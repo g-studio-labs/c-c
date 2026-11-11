@@ -28,7 +28,10 @@ import { EMPTY_FILTER, matchesFilter, type TaskFilter } from "@/lib/task-filter"
 import PinnedLine from "@/components/docs/PinnedLine";
 import CopyId from "@/components/CopyId";
 import Initials from "@/components/ui/initials";
-import ItemCalendar from "@/components/ItemCalendar";
+import ItemCalendar, { type CalendarItem } from "@/components/ItemCalendar";
+import { priorityTone, priorityTones } from "@/components/calendar/tones";
+import { iniciales } from "@/lib/desde";
+import { nombreDe } from "@/lib/nombres";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { usePrompt } from "@/components/PromptDialog";
 import { useTasksStore } from "@/store/tasks.store";
@@ -148,9 +151,30 @@ export default function Tasks() {
 }
 
 
-/** The colour of the column a card sits in, so the calendar reads like the board. */
-function dotForStatus(statuses: { id: string; status: string }[], statusId: string): string {
-  return statusTone(statuses.find((s) => s.id === statusId)?.status).dot;
+/**
+ * Una tarjeta del tablero en el calendario: el día en que se creó (un instante,
+ * así que cae en el día local de quien mira), su prioridad, su columna y quién
+ * la lleva. Sin «vencida»: se coloca por creación, y un punto de vencida en el
+ * día en que nació no diría nada.
+ */
+function calendarCard(
+  c: TaskCard & { createdAt: string },
+  statuses: { id: string; name: string; status: string }[],
+): CalendarItem {
+  const col = statuses.find((s) => s.id === c.statusId);
+  const who = c.assignees[0];
+  return {
+    id: c.id,
+    title: c.title,
+    at: c.createdAt,
+    tone: priorityTone(c.priority),
+    label: `#${c.seq}`,
+    meta: {
+      status: col ? { name: col.name, dot: statusTone(col.status).dot } : undefined,
+      assignee: who ? { initials: iniciales(nombreDe(who)), key: who.id } : undefined,
+      done: !!col && ["done", "closed"].includes(normalizeStatus(col.status)),
+    },
+  };
 }
 
 // ─── Board ────────────────────────────────────────────────────────────────────
@@ -376,16 +400,13 @@ function Board({
           <div className="h-full overflow-auto p-4">
             <ItemCalendar
               countKey="common:count.cards"
+              calendarId="board"
               onOpen={openTask}
-              items={visible.map((t) => ({
-                id: t.id,
-                title: t.title,
-                at: t.createdAt,
-                // Coloured by the column it sits in, so the month reads the same
-                // way the board does.
-                dotClass: dotForStatus(board.statuses, t.statusId),
-                label: `#${t.seq}`,
-              }))}
+              // Por prioridad, como Mi trabajo: el mismo calendario se lee igual
+              // en los dos sitios (command-and-control-333). La columna va en el
+              // estado de cada fila.
+              tones={priorityTones(t)}
+              items={visible.map((c) => calendarCard(c, board.statuses))}
             />
           </div>
         ) : (

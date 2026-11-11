@@ -4,6 +4,10 @@ import ItemCalendar from "@/components/ItemCalendar";
 import { dayKey, toISODate } from "@/lib/month";
 import { fecha } from "@/lib/fechas";
 
+// Los tonos de prueba se llaman como su clase: así las comprobaciones de color
+// siguen leyendo la clase que pintan (command-and-control-334).
+const TONES = ["bg-error", "bg-info", "bg-primary", "bg-muted"].map((c) => ({ key: c, label: c, dot: c, edge: c }));
+
 /**
  * El calendario del teléfono: mes compacto con puntos y, debajo, la lista del
  * día que se toca. El mes de escritorio no cabía (una tarea se leía «#14 p…»).
@@ -22,8 +26,8 @@ const today = new Date();
 const other = new Date(today.getFullYear(), today.getMonth(), today.getDate() === 15 ? 16 : 15);
 
 const items = [
-  { id: "a", title: "Revisar el backup de boaty", day: toISODate(today), dotClass: "bg-error", label: "#26" },
-  { id: "b", title: "Logo nuevo", day: toISODate(other), dotClass: "bg-info", label: "#3" },
+  { id: "a", title: "Revisar el backup de boaty", day: toISODate(today), tone: "bg-error", label: "#26" },
+  { id: "b", title: "Logo nuevo", day: toISODate(other), tone: "bg-info", label: "#3" },
 ];
 
 describe("el calendario en el teléfono", () => {
@@ -35,7 +39,7 @@ describe("el calendario en el teléfono", () => {
    * y el mes no se mueve. El mutante que mata: pintar la lista debajo.
    */
   it("lo de un día, en una hoja al tocarlo", async () => {
-    const { container } = render(<ItemCalendar items={items} onOpen={() => {}} />);
+    const { container } = render(<ItemCalendar tones={TONES} calendarId="test" items={items} onOpen={() => {}} />);
     expect(screen.queryByRole("dialog")).toBeNull();
     tap(container, today);
     const sheet = await screen.findByRole("dialog");
@@ -46,26 +50,26 @@ describe("el calendario en el teléfono", () => {
   });
 
   it("otro día, lo de ese día", async () => {
-    const { container } = render(<ItemCalendar items={items} onOpen={() => {}} />);
+    const { container } = render(<ItemCalendar tones={TONES} calendarId="test" items={items} onOpen={() => {}} />);
     tap(container, other);
     expect((await screen.findByRole("dialog")).textContent).toContain("Logo nuevo");
   });
 
   it("un día sin nada lo dice", async () => {
     const empty = new Date(today.getFullYear(), today.getMonth(), today.getDate() === 20 ? 21 : 20);
-    const { container } = render(<ItemCalendar items={[]} onOpen={() => {}} />);
+    const { container } = render(<ItemCalendar tones={TONES} calendarId="test" items={[]} onOpen={() => {}} />);
     tap(container, empty);
     expect(await screen.findByText("Nothing this day")).toBeTruthy();
   });
 
   it("los días con algo llevan su punto de color", () => {
-    const { container } = render(<ItemCalendar items={items} onOpen={() => {}} />);
+    const { container } = render(<ItemCalendar tones={TONES} calendarId="test" items={items} onOpen={() => {}} />);
     expect(container.querySelector("button[aria-pressed] .bg-error")).not.toBeNull();
   });
 
   it("abrir una tarea desde la hoja", async () => {
     const onOpen = vi.fn();
-    const { container } = render(<ItemCalendar items={items} onOpen={onOpen} />);
+    const { container } = render(<ItemCalendar tones={TONES} calendarId="test" items={items} onOpen={onOpen} />);
     tap(container, today);
     const sheet = await screen.findByRole("dialog");
     fireEvent.click(sheet.querySelector("button.bg-raised")!);
@@ -80,11 +84,11 @@ describe("el calendario en el teléfono", () => {
     const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
     const later = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 3);
     render(
-      <ItemCalendar
+      <ItemCalendar tones={TONES} calendarId="test"
         items={[
-          { id: "y", title: "De ayer", day: toISODate(yesterday), dotClass: "bg-info" },
-          { id: "l", title: "En tres días", day: toISODate(later), dotClass: "bg-info" },
-          { id: "t", title: "De hoy", day: toISODate(today), dotClass: "bg-info" },
+          { id: "y", title: "De ayer", day: toISODate(yesterday), tone: "bg-info" },
+          { id: "l", title: "En tres días", day: toISODate(later), tone: "bg-info" },
+          { id: "t", title: "De hoy", day: toISODate(today), tone: "bg-info" },
         ]}
         onOpen={() => {}}
       />,
@@ -96,7 +100,7 @@ describe("el calendario en el teléfono", () => {
 
   /** Lo que no tiene fecha, detrás de una fila: cincuenta debajo del mes empujaban todo. */
   it("lo que no tiene fecha, en su propia hoja", async () => {
-    render(<ItemCalendar items={[]} undated={[{ id: "u", title: "Sin fecha aún", dotClass: "bg-info" }]} onOpen={() => {}} />);
+    render(<ItemCalendar tones={TONES} calendarId="test" items={[]} undated={[{ id: "u", title: "Sin fecha aún", tone: "bg-info" }]} onOpen={() => {}} />);
     expect(screen.queryByText("Sin fecha aún")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /1 with no date/ }));
     expect(await screen.findByText("Sin fecha aún")).toBeTruthy();
@@ -106,7 +110,7 @@ describe("el calendario en el teléfono", () => {
 describe("en escritorio", () => {
   it("sigue el mes grande", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 });
-    render(<ItemCalendar items={items} onOpen={() => {}} />);
+    render(<ItemCalendar tones={TONES} calendarId="test" items={items} onOpen={() => {}} />);
     expect(screen.queryByText("Nothing this day")).toBeNull();
     expect(screen.getByRole("button", { name: "Today" })).toBeTruthy();
   });

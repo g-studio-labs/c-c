@@ -2,7 +2,6 @@ import ScopeSheet from "@/components/mobile/ScopeSheet";
 import { findScope, scopeGroups, scopeValue } from "@/lib/scope-options";
 import { useIsMobile } from "@/hooks/use-mobile";
 import Picker from "@/components/ui/picker";
-import { priorityDot } from "@/components/tasks/PriorityChip";
 import TabIndicator from "@/components/ui/tab-indicator";
 import { useSlidingIndicator } from "@/lib/use-sliding-indicator";
 import TaskFilters from "@/components/tasks/TaskFilters";
@@ -33,7 +32,8 @@ import type { OpenTask } from "@/types/task";
 import { normalizeStatus, puedeIr, type ReportStatus } from "@/types/report";
 import { cn } from "@/lib/utils";
 import { statusTone } from "@/lib/status-color";
-import { dueCalendarItems } from "@/components/tasks/due-calendar";
+import { dueCalendarItems, taskEntry } from "@/components/tasks/due-calendar";
+import { priorityTones } from "@/components/calendar/tones";
 
 /**
  * Everything open, across every space, one question at a time.
@@ -481,19 +481,14 @@ export default function MyWork() {
               // screen answers "what is coming", and a month view of creation
               // dates answers nothing anybody asked.
               items={dueCalendarItems(shown)}
+              tones={priorityTones(t)}
+              calendarId="mywork"
               // Lo que no tiene fecha, debajo en vez de descartado.
               //
               // Casi nadie pone vencimientos, así que esta vista enseñaba **una**
               // de sesenta y cinco tareas mientras la cabecera decía sesenta y
               // cinco. No estaba filtrando: estaba escondiendo.
-              undated={shown
-                .filter((t) => !t.dueAt)
-                .map((t) => ({
-                  id: t.id,
-                  title: t.title,
-                  dotClass: priorityDot(t.priority),
-                  label: `#${t.seq}`,
-                }))}
+              undated={shown.filter((t) => !t.dueAt).map((t) => taskEntry(t))}
               // Arrastrar una a un día le pone el vencimiento. Es la única forma
               // de ponerlo sin abrir la tarjeta, y lo que convierte esta vista en
               // el sitio donde se planifica en vez de uno donde se mira.

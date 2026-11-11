@@ -122,9 +122,15 @@ export function fechaLarga(valor: Fecha): string {
   return seguro(valor, () => formateador({ weekday: "long", day: "numeric", month: "long" }, "larga-dia"));
 }
 
-/** El mes y el año, para la cabecera de un calendario: «septiembre 2026». */
+/**
+ * El mes y el año, para la cabecera de un calendario: «Noviembre de 2026».
+ *
+ * Con la inicial en mayúscula aquí y no con `capitalize` de CSS: el CSS sube
+ * la de cada palabra y salía «Noviembre De 2026».
+ */
 export function mesYAno(valor: Fecha): string {
-  return seguro(valor, () => formateador({ month: "long", year: "numeric" }, "mesyano"));
+  const s = seguro(valor, () => formateador({ month: "long", year: "numeric" }, "mesyano"));
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 /** Sólo hora y minuto: «8:11». Para el sello de un mensaje de chat. */

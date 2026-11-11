@@ -673,7 +673,9 @@
     "today": "Hoy",
     "more": "+{{count}} más",
     "nothingThatDay": "Nada este día",
-    "upcoming": "Próximos"
+    "upcoming": "Próximos",
+    "meetingActive": "Activa",
+    "meetingPaused": "En pausa"
   },
   "deploy": {
     "title": "Desplegar {{name}}",

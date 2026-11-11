@@ -4,6 +4,10 @@ import ItemCalendar, { type CalendarEntry, type CalendarItem } from "@/component
 import { dueCalendarItems } from "@/components/tasks/due-calendar";
 import { fecha } from "@/lib/fechas";
 
+// Los tonos de prueba se llaman como su clase: así las comprobaciones de color
+// siguen leyendo la clase que pintan (command-and-control-334).
+const TONES = ["bg-error", "bg-info", "bg-primary", "bg-muted"].map((c) => ({ key: c, label: c, dot: c, edge: c }));
+
 /**
  * Un mes que se lee de un vistazo.
  *
@@ -29,13 +33,13 @@ const item = (id: string, dayOfMonth: number, extra: Partial<CalendarEntry> = {}
   id,
   title: `tarea ${id}`,
   day: `2026-08-${String(dayOfMonth).padStart(2, "0")}`,
-  dotClass: "bg-primary",
+  tone: "bg-primary",
   ...extra,
 });
 
 const renderCalendar = (items: CalendarItem[], onOpen = vi.fn()) => {
   vi.setSystemTime(TODAY);
-  render(<ItemCalendar items={items} onOpen={onOpen} countKey="common:count.tasks" />);
+  render(<ItemCalendar tones={TONES} calendarId="test" items={items} onOpen={onOpen} countKey="common:count.tasks" />);
   return onOpen;
 };
 
@@ -142,7 +146,7 @@ describe("en qué día cae", () => {
     vi.useFakeTimers();
     vi.setSystemTime(SEPTEMBER);
     render(
-      <ItemCalendar
+      <ItemCalendar tones={TONES} calendarId="test"
         items={dueCalendarItems([
           { id: "a", seq: 1, title: "entregar", priority: "none", dueAt: "2026-09-30T00:00:00.000Z" },
         ])}
@@ -159,8 +163,8 @@ describe("en qué día cae", () => {
     vi.setSystemTime(SEPTEMBER);
     const at = "2026-09-30T02:00:00.000Z"; // el 29 a las 20:00 en Querétaro
     render(
-      <ItemCalendar
-        items={[{ id: "r", title: "reunión", at, dotClass: "bg-primary" }]}
+      <ItemCalendar tones={TONES} calendarId="test"
+        items={[{ id: "r", title: "reunión", at, tone: "bg-primary" }]}
         onOpen={vi.fn()}
       />,
     );
@@ -172,7 +176,7 @@ describe("en qué día cae", () => {
     vi.setSystemTime(SEPTEMBER);
     const dueAt = "2026-09-30T00:00:00.000Z";
     render(
-      <ItemCalendar
+      <ItemCalendar tones={TONES} calendarId="test"
         items={dueCalendarItems(
           ["a", "b", "c", "d"].map((id, i) => ({ id, seq: i, title: id, priority: "none", dueAt })),
         )}

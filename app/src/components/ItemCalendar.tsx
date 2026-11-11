@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
+import type { CalendarTone } from "@/lib/calendar";
 
 /**
  * A month of work, by the day it arrived.
@@ -38,10 +39,30 @@ import { cn } from "@/lib/utils";
 export interface CalendarEntry {
   id: string;
   title: string;
-  /** Tailwind class for the dot; the caller owns what the colours mean. */
-  dotClass: string;
+  /**
+   * La clave de su tono (una de `tones`): de qué color es y en qué segmento de
+   * la barra cuenta. El llamante decide qué significan los colores —prioridad,
+   * reunión pausada— sin que este fichero lo sepa (command-and-control-333).
+   */
+  tone: string;
   /** A short prefix — a folio, a number — shown before the title. */
   label?: string;
+  /**
+   * Lo que se lee en una fila o una tarjeta además del título. Opcional entero:
+   * una reunión no tiene estado ni responsable, y lo que no viene no se pinta.
+   */
+  meta?: CalendarMeta;
+}
+
+export interface CalendarMeta {
+  /** El estado, con el punto de su color (`lib/status-color.ts`). */
+  status?: { name: string; dot: string };
+  /** Las iniciales y la clave estable de su color (`lib/person-color.ts`). */
+  assignee?: { initials: string; key: string };
+  /** Terminada: se pinta tachada y apagada. */
+  done?: boolean;
+  /** Venció sin cerrarse: el punto rojo del día y el chip «Vencida». */
+  overdue?: boolean;
 }
 
 /**
@@ -81,12 +102,23 @@ const UPCOMING = 6;
 
 export default function ItemCalendar({
   items,
+  tones,
   undated = [],
   onSchedule,
   onOpen,
   countKey = "common:count.items",
 }: {
   items: CalendarItem[];
+  /**
+   * Qué significa cada color, en orden: el de los segmentos de la barra y el de
+   * la leyenda. Ver `components/calendar/tones.ts`.
+   */
+  tones: CalendarTone[];
+  /**
+   * Qué calendario es («mywork», «board», «meetings»): la vista y el carril
+   * abierto se recuerdan por calendario (`store/calendar.store.ts`).
+   */
+  calendarId: string;
   /**
    * Lo que no tiene fecha, y por tanto no cabe en ningún día.
    *
@@ -120,6 +152,7 @@ export default function ItemCalendar({
   countKey?: MessageKey;
 }) {
   const { t } = useT();
+  const dotOf = (tone: string) => tones.find((x) => x.key === tone)?.dot ?? "bg-muted-foreground";
   const [cursor, setCursor] = useState(() => {
     const n = new Date();
     return new Date(n.getFullYear(), n.getMonth(), 1);
@@ -163,7 +196,7 @@ export default function ItemCalendar({
 
   const header = (
     <div className="flex items-center justify-between">
-      <span className="font-medium capitalize">{monthLabel}</span>
+      <span className="font-medium">{monthLabel}</span>
       <div className="flex gap-1">
         <Button size="icon-sm" variant="outline" onClick={() => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1))}>
           <ChevronLeft className="h-4 w-4" />
@@ -200,6 +233,7 @@ export default function ItemCalendar({
         undated={undated}
         onOpen={onOpen}
         countKey={countKey}
+        dotOf={dotOf}
       />
     );
   }
@@ -264,7 +298,7 @@ export default function ItemCalendar({
                   title={r.label ? `${r.label} · ${r.title}` : r.title}
                   className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-left text-[11px] hover:bg-accent"
                 >
-                  <span className={`size-1.5 shrink-0 rounded-full ${r.dotClass}`} />
+                  <span className={`size-1.5 shrink-0 rounded-full ${dotOf(r.tone)}`} />
                   {r.label && (
                     <span className="shrink-0 text-[10px] text-muted-foreground">{r.label}</span>
                   )}
@@ -302,6 +336,7 @@ export default function ItemCalendar({
                 item={r}
                 draggable={!!onSchedule}
                 onOpen={() => onOpen(r.id)}
+                dotOf={dotOf}
               />
             ))}
           </div>
@@ -321,7 +356,7 @@ export default function ItemCalendar({
               onClick={() => onOpen(r.id)}
               className="flex w-full items-center gap-2 rounded-md border p-2 text-left text-sm hover:bg-accent/40"
             >
-              <span className={`h-2 w-2 shrink-0 rounded-full ${r.dotClass}`} />
+              <span className={`h-2 w-2 shrink-0 rounded-full ${dotOf(r.tone)}`} />
               {r.label && <span className="font-mono text-xs text-muted-foreground">{r.label}</span>}
               <span className="truncate">{r.title}</span>
             </button>
@@ -366,10 +401,12 @@ function UndatedChip({
   item,
   draggable,
   onOpen,
+  dotOf,
 }: {
   item: CalendarEntry;
   draggable: boolean;
   onOpen: () => void;
+  dotOf: (tone: string) => string;
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: item.id,
@@ -392,7 +429,7 @@ function UndatedChip({
           <GripVertical className="size-3" />
         </button>
       )}
-      <span className={`size-1.5 shrink-0 rounded-full ${item.dotClass}`} />
+      <span className={`size-1.5 shrink-0 rounded-full ${dotOf(item.tone)}`} />
       <button onClick={onOpen} className="flex min-w-0 items-center gap-1 text-left">
         {item.label && (
           <span className="shrink-0 text-[10px] text-muted-foreground">{item.label}</span>
@@ -423,6 +460,7 @@ function CompactMonth({
   undated,
   onOpen,
   countKey,
+  dotOf,
 }: {
   header: React.ReactNode;
   items: CalendarItem[];
@@ -435,6 +473,7 @@ function CompactMonth({
   undated: CalendarEntry[];
   onOpen: (id: string) => void;
   countKey: MessageKey;
+  dotOf: (tone: string) => string;
 }) {
   const { t } = useT();
   const [sheet, setSheet] = useState<"day" | "undated" | null>(null);
@@ -501,7 +540,7 @@ function CompactMonth({
                   sin tener que leer nada. */}
               <span className="flex h-1 gap-0.5">
                 {dayItems.slice(0, 3).map((r) => (
-                  <span key={r.id} className={cn("size-1 rounded-full", r.dotClass)} />
+                  <span key={r.id} className={cn("size-1 rounded-full", dotOf(r.tone))} />
                 ))}
               </span>
             </button>
@@ -522,7 +561,7 @@ function CompactMonth({
               <span className="w-12 shrink-0 text-xs text-muted-foreground tabular-nums">
                 {dayKey(d) === today ? t("common:calendar.today") : diaYMes(d)}
               </span>
-              <span className={cn("mt-1.5 size-2 shrink-0 rounded-full", r.dotClass)} />
+              <span className={cn("mt-1.5 size-2 shrink-0 rounded-full", dotOf(r.tone))} />
               <span className="line-clamp-2 min-w-0 flex-1">
                 {r.label && <span className="mr-1 font-mono text-xs text-muted-foreground">{r.label}</span>}
                 {r.title}
@@ -572,7 +611,7 @@ function CompactMonth({
                   onClick={() => open(r.id)}
                   className="flex w-full items-start gap-2 rounded-lg border bg-raised p-2.5 text-left text-sm"
                 >
-                  <span className={cn("mt-1.5 size-2 shrink-0 rounded-full", r.dotClass)} />
+                  <span className={cn("mt-1.5 size-2 shrink-0 rounded-full", dotOf(r.tone))} />
                   {r.label && <span className="mt-0.5 shrink-0 font-mono text-xs text-muted-foreground">{r.label}</span>}
                   <span className="line-clamp-2">{r.title}</span>
                 </button>
