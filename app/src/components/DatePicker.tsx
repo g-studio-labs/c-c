@@ -37,12 +37,18 @@ export default function DatePicker({
   onChange,
   className,
   placeholder,
+  trigger,
 }: {
   /** `YYYY-MM-DD`, o vacío. El mismo contrato que el input nativo. */
   value: string;
   onChange: (v: string) => void;
   className?: string;
   placeholder?: string;
+  /**
+   * Un botón propio en vez del de la fecha escrita: el calendario del teléfono
+   * lo abre desde un icono (command-and-control-339).
+   */
+  trigger?: React.ReactElement;
 }) {
   const { t } = useT();
   const elegido = value ? fromISODate(value) : null;
@@ -59,7 +65,7 @@ export default function DatePicker({
     <DropdownMenu open={abierto} onOpenChange={setAbierto}>
       <DropdownMenuTrigger
         render={
-          <button
+          trigger ?? <button
             className={cn(
               "motion-press flex items-center gap-1.5 rounded border px-2 py-1 text-left text-sm",
               !elegido && "text-muted-foreground",

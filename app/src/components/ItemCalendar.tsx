@@ -8,14 +8,8 @@ import {
   useSensors,
 } from "@dnd-kit/core";
 
-import { diaYMes, fecha, mesYAno } from "@/lib/fechas";
-import {
-  dayKey,
-  toISODate,
-  fromISODate,
-  weekdayInitials,
-  monthGrid,
-} from "@/lib/month";
+import { mesYAno } from "@/lib/fechas";
+import { toISODate, fromISODate } from "@/lib/month";
 import { monthWeeks, weekDays, weekLabel, weekStart } from "@/lib/calendar";
 import { useCalendarStore } from "@/store/calendar.store";
 import CalendarHeader from "@/components/calendar/CalendarHeader";
@@ -23,13 +17,10 @@ import MonthGrid from "@/components/calendar/MonthGrid";
 import WeekView, { WeekSummary } from "@/components/calendar/WeekView";
 import { CardBody } from "@/components/calendar/CalendarCard";
 import ScheduleLane, { LANE_ID } from "@/components/calendar/ScheduleLane";
+import MobileCalendar from "@/components/calendar/MobileCalendar";
 import { useT, type MessageKey } from "@/lib/i18n";
 import { useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { cn } from "@/lib/utils";
 import type { CalendarTone } from "@/lib/calendar";
 
 /**
@@ -94,9 +85,6 @@ function localDayOf(item: CalendarItem): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-
-/** Cuántas de las próximas se enseñan bajo el mes en el teléfono. */
-const UPCOMING = 6;
 
 export default function ItemCalendar({
   items,
@@ -169,7 +157,6 @@ export default function ItemCalendar({
   mixLabel?: string;
 }) {
   const { t } = useT();
-  const dotOf = (tone: string) => tones.find((x) => x.key === tone)?.dot ?? "bg-muted-foreground";
   const view = useCalendarStore((s) => s.views[calendarId] ?? "month");
   const setView = useCalendarStore((s) => s.setView);
   const laneOpen = useCalendarStore((s) => s.laneOpen(calendarId, view));
@@ -185,8 +172,6 @@ export default function ItemCalendar({
   // La semana que se mira, por su lunes. Aparte del mes: «Hoy» lleva las dos a
   // la actual, y pasar de Semana a Mes abre el mes de la semana visible.
   const [week, setWeek] = useState(() => weekStart(new Date()));
-  // El día que se mira en el teléfono: hoy, de entrada.
-  const [picked, setPicked] = useState(() => dayKey(new Date()));
   const [dragging, setDragging] = useState<string | null>(null);
   // Los mismos sensores que el tablero: puntero **y teclado**. El arrastre HTML5
   // nativo no tiene lo segundo, y esta es la única forma de poner una fecha sin
@@ -199,33 +184,26 @@ export default function ItemCalendar({
     useSensor(KeyboardSensor),
   );
 
-  // Por día local en las dos claves: `dayKey` para el teléfono (sin cambiar
-  // todavía) y `YYYY-MM-DD` para el escritorio, que es además el id de cada día
-  // como destino de arrastre.
-  const { byDay, byISO } = useMemo(() => {
-    const byDay = new Map<string, CalendarItem[]>();
-    const byISO = new Map<string, CalendarItem[]>();
+  // Por día local, `YYYY-MM-DD`: es además el id de cada día como destino de
+  // arrastre.
+  const byISO = useMemo(() => {
+    const m = new Map<string, CalendarItem[]>();
     for (const r of items) {
       const d = localDayOf(r);
       if (!d) continue;
-      const k = dayKey(d);
-      (byDay.get(k) ?? byDay.set(k, []).get(k)!).push(r);
       const i = toISODate(d);
-      (byISO.get(i) ?? byISO.set(i, []).get(i)!).push(r);
+      (m.get(i) ?? m.set(i, []).get(i)!).push(r);
     }
-    return { byDay, byISO };
+    return m;
   }, [items]);
 
-  // La rejilla del teléfono sigue en seis semanas (`monthGrid`); la del
-  // escritorio, con las justas (`monthWeeks`, ver su comentario).
-  const cells = useMemo(() => monthGrid(cursor), [cursor]);
+  // Las semanas justas del mes (`monthWeeks`, ver su comentario).
   const weeks = useMemo(() => monthWeeks(cursor), [cursor]);
   const days = useMemo(() => weekDays(week), [week]);
   const weekItems = useMemo(() => days.flatMap((d) => byISO.get(toISODate(d)) ?? []), [days, byISO]);
   // Lo que viaja con el puntero: una copia de la tarjeta que se arrastra.
   const dragged = dragging ? [...items, ...pending].find((x) => x.id === dragging) : undefined;
 
-  const today = dayKey(new Date());
   const todayISO = toISODate(new Date());
   // En el teléfono, otro calendario: el mes de escritorio no cabe (cada día
   // queda de 60 px y una tarea se lee «#14 p…»).
@@ -235,45 +213,28 @@ export default function ItemCalendar({
     const n = new Date();
     setCursor(new Date(n.getFullYear(), n.getMonth(), 1));
     setWeek(weekStart(n));
-    setPicked(dayKey(n));
   };
   const step = (dir: 1 | -1) => {
     if (view === "week") setWeek((w) => new Date(w.getFullYear(), w.getMonth(), w.getDate() + 7 * dir));
     else setCursor((c) => new Date(c.getFullYear(), c.getMonth() + dir, 1));
   };
 
-  const header = (
-    <div className="flex items-center justify-between">
-      <span className="font-medium">{mesYAno(cursor)}</span>
-      <div className="flex gap-1">
-        <Button size="icon-sm" variant="outline" onClick={() => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1))}>
-          <ChevronLeft className="h-4 w-4" />
-        </Button>
-        <Button size="sm" variant="outline" onClick={goToday}>
-          {t("common:calendar.today")}
-        </Button>
-        <Button size="icon-sm" variant="outline" onClick={() => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1))}>
-          <ChevronRight className="h-4 w-4" />
-        </Button>
-      </div>
-    </div>
-  );
-
   if (compact) {
     return (
-      <CompactMonth
-        header={header}
+      <MobileCalendar
+        view={view}
+        onView={(v) => setView(calendarId, v)}
+        byDay={byISO}
         items={items}
-        cells={cells}
-        cursor={cursor}
-        today={today}
-        byDay={byDay}
-        picked={picked}
-        onPick={setPicked}
-        undated={pending}
+        pending={pending}
+        hasLane={hasLane}
+        tones={tones}
+        today={todayISO}
         onOpen={onOpen}
+        onSchedule={onSchedule}
+        onUnschedule={onUnschedule}
+        onCreateForDay={onCreateForDay}
         countKey={countKey}
-        dotOf={dotOf}
       />
     );
   }
@@ -377,190 +338,6 @@ export default function ItemCalendar({
           ) : null}
         </DragOverlay>
       </DndContext>
-    </div>
-  );
-}
-
-/**
- * El calendario del teléfono, como el de iOS: el mes compacto con un punto
- * por cosa en cada día. Tocar un día sube una hoja con lo de ese día, con los
- * títulos enteros: así no hay que bajar a buscarlo y el mes no se mueve (jose,
- * 18-oct-2026). Lo que no tiene fecha, detrás de una fila que abre la suya. Sin
- * arrastrar: en una pantalla táctil arrastrar compite con deslizar, y la fecha
- * se pone desde la tarea.
- */
-function CompactMonth({
-  header,
-  items: all,
-  cells,
-  cursor,
-  today,
-  byDay,
-  picked,
-  onPick,
-  undated,
-  onOpen,
-  countKey,
-  dotOf,
-}: {
-  header: React.ReactNode;
-  items: CalendarItem[];
-  cells: Date[];
-  cursor: Date;
-  today: string;
-  byDay: Map<string, CalendarItem[]>;
-  picked: string;
-  onPick: (k: string) => void;
-  undated: CalendarEntry[];
-  onOpen: (id: string) => void;
-  countKey: MessageKey;
-  dotOf: (tone: string) => string;
-}) {
-  const { t } = useT();
-  const [sheet, setSheet] = useState<"day" | "undated" | null>(null);
-  const items = byDay.get(picked) ?? [];
-  const pickedDate = cells.find((d) => dayKey(d) === picked) ?? null;
-
-  // Lo que viene, desde hoy: debajo del mes había un hueco, y es lo primero
-  // que se quiere saber al abrir un calendario (jose, 18-oct-2026).
-  const upcoming = useMemo(() => {
-    const now = new Date();
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    return all
-      .map((r) => ({ r, d: localDayOf(r) }))
-      .filter((x): x is { r: CalendarItem; d: Date } => !!x.d && x.d.getTime() >= start)
-      .sort((a, b) => a.d.getTime() - b.d.getTime())
-      .slice(0, UPCOMING);
-  }, [all]);
-
-  // Abrir una tarea cierra la hoja: lo que se pidió ya está en pantalla.
-  const open = (id: string) => {
-    setSheet(null);
-    onOpen(id);
-  };
-
-  return (
-    <div className="flex flex-col gap-3">
-      {header}
-      <div className="grid grid-cols-7 text-center">
-        {weekdayInitials().map((w) => (
-          <div key={w} className="pb-1 text-[11px] font-medium text-muted-foreground">
-            {w}
-          </div>
-        ))}
-        {cells.map((d) => {
-          const k = dayKey(d);
-          const dayItems = byDay.get(k) ?? [];
-          const inMonth = d.getMonth() === cursor.getMonth();
-          return (
-            <button
-              key={k}
-              type="button"
-              onClick={() => {
-                onPick(k);
-                setSheet("day");
-              }}
-              data-day={k}
-              aria-pressed={k === picked}
-              aria-label={`${fecha(d)} · ${t(countKey, { count: dayItems.length })}`}
-              className={cn(
-                "motion-press flex h-11 flex-col items-center justify-center gap-1 rounded-lg",
-                !inMonth && "opacity-35",
-                k === picked && "bg-accent",
-              )}
-            >
-              <span
-                className={cn(
-                  "grid size-6 place-items-center rounded-full text-sm",
-                  k === today ? "bg-primary font-semibold text-primary-foreground" : k === picked && "font-semibold",
-                )}
-              >
-                {d.getDate()}
-              </span>
-              {/* Un punto por cosa, hasta tres: dice si hay algo y de qué color
-                  sin tener que leer nada. */}
-              <span className="flex h-1 gap-0.5">
-                {dayItems.slice(0, 3).map((r) => (
-                  <span key={r.id} className={cn("size-1 rounded-full", dotOf(r.tone))} />
-                ))}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
-      {upcoming.length > 0 && (
-        <section className="space-y-1.5">
-          <p className="text-xs font-medium text-muted-foreground">{t("common:calendar.upcoming")}</p>
-          {upcoming.map(({ r, d }) => (
-            <button
-              key={r.id}
-              type="button"
-              onClick={() => onOpen(r.id)}
-              className="flex w-full items-start gap-2.5 rounded-lg border bg-raised p-2.5 text-left text-sm"
-            >
-              <span className="w-12 shrink-0 text-xs text-muted-foreground tabular-nums">
-                {dayKey(d) === today ? t("common:calendar.today") : diaYMes(d)}
-              </span>
-              <span className={cn("mt-1.5 size-2 shrink-0 rounded-full", dotOf(r.tone))} />
-              <span className="line-clamp-2 min-w-0 flex-1">
-                {r.label && <span className="mr-1 font-mono text-xs text-muted-foreground">{r.label}</span>}
-                {r.title}
-              </span>
-            </button>
-          ))}
-        </section>
-      )}
-
-      {undated.length > 0 && (
-        <button
-          type="button"
-          onClick={() => setSheet("undated")}
-          className="flex w-full items-center justify-between rounded-lg border px-3 py-2.5 text-sm text-muted-foreground"
-        >
-          {t("common:calendar.undated", { count: undated.length })}
-          <ChevronRight className="size-4" />
-        </button>
-      )}
-
-      <Sheet open={sheet !== null} onOpenChange={(o) => !o && setSheet(null)}>
-        <SheetContent
-          side="bottom"
-          className="gap-3 rounded-t-xl p-4 pb-[max(1rem,env(safe-area-inset-bottom))] data-[side=bottom]:max-h-[75dvh]"
-        >
-          <div className="mx-auto h-1 w-10 shrink-0 rounded-full bg-muted-foreground/30" aria-hidden />
-          <SheetHeader className="p-0">
-            <SheetTitle className="capitalize">
-              {sheet === "undated"
-                ? t("common:calendar.undated", { count: undated.length })
-                : pickedDate
-                  ? fecha(pickedDate)
-                  : picked}
-            </SheetTitle>
-            <SheetDescription>
-              {t(countKey, { count: sheet === "undated" ? undated.length : items.length })}
-            </SheetDescription>
-          </SheetHeader>
-          <div className="-mx-1 min-h-0 flex-1 space-y-1.5 overflow-y-auto px-1">
-            {(sheet === "undated" ? undated : items).length === 0 ? (
-              <p className="py-4 text-center text-sm text-muted-foreground">{t("common:calendar.nothingThatDay")}</p>
-            ) : (
-              (sheet === "undated" ? undated : items).map((r) => (
-                <button
-                  key={r.id}
-                  type="button"
-                  onClick={() => open(r.id)}
-                  className="flex w-full items-start gap-2 rounded-lg border bg-raised p-2.5 text-left text-sm"
-                >
-                  <span className={cn("mt-1.5 size-2 shrink-0 rounded-full", dotOf(r.tone))} />
-                  {r.label && <span className="mt-0.5 shrink-0 font-mono text-xs text-muted-foreground">{r.label}</span>}
-                  <span className="line-clamp-2">{r.title}</span>
-                </button>
-              ))
-            )}
-          </div>
-        </SheetContent>
-      </Sheet>
     </div>
   );
 }
