@@ -675,7 +675,21 @@
     "nothingThatDay": "Nothing this day",
     "upcoming": "Coming up",
     "meetingActive": "Active",
-    "meetingPaused": "Paused"
+    "meetingPaused": "Paused",
+    "lane": "To schedule",
+    "hideLane": "Hide to schedule",
+    "showLane": "Show to schedule",
+    "month": "Month",
+    "week": "Week",
+    "previous": "Previous",
+    "next": "Next",
+    "todayLower": "today",
+    "close": "Close",
+    "overdueOpen": "Overdue and open",
+    "overdue": "Overdue",
+    "nothingDue": "Nothing due this day.",
+    "newForDay": "New task for this day",
+    "clickToPin": "Click to pin"
   },
   "deploy": {
     "title": "Deploy {{name}}",

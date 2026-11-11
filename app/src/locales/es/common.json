@@ -675,7 +675,21 @@
     "nothingThatDay": "Nada este día",
     "upcoming": "Próximos",
     "meetingActive": "Activa",
-    "meetingPaused": "En pausa"
+    "meetingPaused": "En pausa",
+    "lane": "Por programar",
+    "hideLane": "Ocultar por programar",
+    "showLane": "Mostrar por programar",
+    "month": "Mes",
+    "week": "Semana",
+    "previous": "Anterior",
+    "next": "Siguiente",
+    "todayLower": "hoy",
+    "close": "Cerrar",
+    "overdueOpen": "Vencidas sin cerrar",
+    "overdue": "Vencida",
+    "nothingDue": "Nada vence este día.",
+    "newForDay": "Nueva tarea para este día",
+    "clickToPin": "Clic para fijar"
   },
   "deploy": {
     "title": "Desplegar {{name}}",

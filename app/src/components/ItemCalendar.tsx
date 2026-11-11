@@ -4,7 +4,6 @@ import {
   KeyboardSensor,
   pointerWithin,
   useDraggable,
-  useDroppable,
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
@@ -18,6 +17,10 @@ import {
   weekdayInitials,
   monthGrid,
 } from "@/lib/month";
+import { monthWeeks, weekLabel, weekStart } from "@/lib/calendar";
+import { useCalendarStore } from "@/store/calendar.store";
+import CalendarHeader from "@/components/calendar/CalendarHeader";
+import MonthGrid from "@/components/calendar/MonthGrid";
 import { useT, type MessageKey } from "@/lib/i18n";
 import { useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
@@ -89,13 +92,6 @@ function localDayOf(item: CalendarItem): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-/**
- * Cuántos caben en un día antes de resumir.
- *
- * Tres es lo que entra sin que la fila crezca de más. El resto no desaparece:
- * sale un «+N more» que abre el día entero debajo.
- */
-const MAX_PER_DAY = 3;
 
 /** Cuántas de las próximas se enseñan bajo el mes en el teléfono. */
 const UPCOMING = 6;
@@ -103,9 +99,11 @@ const UPCOMING = 6;
 export default function ItemCalendar({
   items,
   tones,
+  calendarId,
   undated = [],
   onSchedule,
   onOpen,
+  onCreateForDay,
   countKey = "common:count.items",
 }: {
   items: CalendarItem[];
@@ -141,6 +139,11 @@ export default function ItemCalendar({
   onSchedule?: (id: string, iso: string) => void;
   onOpen: (id: string) => void;
   /**
+   * «+ Nueva tarea para este día», en el pie del popover del día. Sin ella el
+   * pie no lo ofrece: en el tablero y en reuniones no se crea desde aquí.
+   */
+  onCreateForDay?: (iso: string) => void;
+  /**
    * Cómo se cuentan estos elementos: «3 tarjetas», «3 reuniones».
    *
    * Antes esto era un sustantivo suelto al que la vista le pegaba «(s)». Eso
@@ -153,11 +156,15 @@ export default function ItemCalendar({
 }) {
   const { t } = useT();
   const dotOf = (tone: string) => tones.find((x) => x.key === tone)?.dot ?? "bg-muted-foreground";
+  const view = useCalendarStore((s) => s.views[calendarId] ?? "month");
+  const setView = useCalendarStore((s) => s.setView);
   const [cursor, setCursor] = useState(() => {
     const n = new Date();
     return new Date(n.getFullYear(), n.getMonth(), 1);
   });
-  const [selected, setSelected] = useState<string | null>(null);
+  // La semana que se mira, por su lunes. Aparte del mes: «Hoy» lleva las dos a
+  // la actual, y pasar de Semana a Mes abre el mes de la semana visible.
+  const [week, setWeek] = useState(() => weekStart(new Date()));
   // El día que se mira en el teléfono: hoy, de entrada.
   const [picked, setPicked] = useState(() => dayKey(new Date()));
   const [dragging, setDragging] = useState<string | null>(null);
@@ -172,44 +179,53 @@ export default function ItemCalendar({
     useSensor(KeyboardSensor),
   );
 
-  const byDay = useMemo(() => {
-    const m = new Map<string, CalendarItem[]>();
+  // Por día local en las dos claves: `dayKey` para el teléfono (sin cambiar
+  // todavía) y `YYYY-MM-DD` para el escritorio, que es además el id de cada día
+  // como destino de arrastre.
+  const { byDay, byISO } = useMemo(() => {
+    const byDay = new Map<string, CalendarItem[]>();
+    const byISO = new Map<string, CalendarItem[]>();
     for (const r of items) {
       const d = localDayOf(r);
       if (!d) continue;
       const k = dayKey(d);
-      (m.get(k) ?? m.set(k, []).get(k)!).push(r);
+      (byDay.get(k) ?? byDay.set(k, []).get(k)!).push(r);
+      const i = toISODate(d);
+      (byISO.get(i) ?? byISO.set(i, []).get(i)!).push(r);
     }
-    return m;
+    return { byDay, byISO };
   }, [items]);
 
-  // La rejilla vive en `lib/month`: la usan este calendario y el selector de
-  // fecha, y es aritmética llena de bordes que se prueba mejor sola.
+  // La rejilla del teléfono sigue en seis semanas (`monthGrid`); la del
+  // escritorio, con las justas (`monthWeeks`, ver su comentario).
   const cells = useMemo(() => monthGrid(cursor), [cursor]);
+  const weeks = useMemo(() => monthWeeks(cursor), [cursor]);
 
-  const monthLabel = mesYAno(cursor);
   const today = dayKey(new Date());
-  const selectedItems = selected ? (byDay.get(selected) ?? []) : [];
+  const todayISO = toISODate(new Date());
   // En el teléfono, otro calendario: el mes de escritorio no cabe (cada día
   // queda de 60 px y una tarea se lee «#14 p…»).
   const compact = useIsMobile();
 
+  const goToday = () => {
+    const n = new Date();
+    setCursor(new Date(n.getFullYear(), n.getMonth(), 1));
+    setWeek(weekStart(n));
+    setPicked(dayKey(n));
+  };
+  const step = (dir: 1 | -1) => {
+    if (view === "week") setWeek((w) => new Date(w.getFullYear(), w.getMonth(), w.getDate() + 7 * dir));
+    else setCursor((c) => new Date(c.getFullYear(), c.getMonth() + dir, 1));
+  };
+
   const header = (
     <div className="flex items-center justify-between">
-      <span className="font-medium">{monthLabel}</span>
+      <span className="font-medium">{mesYAno(cursor)}</span>
       <div className="flex gap-1">
         <Button size="icon-sm" variant="outline" onClick={() => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1))}>
           <ChevronLeft className="h-4 w-4" />
         </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => {
-            const n = new Date();
-            setCursor(new Date(n.getFullYear(), n.getMonth(), 1));
-            setPicked(dayKey(n));
-          }}
-        >
+        <Button size="sm" variant="outline" onClick={goToday}>
           {t("common:calendar.today")}
         </Button>
         <Button size="icon-sm" variant="outline" onClick={() => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1))}>
@@ -239,8 +255,23 @@ export default function ItemCalendar({
   }
 
   return (
-    <div className="flex flex-col gap-3">
-      {header}
+    // Interlineado `normal` y no el 1.5 que hereda la app: las medidas del
+    // diseño están tomadas con el del navegador, y con 1.5 cada fila del
+    // popover salía tres píxeles más alta.
+    <div className="flex flex-col gap-[14px] leading-[normal]">
+      <CalendarHeader
+        title={view === "week" ? weekLabel(week) : mesYAno(cursor)}
+        view={view}
+        onView={(v) => {
+          // De Semana a Mes, el mes de la semana que se miraba.
+          if (v === "month" && view === "week") setCursor(new Date(week.getFullYear(), week.getMonth(), 1));
+          setView(calendarId, v);
+        }}
+        tones={tones}
+        onPrev={() => step(-1)}
+        onToday={goToday}
+        onNext={() => step(1)}
+      />
 
       <DndContext
         sensors={sensors}
@@ -253,139 +284,41 @@ export default function ItemCalendar({
         }}
         onDragCancel={() => setDragging(null)}
       >
-      <div className="grid grid-cols-7 gap-px rounded-lg overflow-hidden border bg-border">
-        {weekdayInitials().map((w) => (
-          <div key={w} className="bg-muted px-2 py-1 text-center text-xs font-medium text-muted-foreground">
-            {w}
-          </div>
-        ))}
-        {cells.map((d, i) => {
-          const k = dayKey(d);
-          const dayItems = byDay.get(k) ?? [];
-          const inMonth = d.getMonth() === cursor.getMonth();
-          const shown = dayItems.slice(0, MAX_PER_DAY);
-          const hidden = dayItems.length - shown.length;
-          return (
-            // Una celda y no un botón: dentro va uno por elemento, y anidar
-            // botones no es HTML válido — el de fuera se comería sus clics.
-            <DayCell
-              key={i}
-              iso={toISODate(d)}
-              acceptsDrop={!!onSchedule && dragging !== null}
-              className={`flex min-h-[104px] flex-col gap-0.5 bg-background p-1.5 align-top ${
-                inMonth ? "" : "opacity-40"
-              } ${k === selected ? "ring-1 ring-inset ring-primary/60" : ""}`}
-            >
-              <span
-                className={`mb-0.5 grid size-5 shrink-0 place-items-center rounded-full text-xs ${
-                  k === today
-                    ? "bg-primary font-semibold text-primary-foreground"
-                    : "text-muted-foreground"
-                }`}
-              >
-                {d.getDate()}
-              </span>
+        <MonthGrid
+          cells={weeks}
+          month={cursor.getMonth()}
+          byDay={byISO}
+          tones={tones}
+          today={todayISO}
+          dragging={dragging !== null}
+          canDrop={!!onSchedule}
+          onOpen={onOpen}
+          onCreateForDay={onCreateForDay}
+          countKey={countKey}
+        />
 
-              {/* El título, dentro del día.
-                  Antes la celda pintaba puntos de seis píxeles y un número en la
-                  esquina, y para saber **qué** había que hacer clic en el día. Un
-                  calendario que no dice qué tienes ese día obliga a abrir los
-                  treinta y uno para enterarse. */}
-              {shown.map((r) => (
-                <button
+        {/* Lo que no tiene fecha, debajo y a mano. Ver el comentario de `undated`. */}
+        {undated.length > 0 && (
+          <div className="rounded-lg border p-3">
+            <p className="mb-2 text-xs text-muted-foreground">
+              {onSchedule
+                ? t("common:calendar.undatedDrag", { count: undated.length })
+                : t("common:calendar.undated", { count: undated.length })}
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {undated.map((r) => (
+                <UndatedChip
                   key={r.id}
-                  onClick={() => onOpen(r.id)}
-                  title={r.label ? `${r.label} · ${r.title}` : r.title}
-                  className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-left text-[11px] hover:bg-accent"
-                >
-                  <span className={`size-1.5 shrink-0 rounded-full ${dotOf(r.tone)}`} />
-                  {r.label && (
-                    <span className="shrink-0 text-[10px] text-muted-foreground">{r.label}</span>
-                  )}
-                  <span className="truncate">{r.title}</span>
-                </button>
+                  item={r}
+                  draggable={!!onSchedule}
+                  onOpen={() => onOpen(r.id)}
+                  dotOf={dotOf}
+                />
               ))}
-
-              {/* Lo que no cabe se dice, no se esconde: sin esto, un día con seis
-                  cosas se lee como un día con tres. */}
-              {hidden > 0 && (
-                <button
-                  onClick={() => setSelected(k === selected ? null : k)}
-                  className="motion-press rounded px-1 text-left text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
-                >
-                  {t("common:calendar.more", { count: hidden })}
-                </button>
-              )}
-            </DayCell>
-          );
-        })}
-      </div>
-
-      {/* Lo que no tiene fecha, debajo y a mano. Ver el comentario de `undated`. */}
-      {undated.length > 0 && (
-        <div className="rounded-lg border p-3">
-          <p className="mb-2 text-xs text-muted-foreground">
-            {onSchedule
-              ? t("common:calendar.undatedDrag", { count: undated.length })
-              : t("common:calendar.undated", { count: undated.length })}
-          </p>
-          <div className="flex flex-wrap gap-1.5">
-            {undated.map((r) => (
-              <UndatedChip
-                key={r.id}
-                item={r}
-                draggable={!!onSchedule}
-                onOpen={() => onOpen(r.id)}
-                dotOf={dotOf}
-              />
-            ))}
+            </div>
           </div>
-        </div>
-      )}
+        )}
       </DndContext>
-
-      {selected && selectedItems.length > 0 && (
-        <div className="rounded-lg border p-3 space-y-2">
-          <p className="text-sm font-medium">
-            {fecha(localDayOf(selectedItems[0]))} ·{" "}
-            {t(countKey, { count: selectedItems.length })}
-          </p>
-          {selectedItems.map((r) => (
-            <button
-              key={r.id}
-              onClick={() => onOpen(r.id)}
-              className="flex w-full items-center gap-2 rounded-md border p-2 text-left text-sm hover:bg-accent/40"
-            >
-              <span className={`h-2 w-2 shrink-0 rounded-full ${dotOf(r.tone)}`} />
-              {r.label && <span className="font-mono text-xs text-muted-foreground">{r.label}</span>}
-              <span className="truncate">{r.title}</span>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Un día del mes, que además puede recibir una tarjeta soltada encima. */
-function DayCell({
-  iso,
-  acceptsDrop,
-  className,
-  children,
-}: {
-  iso: string;
-  acceptsDrop: boolean;
-  className: string;
-  children: React.ReactNode;
-}) {
-  const { setNodeRef, isOver } = useDroppable({ id: iso, disabled: !acceptsDrop });
-  return (
-    <div
-      ref={setNodeRef}
-      className={`${className} ${isOver ? "ring-1 ring-inset ring-primary" : ""}`}
-    >
-      {children}
     </div>
   );
 }
