@@ -632,8 +632,10 @@ func (s *TaskService) UpdateTask(ctx context.Context, id, actorID string, req do
 	// Moving between lists is its own operation: it has to carry the denormalised
 	// space with it and give the card a place in the destination's order, neither
 	// of which is a field patch.
+	var moved *repository.MoveResult
 	if req.ListID != nil && *req.ListID != "" {
-		if err := s.repo.MoveTaskToList(id, *req.ListID); err != nil {
+		var err error
+		if moved, err = s.repo.MoveTaskToList(id, *req.ListID); err != nil {
 			return err
 		}
 	}
@@ -672,9 +674,49 @@ func (s *TaskService) UpdateTask(ctx context.Context, id, actorID string, req do
 		s.dropRemovedAttachments(id, oldDescription, *req.Description)
 	}
 	if t, err := s.repo.FindTask(id); err == nil {
+		if moved != nil && moved.Moved {
+			s.leaveMoveTrace(t, actorID, moved)
+			// El tablero que la tenía también tiene que enterarse: el evento de
+			// abajo sólo llega a quien mira el de destino, y en el de origen la
+			// tarjeta se quedaba pintada hasta recargar.
+			s.publish("task:move", t.OrgID, moved.FromListID, t.ID)
+		}
 		s.publish("task:update", t.OrgID, t.ListID, t.ID)
 	}
 	return nil
+}
+
+// leaveMoveTrace: al cruzar de espacio una tarea interna cambia de ref
+// (command-and-control-12 → proteus-301). Los commits ya enlazados siguen
+// enlazados por id, pero quien tenga apuntada la vieja tiene que poder llegar:
+// un comentario con las dos es lo que la búsqueda encuentra. Sin alias, a
+// propósito (decidido con jose el 10-nov-2026). Sólo pasa con internas, así que
+// el comentario no llega a ningún cliente.
+func (s *TaskService) leaveMoveTrace(t *domain.Task, actorID string, m *repository.MoveResult) {
+	if !m.Renumbered() {
+		return
+	}
+	keyOf := func(spaceID string) string {
+		if sp, err := s.repo.FindSpace(spaceID); err == nil {
+			return sp.Key
+		}
+		return ""
+	}
+	from := domain.SpaceTaskRef(keyOf(m.FromSpaceID), m.OldSeq)
+	to := domain.SpaceTaskRef(keyOf(m.ToSpaceID), m.NewSeq)
+	where := ""
+	if l, err := s.repo.FindList(m.FromListID); err == nil {
+		where = l.Name
+		if sp, err := s.repo.FindSpace(m.FromSpaceID); err == nil {
+			where = sp.Name + " › " + l.Name
+		}
+	}
+	body := fmt.Sprintf("Movida desde «%s»: antes era `%s`, ahora es `%s`. Los commits nuevos llevan `%s`.",
+		where, from, to, to)
+	c := newComment(t.ID, actorID, body, domain.VisibilityInternal)
+	if err := s.repo.CreateComment(c); err != nil {
+		lg.Error("move trace on " + t.ID + ": " + err.Error())
+	}
 }
 
 // ClaimTask: reclamar una tarea en una sola operación: quien reclama queda

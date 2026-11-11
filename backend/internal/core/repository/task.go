@@ -30,6 +30,11 @@ var (
 	ErrChannelOtherOrg = errors.New("that channel belongs to another organization")
 	// ErrListHoldsChannelWork: there is a client's ticket in here.
 	ErrListHoldsChannelWork = errors.New("this list holds work that belongs to a client's channel")
+	// ErrMoveSubtask: una subtarea vive en la lista de su padre y se mueve con él.
+	ErrMoveSubtask = errors.New("a subtask moves with its parent")
+	// ErrMoveLeavesChannel: una tarjeta con folio de un cliente sólo se mueve
+	// entre listas de ese mismo canal (ver MoveTaskToList).
+	ErrMoveLeavesChannel = errors.New("a client's card only moves between lists of its channel")
 )
 
 type TaskRepository struct {

@@ -740,7 +740,21 @@ func (r *TaskRepository) PublishToChannel(itemID, projectID string) (int, error)
 //
 // The rank is recomputed: the orders of two lists have nothing to do with each
 // other, so carrying the old one over would drop the card in an arbitrary spot.
-func (r *TaskRepository) MoveTaskToList(itemID, listID string) error {
+//
+// Tres reglas más, que faltaron hasta el 10-nov-2026, cuando el movimiento sólo
+// lo usaba una prueba:
+//
+//   - Una tarea interna se numera por espacio. Al cruzar de espacio toma el
+//     siguiente número del destino: llevarse el suyo chocaba con el que ya
+//     tuviera ese número allí (`idx_items_seq_space`), o cambiaba de prefijo su
+//     ref en silencio. La ref vieja se devuelve para dejar rastro.
+//   - Las subtareas viven en la lista de su padre (ver CreateTask): viajan con
+//     él, y una sola no se mueve.
+//   - Una tarjeta con canal gastó un folio de ese cliente y sale en su tablero
+//     por su `project_id`, no por su lista. Llevarla a una lista de otro canal,
+//     o de ninguno, la dejaría en el tablero del cliente colgando de una lista
+//     interna. Sólo se mueve entre listas del mismo canal.
+func (r *TaskRepository) MoveTaskToList(itemID, listID string) (*MoveResult, error) {
 	var dest struct {
 		SpaceID string
 		OrgID   string
@@ -749,28 +763,123 @@ func (r *TaskRepository) MoveTaskToList(itemID, listID string) error {
 		SELECT l.space_id, s.org_id FROM task_lists l
 		JOIN task_spaces s ON s.id = l.space_id
 		WHERE l.id = ?`, listID).Scan(&dest).Error; err != nil {
-		return err
+		return nil, err
 	}
 	if dest.SpaceID == "" {
-		return ErrListNotFound
+		return nil, ErrListNotFound
 	}
 
 	var item domain.Item
 	if err := r.db.First(&item, "id = ?", itemID).Error; err != nil {
-		return err
+		return nil, err
 	}
 	// Same organization, always. Crossing that line would show the card to people
 	// who cannot see the list it came from — and nobody dragging something
 	// between two boards is expressing that intent.
 	if item.OrgID != "" && item.OrgID != dest.OrgID {
-		return ErrChannelOtherOrg
+		return nil, ErrChannelOtherOrg
+	}
+	res := &MoveResult{FromListID: item.ListID, FromSpaceID: item.SpaceID, OldSeq: item.Seq, NewSeq: item.Seq}
+	if item.ListID == listID {
+		return res, nil
+	}
+	if item.ParentID != nil && *item.ParentID != "" {
+		return nil, ErrMoveSubtask
+	}
+	if item.ProjectID != "" {
+		channel, err := r.EffectiveChannel(listID)
+		if err != nil {
+			return nil, err
+		}
+		if channel != item.ProjectID {
+			return nil, ErrMoveLeavesChannel
+		}
 	}
 
-	last := r.nextRank("items", "list_id = ? AND status = ?", listID, item.Status)
-	return r.db.Model(&domain.Item{}).Where("id = ?", itemID).
-		Updates(map[string]any{
-			"list_id": listID, "space_id": dest.SpaceID, "rank": last,
-		}).Error
+	// Las subtareas, a cualquier profundidad: la regla de la lista del padre
+	// vale en cada nivel.
+	var children []domain.Item
+	if err := r.db.Raw(`
+		WITH RECURSIVE tree AS (
+			SELECT id, project_id, seq FROM items WHERE parent_id = ? AND deleted_at IS NULL
+			UNION ALL
+			SELECT i.id, i.project_id, i.seq FROM items i JOIN tree t ON i.parent_id = t.id
+			WHERE i.deleted_at IS NULL
+		)
+		SELECT id, project_id, seq FROM tree`, itemID).Scan(&children).Error; err != nil {
+		return nil, err
+	}
+
+	crossesSpace := dest.SpaceID != item.SpaceID
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		// Como al crear: Unscoped, porque una fila borrada sigue siendo dueña de
+		// su número; y dentro de la transacción, para numerar de seguido.
+		next := func() (int, error) {
+			var maxSeq int
+			err := tx.Unscoped().Raw(
+				`SELECT COALESCE(MAX(seq),0) FROM items WHERE space_id = ? AND project_id = ''`,
+				dest.SpaceID).Scan(&maxSeq).Error
+			return maxSeq + 1, err
+		}
+
+		fields := map[string]any{
+			"list_id": listID, "space_id": dest.SpaceID,
+			"rank": r.nextRankTx(tx, listID, item.Status),
+		}
+		if crossesSpace && item.ProjectID == "" {
+			seq, err := next()
+			if err != nil {
+				return err
+			}
+			fields["seq"], res.NewSeq = seq, seq
+		}
+		if err := tx.Model(&domain.Item{}).Where("id = ?", itemID).Updates(fields).Error; err != nil {
+			return err
+		}
+
+		for _, c := range children {
+			cf := map[string]any{"list_id": listID, "space_id": dest.SpaceID}
+			if crossesSpace && c.ProjectID == "" {
+				seq, err := next()
+				if err != nil {
+					return err
+				}
+				cf["seq"] = seq
+			}
+			if err := tx.Model(&domain.Item{}).Where("id = ?", c.ID).Updates(cf).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	res.Moved = true
+	res.ToSpaceID = dest.SpaceID
+	return res, nil
+}
+
+// MoveResult: de dónde salió la tarjeta y si cambió su número, para que el
+// servicio avise al tablero de origen y deje el rastro de la ref vieja.
+type MoveResult struct {
+	Moved       bool
+	FromListID  string
+	FromSpaceID string
+	ToSpaceID   string
+	OldSeq      int
+	NewSeq      int
+}
+
+// Renumbered: cruzó de espacio siendo interna, así que su ref es otra.
+func (m *MoveResult) Renumbered() bool { return m != nil && m.Moved && m.OldSeq != m.NewSeq }
+
+// nextRankTx: el final de una columna, leído dentro de la transacción.
+func (r *TaskRepository) nextRankTx(tx *gorm.DB, listID string, status domain.ReportStatus) string {
+	var last string
+	tx.Model(&domain.Item{}).Where("list_id = ? AND status = ?", listID, status).
+		Order("rank DESC").Limit(1).Pluck("rank", &last)
+	return rank.Between(last, "")
 }
 
 // ─── Who is responsible ───────────────────────────────────────────────────────

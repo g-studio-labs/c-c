@@ -184,6 +184,15 @@ func mapTaskError(w http.ResponseWriter, err error) bool {
 	case errors.Is(err, repository.ErrChannelOtherOrg):
 		SendErrorResponse(w, http.StatusForbidden,
 			"That channel belongs to another organization.", "channel-other-org")
+	case errors.Is(err, repository.ErrMoveSubtask):
+		SendErrorResponse(w, http.StatusConflict,
+			"A subtask lives in its parent's list. Move the parent: its subtasks go with it.",
+			"move-subtask")
+	case errors.Is(err, repository.ErrMoveLeavesChannel):
+		SendErrorResponse(w, http.StatusConflict,
+			"This card is on a client's board and spent one of their folio numbers. "+
+				"It can only move to another list of that same client.",
+			"move-leaves-channel")
 	case errors.Is(err, repository.ErrListHoldsChannelWork):
 		SendErrorResponse(w, http.StatusConflict,
 			"This list holds reports that belong to a client. Move them out before deleting it.",
