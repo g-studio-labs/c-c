@@ -554,6 +554,18 @@ fn doc_target(cfg: &Cfg, args: &Value) -> Result<(String, String), String> {
     Ok((k, urlencode(&resolved)))
 }
 
+/// La lista a la que mover una tarea: un id tal cual, o su ruta («Proteus ›
+/// Plataforma») o su nombre si es único, resueltos en el navegador como el
+/// `ownerId` de los documentos. Un id es un UUID; lo demás se busca, para que
+/// un nombre mal escrito diga qué listas hay en vez de un «list not found».
+fn list_target(cfg: &Cfg, wanted: &str) -> Result<String, String> {
+    if is_uuid(wanted) {
+        return Ok(wanted.trim().to_string());
+    }
+    let tree = api_get(cfg, "/api/v1/task-spaces/")?;
+    resolve_node(&tree, wanted, Some("list")).map(|(_, id)| id)
+}
+
 /// Una referencia de tarea como se escribe fuera: `proteus-12`, `acme-7`, o
 /// `cac#12` (que el backend rechaza diciendo por qué). Lo demás es un id.
 fn looks_like_task_ref(s: &str) -> bool {
@@ -2245,7 +2257,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "update_task",
-            "description": "Change an existing task: title, markdown description, priority, tags, assignees, due date, its `handoff` (where it was left), what it waits for (`blockedBy`), or which column it sits in (status by name: open, in_progress, done, closed). To take a task, pass `claim: true`: you become an assignee (nobody is removed) and it moves to in progress in one step; if it is already in progress with someone else the answer says so (`claimed: false`, with who and their handoff) and you comment instead of taking it. `ifStatus` makes any change conditional on the task still being in that state. Needs a token with the `tasks:manage` scope — separate from creating, because this overwrites work someone else may have written. Only the fields you send are touched.",
+            "description": "Change an existing task: title, markdown description, priority, tags, assignees, due date, its `handoff` (where it was left), what it waits for (`blockedBy`), which column it sits in (status by name: open, in_progress, done, closed), or which list it lives in (`listId`, to tidy up a task filed in the wrong place). To take a task, pass `claim: true`: you become an assignee (nobody is removed) and it moves to in progress in one step; if it is already in progress with someone else the answer says so (`claimed: false`, with who and their handoff) and you comment instead of taking it. `ifStatus` makes any change conditional on the task still being in that state. Needs a token with the `tasks:manage` scope — separate from creating, because this overwrites work someone else may have written. Only the fields you send are touched.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2272,6 +2284,7 @@ fn tool_defs() -> Value {
                     "blockedBy": { "type": "array", "items": { "type": "string" }, "description": "The tasks this one waits for, by ref (`proteus-12`) or id. Replaces the list; an empty list clears it. get_context then shows it in `blockedBy` and leaves the task out of `ready` while any of them is open." },
                     "status": { "type": "string", "enum": ["open", "in_progress", "done", "closed"], "description": "Move the task to the column of this state in its own list — no get_board needed. This is also how a subtask is ticked off (done)." },
                     "statusId": { "type": "string", "description": "Alternative to status: the exact column id from get_board." },
+                    "listId": { "type": "string", "description": "Move the task to another list of the same organization: the list's id, or its path as the map shows it (\"Command and control › App\"); a bare name resolves when only one list has it. Its subtasks go with it, and a subtask cannot move alone. Within the same space the ref stays; into another space an internal task takes that space's next number, so its ref CHANGES (the answer carries the new `ref` — use that one in commits from now on; a comment on the task keeps the old one). A client's card (one that spent a folio) only moves between lists of that same client." },
                     "visibility": {
                         "type": "string",
                         "enum": ["public", "internal"],
@@ -4264,6 +4277,12 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
 
         "update_task" => {
             let id = arg_str(args, "id").ok_or("id is required")?;
+            // La lista de destino, resuelta antes que nada: un nombre que no
+            // casa tiene que fallar sin haber tocado la tarea.
+            let list_id = match arg_str(args, "listId") {
+                Some(l) => Some(list_target(cfg, &l)?),
+                None => None,
+            };
             if arg_bool(args, "dryRun") {
                 let target = api_get(cfg, &format!("/api/v1/tasks/{}", urlencode(&id)));
                 return dry_run(cfg, "tasks:manage", target);
@@ -4300,6 +4319,9 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
             if let Some(h) = args.get("handoff").and_then(|v| v.as_str()) {
                 body["handoff"] = json!(h);
             }
+            if let Some(l) = &list_id {
+                body["listId"] = json!(l);
+            }
             // Etiquetas y responsables se resuelven contra la organización de la
             // tarea, que sólo se sabe preguntando por ella.
             if arg_names(args, "tags").is_some() || arg_names(args, "assignees").is_some() {
@@ -4321,7 +4343,7 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
             let only_guard = body.as_object().map(|o| o.keys().all(|k| k == "ifStatus")).unwrap_or(true);
             if only_guard && status_id.is_none() && !claimed {
                 return Err(
-                    "Nothing to change: send at least one of title, description, priority, visibility, tags, assignees, dueAt, handoff, blockedBy, claim, status or statusId"
+                    "Nothing to change: send at least one of title, description, priority, visibility, tags, assignees, dueAt, handoff, blockedBy, listId, claim, status or statusId"
                         .into(),
                 );
             }
@@ -4348,11 +4370,15 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                 changed.push("statusId");
             }
             let after = api_get(cfg, &format!("/api/v1/tasks/{}", urlencode(&id)))?;
+            // La ref, siempre: al cambiar de espacio es otra, y es la que van a
+            // llevar los commits desde ahora.
             Ok(json!({
                 "updated": changed,
+                "ref": task_ref(&after),
                 "task": {
                     "id": after.get("task").and_then(|t| t.get("id")),
                     "seq": after.get("task").and_then(|t| t.get("seq")),
+                    "listId": after.get("task").and_then(|t| t.get("listId")),
                     "title": after.get("task").and_then(|t| t.get("title")),
                     "priority": after.get("task").and_then(|t| t.get("priority")),
                     "column": after.get("status").and_then(|st| st.get("name")),
@@ -8180,6 +8206,32 @@ mod tests {
         let seen = seen.lock().unwrap();
         let mv = seen.iter().find(|(m, p, _)| m == "POST" && p == "/api/v1/tasks/t1/move").expect("no movió la tarea");
         assert_eq!(mv.2["statusId"], "done");
+    }
+
+    /// De punta a punta contra un cac falso. Roturas que detecta: no mandar el
+    /// `listId` resuelto por la ruta, mandar el nombre crudo como si fuera un id,
+    /// no devolver la ref nueva, o tocar la tarea con un nombre que no es lista.
+    #[test]
+    fn update_task_moves_to_a_list_by_its_path() {
+        let tree = json!([{ "id": "s1", "name": "Proteus", "lists": [{ "id": "11111111-2222-3333-4444-555555555555", "name": "Plataforma" }],
+                            "folders": [{ "id": "f1", "name": "App", "lists": [] }] }]);
+        let (cfg, seen) = fake_cac(move |method, path, _| {
+            if method == "GET" && path.starts_with("/api/v1/task-spaces") {
+                return tree.clone();
+            }
+            json!({ "task": { "id": "t1", "listId": "11111111-2222-3333-4444-555555555555" }, "ref": "proteus-301" })
+        });
+        let out = call_tool(&cfg, "update_task", &json!({ "id": "t1", "listId": "Proteus › Plataforma" })).unwrap();
+        assert_eq!(out["ref"], "proteus-301");
+        {
+            let seen = seen.lock().unwrap();
+            let patch = seen.iter().find(|(m, p, _)| m == "PATCH" && p == "/api/v1/tasks/t1").expect("no mandó el PATCH");
+            assert_eq!(patch.2["listId"], "11111111-2222-3333-4444-555555555555");
+        }
+        // Una carpeta no es una lista: falla, y sin escribir nada.
+        seen.lock().unwrap().clear();
+        assert!(call_tool(&cfg, "update_task", &json!({ "id": "t1", "listId": "App" })).is_err());
+        assert!(!seen.lock().unwrap().iter().any(|(m, _, _)| m == "PATCH"), "con una lista que no existe no se toca la tarea");
     }
 
     /// De punta a punta contra un cac falso. Roturas que detecta: no crear las

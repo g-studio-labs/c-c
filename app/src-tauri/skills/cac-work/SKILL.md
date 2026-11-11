@@ -218,6 +218,10 @@ Por el camino:
   `create_task` con `parentId` después), no texto en un comentario: así se ve
   qué está hecho. Cada una se marca con `update_task` y `status: "done"`.
   En una feature, cada subtarea lleva su **brief** (ver «Una feature» abajo).
+- **Si la tarea está en la lista equivocada,** muévela con `update_task` y
+  `listId` (el id o la ruta del mapa): van con ella sus subtareas. Si cambia
+  de espacio, **su ref es otra**: la respuesta trae la nueva, y es la que
+  llevan los commits desde ahí (un comentario en la tarea guarda la vieja).
 - **Lo que no es tuyo** (una prueba roja que ya estaba, una deuda de otra
   parte) va como comentario en la tarea a la que le toca, o como tarea nueva
   si no la tiene.
@@ -429,4 +433,4 @@ de 2026, a partir de lo que fue fallando al trabajar con cac. Cada regla tiene
 detrás algo que pasó de verdad; si cambias una, mira antes en el registro de
 decisiones del espacio Command and control por qué está._
 
-<!-- cac-work v23 -->
+<!-- cac-work v24 -->
