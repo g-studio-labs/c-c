@@ -8,6 +8,10 @@ import { cn } from "@/lib/utils";
  * tonos. Las medidas son las del diseño (`docs/design/calendario.md`).
  */
 
+// El tamaño de las iniciales por tamaño de avatar, como en el diseño: 8,5 px
+// en la tarjeta de la semana (18), 9 px en la fila del popover (20).
+const INITIALS_SIZE = { 18: "text-[8.5px]", 20: "text-[9px]", 22: "text-[10px]", 24: "text-[10px]" } as const;
+
 /** Las iniciales sobre el color estable de la persona (`lib/person-color.ts`). */
 export function CalendarAvatar({ initials, colorKey, size }: { initials: string; colorKey: string; size: 18 | 20 | 22 | 24 }) {
   return (
@@ -16,7 +20,7 @@ export function CalendarAvatar({ initials, colorKey, size }: { initials: string;
       style={{ backgroundColor: hueVar(colorKey), width: size, height: size }}
       className={cn(
         "grid flex-none place-items-center rounded-full font-bold text-primary-foreground",
-        size >= 22 ? "text-[10px]" : "text-[9px]",
+        INITIALS_SIZE[size],
       )}
     >
       {initials}

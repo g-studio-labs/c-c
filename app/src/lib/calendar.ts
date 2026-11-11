@@ -27,6 +27,8 @@ export interface CalendarTone {
   dot: string;
   /** Fondo de la barra lateral de 3 px de una fila o una tarjeta. */
   edge: string;
+  /** Cuenta como «prioridad alta» en el resumen de la semana. */
+  high?: boolean;
 }
 
 export interface ToneSegment {

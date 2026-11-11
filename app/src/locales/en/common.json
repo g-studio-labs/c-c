@@ -689,7 +689,15 @@
     "overdue": "Overdue",
     "nothingDue": "Nothing due this day.",
     "newForDay": "New task for this day",
-    "clickToPin": "Click to pin"
+    "clickToPin": "Click to pin",
+    "thisWeek": "This week",
+    "highPriority": "High priority",
+    "done": "Done",
+    "openCount_one": "{{count}} open",
+    "openCount_other": "{{count}} open",
+    "free": "Free",
+    "priorityMix": "Priority mix",
+    "meetingMix": "Active and paused"
   },
   "deploy": {
     "title": "Deploy {{name}}",

@@ -1,5 +1,6 @@
 import {
   DndContext,
+  DragOverlay,
   PointerSensor,
   KeyboardSensor,
   pointerWithin,
@@ -17,10 +18,12 @@ import {
   weekdayInitials,
   monthGrid,
 } from "@/lib/month";
-import { monthWeeks, weekLabel, weekStart } from "@/lib/calendar";
+import { monthWeeks, weekDays, weekLabel, weekStart } from "@/lib/calendar";
 import { useCalendarStore } from "@/store/calendar.store";
 import CalendarHeader from "@/components/calendar/CalendarHeader";
 import MonthGrid from "@/components/calendar/MonthGrid";
+import WeekView, { WeekSummary } from "@/components/calendar/WeekView";
+import { CardBody } from "@/components/calendar/CalendarCard";
 import { useT, type MessageKey } from "@/lib/i18n";
 import { useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
@@ -105,6 +108,7 @@ export default function ItemCalendar({
   onOpen,
   onCreateForDay,
   countKey = "common:count.items",
+  mixLabel,
 }: {
   items: CalendarItem[];
   /**
@@ -153,6 +157,11 @@ export default function ItemCalendar({
    * dónde va y qué forma toma.
    */
   countKey?: MessageKey;
+  /**
+   * El título de la mezcla de tonos en el resumen de la semana. Por omisión,
+   * «Mezcla de prioridad»; las reuniones lo cambian.
+   */
+  mixLabel?: string;
 }) {
   const { t } = useT();
   const dotOf = (tone: string) => tones.find((x) => x.key === tone)?.dot ?? "bg-muted-foreground";
@@ -200,6 +209,10 @@ export default function ItemCalendar({
   // escritorio, con las justas (`monthWeeks`, ver su comentario).
   const cells = useMemo(() => monthGrid(cursor), [cursor]);
   const weeks = useMemo(() => monthWeeks(cursor), [cursor]);
+  const days = useMemo(() => weekDays(week), [week]);
+  const weekItems = useMemo(() => days.flatMap((d) => byISO.get(toISODate(d)) ?? []), [days, byISO]);
+  // Lo que viaja con el puntero: una copia de la tarjeta que se arrastra.
+  const dragged = dragging ? [...items, ...undated].find((x) => x.id === dragging) : undefined;
 
   const today = dayKey(new Date());
   const todayISO = toISODate(new Date());
@@ -284,18 +297,46 @@ export default function ItemCalendar({
         }}
         onDragCancel={() => setDragging(null)}
       >
-        <MonthGrid
-          cells={weeks}
-          month={cursor.getMonth()}
-          byDay={byISO}
-          tones={tones}
-          today={todayISO}
-          dragging={dragging !== null}
-          canDrop={!!onSchedule}
-          onOpen={onOpen}
-          onCreateForDay={onCreateForDay}
-          countKey={countKey}
-        />
+        {view === "week" ? (
+          <>
+            <WeekSummary
+              week={weekItems}
+              all={items}
+              tones={tones}
+              countKey={countKey}
+              mixLabel={mixLabel ?? t("common:calendar.priorityMix")}
+            />
+            <WeekView
+              days={days}
+              byDay={byISO}
+              tones={tones}
+              today={todayISO}
+              dragging={dragging !== null}
+              canDrop={!!onSchedule}
+              onOpen={onOpen}
+            />
+          </>
+        ) : (
+          <MonthGrid
+            cells={weeks}
+            month={cursor.getMonth()}
+            byDay={byISO}
+            tones={tones}
+            today={todayISO}
+            dragging={dragging !== null}
+            canDrop={!!onSchedule}
+            onOpen={onOpen}
+            onCreateForDay={onCreateForDay}
+            countKey={countKey}
+          />
+        )}
+        <DragOverlay dropAnimation={null}>
+          {dragged ? (
+            <div className="w-[200px] cursor-grabbing shadow-lg">
+              <CardBody item={dragged} tones={tones} />
+            </div>
+          ) : null}
+        </DragOverlay>
 
         {/* Lo que no tiene fecha, debajo y a mano. Ver el comentario de `undated`. */}
         {undated.length > 0 && (

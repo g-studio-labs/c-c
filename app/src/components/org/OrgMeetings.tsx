@@ -12,7 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useMeetingsStore, type Meeting, type MeetingDraft } from "@/store/meetings.store";
 import ItemCalendar, { type CalendarItem } from "@/components/ItemCalendar";
-import { meetingTones } from "@/components/calendar/tones";
+import { meetingMixLabel, meetingTones } from "@/components/calendar/tones";
 import { useOrgsStore } from "@/store/orgs.store";
 import { useTasksStore } from "@/store/tasks.store";
 import { readableRule } from "@/lib/meeting-time";
@@ -133,6 +133,7 @@ export default function OrgMeetings({ canManage }: { canManage: boolean }) {
             }),
           )}
           tones={meetingTones(t)}
+          mixLabel={meetingMixLabel(t)}
           calendarId="meetings"
           onOpen={() => setView("list")}
           countKey="common:count.meetings"

@@ -689,7 +689,15 @@
     "overdue": "Vencida",
     "nothingDue": "Nada vence este día.",
     "newForDay": "Nueva tarea para este día",
-    "clickToPin": "Clic para fijar"
+    "clickToPin": "Clic para fijar",
+    "thisWeek": "Esta semana",
+    "highPriority": "Prioridad alta",
+    "done": "Hechas",
+    "openCount_one": "{{count}} abierta",
+    "openCount_other": "{{count}} abiertas",
+    "free": "Libre",
+    "priorityMix": "Mezcla de prioridad",
+    "meetingMix": "Activas y en pausa"
   },
   "deploy": {
     "title": "Desplegar {{name}}",
