@@ -668,10 +668,7 @@
   "calendar": {
     "undated_one": "{{count}} with no date",
     "undated_other": "{{count}} with no date",
-    "undatedDrag_one": "{{count}} with no date — drag it onto a day to schedule it",
-    "undatedDrag_other": "{{count}} with no date — drag one onto a day to schedule it",
     "today": "Today",
-    "more": "+{{count}} more",
     "nothingThatDay": "Nothing this day",
     "upcoming": "Coming up",
     "meetingActive": "Active",
@@ -697,7 +694,11 @@
     "openCount_other": "{{count}} open",
     "free": "Free",
     "priorityMix": "Priority mix",
-    "meetingMix": "Active and paused"
+    "meetingMix": "Active and paused",
+    "hide": "Hide",
+    "tomorrow": "Tomorrow",
+    "allDated": "Everything has a date.",
+    "laneHelp": "Drag onto a day to give it a date. Drop here to take it away."
   },
   "deploy": {
     "title": "Deploy {{name}}",

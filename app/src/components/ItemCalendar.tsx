@@ -4,11 +4,9 @@ import {
   PointerSensor,
   KeyboardSensor,
   pointerWithin,
-  useDraggable,
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
-import { GripVertical } from "lucide-react";
 
 import { diaYMes, fecha, mesYAno } from "@/lib/fechas";
 import {
@@ -24,6 +22,7 @@ import CalendarHeader from "@/components/calendar/CalendarHeader";
 import MonthGrid from "@/components/calendar/MonthGrid";
 import WeekView, { WeekSummary } from "@/components/calendar/WeekView";
 import { CardBody } from "@/components/calendar/CalendarCard";
+import ScheduleLane, { LANE_ID } from "@/components/calendar/ScheduleLane";
 import { useT, type MessageKey } from "@/lib/i18n";
 import { useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
@@ -103,8 +102,9 @@ export default function ItemCalendar({
   items,
   tones,
   calendarId,
-  undated = [],
+  undated,
   onSchedule,
+  onUnschedule,
   onOpen,
   onCreateForDay,
   countKey = "common:count.items",
@@ -141,6 +141,11 @@ export default function ItemCalendar({
    * se cambia arrastrando nada.
    */
   onSchedule?: (id: string, iso: string) => void;
+  /**
+   * Quitarle la fecha a una soltándola en «Por programar». Sin esto el carril
+   * no acepta lo que tiene fecha.
+   */
+  onUnschedule?: (id: string) => void;
   onOpen: (id: string) => void;
   /**
    * «+ Nueva tarea para este día», en el pie del popover del día. Sin ella el
@@ -167,6 +172,12 @@ export default function ItemCalendar({
   const dotOf = (tone: string) => tones.find((x) => x.key === tone)?.dot ?? "bg-muted-foreground";
   const view = useCalendarStore((s) => s.views[calendarId] ?? "month");
   const setView = useCalendarStore((s) => s.setView);
+  const laneOpen = useCalendarStore((s) => s.laneOpen(calendarId, view));
+  const setLaneOpen = useCalendarStore((s) => s.setLaneOpen);
+  // El carril sólo existe donde se puede poner fecha: Mi trabajo. El tablero
+  // coloca por creación y las reuniones se reprograman en su ficha.
+  const hasLane = !!onSchedule && undated !== undefined;
+  const pending = undated ?? [];
   const [cursor, setCursor] = useState(() => {
     const n = new Date();
     return new Date(n.getFullYear(), n.getMonth(), 1);
@@ -212,7 +223,7 @@ export default function ItemCalendar({
   const days = useMemo(() => weekDays(week), [week]);
   const weekItems = useMemo(() => days.flatMap((d) => byISO.get(toISODate(d)) ?? []), [days, byISO]);
   // Lo que viaja con el puntero: una copia de la tarjeta que se arrastra.
-  const dragged = dragging ? [...items, ...undated].find((x) => x.id === dragging) : undefined;
+  const dragged = dragging ? [...items, ...pending].find((x) => x.id === dragging) : undefined;
 
   const today = dayKey(new Date());
   const todayISO = toISODate(new Date());
@@ -259,7 +270,7 @@ export default function ItemCalendar({
         byDay={byDay}
         picked={picked}
         onPick={setPicked}
-        undated={undated}
+        undated={pending}
         onOpen={onOpen}
         countKey={countKey}
         dotOf={dotOf}
@@ -281,6 +292,11 @@ export default function ItemCalendar({
           setView(calendarId, v);
         }}
         tones={tones}
+        lane={
+          hasLane
+            ? { open: laneOpen, count: pending.length, onToggle: () => setLaneOpen(calendarId, view, !laneOpen) }
+            : undefined
+        }
         onPrev={() => step(-1)}
         onToday={goToday}
         onNext={() => step(1)}
@@ -292,44 +308,67 @@ export default function ItemCalendar({
         onDragStart={(e) => setDragging(String(e.active.id))}
         onDragEnd={(e) => {
           setDragging(null);
-          // `over` es el día sobre el que se soltó; su id **es** la fecha.
-          if (onSchedule && e.over) onSchedule(String(e.active.id), String(e.over.id));
+          if (!e.over) return;
+          const id = String(e.active.id);
+          // En el carril se le quita la fecha, si la tenía; en un día, su id
+          // **es** la fecha.
+          if (e.over.id === LANE_ID) {
+            if (onUnschedule && !pending.some((x) => x.id === id)) onUnschedule(id);
+            return;
+          }
+          onSchedule?.(id, String(e.over.id));
         }}
         onDragCancel={() => setDragging(null)}
       >
-        {view === "week" ? (
-          <>
-            <WeekSummary
-              week={weekItems}
-              all={items}
-              tones={tones}
-              countKey={countKey}
-              mixLabel={mixLabel ?? t("common:calendar.priorityMix")}
-            />
-            <WeekView
-              days={days}
-              byDay={byISO}
-              tones={tones}
-              today={todayISO}
-              dragging={dragging !== null}
-              canDrop={!!onSchedule}
-              onOpen={onOpen}
-            />
-          </>
-        ) : (
-          <MonthGrid
-            cells={weeks}
-            month={cursor.getMonth()}
-            byDay={byISO}
+        {view === "week" && (
+          <WeekSummary
+            week={weekItems}
+            all={items}
             tones={tones}
-            today={todayISO}
-            dragging={dragging !== null}
-            canDrop={!!onSchedule}
-            onOpen={onOpen}
-            onCreateForDay={onCreateForDay}
             countKey={countKey}
+            mixLabel={mixLabel ?? t("common:calendar.priorityMix")}
           />
         )}
+        <div className="flex min-w-0 items-start gap-3">
+          {hasLane && (
+            <ScheduleLane
+              open={laneOpen}
+              items={pending}
+              tones={tones}
+              dragging={dragging !== null}
+              canUnschedule={!!onUnschedule}
+              onClose={() => setLaneOpen(calendarId, view, false)}
+              onOpen={onOpen}
+              onSchedule={onSchedule!}
+            />
+          )}
+          <div className="min-w-0 flex-1">
+            {view === "week" ? (
+              <WeekView
+                days={days}
+                byDay={byISO}
+                tones={tones}
+                today={todayISO}
+                dragging={dragging !== null}
+                canDrop={!!onSchedule}
+                onOpen={onOpen}
+              />
+            ) : (
+              <MonthGrid
+                cells={weeks}
+                month={cursor.getMonth()}
+                byDay={byISO}
+                tones={tones}
+                today={todayISO}
+                dragging={dragging !== null}
+                canDrop={!!onSchedule}
+                onOpen={onOpen}
+                onCreateForDay={onCreateForDay}
+                countKey={countKey}
+              />
+            )}
+          </div>
+        </div>
         <DragOverlay dropAnimation={null}>
           {dragged ? (
             <div className="w-[200px] cursor-grabbing shadow-lg">
@@ -337,80 +376,8 @@ export default function ItemCalendar({
             </div>
           ) : null}
         </DragOverlay>
-
-        {/* Lo que no tiene fecha, debajo y a mano. Ver el comentario de `undated`. */}
-        {undated.length > 0 && (
-          <div className="rounded-lg border p-3">
-            <p className="mb-2 text-xs text-muted-foreground">
-              {onSchedule
-                ? t("common:calendar.undatedDrag", { count: undated.length })
-                : t("common:calendar.undated", { count: undated.length })}
-            </p>
-            <div className="flex flex-wrap gap-1.5">
-              {undated.map((r) => (
-                <UndatedChip
-                  key={r.id}
-                  item={r}
-                  draggable={!!onSchedule}
-                  onOpen={() => onOpen(r.id)}
-                  dotOf={dotOf}
-                />
-              ))}
-            </div>
-          </div>
-        )}
       </DndContext>
     </div>
-  );
-}
-
-/**
- * Una tarjeta sin fecha, de la tira de abajo.
- *
- * El asa es aparte del título: el título abre y el asa arrastra. Con todo el
- * bloque arrastrable, abrir una tarjeta se convierte en una apuesta sobre si la
- * mano se movió tres píxeles.
- */
-function UndatedChip({
-  item,
-  draggable,
-  onOpen,
-  dotOf,
-}: {
-  item: CalendarEntry;
-  draggable: boolean;
-  onOpen: () => void;
-  dotOf: (tone: string) => string;
-}) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
-    id: item.id,
-    disabled: !draggable,
-  });
-  return (
-    <span
-      ref={setNodeRef}
-      style={transform ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` } : undefined}
-      className={`flex max-w-64 items-center gap-1 rounded-md border px-1.5 py-1 text-[11px] ${
-        isDragging ? "z-50 opacity-80 shadow-lg" : ""
-      }`}
-    >
-      {draggable && (
-        <button
-          {...listeners}
-          {...attributes}
-          className="shrink-0 cursor-grab text-muted-foreground/60 hover:text-foreground active:cursor-grabbing"
-        >
-          <GripVertical className="size-3" />
-        </button>
-      )}
-      <span className={`size-1.5 shrink-0 rounded-full ${dotOf(item.tone)}`} />
-      <button onClick={onOpen} className="flex min-w-0 items-center gap-1 text-left">
-        {item.label && (
-          <span className="shrink-0 text-[10px] text-muted-foreground">{item.label}</span>
-        )}
-        <span className="truncate">{item.title}</span>
-      </button>
-    </span>
   );
 }
 

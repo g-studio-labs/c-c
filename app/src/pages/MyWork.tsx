@@ -497,6 +497,12 @@ export default function MyWork() {
                   toast.error(String(e)),
                 )
               }
+              // Soltarla en «Por programar» le quita la fecha. Con
+              // `clearDueAt` y no `dueAt: null`, que el servidor lee como «no
+              // tocar» (#95, ver `dueDatePatch`).
+              onUnschedule={(id) =>
+                updateTask(id, { clearDueAt: true }).catch((e) => toast.error(String(e)))
+              }
               onOpen={(id) => openTask(id).catch(() => {})}
               countKey="common:count.tasks"
             />

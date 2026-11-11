@@ -668,10 +668,7 @@
   "calendar": {
     "undated_one": "{{count}} sin fecha",
     "undated_other": "{{count}} sin fecha",
-    "undatedDrag_one": "{{count}} sin fecha — arrástrala a un día para ponérsela",
-    "undatedDrag_other": "{{count}} sin fecha — arrastra una a un día para ponérsela",
     "today": "Hoy",
-    "more": "+{{count}} más",
     "nothingThatDay": "Nada este día",
     "upcoming": "Próximos",
     "meetingActive": "Activa",
@@ -697,7 +694,11 @@
     "openCount_other": "{{count}} abiertas",
     "free": "Libre",
     "priorityMix": "Mezcla de prioridad",
-    "meetingMix": "Activas y en pausa"
+    "meetingMix": "Activas y en pausa",
+    "hide": "Ocultar",
+    "tomorrow": "Mañana",
+    "allDated": "Todo tiene fecha.",
+    "laneHelp": "Arrastra a un día para ponerle fecha. Suelta aquí para quitársela."
   },
   "deploy": {
     "title": "Desplegar {{name}}",

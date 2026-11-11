@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 
 /**
  * Lo que no tiene fecha no desaparece.
@@ -39,37 +39,39 @@ const undated = (n: number) =>
 
 afterEach(cleanup);
 
+/**
+ * Desde command-and-control-337 lo sin fecha vive en el carril «Por
+ * programar», no en una tira debajo del mes. Lo que esta prueba guarda sigue
+ * siendo lo mismo: que no se trague, y que se diga cuánto hay aunque el carril
+ * esté cerrado.
+ */
 describe("el calendario", () => {
-  it("lista debajo lo que no tiene fecha, en vez de tragárselo", () => {
+  it("lleva al carril lo que no tiene fecha, en vez de tragárselo", () => {
     render(
       <ItemCalendar tones={TONES} calendarId="test" items={[dated]} undated={undated(3)} onOpen={() => {}} onSchedule={() => {}} />,
     );
-    expect(screen.getByText("sin fecha 0")).toBeTruthy();
-    expect(screen.getByText("sin fecha 2")).toBeTruthy();
+    const lane = document.querySelector<HTMLElement>("[data-lane]")!;
+    expect(within(lane).getByText("sin fecha 0")).toBeTruthy();
+    expect(within(lane).getByText("sin fecha 2")).toBeTruthy();
   });
 
-  it("y dice cuántas son", () => {
+  it("y dice cuántas son, con el carril cerrado", () => {
     render(
       <ItemCalendar tones={TONES} calendarId="test" items={[dated]} undated={undated(64)} onOpen={() => {}} onSchedule={() => {}} />,
     );
-    expect(screen.getByText(/64/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /To schedule/ }).textContent).toContain("64");
   });
 
   // El calendario del tablero coloca por fecha de creación, y ésa no se cambia
   // arrastrando: sin `onSchedule` no debe insinuar que se pueda.
-  it("sin poder programar, no invita a arrastrar", () => {
+  it("sin poder programar, no hay carril", () => {
     render(<ItemCalendar tones={TONES} calendarId="test" items={[dated]} undated={undated(2)} onOpen={() => {}} />);
-    // Por la frase concreta y no por la palabra «drag»: dnd-kit pinta un texto
-    // oculto de accesibilidad que también la lleva, y buscarla ahí daba un falso
-    // positivo que no tenía nada que ver con lo que se está comprobando.
+    expect(document.querySelector("[data-lane]")).toBeNull();
     expect(screen.queryByText(/onto a day|a un día/i)).toBeNull();
-    expect(screen.getByText(/^2 (with no date|undated fecha)$/i)).toBeTruthy();
   });
 
-  // Sin nada suelto no aparece la tira: una caja vacía que dice «0 sin fecha»
-  // es ruido en la pantalla de quien lo tiene todo puesto.
-  it("sin nada suelto no hay tira", () => {
-    render(<ItemCalendar tones={TONES} calendarId="test" items={[dated]} onOpen={() => {}} onSchedule={() => {}} />);
-    expect(screen.queryByText(/^\d+ (with no date|undated fecha)/i)).toBeNull();
+  it("sin nada suelto, el carril dice que todo tiene fecha", () => {
+    render(<ItemCalendar tones={TONES} calendarId="test" items={[dated]} undated={[]} onOpen={() => {}} onSchedule={() => {}} />);
+    expect(within(document.querySelector<HTMLElement>("[data-lane]")!).getByText("Everything has a date.")).toBeTruthy();
   });
 });

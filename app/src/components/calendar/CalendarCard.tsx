@@ -23,6 +23,7 @@ export default function CalendarCard({
   draggable,
   onOpen,
   dimmed = false,
+  variant = "week",
   grip,
   footer,
 }: {
@@ -32,6 +33,11 @@ export default function CalendarCard({
   onOpen: () => void;
   /** Un día que ya pasó: la tarjeta al 75%. */
   dimmed?: boolean;
+  /**
+   * La del carril no enseña el estado (lo que no tiene fecha no puede ir
+   * tarde) y al pasar por encima se le marca el borde en vez del fondo.
+   */
+  variant?: "week" | "lane";
   /** El asa delante del folio, en el carril. */
   grip?: ReactNode;
   /** Lo de abajo, en el carril: «→ Hoy» y «Mañana». */
@@ -57,7 +63,7 @@ export default function CalendarCard({
         isDragging ? "opacity-40" : dimmed && "opacity-75",
       )}
     >
-      <CardBody item={item} tones={tones} grip={grip} footer={footer} />
+      <CardBody item={item} tones={tones} variant={variant} grip={grip} footer={footer} />
     </div>
   );
 }
@@ -66,11 +72,13 @@ export default function CalendarCard({
 export function CardBody({
   item,
   tones,
+  variant = "week",
   grip,
   footer,
 }: {
   item: CalendarEntry;
   tones: CalendarTone[];
+  variant?: "week" | "lane";
   grip?: ReactNode;
   footer?: ReactNode;
 }) {
@@ -80,7 +88,8 @@ export function CardBody({
   return (
     <div
       className={cn(
-        "relative flex flex-col gap-[6px] rounded-[7px] border bg-raised py-2 pr-2 pl-[10px] hover:bg-accent",
+        "relative flex flex-col gap-[6px] rounded-[7px] border bg-raised py-2 pr-2 pl-[10px]",
+        variant === "lane" ? "hover:border-border-strong" : "hover:bg-accent",
         m?.overdue ? "border-error/55" : "border-border",
       )}
     >
@@ -105,12 +114,14 @@ export function CardBody({
       <span
         className={cn(
           "text-[12.5px] leading-[17px] text-pretty",
-          m?.done ? "text-muted-foreground line-through" : "text-foreground",
+          // En el carril no se tacha: lo que no tiene fecha está por hacer,
+          // y el diseño lo pinta siempre igual.
+          variant === "week" && m?.done ? "text-muted-foreground line-through" : "text-foreground",
         )}
       >
         {item.title}
       </span>
-      {m?.status && (
+      {variant === "week" && m?.status && (
         <span className="flex items-center gap-[5px] text-[11px] text-muted-foreground">
           <span className={cn("size-[6px] rounded-full", m.status.dot)} />
           {m.status.name}
