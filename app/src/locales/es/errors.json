@@ -66,6 +66,8 @@
   "invalid-status": "Ese estado no existe.",
   "invalid-token": "Tu sesión ya no vale. Vuelve a entrar.",
   "list-holds-channel-work": "Esta lista guarda trabajo que entró por un canal.",
+  "move-subtask": "Una subtarea vive en la lista de su padre: mueve el padre y se va con él.",
+  "move-leaves-channel": "Esta tarjeta está en el tablero de un cliente y gastó uno de sus folios: sólo puede ir a otra lista de ese mismo cliente.",
   "list-in-use-by-channel": "Hay un canal apuntando a esta lista.",
   "locale-not-saved": "No se pudo guardar el idioma.",
   "logout-failed": "El servidor no pudo cerrar la sesión; en este dispositivo ya saliste.",

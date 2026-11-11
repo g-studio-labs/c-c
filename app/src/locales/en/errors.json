@@ -66,6 +66,8 @@
   "invalid-status": "That status doesn't exist.",
   "invalid-token": "Your session is no longer valid. Sign in again.",
   "list-holds-channel-work": "This list is holding work that came in through a channel.",
+  "move-subtask": "A subtask lives in its parent's list: move the parent and it goes along.",
+  "move-leaves-channel": "This card is on a client's board and spent one of their folio numbers: it can only go to another list of that same client.",
   "list-in-use-by-channel": "A channel is pointing at this list.",
   "locale-not-saved": "The language couldn't be saved.",
   "logout-failed": "The server couldn't close the session; you are signed out on this device.",

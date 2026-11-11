@@ -404,6 +404,12 @@ export interface UpdateTaskPayload {
    * quoted that number, so their numbering keeps a gap.
    */
   visibility?: ItemVisibility;
+  /**
+   * Mueve la tarea a otra lista de la misma organización, con sus subtareas.
+   * En otro espacio una interna toma el número siguiente: su ref cambia, y la
+   * respuesta ya trae la nueva (command-and-control-328).
+   */
+  listId?: string;
 }
 
 // ─── Docs ─────────────────────────────────────────────────────────────────────

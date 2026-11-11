@@ -26,7 +26,10 @@ import {
   Gavel,
   Github,
   Link2,
+  FolderInput,
 } from "lucide-react";
+import Picker from "@/components/ui/picker";
+import { moveTargets } from "@/lib/move-targets";
 import { toast } from "sonner";
 import { fileCrash, rutaActual, signature, type Fichado } from "@/lib/file-crash";
 import { Badge } from "@/components/ui/badge";
@@ -354,6 +357,7 @@ function Content() {
   // from a notification showed an empty menu — a control that looked like a
   // label and did nothing.
   const statusesOf = useTasksStore((s) => s.statusesOf);
+  const tree = useTasksStore((s) => s.tree);
   const [columnas, setColumnas] = useState<TaskStatus[]>([]);
   // Y por qué no se pudieron cargar, si no se pudieron.
   //
@@ -1045,6 +1049,28 @@ function Content() {
             </DropdownMenu>
           </div>
 
+          {/* Mover a otra lista. Una subtarea no: vive en la lista de su padre
+              y viaja con él (el servidor contesta 409). */}
+          {!task.parentId && (
+            <MoveToList
+              listId={task.listId}
+              targets={moveTargets(tree, task)}
+              onMove={async (listId, crossesSpace) => {
+                if (crossesSpace) {
+                  const ok = await confirm({
+                    title: t("work:task.moveListTitle"),
+                    description: t("work:task.moveListRefChanges", { ref: detail.ref ?? "" }),
+                    confirmText: t("work:task.moveListConfirm"),
+                  });
+                  if (!ok) return;
+                }
+                await updateTask(task.id, { listId }).catch((e) =>
+                  toast.error(t("work:task.errMoveList"), { description: String(e) }),
+                );
+              }}
+            />
+          )}
+
           <span className="mb-1 flex items-center gap-1.5 text-xs text-muted-foreground">
             <Flag className="size-3.5" /> {t("work:board.priority")}
           </span>
@@ -1404,5 +1430,50 @@ function HandoffSection({ task, handoffBy }: { task: Task; handoffBy?: string })
         <p className="text-sm text-muted-foreground">{t("work:task.noHandoff")}</p>
       )}
     </section>
+  );
+}
+
+/**
+ * El campo «Lista» del riel: dónde vive la tarea, y a dónde se puede llevar
+ * (command-and-control-328). Agrupado por espacio, como las bandejas; las de
+ * otro espacio dicen que la ref cambia, porque allí una interna toma el número
+ * siguiente.
+ */
+function MoveToList({
+  listId,
+  targets,
+  onMove,
+}: {
+  listId: string;
+  targets: ReturnType<typeof moveTargets>;
+  onMove: (listId: string, crossesSpace: boolean) => void;
+}) {
+  const { t } = useT();
+  const crosses = new Map(targets.flatMap((g) => g.targets.map((x) => [x.id, x.crossesSpace] as const)));
+  return (
+    <>
+      <span className="mb-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+        <FolderInput className="size-3.5" /> {t("work:task.list")}
+      </span>
+      <div>
+        <Picker
+          aria-label={t("work:task.moveToList")}
+          size="sm"
+          className="w-full"
+          value={listId}
+          onChange={(next) => {
+            if (!next || next === listId) return;
+            onMove(next, crosses.get(next) ?? false);
+          }}
+          groups={targets.map((g) => ({
+            label: g.space,
+            options: g.targets.map((x) => ({
+              value: x.id,
+              label: x.crossesSpace ? `${x.label} · ${t("work:task.refWillChange")}` : x.label,
+            })),
+          }))}
+        />
+      </div>
+    </>
   );
 }
