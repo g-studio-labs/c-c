@@ -443,6 +443,7 @@ export default function MyWork() {
         {creating && (
           <div className="motion-reveal">
           <NewTaskRow
+            scope={scope ? { kind: scope.kind, id: scope.id } : null}
             // Tras cada Enter, no sólo al cerrar. La fila se queda abierta a
             // propósito —se escriben cuatro seguidas—, así que preguntar sólo al
             // cerrarla dejaba la tarea recién creada sin aparecer por ninguna

@@ -24,8 +24,16 @@ import Picker from "@/components/ui/picker";
 export default function NewTaskRow({
   onClose,
   onCreated,
+  scope,
 }: {
   onClose: () => void;
+  /**
+   * Lo que se está mirando. En una lista, la tarea va ahí y no se pregunta:
+   * arrancaba siempre en la primera lista del árbol, así que quien creaba desde
+   * su lista la mandaba a otra sin verlo (jose, 11-nov-2026). En un espacio,
+   * sólo se ofrecen las listas de ese espacio.
+   */
+  scope?: { kind: "list" | "space"; id: string } | null;
   /**
    * Una tarea acaba de existir. Hace falta porque esta fila **se queda
    * abierta** tras cada Enter: quien la mira ve el título vaciarse y su lista
@@ -58,6 +66,8 @@ export default function NewTaskRow({
   const destinos = useMemo(() => {
     const out: { id: string; label: string; channel?: string }[] = [];
     for (const sp of tree) {
+      if (orgId && sp.orgId && sp.orgId !== orgId) continue;
+      if (scope?.kind === "space" && sp.id !== scope.id) continue;
       for (const l of sp.lists) {
         out.push({ id: l.id, label: `${sp.name} / ${l.name}`, channel: l.projectId });
       }
@@ -72,11 +82,19 @@ export default function NewTaskRow({
       bajar(sp.folders, sp.name);
     }
     return out;
-  }, [tree]);
+  }, [tree, orgId, scope?.kind, scope?.id]);
 
+  // La lista de la vista manda; si no hay, la primera de lo que se ofrece. Se
+  // recalcula al cambiar de vista con la fila abierta: quedarse con la de antes
+  // es crear en una lista que ya no se está mirando.
+  const fija = scope?.kind === "list" ? destinos.find((d) => d.id === scope.id) : undefined;
   useEffect(() => {
-    if (!listId && destinos.length > 0) setListId(destinos[0].id);
-  }, [destinos, listId]);
+    if (fija) {
+      if (listId !== fija.id) setListId(fija.id);
+    } else if (!destinos.some((d) => d.id === listId) && destinos.length > 0) {
+      setListId(destinos[0].id);
+    }
+  }, [fija, destinos, listId]);
 
   const destino = destinos.find((d) => d.id === listId);
   // Visibility is only a question in a list a client can see into. Anywhere
@@ -137,14 +155,21 @@ export default function NewTaskRow({
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
-        <Picker
-          aria-label={t("work:board.whereItGoes")}
-          value={listId}
-          onChange={setListId}
-          options={destinos.map((d) => ({ value: d.id, label: d.label }))}
-          size="sm"
-          className="max-w-[16rem] text-xs"
-        />
+        {fija ? (
+          // Ya se sabe dónde va: se dice, no se pregunta.
+          <span className="max-w-[16rem] truncate px-1 text-muted-foreground" title={fija.label}>
+            {fija.label}
+          </span>
+        ) : (
+          <Picker
+            aria-label={t("work:board.whereItGoes")}
+            value={listId}
+            onChange={setListId}
+            options={destinos.map((d) => ({ value: d.id, label: d.label }))}
+            size="sm"
+            className="max-w-[16rem] text-xs"
+          />
+        )}
 
         <Picker
           aria-label={t("work:board.priority")}

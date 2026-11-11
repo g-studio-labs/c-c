@@ -24,7 +24,10 @@ vi.mock("@/store/tasks.store", () => ({
         },
         {
           id: "sp-2", name: "Cliente", folders: [], color: "#888", orgId: "org-1",
-          lists: [{ id: "li-canal", name: "Con canal", taskCount: 0, projectId: "proj-1" }],
+          lists: [
+            { id: "li-canal", name: "Con canal", taskCount: 0, projectId: "proj-1" },
+            { id: "li-otra", name: "Otra", taskCount: 0 },
+          ],
         },
       ],
     }),
@@ -124,5 +127,29 @@ describe("el composer", () => {
     escribirTitulo("   ");
     enter();
     expect(createTaskIn).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Arrancaba siempre en la primera lista del árbol: quien creaba desde su
+   * lista la mandaba a otra sin verlo, y en su lista se le preguntaba algo que
+   * la pantalla ya sabía (jose, 11-nov-2026).
+   */
+  it("en una lista crea ahí, sin preguntar a dónde", async () => {
+    render(<NewTaskRow onClose={() => {}} scope={{ kind: "list", id: "li-otra" }} />);
+    expect(screen.queryByLabelText("Where it goes")).toBeNull();
+    expect(screen.getByText("Cliente / Otra")).toBeTruthy();
+    escribirTitulo("Aquí");
+    enter();
+    await waitFor(() => expect(createTaskIn).toHaveBeenCalled());
+    expect(createTaskIn.mock.calls[0][0].listId).toBe("li-otra");
+  });
+
+  it("en un espacio sólo ofrece sus listas, y arranca en una de ellas", async () => {
+    render(<NewTaskRow onClose={() => {}} scope={{ kind: "space", id: "sp-2" }} />);
+    expect(screen.getByLabelText("Where it goes").textContent).toContain("Cliente / Con canal");
+    escribirTitulo("En el espacio");
+    enter();
+    await waitFor(() => expect(createTaskIn).toHaveBeenCalled());
+    expect(createTaskIn.mock.calls[0][0].listId).toBe("li-canal");
   });
 });
