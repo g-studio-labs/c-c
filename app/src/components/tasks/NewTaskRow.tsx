@@ -25,6 +25,7 @@ export default function NewTaskRow({
   onClose,
   onCreated,
   scope,
+  initialDueAt = "",
 }: {
   onClose: () => void;
   /**
@@ -34,6 +35,11 @@ export default function NewTaskRow({
    * sólo se ofrecen las listas de ese espacio.
    */
   scope?: { kind: "list" | "space"; id: string } | null;
+  /**
+   * El vencimiento con el que arranca, `YYYY-MM-DD`: el día del calendario
+   * desde el que se pidió (command-and-control-338).
+   */
+  initialDueAt?: string;
   /**
    * Una tarea acaba de existir. Hace falta porque esta fila **se queda
    * abierta** tras cada Enter: quien la mira ve el título vaciarse y su lista
@@ -52,7 +58,12 @@ export default function NewTaskRow({
   const [title, setTitle] = useState("");
   const [listId, setListId] = useState("");
   const [priority, setPriority] = useState<TaskPriority>("normal");
-  const [dueAt, setDueAt] = useState("");
+  // El valor inicial sólo ahorra un fotograma vacío: el efecto de abajo pone
+  // la misma fecha al montar, así que arrancar con "" no se puede distinguir
+  // desde una prueba (mutante equivalente, anotado aquí para no inventarle una).
+  const [dueAt, setDueAt] = useState(initialDueAt);
+  // Otro día del calendario con la fila ya abierta: la fecha es la nueva.
+  useEffect(() => setDueAt(initialDueAt), [initialDueAt]);
   const [assignee, setAssignee] = useState("");
   const [visibility, setVisibility] = useState<ItemVisibility | "">("");
   const [busy, setBusy] = useState(false);

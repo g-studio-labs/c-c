@@ -127,6 +127,20 @@ export default function MyWork() {
   const view = useMyWorkStore((s) => s.vista);
   const setView = useMyWorkStore((s) => s.setVista);
   const [creating, setCreating] = useState(false);
+  // El día con el que nace la tarea nueva, si se pidió desde un día del
+  // calendario («+ Nueva tarea para este día»). Vacío desde el botón de arriba.
+  const [createDue, setCreateDue] = useState("");
+  const setDueLocal = useMyWorkStore((s) => s.setDueLocal);
+  // Cambiar una fecha desde el calendario se ve al instante y se deshace si el
+  // servidor no la acepta.
+  const reschedule = (id: string, dueAt: string | null) => {
+    const prev = setDueLocal(id, dueAt);
+    const patch = dueAt ? { dueAt } : { clearDueAt: true as const };
+    updateTask(id, patch).catch((e) => {
+      setDueLocal(id, prev ?? null);
+      toast.error(String(e));
+    });
+  };
   const [params, setParams] = useSearchParams();
   useEffect(() => {
     if (params.get("new") !== "1") return;
@@ -278,7 +292,10 @@ export default function MyWork() {
           {/* En el teléfono, sólo el icono: el rótulo empujaba al resto y las
               pestañas de debajo se partían en dos líneas. */}
           <button
-            onClick={() => setCreating(true)}
+            onClick={() => {
+              setCreateDue("");
+              setCreating(true);
+            }}
             aria-label={t("work:myWork.newTask")}
             title={t("work:myWork.newTask")}
             className="motion-press ml-auto flex items-center gap-1 self-center rounded bg-primary px-2 py-1 text-xs font-medium text-primary-foreground"
@@ -444,6 +461,7 @@ export default function MyWork() {
           <div className="motion-reveal">
           <NewTaskRow
             scope={scope ? { kind: scope.kind, id: scope.id } : null}
+            initialDueAt={createDue}
             // Tras cada Enter, no sólo al cerrar. La fila se queda abierta a
             // propósito —se escriben cuatro seguidas—, así que preguntar sólo al
             // cerrarla dejaba la tarea recién creada sin aparecer por ninguna
@@ -492,17 +510,15 @@ export default function MyWork() {
               // Arrastrar una a un día le pone el vencimiento. Es la única forma
               // de ponerlo sin abrir la tarjeta, y lo que convierte esta vista en
               // el sitio donde se planifica en vez de uno donde se mira.
-              onSchedule={(id, iso) =>
-                updateTask(id, { dueAt: new Date(iso).toISOString() }).catch((e) =>
-                  toast.error(String(e)),
-                )
-              }
+              onSchedule={(id, iso) => reschedule(id, new Date(iso).toISOString())}
               // Soltarla en «Por programar» le quita la fecha. Con
               // `clearDueAt` y no `dueAt: null`, que el servidor lee como «no
               // tocar» (#95, ver `dueDatePatch`).
-              onUnschedule={(id) =>
-                updateTask(id, { clearDueAt: true }).catch((e) => toast.error(String(e)))
-              }
+              onUnschedule={(id) => reschedule(id, null)}
+              onCreateForDay={(iso) => {
+                setCreateDue(iso);
+                setCreating(true);
+              }}
               onOpen={(id) => openTask(id).catch(() => {})}
               countKey="common:count.tasks"
             />

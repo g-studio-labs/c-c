@@ -152,4 +152,23 @@ describe("el composer", () => {
     await waitFor(() => expect(createTaskIn).toHaveBeenCalled());
     expect(createTaskIn.mock.calls[0][0].listId).toBe("li-canal");
   });
+
+  // Desde un día del calendario (command-and-control-338): la fecha ya puesta,
+  // y como día, a medianoche UTC, que es como se guarda un vencimiento.
+  it("nace con el día del calendario desde el que se pidió", async () => {
+    render(<NewTaskRow onClose={() => {}} initialDueAt="2026-11-20" />);
+    escribirTitulo("Ese día");
+    enter();
+    await waitFor(() => expect(createTaskIn).toHaveBeenCalled());
+    expect(createTaskIn.mock.calls[0][0].dueAt).toBe("2026-11-20T00:00:00.000Z");
+  });
+
+  it("con la fila abierta, otro día del calendario le cambia la fecha", async () => {
+    const { rerender } = render(<NewTaskRow onClose={() => {}} initialDueAt="2026-11-20" />);
+    rerender(<NewTaskRow onClose={() => {}} initialDueAt="2026-11-25" />);
+    escribirTitulo("Otro día");
+    enter();
+    await waitFor(() => expect(createTaskIn).toHaveBeenCalled());
+    expect(createTaskIn.mock.calls[0][0].dueAt).toBe("2026-11-25T00:00:00.000Z");
+  });
 });

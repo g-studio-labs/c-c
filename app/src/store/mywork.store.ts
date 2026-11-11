@@ -136,6 +136,13 @@ interface MyWorkState {
    */
   olvidar: (taskId: string) => void;
   /**
+   * Cambia el vencimiento de una tarea aquí, antes de que conteste el
+   * servidor, y devuelve el que tenía para poder deshacerlo
+   * (command-and-control-338). Arrastrar a un día y esperar la vuelta para ver
+   * la tarjeta moverse se lee como que el arrastre no funcionó.
+   */
+  setDueLocal: (taskId: string, dueAt: string | null) => string | null | undefined;
+  /**
    * Algo pasó con una tarea. Si es una de las que tenemos, se recarga.
    *
    * «My work» junta tareas de todas las listas, así que no tiene lista activa —
@@ -229,6 +236,12 @@ export const useMyWorkStore = create<MyWorkState>()(
 
       olvidar: (taskId) =>
         set((s) => ({ tasks: s.tasks.filter((t) => t.id !== taskId) })),
+
+      setDueLocal: (taskId, dueAt) => {
+        const prev = get().tasks.find((t) => t.id === taskId)?.dueAt;
+        set((s) => ({ tasks: s.tasks.map((t) => (t.id === taskId ? { ...t, dueAt } : t)) }));
+        return prev;
+      },
 
       refrescarSiEsNuestra: (taskId, nueva = false) => {
         // Sólo si ya la tenemos. Una organización con movimiento emite eventos
