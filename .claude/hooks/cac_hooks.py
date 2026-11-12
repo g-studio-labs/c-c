@@ -21,7 +21,7 @@ repos. En un repo que trae los suyos (éste), la copia global calla
 La versión de abajo se sube a mano al cambiar cualquier hook: es lo que hace
 que el MCP ofrezca actualizar la copia global.
 """
-# cac-hooks v2
+# cac-hooks v3
 import json
 import os
 import re
@@ -166,9 +166,18 @@ def fold(s):
     return "".join(c for c in s if not unicodedata.combining(c))
 
 
-def incidents(cfg):
-    """Los incidentes vigentes de las orgs del token, cacheados. Sin cuerpo."""
-    path = os.path.join(cache_dir(), "incidents.json")
+def incidents(cfg, org_id):
+    """Los incidentes vigentes de la org del repo, cacheados por org. Sin cuerpo.
+
+    Sólo los de **esa** org: hasta el 11-nov-2026 se pedían los de todas las
+    del token, y trabajando en cac salían los de Galena, QuickBooks o
+    Hospitable por palabras como «agente» o «sql» (incidente 60919704,
+    command-and-control-347). Sin org —un repo que no está atado— no hay
+    nada que enseñar."""
+    if not org_id:
+        return []
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", org_id)[:80]
+    path = os.path.join(cache_dir(), f"incidents-{safe}.json")
     try:
         with open(path, encoding="utf-8") as f:
             cached = json.load(f)
@@ -176,7 +185,7 @@ def incidents(cfg):
             return cached.get("incidents") or []
     except (OSError, ValueError):
         pass
-    data = api(cfg, "/api/v1/incidents/?limit=200")
+    data = api(cfg, f"/api/v1/incidents/?orgId={safe}&limit=200")
     if data is None:
         return []
     found = data.get("incidents") or []
@@ -192,32 +201,44 @@ def incidents(cfg):
 TASKS_TTL = 5 * 60
 
 
-def in_progress(cfg, repo):
-    """Las tareas en curso del espacio al que está atado `repo`, cacheadas por
-    repo: `ref`, título, handoff y las claves de fuera que nombran (`keys`,
-    p. ej. `PROTEUS-224`). `None` si el repo no está atado o cac no contesta
-    (una lista vacía es un espacio sin nada en curso)."""
+def repo_context(cfg, repo):
+    """Lo que el hook necesita del espacio al que está atado `repo`, cacheado
+    por repo: `space` (con su `orgId`) y `inProgress` (`ref`, título, handoff
+    y las claves de fuera que nombran, p. ej. `PROTEUS-224`). `None` si el
+    repo no está atado o cac no contesta."""
     if not repo:
         return None
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", repo)
-    path = os.path.join(cache_dir(), f"tasks-{safe}.json")
+    path = os.path.join(cache_dir(), f"context-{safe}.json")
     try:
         with open(path, encoding="utf-8") as f:
             cached = json.load(f)
         if time.time() - cached.get("at", 0) < TASKS_TTL:
-            return cached.get("tasks") or []
+            return cached.get("context") or {}
     except (OSError, ValueError):
         pass
     data = api(cfg, "/api/v1/context?repo=" + repo.replace("/", "%2F") + "&only=inProgress")
     if data is None:
         return None
-    found = data.get("inProgress") or []
+    ctx = {"space": data.get("space") or {}, "inProgress": data.get("inProgress") or []}
     try:
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"at": time.time(), "tasks": found}, f)
+            json.dump({"at": time.time(), "context": ctx}, f)
     except OSError:
         pass
-    return found
+    return ctx
+
+
+def in_progress(cfg, repo):
+    """Las tareas en curso del espacio del repo; `None` si no está atado o cac
+    no contesta (una lista vacía es un espacio sin nada en curso)."""
+    ctx = repo_context(cfg, repo)
+    return None if ctx is None else ctx.get("inProgress") or []
+
+
+def repo_org(cfg, repo):
+    """La org del espacio al que está atado `repo`, o vacío."""
+    return ((repo_context(cfg, repo) or {}).get("space") or {}).get("orgId") or ""
 
 
 def seen_path(session):

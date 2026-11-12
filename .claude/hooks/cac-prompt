@@ -13,9 +13,23 @@ tocar pixel-vps no los iba a encontrar sin saber que estaban ahí
 
 Determinista y barato a propósito: sin modelo y sin buscar por significado.
 El vocabulario son los nombres de servidores y áreas que **tienen** incidentes
-—no hay falsos positivos con palabras sueltas—, se pide a cac una vez cada
-`VOCAB_TTL` segundos y se compara en local. Lo que imprime entra en el
-contexto; si no casa nada, no imprime nada. Ante cualquier fallo, calla.
+en la org del repo, se pide a cac una vez cada `VOCAB_TTL` segundos y se
+compara en local. Lo que imprime entra en el contexto; si no casa nada, no
+imprime nada. Ante cualquier fallo, calla.
+
+Un área es una palabra que alguien escribió al apuntar el incidente, y muchas
+son prosa («red», «agente», «pruebas»): el 11-nov-2026, en una sesión sobre el
+propio cac, salieron cuatro veces hasta 8 incidentes ajenos, dos de ellas por
+el aviso de un subagente (incidente 60919704). Desde entonces:
+- un servidor nombrado trae lo abierto y lo arreglado: antes de tocar gstd,
+  todo lo que mordió en gstd sirve;
+- un área trae sólo lo abierto, salvo que sea **rara** en la org (la llevan
+  `RARE_AREA` incidentes o menos): «cert-manager» sí, «k8s» no;
+- las áreas que son prosa (`PROSE`) no casan nunca;
+- los avisos del sistema (`<task-notification>`, `<system-reminder>`) que
+  llegan pegados al prompt no se leen: no los escribió nadie;
+- lo que casó y no cupo se da por visto, para no volver a salir en cada
+  prompt.
 """
 import os
 import re
@@ -30,6 +44,7 @@ from cac_hooks import (  # noqa: E402
     load_seen,
     read_input,
     repo_of,
+    repo_org,
     save_seen,
     shadowed,
 )
@@ -37,11 +52,47 @@ from cac_hooks import (  # noqa: E402
 MAX_LINES = 8
 # Un nombre de dos letras («ui», «db») casaría con medio idioma.
 MIN_TERM = 3
+# Un área que llevan más incidentes que estos es general («k8s»): sólo trae
+# lo abierto.
+RARE_AREA = 2
+# Áreas que son palabras de todos los días: con ellas, cualquier frase casa.
+PROSE = frozenset({
+    "red", "agente", "agentes", "prompt", "pruebas", "fechas", "ramas", "usuarios", "seguridad",
+    "convenciones", "dominios", "listados", "saldos", "notificaciones", "datos", "migracion",
+    "contabilidad", "faltantes", "app", "api", "backend", "database", "auth",
+})
+# Lo que el sistema pega al prompt (el resultado de un subagente, un recordatorio).
+SYSTEM_BLOCK = re.compile(r"<(task-notification|system-reminder)>.*?(</\1>|$)", re.S)
 
 
-def terms_of(inc):
-    names = [s.get("name", "") for s in inc.get("servers") or []] + list(inc.get("areas") or [])
-    return {fold(n) for n in names if len(n) >= MIN_TERM}
+def own_words(prompt):
+    """El prompt sin los avisos del sistema que vienen pegados."""
+    return SYSTEM_BLOCK.sub(" ", prompt)
+
+
+def server_terms(inc):
+    return {fold(s.get("name", "")) for s in inc.get("servers") or [] if len(s.get("name", "")) >= MIN_TERM}
+
+
+def area_terms(inc):
+    return {fold(a) for a in inc.get("areas") or [] if len(a) >= MIN_TERM and fold(a) not in PROSE}
+
+
+def area_counts(found):
+    counts = {}
+    for inc in found:
+        for a in area_terms(inc):
+            counts[a] = counts.get(a, 0) + 1
+    return counts
+
+
+def terms_of(inc, counts):
+    """Los nombres por los que el prompt trae este incidente: sus servidores
+    siempre; sus áreas si está abierto, o si son raras en la org."""
+    out = server_terms(inc)
+    is_open = inc.get("status") == "open"
+    out |= {a for a in area_terms(inc) if is_open or counts.get(a, 0) <= RARE_AREA}
+    return out
 
 
 def named(prompt, term):
@@ -52,11 +103,12 @@ def named(prompt, term):
 
 def lines_for(prompt, found, seen):
     prompt = fold(prompt)
+    counts = area_counts(found)
     hits, words = [], []
     for inc in found:
         if inc.get("id") in seen:
             continue
-        matched = sorted(t for t in terms_of(inc) if named(prompt, t))
+        matched = sorted(t for t in terms_of(inc, counts) if named(prompt, t))
         if not matched:
             continue
         hits.append(inc)
@@ -70,7 +122,7 @@ def lines_for(prompt, found, seen):
         out.append(f"- [{state}] {inc.get('title', '')} ({where}) · get_incident {inc.get('id')}")
     if len(hits) > MAX_LINES:
         out.append(f"… y {len(hits) - MAX_LINES} más: list_incidents con server o area.")
-    return out, [i.get("id") for i in hits[:MAX_LINES]]
+    return out, [i.get("id") for i in hits]
 
 
 def names_ref(prompt, ref):
@@ -115,7 +167,7 @@ def task_lines_for(prompt, tasks, seen):
 
 def main():
     inp = read_input()
-    prompt = inp.get("prompt") or ""
+    prompt = own_words(inp.get("prompt") or "")
     if not prompt.strip() or shadowed(inp):
         return
     cfg = cac_config()
@@ -130,7 +182,7 @@ def main():
         lines, ids = task_lines_for(prompt, tasks, seen)
         out += lines
         shown += ids
-    found = incidents(cfg)
+    found = incidents(cfg, repo_org(cfg, repo))
     if found:
         lines, ids = lines_for(prompt, found, seen)
         out += lines

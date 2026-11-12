@@ -31,6 +31,7 @@ from cac_hooks import (  # noqa: E402
     load_seen,
     read_input,
     repo_of,
+    repo_org,
     save_seen,
     shadowed,
 )
@@ -45,7 +46,7 @@ def main():
     path = (inp.get("tool_input") or {}).get("file_path") or ""
     if not path:
         return
-    root, _ = repo_of(inp.get("cwd") or os.path.dirname(path) or os.getcwd())
+    root, repo = repo_of(inp.get("cwd") or os.path.dirname(path) or os.getcwd())
     if not root:
         return
     path = os.path.realpath(path)
@@ -58,7 +59,7 @@ def main():
         return
     session = inp.get("session_id") or ""
     seen = load_seen(session)
-    found = [i for i in incidents(cfg) if i.get("id") not in seen]
+    found = [i for i in incidents(cfg, repo_org(cfg, repo)) if i.get("id") not in seen]
     if not found:
         return
     c = guard_candidates(rel)

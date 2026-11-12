@@ -157,12 +157,16 @@ class Hooks(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout
 
+    CONTEXT = "/api/v1/context?repo=guz-studio%2Fcac&only=inProgress"
+    SPACE = {"id": "sp-1", "orgId": "org-1"}
+
     def fresh_vocabulary(self, incidents):
         cache = os.path.join(self.tmp.name, ".cache", "cac-hooks")
         if os.path.isdir(cache):
             for f in os.listdir(cache):
                 os.remove(os.path.join(cache, f))
-        ANSWERS["/api/v1/incidents/"] = (200, {"incidents": incidents})
+        ANSWERS[self.CONTEXT] = (200, {"space": self.SPACE, "inProgress": []})
+        ANSWERS["/api/v1/incidents/?orgId=org-1&"] = (200, {"incidents": incidents})
 
     INCIDENTS = [
         {"id": "inc-1", "title": "cert-manager 1.14 no limpia el reto", "status": "open",
@@ -196,15 +200,66 @@ class Hooks(unittest.TestCase):
         self.fresh_vocabulary([])
         self.assertEqual(self.prompt("gstd", session="s-5"), "")
         # Lo cacheado está vacío y fresco: aunque cac ya tenga uno, no se pide.
-        ANSWERS["/api/v1/incidents/"] = (200, {"incidents": self.INCIDENTS})
+        ANSWERS["/api/v1/incidents/?orgId=org-1&"] = (200, {"incidents": self.INCIDENTS})
         self.assertEqual(self.prompt("gstd", session="s-5"), "")
-        path = os.path.join(self.tmp.name, ".cache", "cac-hooks", "incidents.json")
+        path = os.path.join(self.tmp.name, ".cache", "cac-hooks", "incidents-org-1.json")
         with open(path) as f:
             cached = json.load(f)
         cached["at"] -= 3600
         with open(path, "w") as f:
             json.dump(cached, f)
         self.assertIn("inc-2", self.prompt("gstd", session="s-5"), "no se refresca lo viejo")
+
+    # Lo que salió el 11-nov-2026 trabajando en cac: incidentes de otras orgs,
+    # por prosa, por el aviso de un subagente, y los mismos en cada prompt
+    # (incidente 60919704, command-and-control-347).
+
+    def test_only_the_incidents_of_the_repo_org_come(self):
+        self.fresh_vocabulary(self.INCIDENTS)
+        # Lo que contestaría cac si se le pidieran los de todas las orgs del token.
+        ANSWERS["/api/v1/incidents/?limit"] = (200, {"incidents": [
+            {"id": "ajeno", "title": "Galena agendó encima", "status": "open", "servers": [], "areas": ["pixel-vps"]}]})
+        out = self.prompt("actualiza pixel-vps", session="o-1")
+        self.assertIn("inc-1", out)
+        self.assertNotIn("ajeno", out, "trae incidentes de otra org")
+
+    def test_a_repo_that_is_not_linked_brings_no_incidents(self):
+        self.fresh_vocabulary(self.INCIDENTS)
+        del ANSWERS[self.CONTEXT]
+        ANSWERS["/api/v1/incidents/"] = (200, {"incidents": self.INCIDENTS})
+        self.assertEqual(self.prompt("actualiza pixel-vps", session="o-2"), "")
+
+    def test_a_system_notice_pasted_in_the_prompt_is_not_read(self):
+        self.fresh_vocabulary(self.INCIDENTS)
+        notice = "<task-notification>\nel agente terminó: gstd y pixel-vps sanos\n</task-notification>"
+        self.assertEqual(self.prompt(notice, session="o-3"), "")
+        out = self.prompt("<system-reminder>gstd</system-reminder> mira pixel-vps", session="o-3")
+        self.assertIn("inc-1", out)
+        self.assertNotIn("inc-2", out, "lee el recordatorio del sistema")
+        cut = self.prompt("revisa gstd <task-notification> sin cerrar, pixel-vps", session="o-4")
+        self.assertIn("inc-2", cut)
+        self.assertNotIn("inc-1", cut, "lee un aviso que no se cerró")
+
+    def test_a_general_area_brings_only_what_is_open(self):
+        general = [{"id": f"k8s-{i}", "title": f"viejo {i}", "status": "fixed", "servers": [], "areas": ["k8s"]}
+                   for i in range(3)]
+        self.fresh_vocabulary(general + [
+            {"id": "k8s-abierto", "title": "sigue mordiendo", "status": "open", "servers": [], "areas": ["k8s"]},
+            {"id": "raro", "title": "cert-manager no limpia", "status": "fixed", "servers": [], "areas": ["cert-manager"]},
+            {"id": "prosa", "title": "se cae la red", "status": "open", "servers": [], "areas": ["red"]},
+        ])
+        out = self.prompt("en k8s, cert-manager y la red", session="o-5")
+        self.assertIn("k8s-abierto", out)
+        self.assertNotIn("k8s-0", out, "un área general trae lo ya arreglado")
+        self.assertIn("raro", out, "un área rara no trae lo arreglado")
+        self.assertNotIn("prosa", out, "una palabra de todos los días casa como área")
+
+    def test_what_did_not_fit_does_not_come_back(self):
+        self.fresh_vocabulary([{"id": f"z-{i}", "title": f"t{i}", "status": "open", "servers": [], "areas": ["zeta"]}
+                               for i in range(10)])
+        first = self.prompt("zeta", session="o-6")
+        self.assertIn("… y 2 más", first)
+        self.assertEqual(self.prompt("zeta otra vez", session="o-6"), "", "lo recortado vuelve a salir")
 
     TASKS = [
         {"id": "t-7", "ref": "cc-7", "title": "Agente A · cotizaciones sin facturar", "keys": ["PROTEUS-224"],
@@ -214,7 +269,7 @@ class Hooks(unittest.TestCase):
 
     def fresh_tasks(self, tasks):
         self.fresh_vocabulary([])
-        ANSWERS["/api/v1/context?repo=guz-studio%2Fcac&only=inProgress"] = (200, {"inProgress": tasks})
+        ANSWERS[self.CONTEXT] = (200, {"space": self.SPACE, "inProgress": tasks})
 
     def test_a_prompt_that_names_a_task_brings_where_it_was_left(self):
         self.fresh_tasks(self.TASKS)
@@ -239,7 +294,7 @@ class Hooks(unittest.TestCase):
 
     def test_a_task_and_a_server_in_the_same_prompt_bring_both(self):
         self.fresh_tasks(self.TASKS)
-        ANSWERS["/api/v1/incidents/"] = (200, {"incidents": self.INCIDENTS})
+        ANSWERS["/api/v1/incidents/?orgId=org-1&"] = (200, {"incidents": self.INCIDENTS})
         out = self.prompt("cc-7 se despliega en pixel-vps", session="t-4")
         self.assertIn("get_task cc-7", out)
         self.assertIn("get_incident inc-1", out)
@@ -275,6 +330,7 @@ class Hooks(unittest.TestCase):
 
     def test_the_mirror_is_quiet_outside_cac_or_for_a_read(self):
         self.fresh_vocabulary([])
+        del ANSWERS[self.CONTEXT]
         ANSWERS["/api/v1/context"] = (404, None)
         self.assertEqual(self.mirror("mcp__claude_ai_Atlassian_MCP__editJiraIssue", {"issueIdOrKey": "PROTEUS-224"}), "",
                          "habla en un repo sin atar")
@@ -395,6 +451,12 @@ class Hooks(unittest.TestCase):
         self.assertIn("inc-4", self.prompt("toca gstd", session="e-2"))
         self.assertEqual(self.edit("app/src-tauri/src/ansible.rs", session="e-2"), "")
         self.assertIn("inc-4", self.edit("app/src-tauri/src/ansible.rs", session="e-3"))
+
+    def test_editing_brings_only_the_incidents_of_the_repo_org(self):
+        # El repo es de otra org: los incidentes de org-1 no son suyos.
+        self.fresh_vocabulary(self.EDIT_INCIDENTS)
+        ANSWERS[self.CONTEXT] = (200, {"space": {"id": "sp-2", "orgId": "org-2"}, "inProgress": []})
+        self.assertEqual(self.edit("app/src/pages/servers/ServerProvision.tsx", session="e-5"), "")
 
     def test_editing_a_file_without_guards_or_outside_the_repo_says_nothing(self):
         # Uno cuyo guardián nombra un fichero de fuera: que no salga dice que
