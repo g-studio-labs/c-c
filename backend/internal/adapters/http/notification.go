@@ -29,6 +29,19 @@ func InitNotificationRoutes(db *gorm.DB, r *chi.Mux, hub *events.Hub, push *serv
 	search := handler.NewSearchHandler(
 		service.NewSearchService(repository.NewSearchRepository(db)),
 	)
+	// Qué herramientas usan los agentes y si lo que les enseñan los hooks se
+	// abre (command-and-control-347).
+	usage := repository.NewAgentUsageRepository(db)
+	middleware.UseAgentCallRecorder(func(userID, tool, callID, target string) {
+		_ = usage.RecordCall(userID, tool, callID, target)
+	})
+	agents := handler.NewAgentUsageHandler(usage)
+	r.Route("/api/v1/agents", func(r chi.Router) {
+		r.Use(middleware.AuthMiddleware)
+		r.Post("/shown", agents.Shown)
+		r.Get("/usage", agents.Usage)
+	})
+
 	r.Route("/api/v1/search", func(r chi.Router) {
 		r.Use(middleware.AuthMiddleware)
 		r.Get("/", search.Search)

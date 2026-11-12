@@ -86,6 +86,7 @@ func DBConnection() {
 		&domain.PostAttachment{},
 		&domain.PostRead{},
 		&domain.SearchMiss{},
+		&domain.AgentCall{},
 		&domain.SpaceKeyAlias{},
 		&domain.Server{},
 		&domain.Collection{},

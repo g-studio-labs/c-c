@@ -123,6 +123,29 @@ var seenRecorder SeenRecorder
 
 func UseSeenRecorder(fn SeenRecorder) { seenRecorder = fn }
 
+// AgentCallRecorder apunta qué herramienta del MCP hizo una petición (ver
+// domain.AgentCall). Opcional, como seenRecorder: se pone al cablear.
+type AgentCallRecorder func(userID, tool, callID, target string)
+
+var agentCallRecorder AgentCallRecorder
+
+func UseAgentCallRecorder(fn AgentCallRecorder) { agentCallRecorder = fn }
+
+// recordAgentCall: sólo lo que llega por el MCP declarando su herramienta. En
+// segundo plano: contar no puede hacer esperar a la petición, y si falla no
+// pasa nada.
+func recordAgentCall(r *http.Request, userID string) {
+	if agentCallRecorder == nil || domain.NormalizeVia(r.Header.Get(domain.HeaderVia)) != domain.ViaMCP {
+		return
+	}
+	tool, call := r.Header.Get(domain.HeaderAgentTool), r.Header.Get(domain.HeaderAgentCall)
+	if tool == "" || call == "" {
+		return
+	}
+	target := r.Header.Get(domain.HeaderAgentTarget)
+	go agentCallRecorder(userID, tool, call, target)
+}
+
 // UsePATAuthenticator wires PAT support into AuthMiddleware.
 func UsePATAuthenticator(fn PATAuthenticator) {
 	patAuth = fn
@@ -165,7 +188,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
 						"This endpoint is not available to personal access tokens", "endpoint-not-scoped")
 					return
 				}
-				if !claims.HasScope(needed) {
+				if needed != scopeSelfReport && !claims.HasScope(needed) {
 					// Naming the scope is the difference between a dead end and a
 					// fix: "invalid token" and "token lacks a permission" are
 					// otherwise indistinguishable to the caller.
@@ -174,6 +197,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
 					return
 				}
 			}
+			recordAgentCall(r, claims.UserID)
 			ctx := domain.WithVia(r.Context(), r.Header.Get(domain.HeaderVia))
 			ctx = context.WithValue(ctx, repository.UserContextKey, claims)
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -268,6 +292,12 @@ func (rw *responseWriter) Unwrap() http.ResponseWriter {
 // Patterns, not prefixes: each entry is one endpoint, so granting a scope can
 // never widen into something nobody reviewed. Anything absent stays refused —
 // including minting tokens, deleting, and everything outside tasks.
+// scopeSelfReport: lo que cualquier token puede escribir porque sólo cuenta su
+// propio uso —lo que un hook le enseñó a su agente (command-and-control-347)—.
+// No lo lee nadie más que su dueño o un superadmin, no toca nada del equipo y
+// no se puede conceder: no es uno de domain.Scopes.
+const scopeSelfReport = "self:report"
+
 var patWritable = []struct {
 	method string
 	path   *regexp.Regexp
@@ -283,6 +313,7 @@ var patWritable = []struct {
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/task-spaces/[^/]+/lists/?$`), domain.ScopeTasksWrite},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/task-lists/[^/]+/tasks/?$`), domain.ScopeTasksWrite},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/tasks/[^/]+/comments/?$`), domain.ScopeTasksWrite},
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/agents/shown$`), scopeSelfReport},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/notes/?$`), domain.ScopeNotesWrite},
 	// Attaching a file to a page is adding, not overwriting — the same append
 	// that creating the page is, so the same scope. Needed for a migration to
