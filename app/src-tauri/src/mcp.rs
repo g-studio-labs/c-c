@@ -5854,7 +5854,9 @@ fn handle(req: &Value, cfg: &Result<Cfg, String>) -> Option<Value> {
             // A tool that never calls cac must work without a token. Every
             // other one needs the config, so the check stays where it was.
             CURRENT_CALL.with(|c| *c.borrow_mut() = Some((name.to_string(), uuid::Uuid::new_v4().to_string(), call_target(&args))));
-            let res = if LOCAL_TOOLS.contains(&name) {
+            let res = if let Err(e) = known_args(name, &args) {
+                Err(e)
+            } else if LOCAL_TOOLS.contains(&name) {
                 call_local_tool(name, &args)
             } else {
                 match cfg {
@@ -5873,6 +5875,50 @@ fn handle(req: &Value, cfg: &Result<Cfg, String>) -> Option<Value> {
         }
         other => Some(err(id, -32601, format!("method not found: {other}"))),
     }
+}
+
+/// Los parámetros que declara cada herramienta, leídos una vez del catálogo.
+static TOOL_PARAMS: std::sync::OnceLock<std::collections::HashMap<String, Vec<String>>> = std::sync::OnceLock::new();
+
+/// Un argumento que la herramienta no declara es un error, no algo que se
+/// ignora. El 11-nov-2026 un agente cerró una tarea con `update_task` +
+/// `comment` contra un MCP más viejo que su skill: el binario no conocía
+/// `comment`, lo tiró sin decir nada y contestó que había actualizado la
+/// tarea. El agente creyó haber dejado un comentario que no existía
+/// (command-and-control-351). Para una memoria, eso es lo peor: callar que no
+/// se escribió algo. Se rechaza antes de tocar nada, diciendo qué acepta y
+/// por qué puede pasar.
+fn known_args(name: &str, args: &Value) -> Result<(), String> {
+    let params = TOOL_PARAMS.get_or_init(|| {
+        tool_defs()
+            .as_array()
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter_map(|t| {
+                        let props = t["inputSchema"]["properties"].as_object()?;
+                        Some((t["name"].as_str()?.to_string(), props.keys().cloned().collect()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    let (Some(known), Some(given)) = (params.get(name), args.as_object()) else {
+        return Ok(());
+    };
+    let mut unknown: Vec<&str> = given.keys().map(String::as_str).filter(|k| !known.iter().any(|p| p == k)).collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    unknown.sort();
+    let quoted = |l: &[&str]| l.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ");
+    let accepted: Vec<&str> = known.iter().map(String::as_str).collect();
+    Err(format!(
+        "{name} does not take {}, so nothing was done. It takes: {}. If you expected it (a skill or a tool description told you to use it), \
+         this MCP server is an older binary than that: tell the user to reconnect it (/mcp → cac → reconnect) or open a new session.",
+        quoted(&unknown),
+        quoted(&accepted)
+    ))
 }
 
 /// Los tipos del grafo, en el orden en que se prueban cuando no se dice cuál:
@@ -8385,6 +8431,27 @@ mod tests {
         seen.lock().unwrap().clear();
         assert!(call_tool(&cfg, "update_task", &json!({ "id": "t1", "listId": "App" })).is_err());
         assert!(!seen.lock().unwrap().iter().any(|(m, _, _)| m == "PATCH"), "con una lista que no existe no se toca la tarea");
+    }
+
+    /// Un argumento que la herramienta no declara se rechaza sin tocar nada,
+    /// diciendo qué acepta (command-and-control-351). Roturas que detecta:
+    /// ignorarlo y seguir (lo que pasó con `comment`); rechazarlo después de
+    /// haber escrito; rechazar los que sí declara; no nombrarlo.
+    #[test]
+    fn an_argument_a_tool_does_not_take_is_refused_before_anything_is_written() {
+        let (cfg, seen) = fake_cac(|_, _, _| json!({ "task": { "id": "t1" }, "status": { "name": "Done" } }));
+        let base = cfg.base.clone();
+        let call = |args: Value| {
+            let cfg = Cfg { base: base.clone(), token: "cac_pat_test".into() };
+            handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "update_task", "arguments": args } }), &Ok(cfg)).unwrap()
+        };
+        let out = call(json!({ "id": "t1", "status": "done", "coment": "hecho" }));
+        assert_eq!(out["result"]["isError"], true, "{out}");
+        let text = out["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("`coment`") && text.contains("`comment`") && text.contains("reconnect"), "{text}");
+        assert!(seen.lock().unwrap().is_empty(), "escribió algo antes de rechazarlo");
+        let ok = call(json!({ "id": "t1", "status": "done", "comment": "hecho" }));
+        assert!(ok["result"].get("isError").is_none(), "rechaza lo que declara: {ok}");
     }
 
     /// Sin `kind`, una ref va derecha a la tarea y un id se prueba tipo por
