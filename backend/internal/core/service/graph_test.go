@@ -115,3 +115,59 @@ func TestNeighborsAreSeenFromBothEnds(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// Al apuntar una decisión o un incidente, se le enseña al agente lo vigente
+// que se le parece, para que sustituya en vez de duplicar
+// (command-and-control-351).
+//
+// Roturas que atrapa: devolverse a sí mismo; enseñar lo ya sustituido (o lo
+// que el nuevo acaba de sustituir); enseñar lo de otra org; enseñar lo que no
+// se parece; no poner el más parecido primero; mezclar decisiones con
+// incidentes; contestar a quien no es de la org.
+func TestWhatIsRecordedComesWithWhatAlreadyLooksLikeIt(t *testing.T) {
+	db := incidentDB(t)
+	if err := db.AutoMigrate(&domain.GraphLink{}, &domain.SpaceKeyAlias{}, &domain.ItemComment{}, &domain.DocPageVersion{}); err != nil {
+		t.Fatal(err)
+	}
+	svc := incidentSvc(db)
+	// El menos parecido se apunta antes: el orden tiene que salir del
+	// parecido, no de la base.
+	close := record(t, svc, "l-back", domain.IncidentRequest{Title: "cert-manager deja el reto DNS-01 colgado en Cloudflare tras renovar"})
+	old := record(t, svc, "l-back", domain.IncidentRequest{Title: "cert-manager no limpia el reto DNS-01 en Cloudflare"})
+	far := record(t, svc, "l-back", domain.IncidentRequest{Title: "ufw bloquea la red de pods"})
+	replaced := record(t, svc, "l-back", domain.IncidentRequest{Title: "cert-manager no limpia el reto DNS-01 viejo en Cloudflare"})
+	record(t, svc, "l-back", domain.IncidentRequest{Title: "sustituto", Supersedes: replaced.ID})
+	ajeno, err := svc.Record("org-2", domain.DocOwnerList, "l-otro", "u-2", "", domain.IncidentRequest{Title: "cert-manager no limpia el reto DNS-01 en Cloudflare"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs := repository.NewDocRepository(db)
+	doc, _ := docs.Find(domain.DocOwnerList, "l-back")
+	if _, err := docs.AddDecisionWithLinks(&domain.Decision{DocID: doc.ID, Title: "cert-manager limpia el reto DNS-01 en Cloudflare"}, "org-1", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	nuevo := record(t, svc, "l-back", domain.IncidentRequest{Title: "Cert-Manager no limpia el reto dns-01 de Cloudflare"})
+
+	g := NewGraphService(repository.NewGraphRepository(db), repository.NewTaskRepository(db))
+	got, err := g.Similar(domain.EntityIncident, nuevo.ID, []string{"org-1"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{}
+	for _, x := range got {
+		ids = append(ids, x.ID)
+	}
+	if len(ids) != 2 || ids[0] != old.ID || ids[1] != close.ID {
+		t.Errorf("parecidos: quería [%s %s] y salió %+v", old.ID, close.ID, got)
+	}
+	for _, no := range []string{nuevo.ID, far.ID, replaced.ID, ajeno.ID} {
+		for _, x := range ids {
+			if x == no {
+				t.Errorf("sale %s, que no toca", no)
+			}
+		}
+	}
+	if _, err := g.Similar(domain.EntityIncident, nuevo.ID, []string{"org-2"}, false); !errors.Is(err, ErrGraphNotFound) {
+		t.Errorf("otra org pregunta y contesta: %v", err)
+	}
+}

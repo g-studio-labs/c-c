@@ -32,3 +32,14 @@ func TestEveryRelationIsDeclared(t *testing.T) {
 		t.Errorf("enlaces: %+v", got)
 	}
 }
+
+// Dos títulos se parecen por lo que dicen, no por sus artículos. Roturas que
+// atrapa: contar «de», «la», «en»; distinguir mayúsculas o acentos.
+func TestTitlesLookAlikeByWhatTheySay(t *testing.T) {
+	if s := TitleSimilarity("La caída de la red", "La subida de la luz"); s != 0 {
+		t.Errorf("sólo comparten artículos y se parecen %.2f", s)
+	}
+	if s := TitleSimilarity("Publicación en GHCR", "publicacion en ghcr"); s != 1 {
+		t.Errorf("mayúsculas o acentos los separan: %.2f", s)
+	}
+}

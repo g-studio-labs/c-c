@@ -3,6 +3,7 @@ package repository
 import (
 	"fmt"
 	"log"
+	"slices"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -273,4 +274,53 @@ func (r *GraphRepository) titles(kind domain.EntityKind, ids []string) (map[stri
 		out[d.ID] = d
 	}
 	return out, err
+}
+
+// Similar: las decisiones o los incidentes **vigentes** de la misma org cuyo
+// título se parece al de éste, el más parecido primero, sin él. Para que
+// quien acaba de apuntar uno vea si ya estaba y lo sustituya en vez de
+// duplicarlo (command-and-control-351). Se compara en Go: los vigentes de una
+// org son cientos, no millones.
+func (r *GraphRepository) Similar(kind domain.EntityKind, id string) ([]domain.SimilarEntry, error) {
+	out := []domain.SimilarEntry{}
+	var table string
+	switch kind {
+	case domain.EntityDecision:
+		table = "decisions"
+	case domain.EntityIncident:
+		table = "incidents"
+	default:
+		return out, nil
+	}
+	org := r.OrgOf(kind, id)
+	if org == "" {
+		return out, nil
+	}
+	var me struct{ Title, SupersedesID string }
+	r.db.Raw(`SELECT title, COALESCE(supersedes_id, '') AS supersedes_id FROM `+table+` WHERE id = ?`, id).Scan(&me)
+	var rows []struct{ ID, Title, Where string }
+	err := r.db.Raw(`SELECT x.id, x.title, `+nodeName+` AS "where" FROM `+table+` x JOIN docs d ON d.id = x.doc_id`+nodeJoins+`
+		WHERE d.org_id = ? AND x.id <> ? AND x.id <> ?
+		  AND NOT EXISTS (SELECT 1 FROM `+table+` n WHERE n.supersedes_id = x.id)`, org, id, me.SupersedesID).Scan(&rows).Error
+	if err != nil {
+		return out, err
+	}
+	for _, x := range rows {
+		if s := domain.TitleSimilarity(me.Title, x.Title); s >= domain.SimilarTitleMin {
+			out = append(out, domain.SimilarEntry{ID: x.ID, Title: x.Title, Where: x.Where, Score: float64(int(s*100)) / 100})
+		}
+	}
+	slices.SortStableFunc(out, func(a, b domain.SimilarEntry) int {
+		switch {
+		case a.Score > b.Score:
+			return -1
+		case a.Score < b.Score:
+			return 1
+		}
+		return 0
+	})
+	if len(out) > domain.SimilarMax {
+		out = out[:domain.SimilarMax]
+	}
+	return out, nil
 }

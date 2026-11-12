@@ -22,6 +22,16 @@ func NewGraphService(graph *repository.GraphRepository, tasks *repository.TaskRe
 	return &GraphService{graph: graph, tasks: tasks}
 }
 
+// Similar: lo vigente que se parece a una decisión o un incidente (ver
+// GraphRepository.Similar). Sólo de una org de quien pregunta.
+func (s *GraphService) Similar(kind domain.EntityKind, id string, orgs []string, any bool) ([]domain.SimilarEntry, error) {
+	org := s.graph.OrgOf(kind, id)
+	if (kind != domain.EntityDecision && kind != domain.EntityIncident) || org == "" || (!any && !slices.Contains(orgs, org)) {
+		return nil, ErrGraphNotFound
+	}
+	return s.graph.Similar(kind, id)
+}
+
 // Related: la cosa y sus vecinos. Una tarea se pide también por su ref
 // (`proteus-12`), que es como la nombra todo el mundo. `orgs` son las de quien
 // pregunta; vacío con `any` (un superadmin) mira en todas.

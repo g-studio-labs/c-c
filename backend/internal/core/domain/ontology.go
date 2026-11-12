@@ -176,3 +176,45 @@ func ExtractEntityLinks(text string) []EntityRef {
 	}
 	return out
 }
+
+// SimilarTitleMin: desde cuánto parecido dos títulos se enseñan como «quizá
+// es la misma» al apuntar una decisión o un incidente (command-and-control-351).
+// Bajo a propósito: es una pregunta para el agente, no una fusión.
+const SimilarTitleMin = 0.25
+
+// SimilarMax: cuántos parecidos se enseñan, como mucho.
+const SimilarMax = 3
+
+// TitleSimilarity: cuánto se parecen dos títulos por sus palabras con
+// contenido (cuatro letras o más: «de», «la», «que» no dicen de qué va), sin
+// mayúsculas ni acentos. De 0 a 1.
+func TitleSimilarity(a, b string) float64 {
+	set := func(s string) map[string]bool {
+		out := map[string]bool{}
+		for _, w := range foldWords(s) {
+			if len([]rune(w)) >= 4 {
+				out[w] = true
+			}
+		}
+		return out
+	}
+	wa, wb := set(a), set(b)
+	if len(wa) == 0 || len(wb) == 0 {
+		return 0
+	}
+	both := 0
+	for w := range wa {
+		if wb[w] {
+			both++
+		}
+	}
+	return float64(both) / float64(len(wa)+len(wb)-both)
+}
+
+// SimilarEntry: una decisión o un incidente vigente que se parece a otro.
+type SimilarEntry struct {
+	ID    string  `json:"id"`
+	Title string  `json:"title"`
+	Where string  `json:"where,omitempty"`
+	Score float64 `json:"score"`
+}

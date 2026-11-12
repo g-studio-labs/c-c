@@ -47,6 +47,7 @@ func InitNotificationRoutes(db *gorm.DB, r *chi.Mux, hub *events.Hub, push *serv
 	r.Route("/api/v1/graph", func(r chi.Router) {
 		r.Use(middleware.AuthMiddleware)
 		r.Get("/{kind}/{id}", graph.Related)
+		r.Get("/{kind}/{id}/similar", graph.Similar)
 	})
 
 	r.Route("/api/v1/search", func(r chi.Router) {
