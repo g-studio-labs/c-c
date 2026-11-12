@@ -119,6 +119,10 @@ type docResponse struct {
 	// cuatro pestañas, y quien abre el documento va a verla igual que las otras.
 	Decisions   []domain.Decision      `json:"decisions"`
 	Attachments []domain.DocAttachment `json:"attachments"`
+	// Recorded: al apuntar una decisión, cuál quedó. Si ya estaba apuntada
+	// desde esa misma fuente de fuera (`Decision.SourceURL`), es la que había
+	// —que puede vivir en otro documento— y lo dice.
+	Recorded *domain.Decision `json:"recorded,omitempty"`
 }
 
 // nuevaRespuesta: listas vacías y no `null`, para que el cliente no las invente.
@@ -393,7 +397,8 @@ func (h *docHandler) AddDecision(w http.ResponseWriter, r *http.Request) {
 	user, _ := currentUser(r)
 	// `via` viene de la cabecera que pone el MCP, así que la entrada queda
 	// marcada como transcrita por un agente. Ver `Decision.Via`.
-	if _, err := h.svc.AddDecision(orgID, kind, id, user.UserID, "", domain.ViaFrom(r.Context()), req); err != nil {
+	recorded, err := h.svc.AddDecision(orgID, kind, id, user.UserID, "", domain.ViaFrom(r.Context()), req)
+	if err != nil {
 		if errors.Is(err, service.ErrDecisionUnaddressed) {
 			SendErrorResponse(w, http.StatusBadRequest, "A decision needs somewhere to come back to", "decision-no-origin")
 			return
@@ -429,7 +434,9 @@ func (h *docHandler) AddDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d, _ := h.svc.Get(kind, id)
-	SendResult(w, http.StatusCreated, domain.APIResponse[docResponse]{Success: true, Data: h.completa(d)})
+	out := h.completa(d)
+	out.Recorded = recorded
+	SendResult(w, http.StatusCreated, domain.APIResponse[docResponse]{Success: true, Data: out})
 }
 
 // Versions lista el historial de una sección.

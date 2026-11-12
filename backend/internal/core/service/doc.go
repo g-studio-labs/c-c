@@ -220,6 +220,13 @@ func (s *DocService) AddDecision(
 			return nil, ErrDecisionOriginNotHere
 		}
 	}
+	// Si viene de fuera y ya está apuntada, es ésa: no se escribe otra.
+	// Sin fuente no hay nada que comparar (`DecisionBySourceURL` da nil).
+	source := strings.TrimSpace(req.SourceURL)
+	if ya := s.repo.DecisionBySourceURL(orgID, source); ya != nil {
+		ya.AlreadyRecorded = true
+		return ya, nil
+	}
 	// Quién la tomó, si no es quien la escribe. Ver `DecisionRequest.DecidedBy`.
 	autor := userID
 	if strings.TrimSpace(req.DecidedBy) != "" {
@@ -274,6 +281,8 @@ func (s *DocService) AddDecision(
 		OriginMessageID: req.OriginMessageID,
 		OriginChannelID: req.OriginChannelID,
 		OriginCommentID: commentID,
+		SourceURL:       source,
+		SourceAuthor:    strings.TrimSpace(req.SourceAuthor),
 	}
 	return s.repo.AddDecisionWithLinks(d, orgID, taskIDs, req.SectionIDs)
 }

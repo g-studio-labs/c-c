@@ -123,14 +123,21 @@ func (r *TaskRepository) CreateTask(t *domain.Task, spaceID string) error {
 	err := r.createTaskRaw(t, spaceID)
 	if err == nil {
 		syncText(r.db, domain.EntityTask, t.ID)
+		syncTaskKeys(r.db, t.ID)
 	}
 	return err
 }
 
 func (r *TaskRepository) UpdateTask(id string, fields map[string]any) error {
 	err := r.updateTaskRaw(id, fields)
-	if _, touched := fields["description"]; err == nil && touched {
+	_, body := fields["description"]
+	_, title := fields["title"]
+	if err == nil && body {
 		syncText(r.db, domain.EntityTask, id)
+	}
+	// Las claves de fuera salen del título y de la descripción.
+	if err == nil && (body || title) {
+		syncTaskKeys(r.db, id)
 	}
 	return err
 }

@@ -1020,7 +1020,15 @@ func (h *taskHandler) GetTaskByRef(w http.ResponseWriter, r *http.Request) {
 		SendErrorResponse(w, http.StatusUnauthorized, "Unauthorized", "no-claims")
 		return
 	}
-	raw := strings.ToLower(strings.TrimSpace(chi.URLParam(r, "ref")))
+	written := strings.TrimSpace(chi.URLParam(r, "ref"))
+	// En mayúsculas es la clave de fuera (`PROTEUS-165`, de Jira), que numera
+	// aparte de la ref de cac (`proteus-165`): se busca la tarea que la nombra,
+	// nunca la de ese número.
+	if domain.IsExternalKey(written) {
+		h.taskByExternalKey(w, MemberOrgs(user), written)
+		return
+	}
+	raw := strings.ToLower(written)
 	refs := domain.ExtractTaskRefs(raw, false)
 	if len(refs) == 0 || refs[0].Slug == "" {
 		SendErrorResponse(w, http.StatusBadRequest,
@@ -1033,6 +1041,41 @@ func (h *taskHandler) GetTaskByRef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail, err := h.svc.Detail(t.ID)
+	if err != nil {
+		SendErrorResponse(w, http.StatusInternalServerError, "Failed to load task", err.Error())
+		return
+	}
+	SendResult(w, http.StatusOK, domain.APIResponse[*domain.TaskDetail]{Success: true, Data: detail})
+}
+
+// taskByExternalKey: la tarea que nombra una clave de fuera. Con varias no se
+// elige: se dice cuáles son, para que quien pregunta abra la que busca.
+func (h *taskHandler) taskByExternalKey(w http.ResponseWriter, orgIDs []string, key string) {
+	tasks, err := h.svc.FindTasksByExternalKey(orgIDs, key)
+	if err != nil {
+		SendErrorResponse(w, http.StatusInternalServerError, "Failed to look up the key", err.Error())
+		return
+	}
+	if len(tasks) == 0 {
+		SendErrorResponse(w, http.StatusNotFound,
+			"No task in your organizations names "+key+" in its title or description. "+key+
+				" is a tracker key (Jira), numbered apart from cac refs: "+strings.ToLower(key)+" would be another task", "no-task-names-key")
+		return
+	}
+	if len(tasks) > 1 {
+		names := make([]string, 0, len(tasks))
+		for _, t := range tasks {
+			name := t.ID
+			if d, err := h.svc.Detail(t.ID); err == nil && d.Ref != "" {
+				name = d.Ref
+			}
+			names = append(names, name+" «"+t.Title+"»")
+		}
+		SendErrorResponse(w, http.StatusConflict,
+			"Several tasks name "+key+": "+strings.Join(names, "; ")+". Open the one you mean by its ref", "several-tasks-name-key")
+		return
+	}
+	detail, err := h.svc.Detail(tasks[0].ID)
 	if err != nil {
 		SendErrorResponse(w, http.StatusInternalServerError, "Failed to load task", err.Error())
 		return

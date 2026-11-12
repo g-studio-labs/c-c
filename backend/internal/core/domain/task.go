@@ -594,6 +594,22 @@ type Decision struct {
 	// idénticas en un registro del que no se puede borrar nada.
 	OriginCommentID string `gorm:"type:varchar(36)" json:"-"`
 
+	// SourceURL: dónde se dijo, cuando se dijo fuera de cac (el comentario de
+	// Jira, la página de Notion). Además de enlace es la clave que evita
+	// apuntarla dos veces: quien relee el ticket mañana vuelve a encontrar el
+	// mismo comentario, y el registro no se puede podar
+	// (command-and-control-353). Única por organización; lo comprueba
+	// `DocService.AddDecision`.
+	SourceURL string `gorm:"type:varchar(500);index" json:"sourceUrl,omitempty"`
+	// SourceAuthor: quién la tomó, con sus palabras, cuando no es miembro de
+	// la organización en cac («Diego», «Itzel»). `DecidedBy` exige un miembro;
+	// sin esto, la decisión de alguien de fuera saldría firmada por quien la
+	// copió.
+	SourceAuthor string `gorm:"type:varchar(120)" json:"sourceAuthor,omitempty"`
+	// AlreadyRecorded: la respuesta es la entrada que ya existía con esa
+	// `SourceURL`; no se escribió otra.
+	AlreadyRecorded bool `gorm:"-" json:"alreadyRecorded,omitempty"`
+
 	// Via dice por dónde entró: la app, o un agente por MCP.
 	//
 	// En la fila y no sólo en el aviso, al contrario que en el resto del
@@ -635,6 +651,9 @@ type DecisionRequest struct {
 	// cuando la lea. Se acepta el nombre o el usuario de un miembro de la
 	// organización; el servidor lo resuelve.
 	DecidedBy string `json:"decidedBy" validate:"omitempty,max=120"`
+	// SourceURL y SourceAuthor: ver `Decision`.
+	SourceURL    string `json:"sourceUrl"    validate:"omitempty,url,max=500"`
+	SourceAuthor string `json:"sourceAuthor" validate:"omitempty,max=120"`
 	// Supersedes: el id de la decisión del mismo documento que ésta sustituye.
 	// Ver `Decision.SupersedesID`.
 	Supersedes string `json:"supersedes" validate:"omitempty,max=36"`
@@ -1064,6 +1083,8 @@ type TaskCard struct {
 	Flow ItemFlow `json:"flow"`
 	// Git: el resumen de GitHub de la tarjeta, para el chip de PR del tablero.
 	Git *GitSummary `json:"git,omitempty"`
+	// Keys: las claves de fuera que nombra (`PROTEUS-165`). Ver TaskExternalKey.
+	Keys []string `json:"keys,omitempty"`
 }
 
 type BoardResponse struct {
@@ -1210,6 +1231,8 @@ type TaskDetail struct {
 	// cac la enlace sola. El folio si es de un cliente; si no, la clave de su
 	// espacio y su número (`proteus-12`). Ver space_key.go.
 	Ref string `json:"ref,omitempty"`
+	// Keys: las claves de fuera que nombra (`PROTEUS-165`). Ver TaskExternalKey.
+	Keys []string `json:"keys,omitempty"`
 	// HandoffBy: quién escribió el «dónde quedó» (Item.Handoff), con su nombre
 	// visible; la fecha va en la propia tarea.
 	HandoffBy string `json:"handoffBy,omitempty"`

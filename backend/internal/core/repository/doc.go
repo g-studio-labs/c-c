@@ -728,6 +728,25 @@ func (r *DocRepository) DecisionByID(id string) (*domain.Decision, error) {
 	return &d, nil
 }
 
+// DecisionBySourceURL: la decisión de esa organización que ya se apuntó desde
+// esa fuente de fuera, o nil. Ver `Decision.SourceURL`.
+func (r *DocRepository) DecisionBySourceURL(orgID, url string) *domain.Decision {
+	if orgID == "" || url == "" {
+		return nil
+	}
+	var id string
+	r.db.Raw(`SELECT x.id FROM decisions x JOIN docs d ON d.id = x.doc_id
+		WHERE d.org_id = ? AND x.source_url = ? ORDER BY x.decided_at ASC LIMIT 1`, orgID, url).Scan(&id)
+	if id == "" {
+		return nil
+	}
+	d, err := r.DecisionByID(id)
+	if err != nil {
+		return nil
+	}
+	return d
+}
+
 // resolveDecision pone los nombres que se pintan: quién la tomó y de dónde
 // salió.
 func (r *DocRepository) resolveDecision(d *domain.Decision) {

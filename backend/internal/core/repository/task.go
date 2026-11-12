@@ -902,6 +902,7 @@ func (r *TaskRepository) Board(listID string) ([]domain.TaskCard, error) {
 	commentsBy, attachmentsBy := countBy(comments), countBy(attachments)
 	// El chip de PR de cada tarjeta: una consulta agrupada para todo el tablero.
 	gitBy := GitSummaries(r.db, ids)
+	keysBy := r.ExternalKeysOf(ids)
 
 	cards := make([]domain.TaskCard, len(tasks))
 	for i, t := range tasks {
@@ -922,6 +923,7 @@ func (r *TaskRepository) Board(listID string) ([]domain.TaskCard, error) {
 			// Qué máquina la gobierna, resuelta aquí y no en el cliente. Ver
 			// `TaskCard.Flow`.
 			Flow: t.Flow(),
+			Keys: keysBy[t.ID],
 		}
 		if g, ok := gitBy[t.ID]; ok {
 			g := g

@@ -88,6 +88,7 @@ func DBConnection() {
 		&domain.SearchMiss{},
 		&domain.AgentCall{},
 		&domain.GraphLink{},
+		&domain.TaskExternalKey{},
 		&domain.SpaceKeyAlias{},
 		&domain.Server{},
 		&domain.Collection{},
@@ -276,6 +277,7 @@ func DBConnection() {
 	// Lo que nombraba cada texto antes de que existiera graph_links
 	// (command-and-control-348). En segundo plano: no frena el arranque.
 	go BackfillGraphLinks(db)
+	go BackfillTaskExternalKeys(db)
 	// Cada intento de un run, con su hora. Ver FixRunTimes.
 	if err := FixRunTimes(db); err != nil {
 		lg.Warn("activity: could not date run attempts: " + err.Error())

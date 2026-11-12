@@ -549,6 +549,11 @@ func (s *TaskService) FindTaskByRef(orgIDs []string, ref domain.TaskRef) (*domai
 	return s.repo.FindByRef(orgIDs, ref)
 }
 
+// FindTasksByExternalKey: ver TaskRepository.FindByExternalKey.
+func (s *TaskService) FindTasksByExternalKey(orgIDs []string, key string) ([]domain.Task, error) {
+	return s.repo.FindByExternalKey(orgIDs, key)
+}
+
 // actorID es quien edita: hace falta para no avisarle de que se ha asignado
 // algo a sí mismo, que es la mitad de las asignaciones que existen.
 func (s *TaskService) UpdateTask(ctx context.Context, id, actorID string, req domain.UpdateTaskRequest) error {
@@ -986,6 +991,7 @@ func (s *TaskService) Detail(id string) (*domain.TaskDetail, error) {
 	if t.HandoffByID != "" {
 		detail.HandoffBy = s.repo.DisplayName(t.HandoffByID)
 	}
+	detail.Keys = s.repo.ExternalKeysOf([]string{id})[id]
 	// Las decisiones que se le aplican (#91). Como los bloqueos: si fallan,
 	// la tarea se abre igual.
 	detail.Decisions = []domain.DecisionRef{}
