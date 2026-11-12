@@ -13,6 +13,26 @@ tablero: **App** `ca0bfd49-0909-43eb-8135-bc8ecd0f282c` y **Backend**
 
 ## 🟢 Al día
 
+**11-nov, en `main`: cac como segundo cerebro, fases 0 y 1**
+(command-and-control-346; diseño «cac como segundo cerebro» en el espacio,
+decisión 7b3cc169).
+- **Desplegado (backend):**
+  - el mapa de `get_context` sólo lleva los incidentes abiertos y cuenta los
+    arreglados (de ~45 000 a 23 066 caracteres en Command and control);
+  - `/agents/usage` cuenta las llamadas del MCP por herramienta y lo que
+    enseñan los hooks frente a lo que se abre;
+  - `GET /graph/{kind}/{id}`: lo relacionado con cualquier cosa, en los dos
+    sentidos, con `graph_links` para lo que nombra cada texto.
+- **En el repo, ya corriendo aquí:** hooks v3, que sólo enseñan incidentes de
+  la org del repo, no leen los avisos del sistema y no vuelven a enseñar lo ya
+  recortado.
+- **Sale con la próxima release de la app:**
+  - el MCP en JSON compacto, con `annotations`;
+  - `update_task comment`, `get_related` y `agent_usage`;
+  - la skill cac-work v26.
+- **Después:** una semana de datos de `agent_usage` antes de la Fase 2 (temas
+  con alias) y la 4 (vigencia); la Fase 3 (app) se revisa por rebanadas.
+
 **5-nov, en `main`: cac sin que nadie lo recuerde** (command-and-control-314,
 plan aprobado por jose). Medido en las 3 sesiones de crossfire: 16 «usa cac»
 con 317 llamadas a cac hechas; 12 eran escrituras que no se veían.
