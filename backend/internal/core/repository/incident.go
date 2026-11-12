@@ -42,7 +42,7 @@ func (r *IncidentRepository) CommitLink(orgID, repoName, sha string) (repo, full
 
 // Create guarda un incidente con lo que lo ata, en una transacción: no puede
 // quedar escrito sin los servidores de los que dice hablar.
-func (r *IncidentRepository) Create(in *domain.Incident, serverIDs, areas []string,
+func (r *IncidentRepository) createRaw(in *domain.Incident, serverIDs, areas []string,
 	commits []domain.IncidentCommit, guards []string) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		in.ID = uuid.NewString()

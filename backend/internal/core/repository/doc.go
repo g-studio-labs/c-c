@@ -128,7 +128,7 @@ func (r *DocRepository) SaveTab(
 // SaveTabRenaming es `SaveTab` con los renombres que quien guarda declara
 // (id de sección → título nuevo), para que la reconciliación no los adivine.
 // Todo va en una transacción: el cuerpo y sus secciones no se separan.
-func (r *DocRepository) SaveTabRenaming(
+func (r *DocRepository) saveTabRenamingRaw(
 	orgID string, kind domain.DocOwnerKind, ownerID string,
 	key domain.DocTabKey, body, userID string, renames map[string]string,
 ) (*domain.Doc, error) {
@@ -276,7 +276,7 @@ func (r *DocRepository) FindVersion(docID, versionID string) (*domain.DocVersion
 // **edita**, y lo que llega de un mensaje no es una edición de nadie. Apuntarlo
 // llenaría el historial de entradas que no corresponden a ninguna sesión de
 // escritura, que es lo que hace ilegible un historial.
-func (r *DocRepository) AppendTab(
+func (r *DocRepository) appendTabRaw(
 	orgID string, kind domain.DocOwnerKind, ownerID string,
 	key domain.DocTabKey, texto, userID string,
 ) (*domain.Doc, error) {
@@ -356,7 +356,7 @@ func (r *DocRepository) appendTab(
 // lectura no se quede vieja se hace con la fila bloqueada, en una transacción.
 // Quien tenga el documento abierto y guarde después lleva un `baseHash` que ya
 // no casa, y su editor lo trata como un conflicto, no como un borrado.
-func (r *DocRepository) AppendTabSection(
+func (r *DocRepository) appendTabSectionRaw(
 	orgID string, kind domain.DocOwnerKind, ownerID string,
 	key domain.DocTabKey, section, texto, userID string,
 ) (*domain.Doc, error) {
@@ -659,7 +659,7 @@ func (r *DocRepository) IsMember(orgID, userID string) bool {
 // Si ya hay una escrita con ese mismo comentario, se devuelve la que había en
 // vez de escribir otra. El registro no se puede podar, así que un reintento que
 // dejara dos entradas idénticas las dejaría para siempre.
-func (r *DocRepository) AddDecision(d *domain.Decision) (*domain.Decision, error) {
+func (r *DocRepository) addDecisionRaw(d *domain.Decision) (*domain.Decision, error) {
 	if d.OriginCommentID != "" {
 		var ya domain.Decision
 		if err := r.db.Where("origin_comment_id = ?", d.OriginCommentID).First(&ya).Error; err == nil {

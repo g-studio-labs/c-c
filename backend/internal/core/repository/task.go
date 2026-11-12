@@ -487,7 +487,7 @@ func (r *TaskRepository) FindStatus(id string) (*domain.TaskStatus, error) {
 // ─── Tasks ────────────────────────────────────────────────────────────────────
 
 // CreateTask assigns the next per-space folio and appends to its column.
-func (r *TaskRepository) CreateTask(t *domain.Task, spaceID string) error {
+func (r *TaskRepository) createTaskRaw(t *domain.Task, spaceID string) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		// Two numbering scopes, and which one applies is the same question as who
 		// can see the item. A client-visible one takes the next folio of their
@@ -593,7 +593,7 @@ func (r *TaskRepository) findByFolio(ref string) (*domain.Task, bool) {
 	return &t, true
 }
 
-func (r *TaskRepository) UpdateTask(id string, fields map[string]any) error {
+func (r *TaskRepository) updateTaskRaw(id string, fields map[string]any) error {
 	if len(fields) == 0 {
 		return nil
 	}
@@ -1085,9 +1085,9 @@ func (r *TaskRepository) AssigneesOf(taskID string) ([]domain.UserSummary, error
 
 // ─── Comments / attachments ───────────────────────────────────────────────────
 
-func (r *TaskRepository) CreateComment(c *domain.TaskComment) error { return r.db.Create(c).Error }
+func (r *TaskRepository) createCommentRaw(c *domain.TaskComment) error { return r.db.Create(c).Error }
 
-func (r *TaskRepository) UpdateComment(id, body string) error {
+func (r *TaskRepository) updateCommentRaw(id, body string) error {
 	return r.db.Model(&domain.TaskComment{}).Where("id = ?", id).Update("body", body).Error
 }
 

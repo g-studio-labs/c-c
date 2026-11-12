@@ -42,6 +42,13 @@ func InitNotificationRoutes(db *gorm.DB, r *chi.Mux, hub *events.Hub, push *serv
 		r.Get("/usage", agents.Usage)
 	})
 
+	// Lo relacionado con cualquier cosa (command-and-control-348).
+	graph := handler.NewGraphHandler(service.NewGraphService(repository.NewGraphRepository(db), repository.NewTaskRepository(db)))
+	r.Route("/api/v1/graph", func(r chi.Router) {
+		r.Use(middleware.AuthMiddleware)
+		r.Get("/{kind}/{id}", graph.Related)
+	})
+
 	r.Route("/api/v1/search", func(r chi.Router) {
 		r.Use(middleware.AuthMiddleware)
 		r.Get("/", search.Search)

@@ -181,7 +181,7 @@ func (r *DocRepository) PageTree(docID string, trashed bool) ([]domain.DocPageTr
 // CreatePage crea una página, y el documento si aún no había: escribir la
 // primera página de una lista sin documentación es la forma normal de empezar
 // una, igual que con `SaveTab`.
-func (r *DocRepository) CreatePage(
+func (r *DocRepository) createPageRaw(
 	orgID string, kind domain.DocOwnerKind, ownerID string,
 	req domain.CreateDocPageRequest, userID string,
 ) (*domain.DocPage, error) {
@@ -247,7 +247,7 @@ func (r *DocRepository) SavePage(p *domain.DocPage, title, body *string, userID 
 // SavePageRenaming es `SavePage` con los renombres de sección que declara
 // quien guarda (ver `SaveTabRenaming`). El cuerpo y sus secciones, en una
 // transacción.
-func (r *DocRepository) SavePageRenaming(p *domain.DocPage, title, body *string, userID string, renames map[string]string) error {
+func (r *DocRepository) savePageRenamingRaw(p *domain.DocPage, title, body *string, userID string, renames map[string]string) error {
 	fields := map[string]any{"updated_by": userID}
 	changed := false
 	if title != nil && strings.TrimSpace(*title) != p.Title {
@@ -302,7 +302,7 @@ func (r *DocRepository) guardarVersionPagina(p *domain.DocPage, userID string) {
 // AppendPage añade al final sin leer antes, por lo mismo que `AppendTab`: quien
 // tenga la página abierta autoguarda cada segundo y medio, y leer-concatenar-
 // guardar le borraría lo que acaba de escribir.
-func (r *DocRepository) AppendPage(pageID, texto, userID string) error {
+func (r *DocRepository) appendPageRaw(pageID, texto, userID string) error {
 	if strings.TrimSpace(texto) == "" {
 		return nil
 	}
