@@ -2714,6 +2714,18 @@ fn tool_defs() -> Value {
             }
         },
         {
+            "name": "get_related",
+            "description": "Everything that touches one thing, in both directions, in one call: for a task, the decisions that apply to it, the incidents that came out of it, the pages, tabs, decisions, incidents and tasks whose text names it (by its ref or a link), what it blocks and what blocks it, its parent and subtasks; for a decision, what it applies to and what it supersedes; for an incident, its task, its servers and what it names; for a server, what bit on it; for a page, what it names and what names it. Each neighbour with `rel` (mentions, applies_to, origin, blocks, parent_of, supersedes, bit_on, relates_to), `dir` (out: this → it; in: it → this), kind, id, title, status and ref — no bodies: open the one you need. Use it before touching something to see what already hangs from it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The thing: a task's ref (proteus-12) or id, or the id of a decision, incident, page, tab, section or server." },
+                    "kind": { "type": "string", "enum": ["task", "decision", "incident", "page", "tab", "section", "server"], "description": "Optional. Without it a ref is a task, and an id is looked up kind by kind." }
+                },
+                "required": ["id"]
+            }
+        },
+        {
             "name": "search_misses",
             "description": "What agents searched in cac and found nothing, grouped by query with how many times and the last one. It is the data to decide whether search needs meaning (synonyms, the other language) or what is missing is to write it down. Only an admin of the organization, or a superadmin (who also sees the old ones saved without an organization).",
             "inputSchema": {
@@ -4183,6 +4195,11 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
             }
             let data = api_get(cfg, &format!("/api/v1/search/misses?{}", q.join("&")))?;
             Ok(json!({ "misses": data }))
+        }
+
+        "get_related" => {
+            let id = arg_str(args, "id").ok_or("id is required")?;
+            related(cfg, &id, arg_str(args, "kind").as_deref())
         }
 
         "agent_usage" => {
@@ -5856,6 +5873,29 @@ fn handle(req: &Value, cfg: &Result<Cfg, String>) -> Option<Value> {
         }
         other => Some(err(id, -32601, format!("method not found: {other}"))),
     }
+}
+
+/// Los tipos del grafo, en el orden en que se prueban cuando no se dice cuál:
+/// lo que más se pide primero.
+const GRAPH_KINDS: &[&str] = &["task", "decision", "incident", "page", "tab", "section", "server"];
+
+/// Lo relacionado con una cosa (`GET /graph/{kind}/{id}`). Sin `kind`, una ref
+/// (`proteus-12`) es una tarea y un id se prueba tipo por tipo: un agente
+/// tiene el id de un acierto o de un mapa y no siempre sabe de qué es.
+fn related(cfg: &Cfg, id: &str, kind: Option<&str>) -> Result<Value, String> {
+    let path = |k: &str| format!("/api/v1/graph/{}/{}", k, urlencode(id));
+    if let Some(k) = kind {
+        return api_get(cfg, &path(k));
+    }
+    let looks_like_ref = id.rsplit_once('-').is_some_and(|(k, n)| !k.is_empty() && n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty());
+    let kinds: &[&str] = if looks_like_ref { &["task"] } else { GRAPH_KINDS };
+    for k in kinds {
+        match api_get(cfg, &path(k)) {
+            Err(e) if e.contains("404") => continue,
+            other => return other,
+        }
+    }
+    Err(format!("Nothing with id {id} in your organizations (tried {}).", kinds.join(", ")))
 }
 
 /// Lo que cada herramienta le hace al mundo, para el cliente: Claude Code no
@@ -8345,6 +8385,35 @@ mod tests {
         seen.lock().unwrap().clear();
         assert!(call_tool(&cfg, "update_task", &json!({ "id": "t1", "listId": "App" })).is_err());
         assert!(!seen.lock().unwrap().iter().any(|(m, _, _)| m == "PATCH"), "con una lista que no existe no se toca la tarea");
+    }
+
+    /// Sin `kind`, una ref va derecha a la tarea y un id se prueba tipo por
+    /// tipo hasta que uno existe. Roturas que detecta: no probar los demás
+    /// tipos tras un 404; seguir probando tras encontrarlo; probar todos los
+    /// tipos con una ref; tragarse un error que no es 404.
+    #[test]
+    fn get_related_finds_the_kind_when_it_is_not_said() {
+        let (cfg, seen) = fake_cac(|_, path, _| {
+            if path.starts_with("/api/v1/graph/incident/") {
+                return json!({ "kind": "incident", "neighbors": [] });
+            }
+            if path.starts_with("/api/v1/graph/page/") || path == "/api/v1/graph/decision/caido" {
+                return json!({ "__status": 500, "error": "boom" });
+            }
+            json!({ "__status": 404, "error": "not-found" })
+        });
+        let out = call_tool(&cfg, "get_related", &json!({ "id": "1b0add6d-6ff5-40c2-ae60-8477fbb434ce" })).unwrap();
+        assert_eq!(out["kind"], "incident");
+        let paths: Vec<String> = seen.lock().unwrap().drain(..).map(|(_, p, _)| p).collect();
+        assert_eq!(paths.iter().map(|p| p.split('/').nth(4).unwrap().to_string()).collect::<Vec<_>>(), ["task", "decision", "incident"]);
+        call_tool(&cfg, "get_related", &json!({ "id": "proteus-12" })).unwrap_err();
+        let paths: Vec<String> = seen.lock().unwrap().drain(..).map(|(_, p, _)| p).collect();
+        assert_eq!(paths, ["/api/v1/graph/task/proteus-12"], "una ref prueba otros tipos");
+        let err = call_tool(&cfg, "get_related", &json!({ "id": "x", "kind": "page" })).unwrap_err();
+        assert!(err.contains("boom"), "{err}");
+        // Un error que no es «no existe» no se toma por «prueba el siguiente».
+        let err = call_tool(&cfg, "get_related", &json!({ "id": "caido" })).unwrap_err();
+        assert!(err.contains("boom"), "se traga un 500: {err}");
     }
 
     /// cac cuenta llamadas, no peticiones, y cruza lo que enseñan los hooks

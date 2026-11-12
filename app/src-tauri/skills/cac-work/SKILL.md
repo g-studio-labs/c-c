@@ -77,6 +77,13 @@ Con eso, **lee sólo lo que toca**, y primero esto, si existe:
   `request_provisioning` ya lo traen del servidor que nombras;
 - «**Antes de dar algo por hecho**», en el runbook: cómo se verifica aquí.
 
+**Lo que cuelga de algo, en una llamada:** `get_related` con su ref o su id
+(una tarea, una decisión, un incidente, una página, un servidor) da todo lo
+que lo toca en los dos sentidos: las decisiones que se le aplican, los
+incidentes que salieron de él, los textos que lo nombran, lo que bloquea y
+lo que lo bloquea. Sin cuerpos: abre sólo lo que haga falta. Antes de tocar
+una tarea que ya tiene historia, es lo primero.
+
 Lo demás, por su título en el mapa:
 - una sección de una pestaña: `get_doc` con `kind`, `ownerId` (el id del
   nodo, o su ruta tal como la enseña el mapa: «Proteus › Plataforma»), `tab` y
@@ -438,4 +445,4 @@ de 2026, a partir de lo que fue fallando al trabajar con cac. Cada regla tiene
 detrás algo que pasó de verdad; si cambias una, mira antes en el registro de
 decisiones del espacio Command and control por qué está._
 
-<!-- cac-work v25 -->
+<!-- cac-work v26 -->
