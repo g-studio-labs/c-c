@@ -610,6 +610,12 @@ fn list_target(cfg: &Cfg, wanted: &str) -> Result<String, String> {
 /// `cac#12` (que el backend rechaza diciendo por qué). Lo demás es un id.
 fn looks_like_task_ref(s: &str) -> bool {
     let s = s.trim();
+    // La clave de un tracker de fuera (`PROTEUS-165`, de Jira) también nombra
+    // una tarea: la que la lleva en su título o su descripción. Numera aparte
+    // de la ref (`proteus-165` es otra tarea), y eso lo resuelve el backend.
+    if looks_like_tracker_key(s) {
+        return true;
+    }
     if let Some(n) = s.strip_prefix("cac#") {
         return !n.is_empty() && n.chars().all(|c| c.is_ascii_digit());
     }
@@ -618,6 +624,17 @@ fn looks_like_task_ref(s: &str) -> bool {
         && slug.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false)
         && slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         && !n.is_empty()
+        && n.chars().all(|c| c.is_ascii_digit())
+}
+
+/// `PROTEUS-165`: letras y cifras en mayúsculas, guion, número. Lo mismo que
+/// `externalKey` en el backend.
+fn looks_like_tracker_key(s: &str) -> bool {
+    let Some((key, n)) = s.rsplit_once('-') else { return false };
+    (2..=16).contains(&key.len())
+        && key.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
+        && key.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && (1..=7).contains(&n.len())
         && n.chars().all(|c| c.is_ascii_digit())
 }
 
@@ -1475,6 +1492,30 @@ fn write_page_section(
 /// `createdAt` más reciente —no la primera de la lista, que va por `decidedAt` y
 /// una decisión de la semana pasada apuntada hoy quedaría abajo—.
 fn recorded_decision(doc: &Value) -> Value {
+    // Lo que el backend dice que quedó (`recorded`); si ya estaba apuntada
+    // desde esa fuente de fuera, no se escribió nada y se devuelve la que hay.
+    if let Some(d) = doc.get("recorded").filter(|d| d.get("id").is_some()) {
+        let view = json!({
+            "id": d.get("id"),
+            "title": d.get("title"),
+            "origin": d.get("origin"),
+            "originTaskId": d.get("originTaskId"),
+            "decidedAt": d.get("decidedAt"),
+            "sourceUrl": d.get("sourceUrl"),
+            "sourceAuthor": d.get("sourceAuthor"),
+            "links": decision_links(d),
+        });
+        if d.get("alreadyRecorded").and_then(|v| v.as_bool()) == Some(true) {
+            return json!({
+                "recorded": false,
+                "already": view,
+                "note": "A decision from this sourceUrl is already in the log: nothing was written. If it changed, record the new one with `supersedes` and its own sourceUrl.",
+            });
+        }
+        let mut view = view;
+        view["recorded"] = json!(true);
+        return view;
+    }
     let newest = doc
         .get("decisions")
         .and_then(|d| d.as_array())
@@ -1722,7 +1763,7 @@ fn decision_links(d: &Value) -> Vec<Value> {
 
 fn decision_body(title: &str, args: &Value) -> Value {
     let mut body = json!({ "title": title, "origin": "doc" });
-    for key in ["body", "tag", "decidedBy", "supersedes"] {
+    for key in ["body", "tag", "decidedBy", "supersedes", "sourceUrl", "sourceAuthor"] {
         if let Some(x) = arg_str(args, key) {
             body[key] = json!(x);
         }
@@ -2211,7 +2252,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "get_board",
-            "description": "A task list's board: its columns (with the statusId update_task takes) and the cards in each, newest first. Use it to see what a team is working on.",
+            "description": "A task list's board: its columns (with the statusId update_task takes) and the cards in each, newest first, each with the tracker `keys` it names (`PROTEUS-165`). Use it to see what a team is working on.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2243,7 +2284,7 @@ fn tool_defs() -> Value {
             "description": "Full detail of one task, with its `ref` — how to name it in a commit message, branch or PR so cac links it by itself: its space key and number (`proteus-12`), or a client's folio (`acme-7`): its `handoff` (where the last session left it: read this before the thread), what it waits for (`blockedBy`, each with whether it is still open), the decisions that apply to it (`decisions`; one superseded says by which, read with get_decision), its markdown description, status, priority, tags, assignees, attachments, the comment thread (people and agents only: GitHub's commit notes are left out, they are the same commits as `git.commits`), its subtasks — which are its checklist — and `git`: the GitHub branches, pull requests (with state open/draft/merged/closed) and commits linked to it, by the task named in a commit/PR or by the branch name (cac-12-…, acme-7-…); each commit carries `releasedIn` {tag, at, url} once it went out in a GitHub release of its repo. get_board does not list subtasks; it only shows how many are done.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "id": { "type": "string", "description": "The task id, or its ref as people write it: `proteus-12` (space key and number) or a client's folio `acme-7`. `cac#12` does not resolve: a number without its space." } },
+                "properties": { "id": { "type": "string", "description": "The task id, or its ref as people write it: `proteus-12` (space key and number) or a client's folio `acme-7`. A tracker key in capitals (`PROTEUS-165`, Jira) resolves to the task that names it in its title or description — numbered apart from refs, so `proteus-165` is another task; several tasks naming it are listed instead. `cac#12` does not resolve: a number without its space." } },
                 "required": ["id"]
             }
         },
@@ -2640,6 +2681,8 @@ fn tool_defs() -> Value {
                     "body": { "type": "string", "description": "Why. The reasoning is what makes the entry worth keeping." },
                     "tag": { "type": "string", "description": "Optional: architecture, vendor, scope…" },
                     "decidedBy": { "type": "string", "description": "The name or username of the person in this organization who made the call, when it wasn't you. Signing it with the token's owner would say they decided it, which is what whoever reads it will believe." },
+                    "sourceUrl": { "type": "string", "description": "Where it was said, when it was said outside cac: the URL of the Jira comment or the Notion page. It is also what keeps it from being recorded twice: the same sourceUrl in the same organization returns the entry already there (`recorded: false`, `already`) and writes nothing. Always pass it for a decision copied from a tracker." },
+                    "sourceAuthor": { "type": "string", "description": "Who made the call, in plain words, when they are not a member of this organization in cac (a client's or a partner's teammate). `decidedBy` only takes members." },
                     "originTaskId": { "type": "string", "description": "Optional. The task this decision came out of (a ref like proteus-12, or its id); the entry links back to it. It must be a real task in the same organization, or the entry is refused — the log can't be edited, so a link to nothing would stay forever." },
                     "tasks": { "type": "array", "items": { "type": "string" }, "description": "Optional. Other tasks this decision applies to, by ref (proteus-12) or id. Each must be a live task of the same organization." },
                     "sectionIds": { "type": "array", "items": { "type": "string" }, "description": "Optional. The sections (sectionId from get_doc or get_doc_page) that carry this decision out, typically a runbook section. Any node of the same organization." },
@@ -5306,6 +5349,8 @@ fn summarize_board(data: &Value, limit: usize) -> Value {
                                 .collect::<Vec<_>>()
                         }),
                         "comments": t.get("commentCount"),
+                        // Las claves de fuera que nombra (`PROTEUS-165`).
+                        "keys": t.get("keys"),
                         "hasDescription": t.get("hasDescription"),
                         // El checklist de la tarea. El tablero no lista las
                         // subtareas, así que sin esto no había ninguna pista de
@@ -8027,7 +8072,52 @@ mod tests {
         assert!(resolve_node(&tree, "Plataforma", Some("folder")).is_err(), "con kind, sólo de esa clase");
         assert!(resolve_node(&tree, "Nada", None).is_err());
         assert!(looks_like_task_ref("proteus-12") && looks_like_task_ref("command-and-control-203") && looks_like_task_ref("cac#12"));
-        assert!(!looks_like_task_ref("7a1aa6b7-0792-4ef4-8192-21b4a163dbdb") && !looks_like_task_ref("t1") && !looks_like_task_ref("PROTEUS-12"));
+        assert!(!looks_like_task_ref("7a1aa6b7-0792-4ef4-8192-21b4a163dbdb") && !looks_like_task_ref("t1"));
+    }
+
+    /// La clave de un tracker de fuera nombra la tarea que la lleva, y una
+    /// decisión copiada de fuera lleva su fuente y no entra dos veces
+    /// (command-and-control-353). Roturas que detecta: mandar la clave por la
+    /// ruta del id; pasarla a minúsculas (sería la ref, otra tarea); tomar por
+    /// clave un texto con minúsculas o sin número; no enseñar las claves en el
+    /// tablero; no mandar la fuente ni quién lo dijo; decir «apuntada» cuando
+    /// ya estaba.
+    #[test]
+    fn a_tracker_key_names_its_task_and_an_outside_decision_enters_once() {
+        let (cfg, log) = fake_cac(|m, p, body| {
+            if p.ends_with("/board") {
+                json!({ "statuses": [{ "id": "s1", "name": "Open" }],
+                        "tasks": [{ "id": "t1", "seq": 7, "title": "x", "statusId": "s1", "keys": ["PROTEUS-165"] }] })
+            } else if p.ends_with("/decisions") && m == "POST" {
+                let already = body["title"] == "releída";
+                json!({ "decisions": [{ "id": "dec-otra", "title": "la más nueva del documento", "createdAt": "2026-12-01T00:00:00Z" }],
+                        "recorded": { "id": "dec-1", "title": "El DSD se paga por parte", "sourceUrl": body["sourceUrl"],
+                                      "sourceAuthor": "Itzel", "alreadyRecorded": already } })
+            } else {
+                json!({ "task": { "id": "t1", "seq": 7 }, "ref": "proteus-7", "comments": [] })
+            }
+        });
+        call_tool(&cfg, "get_task", &json!({ "id": "PROTEUS-165" })).unwrap();
+        assert_eq!(log.lock().unwrap()[0].1, "/api/v1/tasks/by-ref/PROTEUS-165");
+        for not_a_key in ["Proteus-165", "PROTEUS-", "PROTEUS-12a", "P-1", "PROTEUS165"] {
+            assert!(!looks_like_tracker_key(not_a_key), "{not_a_key}");
+        }
+        assert!(looks_like_tracker_key("PROTEUS-165") && looks_like_tracker_key("CC-7") && !looks_like_tracker_key("proteus-165"));
+
+        let board = call_tool(&cfg, "get_board", &json!({ "listId": "l1" })).unwrap();
+        assert!(board.to_string().contains("PROTEUS-165"), "{board}");
+
+        let source = "https://tcg.atlassian.net/browse/PROTEUS-165?focusedCommentId=10234";
+        let first = call_tool(&cfg, "record_decision", &json!({ "kind": "space", "ownerId": "s1", "title": "El DSD se paga por parte",
+            "sourceUrl": source, "sourceAuthor": "Itzel" })).unwrap();
+        assert_eq!(first["recorded"], true, "{first}");
+        assert_eq!(first["id"], "dec-1", "la que quedó, no la más nueva del documento: {first}");
+        let sent = log.lock().unwrap().iter().find(|(m, p, _)| m == "POST" && p.ends_with("/decisions")).unwrap().2.clone();
+        assert_eq!(sent["sourceUrl"], source);
+        assert_eq!(sent["sourceAuthor"], "Itzel");
+        let again = call_tool(&cfg, "record_decision", &json!({ "kind": "space", "ownerId": "s1", "title": "releída", "sourceUrl": source })).unwrap();
+        assert_eq!(again["recorded"], false, "{again}");
+        assert_eq!(again["already"]["id"], "dec-1", "{again}");
     }
 
     /// Roturas que detecta: no leer la sección con `expand`; leer más de tres
