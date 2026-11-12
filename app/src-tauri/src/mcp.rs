@@ -4082,8 +4082,18 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                 )?;
                 return Ok(json!({ "remembered": true, "as": "trap", "tab": "overview", "section": TRAPS_SECTION, "line": line }));
             }
-            let page = agent_notes_page(cfg, &kind, &id)?;
+            let (page, created) = agent_notes_page(cfg, &kind, &id)?;
             let line = format!("- {} · {}", today_utc(), strip_leading_date(&text.trim().replace('\n', " ")));
+            // La misma nota otra vez no se apunta: la página crece sin fin y
+            // nadie la poda más que cac-consolidar (command-and-control-351).
+            if !created {
+                let view = api_get(cfg, &format!("/api/v1/docs/{kind}/{id}/pages/{}", urlencode(&page)))?;
+                let body = view.get("body").and_then(|b| b.as_str()).unwrap_or("");
+                if let Some(old) = body.lines().find(|l| note_gist(l) == note_gist(&line)) {
+                    return Ok(json!({ "remembered": false, "already": old.trim(), "pageId": page, "link": page_link(&kind, &id, &page),
+                        "note": "That note was already there; nothing was added." }));
+                }
+            }
             api_post(cfg, &format!("/api/v1/docs/{kind}/{id}/pages/{}/append", urlencode(&page)), json!({ "text": line }))?;
             Ok(json!({ "remembered": true, "pageId": page, "line": line, "link": page_link(&kind, &id, &page) }))
         }
@@ -4139,7 +4149,9 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                 }
             }
             let out = api_post(cfg, &format!("/api/v1/docs/{kind}/{id}/incidents"), body)?;
-            Ok(json!({ "recorded": incident_view(&out) }))
+            let mut res = json!({ "recorded": incident_view(&out) });
+            with_similar(cfg, "incident", out.get("id").and_then(|v| v.as_str()), &mut res);
+            Ok(res)
         }
 
         "list_incidents" => {
@@ -4869,7 +4881,10 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                 body["sectionIds"] = json!(secs);
             }
             let out = api_post(cfg, &format!("/api/v1/docs/{kind}/{id}/decisions"), body)?;
-            Ok(recorded_decision(&out))
+            let mut res = recorded_decision(&out);
+            let new_id = res.get("id").and_then(|v| v.as_str()).map(str::to_string);
+            with_similar(cfg, "decision", new_id.as_deref(), &mut res);
+            Ok(res)
         }
 
         "link_decision" => {
@@ -5921,6 +5936,20 @@ fn known_args(name: &str, args: &Value) -> Result<(), String> {
     ))
 }
 
+/// Lo vigente que se parece a lo que se acaba de apuntar, para que el agente
+/// sustituya en vez de duplicar (command-and-control-351). Un extra: si cac
+/// no contesta, la respuesta sale sin ello.
+fn with_similar(cfg: &Cfg, kind: &str, id: Option<&str>, res: &mut Value) {
+    let Some(id) = id else { return };
+    let Ok(found) = api_get(cfg, &format!("/api/v1/graph/{kind}/{}/similar", urlencode(id))) else { return };
+    if found.as_array().is_some_and(|a| !a.is_empty()) {
+        res["similar"] = found;
+        res["similarNote"] = json!(format!(
+            "These {kind}s in force look like the one you just recorded. If one says the same thing, it is a duplicate: record yours again with `supersedes` set to the old id (or tell the user) instead of leaving two."
+        ));
+    }
+}
+
 /// Los tipos del grafo, en el orden en que se prueban cuando no se dice cuál:
 /// lo que más se pide primero.
 const GRAPH_KINDS: &[&str] = &["task", "decision", "incident", "page", "tab", "section", "server"];
@@ -6172,20 +6201,34 @@ fn message_lines(data: &Value) -> Vec<Value> {
 /// portada; se crea la primera vez.
 const AGENT_NOTES_TITLE: &str = "Notas de agentes";
 
-fn agent_notes_page(cfg: &Cfg, kind: &str, id: &str) -> Result<String, String> {
+fn agent_notes_page(cfg: &Cfg, kind: &str, id: &str) -> Result<(String, bool), String> {
     let flat = api_get(cfg, &format!("/api/v1/docs/{kind}/{id}/pages"))?;
     let found = flat.as_array().into_iter().flatten().find(|p| {
         p.get("title").and_then(|t| t.as_str()) == Some(AGENT_NOTES_TITLE)
             && p.get("parentId").and_then(|v| v.as_str()).map(|v| v.is_empty()).unwrap_or(true)
     });
     if let Some(p) = found.and_then(|p| p.get("id")).and_then(|v| v.as_str()) {
-        return Ok(p.to_string());
+        return Ok((p.to_string(), false));
     }
     let created = api_post(cfg, &format!("/api/v1/docs/{kind}/{id}/pages"), json!({
         "title": AGENT_NOTES_TITLE,
         "body": "Lo que los agentes descubren al trabajar aquí y no es una decisión ni cambia cómo se hace algo: un dato medido, un truco, un callejón sin salida. Una línea por nota, con su fecha. Lo que resulte ser una trampa sube a «Trampas que ya han mordido».\n",
     }))?;
-    created.get("id").and_then(|v| v.as_str()).map(str::to_string).ok_or("cac did not say the id of the page it created".into())
+    created
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|p| (p.to_string(), true))
+        .ok_or("cac did not say the id of the page it created".into())
+}
+
+/// Una nota sin su fecha ni sus mayúsculas ni espacios de más: lo que dice.
+fn note_gist(line: &str) -> String {
+    let body = line.trim().trim_start_matches("- ");
+    let body = match body.split_once(" · ") {
+        Some((date, rest)) if date.len() == 10 && date.as_bytes()[4] == b'-' => rest,
+        _ => body,
+    };
+    body.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
 /// La nota sin una fecha delante: la pone `remember`, y un agente que también
@@ -8431,6 +8474,48 @@ mod tests {
         seen.lock().unwrap().clear();
         assert!(call_tool(&cfg, "update_task", &json!({ "id": "t1", "listId": "App" })).is_err());
         assert!(!seen.lock().unwrap().iter().any(|(m, _, _)| m == "PATCH"), "con una lista que no existe no se toca la tarea");
+    }
+
+    /// Apuntar viene con lo vigente que se le parece, y una nota repetida no
+    /// se apunta (command-and-control-351). Roturas que detecta: no pedir los
+    /// parecidos; pedirlos de otra cosa; enseñar un `similar` vacío; apuntar
+    /// otra vez la misma nota (con otra fecha, mayúsculas o espacios); no
+    /// apuntar una nota distinta.
+    #[test]
+    fn recording_comes_with_what_looks_like_it_and_a_note_is_not_repeated() {
+        let (cfg, log) = fake_cac(|m, p, _| {
+            if p.ends_with("/incidents") && m == "POST" {
+                json!({ "id": "inc-new", "title": "x" })
+            } else if p.ends_with("/decisions") && m == "POST" {
+                json!({ "decisions": [{ "id": "dec-new", "title": "x", "createdAt": "2026-11-12T00:00:00Z" }] })
+            } else if p == "/api/v1/graph/decision/dec-new/similar" {
+                json!([{ "id": "dec-old", "title": "lo mismo", "score": 0.7 }])
+            } else if p == "/api/v1/graph/incident/inc-new/similar" {
+                json!([{ "id": "inc-old", "title": "lo mismo", "score": 0.8 }])
+            } else if p.ends_with("/pages") && m == "GET" {
+                json!([{ "id": "p-notes", "title": "Notas de agentes" }])
+            } else if p.ends_with("/pages/p-notes") {
+                json!({ "body": "Lo que descubren.\n\n- 2026-10-01 · El egress muerto   contesta 408 al parar." })
+            } else {
+                json!([])
+            }
+        });
+        let out = call_tool(&cfg, "record_incident", &json!({ "kind": "space", "ownerId": "s1", "title": "x" })).unwrap();
+        assert_eq!(out["similar"][0]["id"], "inc-old", "{out}");
+        assert!(out["similarNote"].as_str().unwrap().contains("supersedes"));
+        let dec = call_tool(&cfg, "record_decision", &json!({ "kind": "space", "ownerId": "s1", "title": "x" })).unwrap();
+        assert_eq!(dec["similar"][0]["id"], "dec-old", "{dec}");
+
+        let same = call_tool(&cfg, "remember", &json!({ "ownerId": "s1", "text": "el egress muerto contesta 408 al parar." })).unwrap();
+        assert_eq!(same["remembered"], false, "{same}");
+        assert!(!log.lock().unwrap().iter().any(|(m, p, _)| m == "POST" && p.ends_with("/append")), "la apuntó otra vez");
+        let other = call_tool(&cfg, "remember", &json!({ "ownerId": "s1", "text": "El egress vivo contesta 412." })).unwrap();
+        assert_eq!(other["remembered"], true, "{other}");
+
+        // Sin parecidos, sin campo.
+        let (cfg, _) = fake_cac(|m, p, _| if m == "POST" { json!({ "id": "inc-2" }) } else if p.contains("/similar") { json!([]) } else { json!({}) });
+        let out = call_tool(&cfg, "record_incident", &json!({ "kind": "space", "ownerId": "s1", "title": "y" })).unwrap();
+        assert!(out.get("similar").is_none(), "{out}");
     }
 
     /// Un argumento que la herramienta no declara se rechaza sin tocar nada,
