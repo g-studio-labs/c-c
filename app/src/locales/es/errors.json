@@ -54,6 +54,7 @@
   "image-service-not-configured": "Las imágenes no están montadas en este servidor.",
   "inbox-other-org": "Esa lista es de otra organización.",
   "insufficient-role": "Tu rol en esta organización no llega a eso.",
+  "invalid-hook": "Ese aviso no viene de un hook de cac.",
   "invalid-agent-token": "El agente se presentó con un token que no vale; hay que reinstalarlo.",
   "invalid-body": "El cuerpo de la petición no es el que este endpoint espera.",
   "invalid-category": "Esa categoría no existe.",
