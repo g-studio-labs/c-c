@@ -21,7 +21,8 @@ import (
 // no se cruzan (command-and-control-353).
 //
 // Roturas que atrapa: pasar la clave a minúsculas y contestar la tarea de ese
-// número; contestar una cualquiera cuando varias la nombran; contestar la de
+// número; dar por ambigua una clave porque otra tarea la cita de pasada;
+// contestar una cualquiera cuando varias son ese ticket; contestar la de
 // una organización de la que no se es miembro; un 500 o un 200 vacío cuando
 // nadie la nombra.
 func TestATrackerKeyAndARefAreDifferentNames(t *testing.T) {
@@ -52,7 +53,10 @@ func TestATrackerKeyAndARefAreDifferentNames(t *testing.T) {
 	}
 	named := create("org-1", "l-1", "esp-1", "El cierre cuadra", "**Jira:** PROTEUS-3")
 	create("org-1", "l-1", "esp-1", "Una", "**Jira:** PROTEUS-9")
-	create("org-1", "l-1", "esp-1", "Otra", "**Referencias:** PROTEUS-9")
+	create("org-1", "l-1", "esp-1", "Otra", "**Jira:** PROTEUS-9")
+	// Nombrar un ticket no es ser su tarea: la que lo cita de pasada no
+	// compite con la que lo lleva en su línea **Jira:**.
+	create("org-1", "l-1", "esp-1", "La que lo cita", "Como en PROTEUS-3, pero con otra cosa. **Referencias:** PROTEUS-3")
 	create("org-2", "l-2", "esp-2", "De otra organización", "PROTEUS-77")
 
 	h := &taskHandler{svc: service.NewTaskService(tasks, nil, nil, nil)}

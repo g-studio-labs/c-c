@@ -103,6 +103,82 @@ func TestATrackerKeyLeadsToTheTaskThatNamesIt(t *testing.T) {
 	}
 }
 
+// Nombrar un ticket no es ser su tarea: lleva a la que lo tiene en su línea
+// **Jira:**; si ninguna, a la que lo lleva en el título; y sólo si tampoco, a
+// las que lo citan. El primer día en producción `PROTEUS-165` lo nombraban
+// cuatro tareas y la respuesta era «varias».
+//
+// Roturas que atrapa: tratar igual una cita y la línea **Jira:**; contar como
+// ticket lo que va tras **Referencias** en la misma línea; no mirar el título
+// antes que las citas; no rehacer cómo la nombra al mover la clave de sitio;
+// juntar los grupos en vez de quedarse con el primero que tiene alguna.
+func TestTheTaskOfATicketIsNotAnyTaskThatMentionsIt(t *testing.T) {
+	kinds := func(title, description string) map[string]domain.ExternalKeyKind {
+		out := map[string]domain.ExternalKeyKind{}
+		for _, k := range domain.ClassifyExternalKeys(title, description) {
+			out[k.Key] = k.Kind
+		}
+		return out
+	}
+	got := kinds("Cerrar PROTEUS-284 en Jira", "**Jira:** PROTEUS-165 · **Referencias:** PROTEUS-12\nVer también PROTEUS-99.\n**jira**: PROTEUS-7")
+	for key, want := range map[string]domain.ExternalKeyKind{
+		"PROTEUS-165": domain.ExternalKeyTicket, "PROTEUS-7": domain.ExternalKeyTicket,
+		"PROTEUS-284": domain.ExternalKeyTitle,
+		"PROTEUS-12":  domain.ExternalKeyMention, "PROTEUS-99": domain.ExternalKeyMention,
+	} {
+		if got[key] != want {
+			t.Errorf("%s se nombra como %q, quiero %q", key, got[key], want)
+		}
+	}
+
+	db := incidentDB(t)
+	if err := db.AutoMigrate(&domain.GraphLink{}, &domain.SpaceKeyAlias{}, &domain.ItemComment{}, &domain.TaskExternalKey{}); err != nil {
+		t.Fatal(err)
+	}
+	tasks := repository.NewTaskRepository(db)
+	create := func(title, description string) string {
+		it := &domain.Task{OrgID: "org-1", ListID: "l-back", Title: title, Description: description, Status: domain.ReportPending}
+		if err := tasks.CreateTask(it, "sp-1"); err != nil {
+			t.Fatal(err)
+		}
+		return it.ID
+	}
+	leadsTo := func(key string) []string {
+		t.Helper()
+		found, err := tasks.FindByExternalKey([]string{"org-1"}, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids := []string{}
+		for _, x := range found {
+			ids = append(ids, x.ID)
+		}
+		return ids
+	}
+	cites := create("Otra cosa", "Como en PROTEUS-165, pero aquí.")
+	titled := create("Revisión en PROTEUS-165", "")
+	if got := leadsTo("PROTEUS-165"); len(got) != 1 || got[0] != titled {
+		t.Errorf("sin línea **Jira:**, lleva a %v; quiero la del título (%s), no la que lo cita (%s)", got, titled, cites)
+	}
+	ticket := create("El registro de configuración", "**Jira:** PROTEUS-165")
+	if got := leadsTo("PROTEUS-165"); len(got) != 1 || got[0] != ticket {
+		t.Errorf("con una tarea que lo lleva en **Jira:**, lleva a %v; quiero sólo ésa (%s)", got, ticket)
+	}
+	// Mover la clave de la línea **Jira:** a una cita cambia cómo la nombra.
+	if err := tasks.UpdateTask(ticket, map[string]any{"description": "Ya no es su ticket, sólo cita PROTEUS-165."}); err != nil {
+		t.Fatal(err)
+	}
+	if got := leadsTo("PROTEUS-165"); len(got) != 1 || got[0] != titled {
+		t.Errorf("tras quitar la línea **Jira:**, lleva a %v; quiero otra vez la del título (%s)", got, titled)
+	}
+	if err := tasks.UpdateTask(titled, map[string]any{"title": "Revisión"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := leadsTo("PROTEUS-165"); len(got) != 2 {
+		t.Errorf("si sólo hay citas, lleva a todas las que lo citan; salieron %v", got)
+	}
+}
+
 // Sólo es una clave de fuera lo que va entero en mayúsculas: la ref de cac
 // sigue su camino. Rotura que atrapa: aceptar la ref en minúsculas, o un texto
 // que sólo contiene una clave.

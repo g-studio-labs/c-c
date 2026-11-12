@@ -19,33 +19,37 @@ func syncTaskKeys(db *gorm.DB, taskID string) {
 		WHERE id = ? AND deleted_at IS NULL`, taskID).Scan(&t).Error; err != nil || t.OrgID == "" {
 		return
 	}
-	keys := domain.ExternalKeys(t.Title, t.Description)
-	q := db.Where("task_id = ?", taskID)
-	if len(keys) > 0 {
-		q = q.Where("key NOT IN ?", keys)
-	}
-	if err := q.Delete(&domain.TaskExternalKey{}).Error; err != nil {
+	// Se reescriben todas: cambiar de sitio la clave (de una cita a la línea
+	// **Jira:**) cambia cómo la nombra sin cambiar la clave.
+	if err := db.Where("task_id = ?", taskID).Delete(&domain.TaskExternalKey{}).Error; err != nil {
 		return
 	}
-	for _, k := range keys {
-		db.Clauses(clause.OnConflict{DoNothing: true}).
-			Create(&domain.TaskExternalKey{TaskID: taskID, Key: k, OrgID: t.OrgID})
+	for _, k := range domain.ClassifyExternalKeys(t.Title, t.Description) {
+		k.TaskID, k.OrgID = taskID, t.OrgID
+		db.Clauses(clause.OnConflict{DoNothing: true}).Create(&k)
 	}
 }
 
-// FindByExternalKey: las tareas vivas de esas organizaciones que nombran la
-// clave, las abiertas primero y luego la más reciente. Varias es legítimo: un
-// ticket de Jira puede tener su tarea y otra que lo cita en **Referencias**.
+// FindByExternalKey: las tareas vivas de esas organizaciones a las que lleva
+// la clave. Las que la tienen en su línea **Jira:**; si no hay ninguna, las
+// que la llevan en el título; y si tampoco, las que la citan. Dentro de cada
+// grupo, las abiertas primero. Varias en el mismo grupo es legítimo (una tarea
+// y la que la cierra en Jira): quien pregunta elige.
 func (r *TaskRepository) FindByExternalKey(orgIDs []string, key string) ([]domain.Task, error) {
 	out := []domain.Task{}
 	if len(orgIDs) == 0 || key == "" {
 		return out, nil
 	}
-	err := r.db.Joins("JOIN task_external_keys k ON k.task_id = items.id").
-		Where("k.org_id IN ? AND k.key = ? AND items.archived_at IS NULL", orgIDs, key).
-		Order("CASE WHEN items.status IN ('resolved', 'closed') THEN 1 ELSE 0 END, items.updated_at DESC").
-		Find(&out).Error
-	return out, err
+	for _, kind := range domain.ExternalKeyKinds {
+		err := r.db.Joins("JOIN task_external_keys k ON k.task_id = items.id").
+			Where("k.org_id IN ? AND k.key = ? AND k.kind = ? AND items.archived_at IS NULL", orgIDs, key, kind).
+			Order("CASE WHEN items.status IN ('resolved', 'closed') THEN 1 ELSE 0 END, items.updated_at DESC").
+			Find(&out).Error
+		if err != nil || len(out) > 0 {
+			return out, err
+		}
+	}
+	return out, nil
 }
 
 // ExternalKeysOf: las claves de cada tarea, para ponerlas en una lista de
@@ -66,8 +70,10 @@ func (r *TaskRepository) ExternalKeysOf(taskIDs []string) map[string][]string {
 // BackfillTaskExternalKeys rellena una vez las claves de las tareas que ya
 // existían. Sólo con la tabla vacía: después, cada guardado se ocupa.
 func BackfillTaskExternalKeys(db *gorm.DB) {
+	// «Vacía» es «sin ninguna fila que diga cómo nombra la clave»: las del
+	// primer despliegue, de antes de `Kind`, se rehacen.
 	var n int64
-	if db.Model(&domain.TaskExternalKey{}).Count(&n); n > 0 {
+	if db.Model(&domain.TaskExternalKey{}).Where("kind <> ''").Count(&n); n > 0 {
 		return
 	}
 	var ids []string
