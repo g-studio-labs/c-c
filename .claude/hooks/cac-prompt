@@ -43,6 +43,7 @@ from cac_hooks import (  # noqa: E402
     incidents,
     load_seen,
     read_input,
+    report_shown,
     repo_of,
     repo_org,
     save_seen,
@@ -157,12 +158,12 @@ def task_lines_for(prompt, tasks, seen):
         else:
             line += " · sin «dónde quedó»"
         out.append(line + f" · get_task {ref}")
-        shown.append(key)
+        shown.append((key, ref))
         if len(out) == MAX_LINES:
             break
     if out:
         out.insert(0, "cac · la tarea que nombras, en curso:")
-    return out, shown
+    return out, [k for k, _ in shown], [r for _, r in shown]
 
 
 def main():
@@ -175,22 +176,27 @@ def main():
         return
     session = inp.get("session_id") or ""
     seen = load_seen(session)
-    out, shown = [], []
+    out, shown, targets = [], [], []
     _, repo = repo_of(inp.get("cwd") or os.getcwd())
     tasks = in_progress(cfg, repo)
     if tasks:
-        lines, ids = task_lines_for(prompt, tasks, seen)
+        lines, ids, refs = task_lines_for(prompt, tasks, seen)
         out += lines
         shown += ids
+        targets += refs
     found = incidents(cfg, repo_org(cfg, repo))
     if found:
         lines, ids = lines_for(prompt, found, seen)
         out += lines
         shown += ids
+        # Lo que se imprimió, no lo recortado: eso no llegó a verlo.
+        targets += [i for i in ids if any(i in line for line in lines)]
     if not out:
         return
     save_seen(session, seen | set(shown))
     print("\n".join(out))
+    sys.stdout.flush()
+    report_shown(cfg, "cac-prompt", targets)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ from cac_hooks import (  # noqa: E402
     incidents,
     load_seen,
     read_input,
+    report_shown,
     repo_of,
     repo_org,
     save_seen,
@@ -73,6 +74,8 @@ def main():
         lines.append(f"- [{state}] {inc.get('title', '')} · guard {guard} · get_incident {inc.get('id')}")
     save_seen(session, seen | {inc.get("id") for inc, _ in hits})
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "\n".join(lines)}}))
+    sys.stdout.flush()
+    report_shown(cfg, "cac-edit", [inc.get("id") for inc, _ in hits])
 
 
 if __name__ == "__main__":

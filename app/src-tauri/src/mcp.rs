@@ -32,6 +32,46 @@ pub(crate) struct Cfg {
 const VIA_HEADER: &str = "X-Cac-Via";
 const VIA_MCP: &str = "mcp";
 
+thread_local! {
+    /// La herramienta que se está atendiendo: su nombre, un id propio y lo que
+    /// toca (el `id` o la ref que se le pasó). Viaja en cada petición que hace
+    /// para que cac cuente **llamadas**, no peticiones —una herramienta hace
+    /// varias— y pueda cruzar lo que enseñan los hooks con lo que el agente
+    /// abre después (command-and-control-347). Este servidor atiende una
+    /// llamada cada vez, en un hilo, y cada petición sale de ese mismo hilo.
+    static CURRENT_CALL: std::cell::RefCell<Option<(String, String, String)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Las cabeceras de toda petición a cac: la marca del MCP y, durante una
+/// llamada, qué herramienta la hace. Como `Via`, una declaración para contar,
+/// no una credencial.
+fn agent_headers() -> reqwest::header::HeaderMap {
+    use reqwest::header::HeaderValue;
+    let mut h = reqwest::header::HeaderMap::new();
+    h.insert(VIA_HEADER, HeaderValue::from_static(VIA_MCP));
+    CURRENT_CALL.with(|c| {
+        if let Some((tool, call, target)) = &*c.borrow() {
+            for (k, v) in [("X-Cac-Tool", tool), ("X-Cac-Call", call), ("X-Cac-Target", target)] {
+                if let (false, Ok(v)) = (v.is_empty(), HeaderValue::from_str(v)) {
+                    h.insert(k, v);
+                }
+            }
+        }
+    });
+    h
+}
+
+/// Lo que toca una llamada, para cruzarlo: el primer id o ref que traiga, si
+/// tiene forma de id (lo demás no viaja: no es para mandar texto).
+fn call_target(args: &Value) -> String {
+    ["id", "ref", "pageId", "ownerId"]
+        .iter()
+        .filter_map(|k| args.get(*k).and_then(|v| v.as_str()))
+        .find(|v| !v.is_empty() && v.len() <= 80 && v.chars().all(|c| c.is_ascii_alphanumeric() || "_.:-".contains(c)))
+        .unwrap_or("")
+        .to_string()
+}
+
 pub(crate) fn cfg() -> Result<Cfg, String> {
     let base = std::env::var("CAC_URL")
         .unwrap_or_else(|_| "https://cac.guz-studio.dev".to_string())
@@ -66,7 +106,7 @@ pub(crate) fn api_get(cfg: &Cfg, path: &str) -> Result<Value, String> {
         let res = client
             .get(&url)
             .header("Authorization", format!("Bearer {}", cfg.token))
-            .header(VIA_HEADER, VIA_MCP)
+            .headers(agent_headers())
             .send()
             .await
             .map_err(|e| format!("request failed: {e}"))?;
@@ -129,7 +169,7 @@ fn api_download(cfg: &Cfg, path: &str) -> Result<(Vec<u8>, String, Option<String
         let res = client
             .get(&url)
             .header("Authorization", format!("Bearer {}", cfg.token))
-            .header(VIA_HEADER, VIA_MCP)
+            .headers(agent_headers())
             .send()
             .await
             .map_err(|e| format!("request failed: {e}"))?;
@@ -193,7 +233,7 @@ fn api_form(
         };
         let res = req
             .header("Authorization", format!("Bearer {}", cfg.token))
-            .header(VIA_HEADER, VIA_MCP)
+            .headers(agent_headers())
             .multipart(form)
             .send()
             .await
@@ -290,7 +330,7 @@ fn api_upload(
         let res = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", cfg.token))
-            .header(VIA_HEADER, VIA_MCP)
+            .headers(agent_headers())
             .multipart(reqwest::multipart::Form::new().part("file", part))
             .send()
             .await
@@ -347,7 +387,7 @@ fn api_delete(cfg: &Cfg, path: &str) -> Result<Value, String> {
         let res = client
             .delete(&url)
             .header("Authorization", format!("Bearer {}", cfg.token))
-            .header(VIA_HEADER, VIA_MCP)
+            .headers(agent_headers())
             .send()
             .await
             .map_err(|e| format!("request failed: {e}"))?;
@@ -410,7 +450,7 @@ fn api_write(cfg: &Cfg, method: &str, path: &str, body: Value) -> Result<Value, 
         };
         let res = req
             .header("Authorization", format!("Bearer {}", cfg.token))
-            .header(VIA_HEADER, VIA_MCP)
+            .headers(agent_headers())
             .json(&body)
             .send()
             .await
@@ -2685,6 +2725,17 @@ fn tool_defs() -> Value {
             }
         },
         {
+            "name": "agent_usage",
+            "description": "How agents use cac: calls per MCP tool (how many, by how many people, the last one), and of what each hook put in front of an agent (an incident, a task), how much that same person opened afterwards with a tool (same id or ref, within two hours). It is the data to decide whether a hook helps or is noise, and which tools nobody uses. Your own usage; a superadmin sees everyone's with all: true.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "days": { "type": "integer", "description": "1–90, default 30." },
+                    "all": { "type": "boolean", "description": "Everyone's, not only yours. Superadmin only; ignored otherwise." }
+                }
+            }
+        },
+        {
             "name": "remember",
             "description": "Write down one fact for whoever works on this space next: a measured number, a trick that worked, a dead end, a command. It goes as one dated line into the space's \"Notas de agentes\" page (created the first time), which search covers like any page. Something that already BIT and will bite the next one is not a note: record it with record_incident (server, area, commit, guard), so whoever touches that server finds it. Not for decisions (record_decision), not for how things are done (the runbook), not for what belongs in a task's thread (add_task_comment). Needs `docs:write`.",
             "inputSchema": {
@@ -4132,6 +4183,12 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
             }
             let data = api_get(cfg, &format!("/api/v1/search/misses?{}", q.join("&")))?;
             Ok(json!({ "misses": data }))
+        }
+
+        "agent_usage" => {
+            let days = arg_i64(args, "days").unwrap_or(30).clamp(1, 90);
+            let all = if arg_bool(args, "all") { "&all=1" } else { "" };
+            api_get(cfg, &format!("/api/v1/agents/usage?days={days}{all}"))
         }
 
         "get_decision" => {
@@ -5779,6 +5836,7 @@ fn handle(req: &Value, cfg: &Result<Cfg, String>) -> Option<Value> {
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             // A tool that never calls cac must work without a token. Every
             // other one needs the config, so the check stays where it was.
+            CURRENT_CALL.with(|c| *c.borrow_mut() = Some((name.to_string(), uuid::Uuid::new_v4().to_string(), call_target(&args))));
             let res = if LOCAL_TOOLS.contains(&name) {
                 call_local_tool(name, &args)
             } else {
@@ -5787,6 +5845,7 @@ fn handle(req: &Value, cfg: &Result<Cfg, String>) -> Option<Value> {
                     Err(e) => Err(e.clone()),
                 }
             };
+            CURRENT_CALL.with(|c| *c.borrow_mut() = None);
             let mut out = tool_result(res);
             if let Some(note) = stale_binary_note() {
                 if let Some(c) = out.get_mut("content").and_then(|c| c.as_array_mut()) {
@@ -8183,11 +8242,23 @@ mod tests {
     fn fake_cac(
         answer: impl Fn(&str, &str, &Value) -> Value + Send + 'static,
     ) -> (Cfg, std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>) {
+        let (cfg, seen, _) = fake_cac_with_headers(answer);
+        (cfg, seen)
+    }
+
+    /// Las cabeceras `x-cac-*` de cada petición, en el orden en que llegan.
+    type SeenHeaders = std::sync::Arc<std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>>;
+
+    fn fake_cac_with_headers(
+        answer: impl Fn(&str, &str, &Value) -> Value + Send + 'static,
+    ) -> (Cfg, std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>, SeenHeaders) {
         use std::io::{BufRead, BufReader, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let seen = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
         let log = seen.clone();
+        let headers: SeenHeaders = Default::default();
+        let hlog = headers.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
@@ -8197,6 +8268,7 @@ mod tests {
                 let mut parts = line.split_whitespace();
                 let (method, path) = (parts.next().unwrap_or("").to_string(), parts.next().unwrap_or("").to_string());
                 let mut len = 0;
+                let mut cac = std::collections::BTreeMap::new();
                 loop {
                     let mut h = String::new();
                     reader.read_line(&mut h).unwrap();
@@ -8206,7 +8278,13 @@ mod tests {
                     if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
                         len = v.trim().parse().unwrap_or(0);
                     }
+                    if let Some((k, v)) = h.split_once(':') {
+                        if k.to_ascii_lowercase().starts_with("x-cac-") {
+                            cac.insert(k.to_ascii_lowercase(), v.trim().to_string());
+                        }
+                    }
                 }
+                hlog.lock().unwrap().push(cac);
                 let mut buf = vec![0; len];
                 reader.read_exact(&mut buf).unwrap();
                 let body: Value = serde_json::from_slice(&buf).unwrap_or(Value::Null);
@@ -8227,7 +8305,7 @@ mod tests {
                 );
             }
         });
-        (Cfg { base, token: "cac_pat_test".into() }, seen)
+        (Cfg { base, token: "cac_pat_test".into() }, seen, headers)
     }
 
     /// De punta a punta contra un cac falso. Rotura que detecta: que
@@ -8267,6 +8345,38 @@ mod tests {
         seen.lock().unwrap().clear();
         assert!(call_tool(&cfg, "update_task", &json!({ "id": "t1", "listId": "App" })).is_err());
         assert!(!seen.lock().unwrap().iter().any(|(m, _, _)| m == "PATCH"), "con una lista que no existe no se toca la tarea");
+    }
+
+    /// cac cuenta llamadas, no peticiones, y cruza lo que enseñan los hooks
+    /// con lo que el agente abre (command-and-control-347). Roturas que
+    /// detecta: no mandar la herramienta; un id de llamada distinto en cada
+    /// petición de la misma llamada (contaría tres por un update_task); el
+    /// mismo id en dos llamadas; perder lo que toca; que la llamada se quede
+    /// pegada a las peticiones que vienen después.
+    #[test]
+    fn every_request_says_which_call_made_it() {
+        let (cfg, _, headers) = fake_cac_with_headers(|_, _, _| json!({ "task": { "id": "t1" }, "status": { "name": "Done" } }));
+        let base = cfg.base.clone();
+        let call = |name: &str, args: Value| {
+            let cfg = Cfg { base: base.clone(), token: "cac_pat_test".into() };
+            handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args } }), &Ok(cfg))
+        };
+        call("update_task", json!({ "id": "cc-7", "status": "done", "comment": "hecho" }));
+        let first: Vec<_> = headers.lock().unwrap().drain(..).collect();
+        assert!(first.len() >= 3, "update_task hace varias peticiones: {first:?}");
+        for h in &first {
+            assert_eq!(h.get("x-cac-tool").map(String::as_str), Some("update_task"), "{h:?}");
+            assert_eq!(h.get("x-cac-target").map(String::as_str), Some("cc-7"), "{h:?}");
+            assert_eq!(h.get("x-cac-call"), first[0].get("x-cac-call"), "una llamada, dos ids");
+            assert_eq!(h.get("x-cac-via").map(String::as_str), Some("mcp"));
+        }
+        call("get_task", json!({ "id": "cc-7" }));
+        let second = headers.lock().unwrap().drain(..).next().unwrap();
+        assert_ne!(second.get("x-cac-call"), first[0].get("x-cac-call"), "dos llamadas, un id");
+        api_get(&cfg, "/api/v1/tasks/x").unwrap();
+        let after = headers.lock().unwrap().drain(..).next().unwrap();
+        assert!(!after.contains_key("x-cac-tool"), "la llamada sigue pegada después: {after:?}");
+        assert_eq!(call_target(&json!({ "id": "una frase con espacios", "ownerId": "s1" })), "s1", "manda texto como id");
     }
 
     /// Cerrar una tarea es handoff + estado + comentario, y se hace en una

@@ -80,6 +80,29 @@ def api(cfg, path):
         return None
 
 
+# Lo que se espera a cac al contar: menos que una lectura, porque nadie espera
+# la respuesta y el hook no puede hacer esperar al prompt.
+SHOWN_TIMEOUT = 2
+
+
+def report_shown(cfg, hook, targets):
+    """Le dice a cac qué puso delante del agente este hook (ids de incidentes,
+    refs de tareas), para cruzarlo con lo que el agente abre después y saber
+    si el hook ayuda o es ruido (`agent_usage`, command-and-control-347).
+    Cualquier token puede: sólo habla de su propio uso. Si falla, nada."""
+    targets = [t for t in targets if t][:20]
+    if not targets:
+        return
+    url, token = cfg
+    body = json.dumps({"hook": hook, "targets": targets}).encode()
+    req = urllib.request.Request(url + "/api/v1/agents/shown", data=body, method="POST", headers={
+        "Authorization": "Bearer " + token, "Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=SHOWN_TIMEOUT).close()
+    except (urllib.error.URLError, ValueError, OSError):
+        pass
+
+
 def repo_of(cwd):
     """(raíz del repo, `owner/name`), o vacíos si no es un repo de GitHub."""
     root = git(cwd, "rev-parse", "--show-toplevel")

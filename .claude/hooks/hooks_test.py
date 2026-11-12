@@ -31,9 +31,19 @@ sys.path.insert(0, HERE)
 from cac_hooks import go_test_index, guards_for  # noqa: E402
 
 ANSWERS = {}
+# Lo que los hooks mandan a cac (path, cuerpo), en orden.
+POSTS = []
 
 
 class FakeCac(BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        POSTS.append((self.path, json.loads(self.rfile.read(n) or b"null")))
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"success": true, "data": {"recorded": true}}')
+
     def do_GET(self):
         for prefix, (code, body) in ANSWERS.items():
             if self.path.startswith(prefix):
@@ -97,6 +107,7 @@ class Hooks(unittest.TestCase):
 
     def setUp(self):
         ANSWERS.clear()
+        POSTS.clear()
 
     # ── cac-session ──
 
@@ -260,6 +271,37 @@ class Hooks(unittest.TestCase):
         first = self.prompt("zeta", session="o-6")
         self.assertIn("… y 2 más", first)
         self.assertEqual(self.prompt("zeta otra vez", session="o-6"), "", "lo recortado vuelve a salir")
+
+    def shown(self):
+        return [b for p, b in POSTS if p == "/api/v1/agents/shown"]
+
+    def test_what_a_hook_shows_is_reported_so_it_can_be_measured(self):
+        # Para saber si un hook ayuda o es ruido: lo que enseñó, cruzado con lo
+        # que el agente abrió después (agent_usage, command-and-control-347).
+        self.fresh_vocabulary([{"id": f"z-{i}", "title": f"t{i}", "status": "open", "servers": [], "areas": ["zeta"]}
+                               for i in range(10)])
+        self.prompt("zeta", session="m-1")
+        got = self.shown()
+        self.assertEqual(len(got), 1, POSTS)
+        self.assertEqual(got[0]["hook"], "cac-prompt")
+        self.assertEqual(len(got[0]["targets"]), 8, "cuenta como enseñado lo que se recortó")
+        POSTS.clear()
+        self.assertEqual(self.prompt("nada que ver", session="m-1"), "")
+        # Lo guarda que el hook sólo llama después de imprimir. Quitar la
+        # guarda de `report_shown` (sin objetivos, no mandar) es un mutante
+        # equivalente: lo impreso siempre trae su id o su ref, así que nunca
+        # llega vacío, y si llegara cac lo aceptaría sin apuntar nada.
+        self.assertEqual(self.shown(), [], "cuenta algo sin haber enseñado nada")
+
+    def test_a_task_is_reported_by_its_ref_and_an_edit_by_its_incident(self):
+        # La ref, porque es lo que el agente le pasa a get_task.
+        self.fresh_tasks(self.TASKS)
+        self.prompt("sigamos con cc-7", session="m-2")
+        self.assertEqual(self.shown(), [{"hook": "cac-prompt", "targets": ["cc-7"]}])
+        POSTS.clear()
+        self.fresh_vocabulary(self.EDIT_INCIDENTS)
+        self.edit("app/src/pages/servers/ServerProvision.tsx", session="m-3")
+        self.assertEqual(self.shown(), [{"hook": "cac-edit", "targets": ["inc-3"]}])
 
     TASKS = [
         {"id": "t-7", "ref": "cc-7", "title": "Agente A · cotizaciones sin facturar", "keys": ["PROTEUS-224"],
