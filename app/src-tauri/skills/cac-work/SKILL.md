@@ -137,12 +137,14 @@ mueve. Así que, al llegar, revisa lo que `get_context` da en `inProgress` (o
 el tablero, con `get_board`):
 
 1. **Si trae `shipped`**, cac ya vio salir todos sus commits en una release
-   de GitHub: ciérrala con `status: "done"` y el comentario «Salió en v1.9.1
-   (lo vio cac en la release)». Sin `shipped` no quiere decir que no salió:
-   una tarea con commits del backend, que se despliega con el push, no lo
-   lleva nunca; para ésas, el paso siguiente. Un incidente abierto con
-   `shipped` tiene su arreglo publicado: díselo al usuario; marcarlo
-   arreglado (`update_incident`) es decisión suya.
+   de GitHub: ciérrala en una llamada, `update_task` con `status: "done"` y
+   `comment: "Salió en v1.9.1 (lo vio cac en la release)"`. Sin `shipped` no
+   quiere decir que no salió: una tarea con commits del backend, que se
+   despliega con el push, no lo lleva nunca; para ésas, el paso siguiente.
+   Un incidente abierto con `shippedIn` tiene su arreglo publicado: díselo
+   al usuario; marcarlo arreglado (`update_incident`) es decisión suya. El
+   mapa sólo lista los incidentes abiertos; los arreglados los cuenta
+   (`fixedIncidents`) y salen con `list_incidents` por servidor o área.
 2. Lee su `handoff` en el mapa: dice qué falta («sale en la próxima
    release», «espera a AWS», «falta probarlo en una llamada»). Sólo si no lo
    tiene, abre la tarea con `get_task` y lee el último comentario de una
@@ -394,6 +396,9 @@ Y deja un comentario de cierre corto:
 - los commits o el PR (usa `link_pull_request` si el PR no nombra la tarea);
 - qué queda pendiente.
 
+Handoff, estado y comentario van en **una** llamada: `update_task` con
+`handoff`, `status` y `comment`.
+
 Si cambias de rumbo a mitad de camino, dilo también en la tarea: basta con una
 línea.
 
@@ -433,4 +438,4 @@ de 2026, a partir de lo que fue fallando al trabajar con cac. Cada regla tiene
 detrás algo que pasó de verdad; si cambias una, mira antes en el registro de
 decisiones del espacio Command and control por qué está._
 
-<!-- cac-work v24 -->
+<!-- cac-work v25 -->

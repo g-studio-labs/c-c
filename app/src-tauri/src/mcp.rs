@@ -2151,7 +2151,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "get_context",
-            "description": "START HERE when you begin work in a repository. One call returns what the team knows about its project, without any bodies: the space's tree (folders and lists, with `path`; a list with `projectId` belongs to a client), for each node with a document the headings of its tabs (overview, runbook, decisions, links; up to level 3, with their size in `chars`), its subpages and its decisions still in force (id and title; the body with get_decision), the markdown files of the repos linked to the space, and the tasks already in progress — each with its `ref`, who is on it (`assignees`) and its `handoff`: where it was left, by whom and when, so you don't open every task to find out. A task in progress whose linked commits have all gone out in a GitHub release carries `shipped` {tag, at}: move it to done with a comment saying so (cac marks it; it never moves it). An incident in a node's `incidents` carries `shipped` the same way: tell the user its fix is out. `truncated` names anything cut for size.\n\nWith no arguments it reads the git remote of the folder you are working in and finds the space that GitHub repo is linked to. Then read only the sections you need: get_doc with kind, ownerId (the node's id), tab and section (a heading's text); get_doc_page for a subpage; get_repo_doc for a repo file.",
+            "description": "START HERE when you begin work in a repository. One call returns what the team knows about its project, without any bodies: the space's tree (folders and lists, with `path`; a list with `projectId` belongs to a client), for each node with a document the headings of its tabs (overview, runbook, decisions, links; up to level 3, with their size in `chars`), its subpages and its decisions still in force (id and title; the body with get_decision), the markdown files of the repos linked to the space, and the tasks already in progress — each with its `ref`, who is on it (`assignees`) and its `handoff`: where it was left, by whom and when, so you don't open every task to find out. A task in progress whose linked commits have all gone out in a GitHub release carries `shipped` {tag, at}: move it to done with a comment saying so (cac marks it; it never moves it). Each node's `incidents` are the ones still open (id, title, servers, areas; the body with get_incident) and `fixedIncidents` counts the fixed ones (list_incidents by server or area when you touch them); an open one with `shippedIn` has its fix released: tell the user. `truncated` names anything cut for size.\n\nWith no arguments it reads the git remote of the folder you are working in and finds the space that GitHub repo is linked to. Then read only the sections you need: get_doc with kind, ownerId (the node's id), tab and section (a heading's text); get_doc_page for a subpage; get_repo_doc for a repo file.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2279,6 +2279,7 @@ fn tool_defs() -> Value {
                     },
                     "clearDueAt": { "type": "boolean", "description": "Remove the task's due date." },
                     "handoff": { "type": "string", "description": "Where the work was left, for whoever picks it up next: what is done, the next step, and how to check whether it shipped. Three lines, markdown. It REPLACES the previous handoff and is stamped with your name and the time; write it before you stop, and every time the state changes. An empty string clears it. Findings and discussion go in comments; this is the summary." },
+                    "comment": { "type": "string", "description": "Optional. A markdown comment added to the thread after the other changes, in the same call: closing a task is handoff + status + comment at once. Append-only, like add_task_comment (needs `tasks:write`)." },
                     "claim": { "type": "boolean", "description": "Take the task: you become an assignee (the current ones stay) and it moves to in progress, atomically. Refused with `claimed: false` when it is already in progress with someone else." },
                     "ifStatus": { "type": "string", "enum": ["pending", "in_progress", "resolved", "closed"], "description": "Only if the task is still in this state; otherwise nothing changes and the answer carries `conflict` with the real state and handoff. Use it when you read the task a while ago." },
                     "blockedBy": { "type": "array", "items": { "type": "string" }, "description": "The tasks this one waits for, by ref (`proteus-12`) or id. Replaces the list; an empty list clears it. get_context then shows it in `blockedBy` and leaves the task out of `ready` while any of them is open." },
@@ -2692,7 +2693,6 @@ fn tool_defs() -> Value {
                     "kind": { "type": "string", "enum": ["space", "folder", "list"], "description": "Optional; space when omitted." },
                     "ownerId": { "type": "string", "description": "The node's id, or its path as the map shows it." },
                     "text": { "type": "string", "description": "One line, markdown, as it should read in a year: what, where, and the number or the command. Do not write the date: it is added." },
-                    "as": { "type": "string", "enum": ["note", "trap"], "description": "Optional; note when omitted. (trap is kept for older sessions; what bit goes with record_incident.)" },
                     "dryRun": { "type": "boolean" }
                 },
                 "required": ["ownerId", "text"]
@@ -4341,9 +4341,10 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
             let status_id = move_target(args)?;
             // `ifStatus` solo no es un cambio: acompaña a otro.
             let only_guard = body.as_object().map(|o| o.keys().all(|k| k == "ifStatus")).unwrap_or(true);
-            if only_guard && status_id.is_none() && !claimed {
+            let comment = arg_str(args, "comment");
+            if only_guard && status_id.is_none() && !claimed && comment.is_none() {
                 return Err(
-                    "Nothing to change: send at least one of title, description, priority, visibility, tags, assignees, dueAt, handoff, blockedBy, listId, claim, status or statusId"
+                    "Nothing to change: send at least one of title, description, priority, visibility, tags, assignees, dueAt, handoff, blockedBy, listId, claim, status, statusId or comment"
                         .into(),
                 );
             }
@@ -4368,6 +4369,11 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                     return task_conflict(cfg, &id, &e, "moved").ok_or(e).map(Ok)?;
                 }
                 changed.push("statusId");
+            }
+            // El comentario, al final: dice lo que ya quedó hecho.
+            if let Some(c) = comment {
+                api_post(cfg, &format!("/api/v1/tasks/{}/comments", urlencode(&id)), json!({ "body": c }))?;
+                changed.push("comment");
             }
             let after = api_get(cfg, &format!("/api/v1/tasks/{}", urlencode(&id)))?;
             // La ref, siempre: al cambiar de espacio es otra, y es la que van a
@@ -5736,7 +5742,7 @@ fn stale_note_for(path: &std::path::Path, t: std::time::SystemTime, len: u64) ->
 fn tool_result(value: Result<Value, String>) -> Value {
     match value {
         Ok(v) => json!({
-            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }]
+            "content": [{ "type": "text", "text": serde_json::to_string(&v).unwrap_or_default() }]
         }),
         Err(e) => json!({
             "content": [{ "type": "text", "text": e }],
@@ -5766,7 +5772,7 @@ fn handle(req: &Value, cfg: &Result<Cfg, String>) -> Option<Value> {
             }),
         )),
         "ping" => Some(ok(id, json!({}))),
-        "tools/list" => Some(ok(id, json!({ "tools": tool_defs() }))),
+        "tools/list" => Some(ok(id, json!({ "tools": annotate(tool_defs()) }))),
         "tools/call" => {
             let params = req.get("params").cloned().unwrap_or(json!({}));
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -5791,6 +5797,35 @@ fn handle(req: &Value, cfg: &Result<Cfg, String>) -> Option<Value> {
         }
         other => Some(err(id, -32601, format!("method not found: {other}"))),
     }
+}
+
+/// Lo que cada herramienta le hace al mundo, para el cliente: Claude Code no
+/// pide permiso para lo que sólo lee y puede correrlo en paralelo
+/// (command-and-control-347). Se deduce del nombre, que en este catálogo lo
+/// dice siempre (`get_`, `list_`, `search`), y una prueba lo vigila:
+/// `get_attachment` no es lectura, porque escribe un fichero en la máquina.
+fn annotate(mut tools: Value) -> Value {
+    if let Some(list) = tools.as_array_mut() {
+        for t in list {
+            let name = t["name"].as_str().unwrap_or("").to_string();
+            t["annotations"] = json!({
+                "readOnlyHint": is_read_only(&name),
+                "destructiveHint": is_destructive(&name),
+                "openWorldHint": false,
+            });
+        }
+    }
+    tools
+}
+
+fn is_read_only(name: &str) -> bool {
+    name != "get_attachment"
+        && (name.starts_with("get_") || name.starts_with("list_") || name.starts_with("search") || name == "read_messages")
+}
+
+/// Lo que borra o reemplaza entero algo que otra persona pudo escribir.
+fn is_destructive(name: &str) -> bool {
+    name.starts_with("delete_") || matches!(name, "write_doc_tab" | "write_doc_page")
 }
 
 /// La sección del overview donde va lo que ya mordió a alguien. El nombre es
@@ -8232,6 +8267,68 @@ mod tests {
         seen.lock().unwrap().clear();
         assert!(call_tool(&cfg, "update_task", &json!({ "id": "t1", "listId": "App" })).is_err());
         assert!(!seen.lock().unwrap().iter().any(|(m, _, _)| m == "PATCH"), "con una lista que no existe no se toca la tarea");
+    }
+
+    /// Cerrar una tarea es handoff + estado + comentario, y se hace en una
+    /// llamada (command-and-control-347). Roturas que detecta: no mandar el
+    /// comentario; mandarlo antes de mover la tarea (diría hecho algo que
+    /// todavía no lo está); no admitir un comentario solo; tocar la tarea con
+    /// un PATCH vacío cuando sólo hay comentario.
+    #[test]
+    fn update_task_closes_with_a_comment_in_the_same_call() {
+        let (cfg, seen) = fake_cac(|_, _, _| json!({ "task": { "id": "t1" }, "status": { "name": "Done", "kind": "done" } }));
+        let out = call_tool(&cfg, "update_task", &json!({ "id": "t1", "handoff": "Hecho.", "status": "done", "comment": "Salió en v1.30.0." })).unwrap();
+        assert!(out["updated"].as_array().unwrap().iter().any(|v| v == "comment"), "{out}");
+        {
+            let seen = seen.lock().unwrap();
+            let at = |m: &str, p: &str| seen.iter().position(|(mm, pp, _)| mm == m && pp == p);
+            let comment = at("POST", "/api/v1/tasks/t1/comments").expect("no mandó el comentario");
+            assert_eq!(seen[comment].2["body"], "Salió en v1.30.0.");
+            assert!(comment > at("POST", "/api/v1/tasks/t1/move").expect("no movió"), "comenta antes de mover");
+        }
+        seen.lock().unwrap().clear();
+        call_tool(&cfg, "update_task", &json!({ "id": "t1", "comment": "sólo esto" })).expect("un comentario solo no basta");
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().any(|(m, p, _)| m == "POST" && p == "/api/v1/tasks/t1/comments"));
+        assert!(!seen.iter().any(|(m, _, _)| m == "PATCH"), "un comentario solo manda un PATCH");
+    }
+
+    /// Claude Code no pide permiso para lo que sólo lee y lo puede correr en
+    /// paralelo: cada herramienta dice qué le hace al mundo. Roturas que
+    /// detecta: herramientas sin `annotations`; una lectura marcada como
+    /// escritura o al revés; `get_attachment`, que escribe en disco, como
+    /// lectura; un borrado sin `destructiveHint`.
+    #[test]
+    fn every_tool_says_what_it_does_to_the_world() {
+        let tools = annotate(tool_defs());
+        let hint = |name: &str, key: &str| {
+            let t = tools.as_array().unwrap().iter().find(|t| t["name"] == name).unwrap_or_else(|| panic!("no está {name}"));
+            t["annotations"][key].as_bool().unwrap_or_else(|| panic!("{name} sin {key}"))
+        };
+        for t in tools.as_array().unwrap() {
+            assert!(t["annotations"]["readOnlyHint"].is_boolean(), "{} sin annotations", t["name"]);
+        }
+        for read in ["get_context", "search", "get_task", "list_incidents", "read_messages", "search_misses"] {
+            assert!(hint(read, "readOnlyHint"), "{read} no es lectura");
+        }
+        for write in ["update_task", "record_decision", "remember", "get_attachment", "compress_pdf", "install_hooks"] {
+            assert!(!hint(write, "readOnlyHint"), "{write} pasa por lectura");
+        }
+        assert!(hint("delete_doc_page", "destructiveHint"));
+        assert!(hint("write_doc_tab", "destructiveHint"));
+        assert!(!hint("record_decision", "destructiveHint"), "apuntar algo no borra nada");
+    }
+
+    /// Lo que devuelve una herramienta entra en el contexto del agente: sin
+    /// sangría, un 30 % menos. Y `remember` ya no anuncia `as: trap` (decisión
+    /// 678d8c48): lo que mordió va con record_incident.
+    #[test]
+    fn answers_are_compact_and_remember_has_no_trap() {
+        let out = tool_result(Ok(json!({ "a": 1, "b": [1, 2] })));
+        assert_eq!(out["content"][0]["text"], r#"{"a":1,"b":[1,2]}"#);
+        let defs = tool_defs();
+        let remember = defs.as_array().unwrap().iter().find(|t| t["name"] == "remember").unwrap();
+        assert!(remember["inputSchema"]["properties"].get("as").is_none(), "remember sigue anunciando as");
     }
 
     /// De punta a punta contra un cac falso. Roturas que detecta: no crear las
