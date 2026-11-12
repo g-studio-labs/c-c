@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -357,11 +358,85 @@ func TestTheMapShowsWhatBitOnEachNode(t *testing.T) {
 	if back == nil || back.Doc == nil || len(back.Doc.Incidents) != domain.ContextMaxIncidents {
 		t.Fatalf("el nodo no lleva sus incidentes recortados: %+v", back)
 	}
-	if back.Doc.Incidents[0].Servers[0].Name != "gstd" {
+	if back.Doc.Incidents[0].Servers[0] != "gstd" {
 		t.Errorf("el incidente del mapa no dice su servidor: %+v", back.Doc.Incidents[0])
 	}
 	if !slices.Contains(m.Truncated, "incidents") {
 		t.Errorf("no dice que recortó: %v", m.Truncated)
+	}
+}
+
+// En el mapa, un incidente lleva lo justo para decidir si se lee, sólo van los
+// abiertos, y los arreglados se cuentan (command-and-control-347). Hasta el
+// 11-nov-2026 iba entero —org, uuid de cada servidor, guardianes, URL de la
+// release—, arreglados incluidos, y era la mitad del mapa.
+//
+// Roturas que atrapa: listar los arreglados; no contarlos; volver a mandar el
+// resumen entero (org, guardianes, uuid del servidor); perder la release en
+// la que salió el arreglo de uno abierto.
+func TestAContextIncidentCarriesOnlyWhatTheMapNeeds(t *testing.T) {
+	db := incidentDB(t)
+	svc := incidentSvc(db)
+	open := record(t, svc, "l-back", domain.IncidentRequest{Title: "sigue mordiendo", Servers: []string{"gstd"},
+		Areas: []string{"k8s"}, Guards: []string{"ansible::tests::x"}})
+	for i := 0; i < 2; i++ {
+		old := record(t, svc, "l-back", domain.IncidentRequest{Title: fmt.Sprintf("ya arreglado %d", i)})
+		if _, err := svc.SetStatus(old.ID, domain.IncidentFixed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := NewContextService(db).MapWith("org-1", "sp-1", nil, domain.ContextOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc *domain.ContextDoc
+	for i := range m.Nodes {
+		if m.Nodes[i].ID == "l-back" {
+			doc = m.Nodes[i].Doc
+		}
+	}
+	if doc == nil || len(doc.Incidents) != 1 || doc.Incidents[0].ID != open.ID {
+		t.Fatalf("el mapa no lleva sólo el abierto: %+v", doc)
+	}
+	if doc.FixedIncidents != 2 {
+		t.Errorf("no cuenta los arreglados: %d", doc.FixedIncidents)
+	}
+	got, _ := json.Marshal(doc.Incidents[0])
+	for _, extra := range []string{"orgId", "guards", "recordedAt", "srv-gstd", "ownerKind"} {
+		if strings.Contains(string(got), extra) {
+			t.Errorf("el incidente del mapa lleva %q: %s", extra, got)
+		}
+	}
+	if !strings.Contains(string(got), `"servers":["gstd"]`) || !strings.Contains(string(got), `"areas":["k8s"]`) {
+		t.Errorf("el incidente del mapa no dice dónde mordió: %s", got)
+	}
+	shipped := domain.ContextIncidentOf(domain.IncidentSummary{ID: "x", Shipped: &domain.ReleaseRef{Tag: "v1.29.0", URL: "https://x"}})
+	if shipped.ShippedIn != "v1.29.0" {
+		t.Errorf("pierde la release en la que salió el arreglo: %+v", shipped)
+	}
+}
+
+// Lo que cambió también dice si recortó los incidentes: hasta el 11-nov-2026
+// se cortaban a 30 sin decirlo, y quien volvía a una feature creía que no
+// había más.
+//
+// Roturas que atrapa: no recortar; recortar sin apuntarlo en `truncated`.
+func TestTheChangesSayWhenTheyCutTheIncidents(t *testing.T) {
+	db := incidentDB(t)
+	svc := incidentSvc(db)
+	since := time.Now().Add(-time.Minute)
+	for i := 0; i < domain.ContextMaxInProgress+1; i++ {
+		record(t, svc, "l-back", domain.IncidentRequest{Title: fmt.Sprintf("tropiezo %d", i)})
+	}
+	m, err := NewContextService(db).MapWith("org-1", "sp-1", nil, domain.ContextOptions{Since: &since, Only: []string{"changes"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Changes == nil || len(m.Changes.Incidents) != domain.ContextMaxInProgress {
+		t.Fatalf("no recorta los incidentes de lo que cambió: %+v", m.Changes)
+	}
+	if !slices.Contains(m.Truncated, "changes.incidents") {
+		t.Errorf("recorta sin decirlo: %v", m.Truncated)
 	}
 }
 

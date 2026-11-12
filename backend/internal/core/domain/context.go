@@ -70,7 +70,7 @@ type ContextChanges struct {
 	Docs      []ContextChangedDoc      `json:"docs"`
 	RepoDocs  []ContextRepoDoc         `json:"repoDocs"`
 	// Incidents: los apuntados o tocados (estado, un commit nuevo) desde `Since`.
-	Incidents []IncidentSummary `json:"incidents"`
+	Incidents []ContextIncident `json:"incidents"`
 }
 
 // ContextChangedDecision: una decisión apuntada desde `Since`, con el nodo.
@@ -152,9 +152,42 @@ type ContextDoc struct {
 	Tabs       []ContextTab      `json:"tabs"`
 	Pages      []ContextPage     `json:"pages,omitempty"`
 	Decisions  []ContextDecision `json:"decisions,omitempty"`
-	// Incidents: lo que mordió aquí y sigue vigente, los abiertos primero
-	// (ver Incident). Sin cuerpo: se lee con `get_incident`.
-	Incidents []IncidentSummary `json:"incidents,omitempty"`
+	// Incidents: lo que mordió aquí y sigue abierto. Sin cuerpo: se lee con
+	// `get_incident`. Los arreglados no se listan, se cuentan en
+	// FixedIncidents: el agente los encuentra con `list_incidents` por
+	// servidor o área, que es cuando sirven (command-and-control-347).
+	Incidents      []ContextIncident `json:"incidents,omitempty"`
+	FixedIncidents int               `json:"fixedIncidents,omitempty"`
+}
+
+// ContextIncident: un incidente en el mapa, con lo justo para decidir si se
+// lee. Hasta el 11-nov-2026 iba el IncidentSummary entero —org, uuid de cada
+// servidor, guardianes, la URL de la release— y los de un nodo, arreglados
+// incluidos, eran la mitad del mapa de Command and control (~25 KB).
+type ContextIncident struct {
+	ID      string         `json:"id"`
+	Title   string         `json:"title"`
+	Status  IncidentStatus `json:"status"`
+	Servers []string       `json:"servers,omitempty"`
+	Areas   []string       `json:"areas,omitempty"`
+	// ShippedIn: la release en la que salieron todos sus commits. En uno
+	// abierto, «el arreglo ya está publicado: díselo a quien lo marca».
+	ShippedIn string `json:"shippedIn,omitempty"`
+}
+
+// ContextIncidentOf: el incidente del mapa, de su resumen.
+func ContextIncidentOf(s IncidentSummary) ContextIncident {
+	out := ContextIncident{ID: s.ID, Title: s.Title, Status: s.Status, Areas: s.Areas}
+	for _, sv := range s.Servers {
+		out.Servers = append(out.Servers, sv.Name)
+	}
+	if len(out.Areas) == 0 {
+		out.Areas = nil
+	}
+	if s.Shipped != nil {
+		out.ShippedIn = s.Shipped.Tag
+	}
+	return out
 }
 
 // ContextTab: una pestaña con contenido, su tamaño y sus títulos (hasta el

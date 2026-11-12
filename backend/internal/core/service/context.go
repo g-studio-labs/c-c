@@ -165,6 +165,10 @@ func (s *ContextService) MapWith(orgID, spaceID string, repo *domain.ContextRepo
 			changes.Tasks = changes.Tasks[:domain.ContextMaxInProgress]
 			out.Truncated = append(out.Truncated, "changes.tasks")
 		}
+		if len(changes.Incidents) > domain.ContextMaxInProgress {
+			changes.Incidents = changes.Incidents[:domain.ContextMaxInProgress]
+			out.Truncated = append(out.Truncated, "changes.incidents")
+		}
 		out.Changes = &changes
 	}
 	return out, nil
@@ -231,7 +235,7 @@ func (s *ContextService) decorateTasks(spaceKey string, tasks []domain.ContextTa
 // saber qué mirar sin abrir nada.
 func (s *ContextService) changes(orgID, spaceID, spaceKey string, since time.Time, nodes []domain.ContextNode, docs []repository.ContextDocRow) (domain.ContextChanges, error) {
 	out := domain.ContextChanges{Since: since, Tasks: []domain.ContextTask{}, Decisions: []domain.ContextChangedDecision{},
-		Docs: []domain.ContextChangedDoc{}, RepoDocs: []domain.ContextRepoDoc{}, Incidents: []domain.IncidentSummary{}}
+		Docs: []domain.ContextChangedDoc{}, RepoDocs: []domain.ContextRepoDoc{}, Incidents: []domain.ContextIncident{}}
 	tasks, err := s.repo.ChangedTasks(spaceID, since, domain.ContextMaxInProgress)
 	if err != nil {
 		return out, err
@@ -272,13 +276,13 @@ func (s *ContextService) changes(orgID, spaceID, spaceKey string, since time.Tim
 		})
 	}
 	// Un extra, como en el índice: si falla, los cambios salen sin ellos.
+	// Uno de más, para saber si hay que decir que se recortó (lo hace Map).
 	incidents, _ := s.inc.List(domain.IncidentFilter{
-		OrgIDs: []string{orgID}, SpaceID: spaceID, Since: &since, Limit: domain.ContextMaxInProgress,
+		OrgIDs: []string{orgID}, SpaceID: spaceID, Since: &since, Limit: domain.ContextMaxInProgress + 1,
 	})
-	if len(incidents) > domain.ContextMaxInProgress {
-		incidents = incidents[:domain.ContextMaxInProgress]
+	for _, inc := range incidents {
+		out.Incidents = append(out.Incidents, domain.ContextIncidentOf(inc))
 	}
-	out.Incidents = append(out.Incidents, incidents...)
 	repoDocs, err := s.repo.ChangedRepoDocs(orgID, spaceID, since)
 	if err != nil {
 		return out, err
@@ -355,10 +359,17 @@ func (s *ContextService) attachDocs(orgID string, out *domain.ContextMap, docs [
 	incidents, _ := s.inc.ForDocs(orgID, docIDs)
 	truncatedIncidents := false
 	for docID, list := range incidents {
-		if len(list) > domain.ContextMaxIncidents {
-			list, truncatedIncidents = list[:domain.ContextMaxIncidents], true
+		d := get(docID)
+		for _, inc := range list {
+			switch {
+			case inc.Status != domain.IncidentOpen:
+				d.FixedIncidents++
+			case len(d.Incidents) == domain.ContextMaxIncidents:
+				truncatedIncidents = true
+			default:
+				d.Incidents = append(d.Incidents, domain.ContextIncidentOf(inc))
+			}
 		}
-		get(docID).Incidents = list
 	}
 	if truncatedIncidents {
 		out.Truncated = append(out.Truncated, "incidents")
