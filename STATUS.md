@@ -13,6 +13,22 @@ tablero: **App** `ca0bfd49-0909-43eb-8135-bc8ecd0f282c` y **Backend**
 
 ## 🟢 Al día
 
+**12-nov, en `main`: Jira y fuentes externas en cac, parte 0**
+(command-and-control-352; diseño «Jira y fuentes externas en cac» en el
+espacio, decisión 0caaffbe: cac es la fuente, Jira y Notion son copias).
+- **Desplegado (backend):**
+  - la clave de un tracker de fuera (`PROTEUS-165`) lleva a la tarea de ese
+    ticket: `GET /tasks/by-ref/PROTEUS-165`, con la línea **Jira:** por
+    delante del título y de las citas; `proteus-165` sigue siendo la ref;
+  - el tablero y el detalle de una tarea llevan sus `keys`;
+  - una decisión copiada de fuera guarda `sourceUrl` y `sourceAuthor`, y la
+    misma fuente no entra dos veces.
+- **Espera release de la app:** `get_task PROTEUS-nnn` y `record_decision`
+  con `sourceUrl` desde el MCP.
+- **Falta:** las fuentes por espacio y el patrón de reglas (354), que
+  cac-work lea el ticket (355), la skill de puesta al día (356) y el registro
+  de reglas de TCG como página (357, lo aprueba jose).
+
 **11-nov, en `main`: cac como segundo cerebro, fases 0 y 1**
 (command-and-control-346; diseño «cac como segundo cerebro» en el espacio,
 decisión 7b3cc169).
