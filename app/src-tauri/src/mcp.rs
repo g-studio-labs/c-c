@@ -594,6 +594,17 @@ fn doc_target(cfg: &Cfg, args: &Value) -> Result<(String, String), String> {
     Ok((k, urlencode(&resolved)))
 }
 
+/// El espacio que nombra `space`: un id tal cual, o su nombre como lo enseña
+/// el mapa, resuelto en el navegador.
+fn space_target(cfg: &Cfg, args: &Value) -> Result<String, String> {
+    let wanted = arg_str(args, "space").ok_or("space is required: its id, or its name as the map shows it")?;
+    if is_uuid(&wanted) {
+        return Ok(wanted.trim().to_string());
+    }
+    let tree = api_get(cfg, "/api/v1/task-spaces/")?;
+    resolve_node(&tree, &wanted, Some("space")).map(|(_, id)| id)
+}
+
 /// La lista a la que mover una tarea: un id tal cual, o su ruta («Proteus ›
 /// Plataforma») o su nombre si es único, resueltos en el navegador como el
 /// `ownerId` de los documentos. Un id es un UUID; lo demás se busca, para que
@@ -2758,14 +2769,62 @@ fn tool_defs() -> Value {
         },
         {
             "name": "get_related",
-            "description": "Everything that touches one thing, in both directions, in one call: for a task, the decisions that apply to it, the incidents that came out of it, the pages, tabs, decisions, incidents and tasks whose text names it (by its ref or a link), what it blocks and what blocks it, its parent and subtasks; for a decision, what it applies to and what it supersedes; for an incident, its task, its servers and what it names; for a server, what bit on it; for a page, what it names and what names it. Each neighbour with `rel` (mentions, applies_to, origin, blocks, parent_of, supersedes, bit_on, relates_to), `dir` (out: this → it; in: it → this), kind, id, title, status and ref — no bodies: open the one you need. Use it before touching something to see what already hangs from it.",
+            "description": "Everything that touches one thing, in both directions, in one call: for a task, the decisions that apply to it, the incidents that came out of it, the pages, tabs, decisions, incidents and tasks whose text names it (by its ref or a link), what it blocks and what blocks it, its parent and subtasks; for a decision, what it applies to and what it supersedes; for an incident, its task, its servers and what it names; for a server, what bit on it; for a page, what it names and what names it; for a rule of the space's registry (`R-012`), the tasks, decisions and pages that cite it. Each neighbour with `rel` (mentions, applies_to, origin, blocks, parent_of, supersedes, bit_on, relates_to), `dir` (out: this → it; in: it → this), kind, id, title, status and ref — no bodies: open the one you need. Use it before touching something to see what already hangs from it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string", "description": "The thing: a task's ref (proteus-12) or id, or the id of a decision, incident, page, tab, section or server." },
-                    "kind": { "type": "string", "enum": ["task", "decision", "incident", "page", "tab", "section", "server"], "description": "Optional. Without it a ref is a task, and an id is looked up kind by kind." }
+                    "id": { "type": "string", "description": "The thing: a task's ref (proteus-12) or id, the id of a decision, incident, page, tab, section or server, or a rule as it is written (R-012)." },
+                    "kind": { "type": "string", "enum": ["task", "decision", "incident", "page", "tab", "section", "server", "rule"], "description": "Optional. Without it a ref is a task (and, in capitals, a rule if no task has it), and an id is looked up kind by kind." }
                 },
                 "required": ["id"]
+            }
+        },
+        {
+            "name": "get_space_sources",
+            "description": "The sources of a space: where what cac must bring in lives outside (the Jira board that is this space's `tracker`, the Notion pages where the client writes `decisions` and `open-questions`) and which cac page is its `rules` registry, with the pattern that names a rule (`R-\\d+`). Each with `lastSyncAt`: up to when it was already read, so a catch-up asks only for what is newer. With a rules registry set, a rule named in any text of the space (`R-012` in a task, a comment, a decision) is an edge to the section of the registry that IS that rule (`## R-012 · …`): get_related with the rule's name shows who cites it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "space": { "type": "string", "description": "The space: its id, or its name as the map shows it." }
+                },
+                "required": ["space"]
+            }
+        },
+        {
+            "name": "set_space_sources",
+            "description": "Save the sources of a space, or move the cursor of one. `sources` is the WHOLE list: what is not in it is removed; a source that was already there (same id, or same role, system and ref) keeps its `lastSyncAt`. Read get_space_sources first and send it back with your change. `synced` moves one source's cursor after a catch-up that finished: only then, so a run cut short reads the same span again. cac is the source of truth and what is outside is a copy: this only says where to read from. Needs `tasks:manage`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "space": { "type": "string", "description": "The space: its id, or its name as the map shows it." },
+                    "sources": {
+                        "type": "array",
+                        "description": "The whole list.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "Only for one that already exists, from get_space_sources." },
+                                "role": { "type": "string", "enum": ["tracker", "rules", "decisions", "open-questions"] },
+                                "system": { "type": "string", "enum": ["jira", "notion", "cac", "other"], "description": "`rules` is always cac: the registry is a cac page." },
+                                "ref": { "type": "string", "description": "How it is named there: the Jira project key (PROTEUS), the page's URL, or for `rules` the id of the cac page." },
+                                "pattern": { "type": "string", "description": "Only for `rules`: a regular expression matching a whole rule id, e.g. R-\\d+." },
+                                "note": { "type": "string" }
+                            },
+                            "required": ["role", "system", "ref"]
+                        }
+                    },
+                    "synced": {
+                        "type": "object",
+                        "description": "Move one source's cursor.",
+                        "properties": {
+                            "id": { "type": "string", "description": "The source's id." },
+                            "at": { "type": "string", "description": "RFC 3339, the moment the reading STARTED (what arrived during the run is read next time). Now when omitted; never in the future." }
+                        },
+                        "required": ["id"]
+                    },
+                    "dryRun": { "type": "boolean", "description": "Validate without writing." }
+                },
+                "required": ["space"]
             }
         },
         {
@@ -4250,6 +4309,47 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
             }
             let data = api_get(cfg, &format!("/api/v1/search/misses?{}", q.join("&")))?;
             Ok(json!({ "misses": data }))
+        }
+
+        "get_space_sources" => {
+            let space = space_target(cfg, args)?;
+            let data = api_get(cfg, &format!("/api/v1/task-spaces/{}/sources", urlencode(&space)))?;
+            Ok(json!({ "spaceId": space, "sources": data }))
+        }
+
+        "set_space_sources" => {
+            let space = space_target(cfg, args)?;
+            let path = format!("/api/v1/task-spaces/{}/sources", urlencode(&space));
+            let sources = args.get("sources").filter(|v| v.is_array());
+            let synced = args.get("synced").filter(|v| v.is_object());
+            if sources.is_none() && synced.is_none() {
+                return Err("Nothing to do: pass sources (the whole list) or synced ({ id, at })".into());
+            }
+            // Antes de escribir nada: una lista guardada con un cursor que
+            // luego falla dejaría la mitad hecha.
+            let synced_id = match synced {
+                Some(s) => Some(
+                    s.get("id").and_then(|v| v.as_str()).filter(|v| !v.is_empty())
+                        .ok_or("synced.id is required: the source's id, from get_space_sources")?,
+                ),
+                None => None,
+            };
+            if arg_bool(args, "dryRun") {
+                return dry_run(cfg, "tasks:manage", api_get(cfg, &path));
+            }
+            let mut out = Value::Null;
+            if let Some(list) = sources {
+                out = api_put(cfg, &path, json!({ "sources": list }))?;
+            }
+            if let (Some(s), Some(id)) = (synced, synced_id) {
+                let mut body = json!({});
+                if let Some(at) = s.get("at").and_then(|v| v.as_str()) {
+                    body["at"] = json!(at);
+                }
+                api_post(cfg, &format!("{path}/{}/synced", urlencode(id)), body)?;
+                out = api_get(cfg, &path)?;
+            }
+            Ok(json!({ "spaceId": space, "sources": out }))
         }
 
         "get_related" => {
@@ -6008,7 +6108,13 @@ fn related(cfg: &Cfg, id: &str, kind: Option<&str>) -> Result<Value, String> {
         return api_get(cfg, &path(k));
     }
     let looks_like_ref = id.rsplit_once('-').is_some_and(|(k, n)| !k.is_empty() && n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty());
-    let kinds: &[&str] = if looks_like_ref { &["task"] } else { GRAPH_KINDS };
+    // En mayúsculas puede ser una regla del registro del espacio (`R-012`):
+    // se prueba después de la tarea, que es lo que casi siempre es.
+    let kinds: &[&str] = match (looks_like_ref, id.chars().any(|c| c.is_ascii_uppercase())) {
+        (true, true) => &["task", "rule"],
+        (true, false) => &["task"],
+        _ => GRAPH_KINDS,
+    };
     for k in kinds {
         match api_get(cfg, &path(k)) {
             Err(e) if e.contains("404") => continue,
@@ -8656,6 +8762,71 @@ mod tests {
         // Un error que no es «no existe» no se toma por «prueba el siguiente».
         let err = call_tool(&cfg, "get_related", &json!({ "id": "caido" })).unwrap_err();
         assert!(err.contains("boom"), "se traga un 500: {err}");
+    }
+
+    /// Las fuentes de un espacio se leen y se guardan por su nombre, y una
+    /// regla se pide como se escribe (command-and-control-354). Roturas que
+    /// detecta: no resolver el espacio por su nombre; no mandar la lista
+    /// entera; mover el cursor sin que se pida, o no moverlo; escribir en un
+    /// ensayo; escribir la lista cuando el cursor viene sin id; no probar una
+    /// regla tras la tarea, o probarla con una ref en minúsculas.
+    #[test]
+    fn the_sources_of_a_space_and_a_rule_by_its_name() {
+        let (cfg, seen) = fake_cac(|method, path, _| {
+            if path == "/api/v1/task-spaces/" {
+                return json!([{ "id": "sp-tcg", "name": "TCG", "folders": [], "lists": [] }]);
+            }
+            if path == "/api/v1/task-spaces/sp-tcg/sources" && method == "GET" {
+                return json!([{ "id": "s1", "role": "tracker", "system": "jira", "ref": "PROTEUS" }]);
+            }
+            if path == "/api/v1/graph/rule/R-012" {
+                return json!({ "kind": "section", "id": "sec-1", "title": "R-012 · Los pagos", "neighbors": [] });
+            }
+            if path.starts_with("/api/v1/graph/") {
+                return json!({ "__status": 404, "error": "not-found" });
+            }
+            json!([])
+        });
+        let calls = |seen: &std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>| -> Vec<String> { seen.lock().unwrap().drain(..).map(|(m, p, _)| format!("{m} {p}")).collect() };
+
+        let got = call_tool(&cfg, "get_space_sources", &json!({ "space": "tcg" })).unwrap();
+        assert_eq!(got["spaceId"], "sp-tcg");
+        assert_eq!(got["sources"][0]["ref"], "PROTEUS");
+        calls(&seen);
+
+        let list = json!([{ "role": "rules", "system": "cac", "ref": "page-1", "pattern": "R-\\d+" }]);
+        call_tool(&cfg, "set_space_sources", &json!({ "space": "TCG", "sources": list })).unwrap();
+        {
+            let all = seen.lock().unwrap();
+            let put = all.iter().find(|(m, _, _)| m == "PUT").expect("no guardó la lista");
+            assert_eq!(put.1, "/api/v1/task-spaces/sp-tcg/sources");
+            assert_eq!(put.2["sources"], list);
+            assert!(!all.iter().any(|(m, _, _)| m == "POST"), "movió un cursor que nadie pidió");
+        }
+        calls(&seen);
+
+        call_tool(&cfg, "set_space_sources", &json!({ "space": "TCG", "synced": { "id": "s1", "at": "2026-11-12T10:00:00Z" } })).unwrap();
+        {
+            let all = seen.lock().unwrap();
+            let post = all.iter().find(|(m, _, _)| m == "POST").expect("no movió el cursor");
+            assert_eq!(post.1, "/api/v1/task-spaces/sp-tcg/sources/s1/synced");
+            assert_eq!(post.2["at"], "2026-11-12T10:00:00Z");
+            assert!(!all.iter().any(|(m, _, _)| m == "PUT"), "reescribió la lista al mover un cursor");
+        }
+        calls(&seen);
+
+        call_tool(&cfg, "set_space_sources", &json!({ "space": "TCG", "sources": list, "dryRun": true })).unwrap();
+        assert!(calls(&seen).iter().all(|c| c.starts_with("GET ")), "un ensayo escribió");
+        call_tool(&cfg, "set_space_sources", &json!({ "space": "TCG", "sources": list, "synced": {} })).unwrap_err();
+        assert!(calls(&seen).iter().all(|c| c.starts_with("GET ")), "guardó la lista con un cursor sin id");
+        call_tool(&cfg, "set_space_sources", &json!({ "space": "TCG" })).unwrap_err();
+        calls(&seen);
+
+        let rule = call_tool(&cfg, "get_related", &json!({ "id": "R-012" })).unwrap();
+        assert_eq!(rule["id"], "sec-1");
+        assert_eq!(calls(&seen), ["GET /api/v1/graph/task/R-012", "GET /api/v1/graph/rule/R-012"]);
+        call_tool(&cfg, "get_related", &json!({ "id": "proteus-12" })).unwrap_err();
+        assert_eq!(calls(&seen), ["GET /api/v1/graph/task/proteus-12"], "una ref en minúsculas no es una regla");
     }
 
     /// cac cuenta llamadas, no peticiones, y cruza lo que enseñan los hooks
