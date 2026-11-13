@@ -30,9 +30,13 @@ describe("el vencimiento en palabras", () => {
     expect(cuando(dias(-1)).texto).toBe("yesterday");
   });
 
-  it("hoy ya cuenta como vencida: es la fecha que cambia lo que haces ahora", () => {
-    expect(cuando(dias(0)).vencida).toBe(true);
+  // jose, 13-nov-2026: lo que vence hoy todavía no está vencido; va en ámbar.
+  it("hoy todavía no está vencida: vence hoy; ayer y antes, sí", () => {
+    expect(cuando(dias(0)).vencida).toBe(false);
+    expect(cuando(dias(0)).hoy).toBe(true);
+    expect(cuando(dias(-1)).vencida).toBe(true);
     expect(cuando(dias(-3)).vencida).toBe(true);
+    expect(cuando(dias(-1)).hoy).toBe(false);
   });
 
   it("mañana todavía no", () => {
@@ -41,11 +45,12 @@ describe("el vencimiento en palabras", () => {
   });
 
   /** Mañana va en ámbar: no vence, pero es la siguiente que lo hará. */
-  it("mañana es pronto, en ámbar; hoy y antes, en rojo; lo demás, apagado", () => {
+  it("hoy y mañana, en ámbar (hoy con peso); antes, en rojo; lo demás, apagado", () => {
     expect(cuando(dias(1)).pronto).toBe(true);
     expect(cuando(dias(0)).pronto).toBe(false);
     expect(cuando(dias(2)).pronto).toBe(false);
-    expect(dueClass(cuando(dias(1)))).toContain("text-warning");
+    expect(dueClass(cuando(dias(0)))).toBe("font-medium text-warning");
+    expect(dueClass(cuando(dias(1)))).toBe("text-warning");
     expect(dueClass(cuando(dias(-2)))).toContain("text-error");
     expect(dueClass(cuando(dias(5)))).toBe("text-muted-foreground");
   });

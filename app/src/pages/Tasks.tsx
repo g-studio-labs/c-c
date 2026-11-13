@@ -2,7 +2,7 @@ import { showListInMyWork } from "@/lib/list-in-my-work";
 import { BoardSkeleton } from "@/components/ui/skeletons";
 import TagChip from "@/components/tasks/TagChip";
 import PriorityChip from "@/components/tasks/PriorityChip";
-import { cuando, dueClass } from "@/components/tasks/TaskCardMini";
+import { cuando, dueClass, dueTitle } from "@/components/tasks/TaskCardMini";
 import { fecha } from "@/lib/fechas";
 import { enterOrg } from "@/lib/ir-en-org";
 import { dueDay } from "@/lib/month";
@@ -552,7 +552,7 @@ function TaskCardView({
           </span>
         )}
         <PriorityChip priority={card.priority} />
-        {due.texto && <span className={cn("shrink-0", dueClass(due))}>{due.texto}</span>}
+        {due.texto && <span className={cn("shrink-0", dueClass(due))} title={dueTitle()}>{due.texto}</span>}
         <span className="ml-auto">#{card.seq}</span>
         {card.assignees.length > 0 && (
           <span className="flex items-center gap-0.5">

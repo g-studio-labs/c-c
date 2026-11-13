@@ -2,6 +2,7 @@ import PriorityChip from "@/components/tasks/PriorityChip";
 import { diaYMes } from "@/lib/fechas";
 import i18next from "@/lib/i18n";
 import { dueDay } from "@/lib/month";
+import { orgZone, todayIn, zoneHint } from "@/lib/due";
 import type { OpenTask } from "@/types/task";
 import { cn } from "@/lib/utils";
 import Initials from "@/components/ui/initials";
@@ -19,25 +20,46 @@ import Initials from "@/components/ui/initials";
  * Today, yesterday, or a short date. Overdue is the caller's to colour —
  * `dueClass` does it the same way everywhere.
  *
- * `pronto` es mañana: todavía no vence, pero es lo siguiente que va a vencer,
- * y en ámbar se ve antes de que sea rojo.
+ * `hoy` vence hoy: todavía no está vencida —el día no ha acabado—, así que va
+ * en ámbar y con peso, no en rojo (jose, 13-nov-2026; hasta entonces hoy ya
+ * contaba como vencida aquí y no en el calendario). `pronto` es mañana, en
+ * ámbar sin peso.
+ *
+ * «Hoy» es el de la zona de la organización, no el de quien mira: ver
+ * `lib/due.ts`.
  */
-export function cuando(iso?: string | null): { texto: string; vencida: boolean; pronto: boolean } {
-  const d = dueDay(iso);
-  if (!d) return { texto: "", vencida: false, pronto: false };
-  const hoy = new Date();
-  const dia = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-  const dias = Math.round((dia(d) - dia(hoy)) / 86_400_000);
-  if (dias === 0) return { texto: i18next.t("work:due.today"), vencida: true, pronto: false };
-  if (dias === -1) return { texto: i18next.t("work:due.yesterday"), vencida: true, pronto: false };
-  if (dias < -1) return { texto: diaYMes(d), vencida: true, pronto: false };
-  if (dias === 1) return { texto: i18next.t("work:due.tomorrow"), vencida: false, pronto: true };
-  return { texto: diaYMes(d), vencida: false, pronto: false };
+export interface DueState {
+  texto: string;
+  vencida: boolean;
+  hoy: boolean;
+  pronto: boolean;
 }
 
-/** El color de un vencimiento: rojo si ya toca, ámbar si es mañana. */
-export function dueClass(v: { vencida: boolean; pronto: boolean }): string {
-  return v.vencida ? "font-medium text-error" : v.pronto ? "text-warning" : "text-muted-foreground";
+export function cuando(iso?: string | null, zone: string | undefined = orgZone(), now: Date = new Date()): DueState {
+  const none = { texto: "", vencida: false, hoy: false, pronto: false };
+  const d = dueDay(iso);
+  if (!d) return none;
+  const dias = Math.round((d.getTime() - todayIn(zone, now).getTime()) / 86_400_000);
+  if (dias === 0) return { ...none, texto: i18next.t("work:due.today"), hoy: true };
+  if (dias === -1) return { ...none, texto: i18next.t("work:due.yesterday"), vencida: true };
+  if (dias < -1) return { ...none, texto: diaYMes(d), vencida: true };
+  if (dias === 1) return { ...none, texto: i18next.t("work:due.tomorrow"), pronto: true };
+  return { ...none, texto: diaYMes(d) };
+}
+
+/** El color de un vencimiento: rojo si ya pasó, ámbar si es hoy o mañana. */
+export function dueClass(v: Pick<DueState, "vencida" | "pronto"> & { hoy?: boolean }): string {
+  if (v.vencida) return "font-medium text-error";
+  if (v.hoy) return "font-medium text-warning";
+  return v.pronto ? "text-warning" : "text-muted-foreground";
+}
+
+/**
+ * Lo que sale al pasar el cursor por un vencimiento, para quien no está en la
+ * hora de la organización: en una tarjeta no cabe escrito.
+ */
+export function dueTitle(): string | undefined {
+  return zoneHint() || undefined;
 }
 
 /**
@@ -71,7 +93,7 @@ export default function TaskCardMini({ task, onOpen }: { task: OpenTask; onOpen:
             {task.subtasksDone}/{task.subtasksTotal}
           </span>
         )}
-        <span className={cn("shrink-0", dueClass(vence))}>
+        <span className={cn("shrink-0", dueClass(vence))} title={dueTitle()}>
           {vence.texto || "—"}
         </span>
         {task.assignee && (

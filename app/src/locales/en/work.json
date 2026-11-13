@@ -544,7 +544,8 @@
   "due": {
     "today": "today",
     "yesterday": "yesterday",
-    "tomorrow": "tomorrow"
+    "tomorrow": "tomorrow",
+    "zone": "{{city}} time"
   },
   "incidents": {
     "title": "What already bit here",

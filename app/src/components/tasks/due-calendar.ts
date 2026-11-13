@@ -1,6 +1,7 @@
 import type { CalendarEntry, CalendarItem, CalendarMeta } from "@/components/ItemCalendar";
 import { priorityTone } from "@/components/calendar/tones";
 import { toISODate, dueDay } from "@/lib/month";
+import { orgZone, todayIn } from "@/lib/due";
 import { iniciales } from "@/lib/desde";
 import { statusTone } from "@/lib/status-color";
 import { normalizeStatus } from "@/types/report";
@@ -30,10 +31,8 @@ function metaOf(t: Dated, today: Date): CalendarMeta {
   };
 }
 
-const startOfToday = () => {
-  const n = new Date();
-  return new Date(n.getFullYear(), n.getMonth(), n.getDate());
-};
+// Hoy, en la zona de la organización (ver `lib/due.ts`).
+const startOfToday = () => todayIn(orgZone());
 
 /** Una tarea como elemento del calendario, sin día: lo que va al carril. */
 export function taskEntry(t: Dated, today = startOfToday()): CalendarEntry {

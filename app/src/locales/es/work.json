@@ -544,7 +544,8 @@
   "due": {
     "today": "hoy",
     "yesterday": "ayer",
-    "tomorrow": "mañana"
+    "tomorrow": "mañana",
+    "zone": "hora de {{city}}"
   },
   "incidents": {
     "title": "Lo que ya mordió aquí",

@@ -57,6 +57,7 @@ import CopyId from "@/components/CopyId";
 import TelemetryTimeline from "@/components/TelemetryTimeline";
 import { commentByline } from "@/lib/byline";
 import { isAgentNote, splitThread } from "@/lib/thread";
+import { zoneHint } from "@/lib/due";
 import TabIndicator from "@/components/ui/tab-indicator";
 import { useSlidingIndicator } from "@/lib/use-sliding-indicator";
 import TaskGitPanel from "@/components/TaskGitPanel";
@@ -1286,6 +1287,13 @@ function Content() {
               }
               className="text-xs"
             />
+            {/* A quién está en otra hora que la organización se le dice de
+                quién es el día: aquí sí cabe escrito. */}
+            {zoneHint() && (
+              <span data-testid="due-zone" className="mt-1 block text-[11px] text-muted-foreground">
+                ({zoneHint()})
+              </span>
+            )}
           </div>
         </div>
 

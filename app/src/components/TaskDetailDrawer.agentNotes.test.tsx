@@ -118,3 +118,17 @@ describe("las notas de agentes en el hilo de una tarea", () => {
     expect(screen.queryByText(/jose's agent|agente de jose/i)).toBeNull();
   });
 });
+
+// jose, 13-nov-2026: «hoy» es el de la organización, y a quien está en otra
+// hora se le dice de quién es el día junto a la fecha de la tarea.
+describe("la zona del vencimiento en el detalle", () => {
+  it("sale entre paréntesis sólo para quien está en otra hora", () => {
+    useOrgsStore.setState({ currentOrgId: "o-1", orgs: [{ id: "o-1", name: "Uno", timezone: "Asia/Kathmandu" }] as never });
+    montar([]);
+    expect(screen.getByTestId("due-zone").textContent).toMatch(/^\(.*Kathmandu.*\)$/);
+    cleanup();
+    useOrgsStore.setState({ currentOrgId: "o-1", orgs: [{ id: "o-1", name: "Uno" }] as never });
+    montar([]);
+    expect(screen.queryByTestId("due-zone")).toBeNull();
+  });
+});
