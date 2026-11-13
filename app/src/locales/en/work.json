@@ -39,6 +39,7 @@
     "clientSeesSpace": "A client can see this space",
     "clientSeesList": "A client can see this list",
     "openOverview": "Open overview",
+    "openTasks": "Show its tasks",
     "spaceMenu": "Space menu",
     "folderMenu": "Folder menu",
     "listMenu": "List menu",

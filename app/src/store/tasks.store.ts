@@ -86,6 +86,12 @@ interface TasksState {
    * llega a enseñar. Quien sí va al tablero pasa por `selectList`.
    */
   focusList: (listId: string) => void;
+  /**
+   * Se pasa a mirar un espacio entero: ni lista activa ni documento abierto.
+   * Con la lista anterior puesta, el árbol seguiría resaltándola al lado del
+   * espacio que se acaba de pulsar.
+   */
+  focusSpace: () => void;
   selectList: (listId: string) => Promise<void>;
   refreshBoard: () => Promise<void>;
 
@@ -422,6 +428,8 @@ export const useTasksStore = create<TasksState>()(
       // Picking a list means "show me the board" — leave any open document.
       focusList: (listId) =>
         set({ activeListId: listId, board: null, activeDoc: null, doc: null }),
+
+      focusSpace: () => set({ activeListId: null, board: null, activeDoc: null, doc: null }),
 
       selectList: async (listId) => {
         get().focusList(listId);

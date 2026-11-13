@@ -447,6 +447,20 @@ function SpaceNode({ space }: { space: ReturnType<typeof useTasksStore.getState>
   const activeDoc = useTasksStore((s) => s.activeDoc);
   const docIndex = useTasksStore((s) => s.docIndex);
   const confirm = useConfirm();
+  const currentOrgId = useOrgsStore((s) => s.currentOrgId);
+  const docsScreen = docsRoute(activeDoc, currentOrgId, pathname);
+  const focusSpace = useTasksStore((s) => s.focusSpace);
+  const setScope = useMyWorkStore((s) => s.setScope);
+  // El espacio marcado: el que acota «Mi trabajo», mientras se mira esa pantalla.
+  const scoped = useMyWorkStore(
+    (s) => pathname === "/my-work" && s.scope?.kind === "space" && s.scope.id === space.id,
+  );
+  const openSpaceDoc = () => {
+    void openDoc("space", space.id, space.name).catch(() => {});
+    // Abrir un documento sólo cambia el estado: sin ir a una pantalla que lo
+    // pinta no pasa nada. En la de Documentación (`/docs`), se queda en ella.
+    navigate(pathname.startsWith("/docs") ? "/docs" : "/tasks");
+  };
   const { createFolder, createList, renameSpace, setSpaceColor, setSpaceKey, deleteSpace, moveSpace, sortChildren } =
     useTasksStore.getState();
   const prompt = usePrompt();
@@ -516,15 +530,22 @@ function SpaceNode({ space }: { space: ReturnType<typeof useTasksStore.getState>
         <button
           className={cn(
             "flex-1 truncate text-left text-sm font-medium hover:underline",
-            activeDoc?.kind === "space" && activeDoc.id === space.id && "text-primary",
+            (docsScreen ? activeDoc?.kind === "space" && activeDoc.id === space.id : scoped) && "text-primary",
           )}
-          title={t("work:tree.openOverview")}
+          title={docsScreen ? t("work:tree.openOverview") : t("work:tree.openTasks")}
           onClick={() => {
-            void openDoc("space", space.id, space.name).catch(() => {});
-            // Sin esto no pasaba nada salvo que ya estuvieras en una pantalla
-            // que pinta un documento. En la de Documentación (`/docs`), se
-            // queda en ella.
-            navigate(pathname.startsWith("/docs") ? "/docs" : "/tasks");
+            // Como una lista: acota «Mi trabajo» al espacio entero. Hasta el
+            // 13-nov-2026 abría su documentación, y en el escritorio no había
+            // forma de ver las tareas de un espacio (jose). Quien está leyendo
+            // documentación se queda en ella (ver `docsRoute`); para los
+            // demás, está en el menú de la fila.
+            if (docsScreen) {
+              openSpaceDoc();
+              return;
+            }
+            focusSpace();
+            setScope({ kind: "space", id: space.id, name: space.name });
+            navigate("/my-work");
           }}
         >
           {space.name}
@@ -542,6 +563,9 @@ function SpaceNode({ space }: { space: ReturnType<typeof useTasksStore.getState>
           />
           <DropdownMenuContent align="start">
             <DropdownMenuGroup>
+              <DropdownMenuItem onClick={openSpaceDoc}>
+                <FileText className="size-4" /> {t("work:tree.openDocs")}
+              </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={async () => {
                   startAdding("folder");
