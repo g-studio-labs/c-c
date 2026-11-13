@@ -13,13 +13,23 @@ tablero: **App** `ca0bfd49-0909-43eb-8135-bc8ecd0f282c` y **Backend**
 
 ## 🟢 Al día
 
+**13-nov, en `main`: un vencimiento se mide con el día de la organización**
+(command-and-control-363). «Hoy» es el de la zona de la organización (sin
+zona, el reloj de quien mira); lo que vence hoy va en ámbar y rojo desde
+ayer, igual en tarjetas, lista, «Mi trabajo» y calendario; a quien está en
+otra hora se le dice de quién es el día (escrito en el detalle, al pasar el
+cursor en tarjetas y filas).
+- **Espera release de la app** y la revisión visual de jose.
+- **Falta:** poner la zona en Dwit México, G Studio y Nuke AI (hoy vacía en
+  las tres: hasta entonces nada cambia salvo el ámbar de «hoy»).
+
 **13-nov, en `main`: las notas de agentes no las lee el cliente y van aparte**
 (command-and-control-359, decisión 2c342250; salió de Portento, donde el
 cliente ve el tablero: 252 comentarios a su vista, ninguno interno).
 - **Desplegado (backend):** un comentario que entra con un token es interno
   si no dice nada y queda marcado `via: mcp`. Vale con cualquier versión del
   MCP. Comprobado en producción.
-- **Espera release de la app:** la pestaña «Notas de agentes» del hilo de una
+- **Publicado en la v1.32.0:** la pestaña «Notas de agentes» del hilo de una
   tarea, con de quién es el agente (falta la revisión visual de jose), y
   `visibility: public` en `add_task_comment` / `commentVisibility` en
   `update_task` para hablarle al cliente a propósito.
