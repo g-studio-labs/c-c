@@ -199,8 +199,11 @@ func TestTheSourcesOfASpaceKeepTheirCursor(t *testing.T) {
 
 	jira := domain.SpaceSourceInput{Role: domain.SourceTracker, System: domain.SystemJira, Ref: " PROTEUS ", Pattern: `R-\d+`}
 	notion := domain.SpaceSourceInput{Role: domain.SourceDecisions, System: domain.SystemNotion, Ref: "https://notion.so/decisiones"}
-	got, err := svc.Replace(sp1, domain.SpaceSourcesRequest{Sources: []domain.SpaceSourceInput{jira, notion}})
-	if err != nil || len(got) != 2 {
+	// La copia del registro que lee el cliente vive fuera: no es el registro,
+	// así que ni tiene que estar en cac ni lleva patrón.
+	copia := domain.SpaceSourceInput{Role: domain.SourceRulesCopy, System: domain.SystemNotion, Ref: "https://notion.so/reglas"}
+	got, err := svc.Replace(sp1, domain.SpaceSourcesRequest{Sources: []domain.SpaceSourceInput{jira, notion, copia}})
+	if err != nil || len(got) != 3 || got[2].Role != domain.SourceRulesCopy {
 		t.Fatalf("guardar: %+v %v", got, err)
 	}
 	if got[0].Ref != "PROTEUS" || got[0].Pattern != "" || got[1].Role != domain.SourceDecisions || got[0].LastSyncAt != nil {

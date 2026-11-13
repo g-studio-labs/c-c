@@ -40,7 +40,7 @@ var sourceErrors = map[error]struct {
 	status int
 	msg    string
 }{
-	domain.ErrSourceRole:       {http.StatusBadRequest, "A source's role is one of: tracker, rules, decisions, open-questions"},
+	domain.ErrSourceRole:       {http.StatusBadRequest, "A source's role is one of: tracker, rules, rules-copy, decisions, open-questions"},
 	domain.ErrSourceSystem:     {http.StatusBadRequest, "A source's system is one of: jira, notion, cac, other"},
 	domain.ErrSourceRef:        {http.StatusBadRequest, "A source needs a ref: the Jira project key, the page URL, or the id of the cac page"},
 	domain.ErrSourcePattern:    {http.StatusBadRequest, "A rules source needs a pattern: a regular expression of at most 40 characters that matches a whole rule id, such as R-\\d+"},

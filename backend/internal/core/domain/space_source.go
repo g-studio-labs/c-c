@@ -31,13 +31,16 @@ const (
 	SourceTracker SourceRole = "tracker"
 	// SourceRules: el registro de reglas, una página de cac.
 	SourceRules SourceRole = "rules"
+	// SourceRulesCopy: la copia del registro que lee quien no usa cac (una
+	// página de Notion). Se regenera desde cac; no es de donde se lee.
+	SourceRulesCopy SourceRole = "rules-copy"
 	// SourceDecisions: donde el cliente apunta lo que se resolvió.
 	SourceDecisions SourceRole = "decisions"
 	// SourceOpenQuestions: lo que está por definir.
 	SourceOpenQuestions SourceRole = "open-questions"
 )
 
-var SourceRoles = []SourceRole{SourceTracker, SourceRules, SourceDecisions, SourceOpenQuestions}
+var SourceRoles = []SourceRole{SourceTracker, SourceRules, SourceRulesCopy, SourceDecisions, SourceOpenQuestions}
 
 // SourceSystem: dónde vive.
 type SourceSystem string
