@@ -387,6 +387,11 @@ var patWritable = []struct {
 	// only be changed by editing the database.
 	{http.MethodPatch, regexp.MustCompile(`^/api/v1/task-lists/[^/]+$`), domain.ScopeTasksManage},
 	{http.MethodPatch, regexp.MustCompile(`^/api/v1/task-spaces/[^/]+$`), domain.ScopeTasksManage},
+	// Las fuentes del espacio: qué tablero de fuera es el suyo, cuál es su
+	// registro de reglas y hasta cuándo se leyó cada una. Manage: cambia lo que
+	// los textos del espacio enlazan y qué relee la puesta al día.
+	{http.MethodPut, regexp.MustCompile(`^/api/v1/task-spaces/[^/]+/sources/?$`), domain.ScopeTasksManage},
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/task-spaces/[^/]+/sources/[^/]+/synced$`), domain.ScopeTasksManage},
 	{http.MethodPatch, regexp.MustCompile(`^/api/v1/tasks/[^/]+$`), domain.ScopeTasksManage},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/tasks/[^/]+/move/?$`), domain.ScopeTasksManage},
 	// Reclamar mueve la tarea y añade responsable: cambia, no añade. Faltó al

@@ -45,7 +45,8 @@ func ValidEntityKind(k string) bool {
 type Relation string
 
 const (
-	// RelMentions: el texto del origen nombra al destino (una ref, un enlace).
+	// RelMentions: el texto del origen nombra al destino (una ref, un enlace,
+	// o la regla del registro de su espacio).
 	// Se recalcula en cada escritura del origen (`LinkSourceText`).
 	RelMentions Relation = "mentions"
 	// RelRelatesTo: alguien dijo que van juntas, sin más.
@@ -68,7 +69,8 @@ const (
 // RelationEnds: qué une cada relación (origen → destinos). Cerrado: una arista
 // que no está aquí no se guarda ni se enseña.
 var RelationEnds = map[Relation]struct{ From, To []EntityKind }{
-	RelMentions:   {From: []EntityKind{EntityTask, EntityPage, EntityTab, EntityDecision, EntityIncident}, To: []EntityKind{EntityTask, EntityPage, EntityDecision, EntityIncident}},
+	// Una sección se nombra por su regla (`R-012`): ver space_source.go.
+	RelMentions:   {From: []EntityKind{EntityTask, EntityPage, EntityTab, EntityDecision, EntityIncident}, To: []EntityKind{EntityTask, EntityPage, EntityDecision, EntityIncident, EntitySection}},
 	RelRelatesTo:  {From: EntityKinds, To: EntityKinds},
 	RelAppliesTo:  {From: []EntityKind{EntityDecision}, To: []EntityKind{EntityTask, EntitySection, EntityIncident, EntityServer}},
 	RelOrigin:     {From: []EntityKind{EntityIncident}, To: []EntityKind{EntityTask}},

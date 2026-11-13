@@ -67,6 +67,7 @@ func InitTaskRoutes(db *gorm.DB, r *chi.Mux, hub *events.Hub, calls *service.Cal
 	// documento, y las tarjetas lo necesitan para `/decision`.
 	docSvc := service.NewDocService(repository.NewDocRepository(db)).WithNotifier(inbox)
 	h := handler.NewTaskHandler(svc, channels, chat, dms, taskRepo, images, store, voice, docSvc)
+	sources := handler.NewSpaceSourceHandler(service.NewSpaceSourceService(repository.NewSpaceSourceRepository(db)), taskRepo)
 
 	// The navigator: spaces → folders → lists.
 	r.Route("/api/v1/task-spaces", func(r chi.Router) {
@@ -82,6 +83,11 @@ func InitTaskRoutes(db *gorm.DB, r *chi.Mux, hub *events.Hub, calls *service.Cal
 		r.Post("/{id}/lists", h.CreateList)
 		r.Post("/{id}/move", h.MoveSpace)
 		r.Post("/{id}/sort", h.SortSpace)
+		// Las fuentes del espacio: lo de fuera que hay que traer y su registro
+		// de reglas (command-and-control-354).
+		r.Get("/{id}/sources", sources.List)
+		r.Put("/{id}/sources", sources.Replace)
+		r.Post("/{id}/sources/{sourceId}/synced", sources.Synced)
 		// The channel into this space: the credential work arrives with, and the
 		// rules it arrives under.
 		r.Get("/{id}/channel", h.GetChannel)

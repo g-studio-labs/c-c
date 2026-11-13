@@ -34,6 +34,9 @@ func TestEachEndpointAsksForTheRightScope(t *testing.T) {
 		// reaching a tenant nobody here works with.
 		{http.MethodPatch, "/api/v1/task-lists/abc", domain.ScopeTasksManage},
 		{http.MethodPatch, "/api/v1/task-spaces/abc", domain.ScopeTasksManage},
+		// Las fuentes del espacio y su cursor (MCP set_space_sources).
+		{http.MethodPut, "/api/v1/task-spaces/abc/sources", domain.ScopeTasksManage},
+		{http.MethodPost, "/api/v1/task-spaces/abc/sources/xyz/synced", domain.ScopeTasksManage},
 		{http.MethodPost, "/api/v1/tasks/abc/move", domain.ScopeTasksManage},
 		// Reclamar: se pide desde el MCP (update_task claim) con un token.
 		{http.MethodPost, "/api/v1/tasks/abc/claim", domain.ScopeTasksManage},

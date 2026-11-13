@@ -18,8 +18,9 @@ type GraphRepository struct{ db *gorm.DB }
 func NewGraphRepository(db *gorm.DB) *GraphRepository { return &GraphRepository{db: db} }
 
 // SyncTextLinks deja en `links` lo que el texto de una cosa nombra —las refs de
-// tareas (`proteus-12`) y los enlaces de la app a una tarea, página, decisión o
-// incidente— y quita lo que ya no nombra. Se llama en cada escritura del
+// tareas (`proteus-12`), los enlaces de la app a una tarea, página, decisión o
+// incidente, y las reglas del registro de su espacio— y quita lo que ya no
+// nombra. Se llama en cada escritura del
 // texto: así «quién nombra esta tarea» es una consulta por índice y no un
 // LIKE sobre todos los documentos.
 //
@@ -41,6 +42,11 @@ func (r *GraphRepository) SyncTextLinks(orgID string, fromKind domain.EntityKind
 		if r.inOrg(orgID, e.Kind, e.ID) {
 			targets[e] = true
 		}
+	}
+	// Las reglas del registro de su espacio (`R-012`): cada una lleva a su
+	// sección. El patrón es del espacio; sin registro, no hay nada que buscar.
+	for _, sec := range ruleSections(r.db, r.SpaceOf(fromKind, fromID), fromKind, fromID, text) {
+		targets[domain.EntityRef{Kind: domain.EntitySection, ID: sec}] = true
 	}
 	delete(targets, domain.EntityRef{Kind: fromKind, ID: fromID})
 	err := r.db.Transaction(func(tx *gorm.DB) error {

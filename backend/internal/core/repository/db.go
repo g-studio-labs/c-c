@@ -177,6 +177,8 @@ func DBConnection() {
 		&domain.TaskGitLink{},
 		// Las releases y sus commits: «¿esto ya salió?» (ver domain/release.go).
 		&domain.Release{}, &domain.ReleaseCommit{},
+		// Las fuentes de cada espacio (ver domain/space_source.go).
+		&domain.SpaceSource{},
 	); err != nil {
 		panic("failed to run migrations: " + err.Error())
 	}

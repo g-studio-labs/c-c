@@ -98,6 +98,8 @@ func (r *DocRepository) SavePageRenaming(p *domain.DocPage, title, body *string,
 	err := r.savePageRenamingRaw(p, title, body, userID, renames)
 	if err == nil {
 		syncText(r.db, domain.EntityPage, p.ID)
+		// Si es el registro de reglas de un espacio, sus secciones cambiaron.
+		resyncRulesOfPage(r.db, p.ID)
 	}
 	return err
 }
@@ -106,6 +108,7 @@ func (r *DocRepository) AppendPage(pageID, texto, userID string) error {
 	err := r.appendPageRaw(pageID, texto, userID)
 	if err == nil {
 		syncText(r.db, domain.EntityPage, pageID)
+		resyncRulesOfPage(r.db, pageID)
 	}
 	return err
 }

@@ -238,6 +238,7 @@
   "context-bad-options": "Las opciones del mapa no valen: since es una fecha RFC 3339 y only acepta tree, docs, repoDocs, inProgress o changes.",
   "no-task-names-key": "Ninguna tarea nombra esa clave de fuera en su título o su descripción.",
   "several-tasks-name-key": "Varias tareas nombran esa clave: abre la que buscas por su referencia.",
+  "several-rules": "Más de un registro de reglas tiene esa regla: ábrela por su sección.",
   "bad-task-ref": "Una referencia es la clave del espacio y el número (proteus-12) o el folio de un cliente (acme-7); cac#12 es un número sin espacio.",
   "task-status-changed": "La tarea ya no está en el estado que esperabas: vuelve a leerla antes de cambiarla.",
   "task-claimed-by-other": "La tarea ya está en curso con otra persona: comenta en ella en vez de tomarla.",
