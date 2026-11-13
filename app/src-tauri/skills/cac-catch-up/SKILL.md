@@ -48,6 +48,14 @@ siete días, y díselo al usuario. Nunca el proyecto entero.
   uno: estado, a quién está asignado, y sus comentarios posteriores al
   cursor. Su tarea de cac, con `get_task` y la clave (`PROTEUS-165`): si no
   hay ninguna, o contesta varias, se apunta así.
+  - Pide los comentarios **en la misma búsqueda** (`fields`: `summary`,
+    `status`, `assignee`, `updated`, `comment`) y en páginas de diez: un día
+    de un tablero vivo son decenas de tickets (89 el 12-nov-2026), y una
+    llamada por ticket no se termina.
+  - Un comentario es nuevo por su `updated`, no por su `created`: los
+    comentarios se corrigen después de escritos.
+  - Muchos tickets «actualizados» sólo cambiaron un campo en bloque. Sin
+    comentario nuevo ni cambio de estado, no hay nada que proponer.
 - **`decisions`** y **`open-questions`**: la página, y qué entradas no están
   todavía en cac (`search` con dos o tres palabras de cada una).
 - **`rules`**: el registro, para saber qué reglas existen. Una regla citada
@@ -62,7 +70,9 @@ página, quién, cuándo, el enlace) y **lo que se escribiría** tal cual:
 1. **Decisiones.** Un comentario con el formato «Decisión / Fuente /
    Supuesto / Se revierte si», o una entrada nueva de la página de
    decisiones. Título, cuerpo con el porqué, quién la escribió allí y su
-   enlace.
+   enlace. Si el comentario ya se copió y **se corrigió después** (su
+   `updated` es posterior al cursor y `search` encuentra la decisión), se
+   propone como corrección: qué decía y qué dice ahora.
 2. **Tareas que se movieron fuera.** El ticket cambió de estado y su tarea de
    cac dice otra cosa: el estado nuevo, y una línea de por qué.
 3. **Lo que hay que saber en la tarea.** Un dato, un bloqueo, un cambio de
@@ -91,6 +101,10 @@ Sólo lo aprobado, fila por fila:
   el nombre del usuario (sólo acepta gente de la organización) y
   `originTaskId` si el ticket tiene tarea; si no, en el nodo del espacio. Si
   contesta `recorded: false`, ya estaba: la misma fuente no entra dos veces.
+  El enlace a un comentario de Jira es
+  `https://<sitio>/browse/PROTEUS-165?focusedCommentId=<id del comentario>`.
+  Una **corrección** lleva además `supersedes` con el id de la que había: es
+  lo único que deja entrar otra vez la misma fuente.
 - **Estados:** `update_task` con `status` y `comment` («En Jira pasó a … el
   …», con el enlace). Si la tarea la lleva otra persona, sólo el comentario.
 - **Comentarios:** `add_task_comment`, con el enlace.

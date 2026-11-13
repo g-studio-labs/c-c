@@ -302,7 +302,8 @@ lees lo que pasó desde la última vez:
    asignado y la descripción: si cambió algo que la tarea de cac no dice,
    díselo al usuario.
 2. **Sus comentarios posteriores a `since`** (la hora del último handoff; sin
-   ella, todos). Los anteriores ya los leyó quien escribió el handoff.
+   ella, todos), por su `updated`: un comentario corregido después cuenta.
+   Los anteriores ya los leyó quien escribió el handoff.
 3. **Los que son una decisión** —el formato «Decisión / Fuente / Supuesto /
    Se revierte si», o una frase que cierra algo abierto— los propones **todos
    juntos, en una tabla**: qué se decidió, quién, cuándo y el enlace. No
@@ -312,6 +313,8 @@ lees lo que pasó desde la última vez:
    nombre), `originTaskId` y `decidedBy` con el nombre del usuario (sólo
    acepta gente de la organización). Si contesta `recorded: false`, ya estaba:
    la misma fuente no entra dos veces, así que releer un ticket no duplica.
+   Si el comentario se corrigió después de copiarlo, la corrección va con
+   `supersedes` y el id de la que había.
 5. **Lo demás que importe** (un dato, un bloqueo, un cambio de alcance) va en
    un comentario de la tarea, con el enlace.
 
