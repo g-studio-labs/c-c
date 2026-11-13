@@ -290,6 +290,39 @@ agente», y avisa a quien lo lee (`@usuario` le avisa a esa persona). Por eso:
 - para «paré, necesito una decisión tuya», `notify_me` le llega sólo a tu
   usuario; un mensaje es para otras personas.
 
+### Si la tarea es un ticket de fuera: leer lo que pasó allí
+
+Quien trabaja en el tracker (el equipo del cliente en Jira) comenta y decide
+allí, y no lo copia a cac. Cuando `get_task` trae `tracker`
+(`{ tickets, since }`), la tarea es ese ticket, y antes de seguir con ella
+lees lo que pasó desde la última vez:
+
+1. **El ticket y su épica**, con la herramienta del tracker que tenga la
+   sesión (el MCP de Atlassian: `getJiraIssue`). Estado, a quién está
+   asignado y la descripción: si cambió algo que la tarea de cac no dice,
+   díselo al usuario.
+2. **Sus comentarios posteriores a `since`** (la hora del último handoff; sin
+   ella, todos). Los anteriores ya los leyó quien escribió el handoff.
+3. **Los que son una decisión** —el formato «Decisión / Fuente / Supuesto /
+   Se revierte si», o una frase que cierra algo abierto— los propones **todos
+   juntos, en una tabla**: qué se decidió, quién, cuándo y el enlace. No
+   escribes nada todavía.
+4. **Con el sí del usuario**, cada una va con `record_decision`: `sourceUrl`
+   (el enlace al comentario), `sourceAuthor` (quien lo escribió allí, con su
+   nombre), `originTaskId` y `decidedBy` con el nombre del usuario (sólo
+   acepta gente de la organización). Si contesta `recorded: false`, ya estaba:
+   la misma fuente no entra dos veces, así que releer un ticket no duplica.
+5. **Lo demás que importe** (un dato, un bloqueo, un cambio de alcance) va en
+   un comentario de la tarea, con el enlace.
+
+Una regla citada como `R-012` es una sección del registro de reglas del
+espacio: `get_related` con `R-012` trae la regla y quién más la cita.
+
+Si la sesión no tiene herramienta para ese tracker, dilo en una línea y
+sigue: no es motivo para parar. **Y aquí no se escribe en el tracker**: se
+lee. Varias tareas pueden ser el mismo ticket (`get_task` con la clave
+contesta la lista): lo que se lee va a la que estás trabajando.
+
 ## 5 · Cada commit nombra su tarea
 
 Así cac enlaza solo el commit con su tarea. `create_task` y `get_task` dan su
@@ -445,4 +478,4 @@ de 2026, a partir de lo que fue fallando al trabajar con cac. Cada regla tiene
 detrás algo que pasó de verdad; si cambias una, mira antes en el registro de
 decisiones del espacio Command and control por qué está._
 
-<!-- cac-work v26 -->
+<!-- cac-work v27 -->

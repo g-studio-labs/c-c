@@ -2298,7 +2298,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "get_task",
-            "description": "Full detail of one task, with its `ref` — how to name it in a commit message, branch or PR so cac links it by itself: its space key and number (`proteus-12`), or a client's folio (`acme-7`): its `handoff` (where the last session left it: read this before the thread), what it waits for (`blockedBy`, each with whether it is still open), the decisions that apply to it (`decisions`; one superseded says by which, read with get_decision), its markdown description, status, priority, tags, assignees, attachments, the comment thread (people and agents only: GitHub's commit notes are left out, they are the same commits as `git.commits`), its subtasks — which are its checklist — and `git`: the GitHub branches, pull requests (with state open/draft/merged/closed) and commits linked to it, by the task named in a commit/PR or by the branch name (cac-12-…, acme-7-…); each commit carries `releasedIn` {tag, at, url} once it went out in a GitHub release of its repo. get_board does not list subtasks; it only shows how many are done.",
+            "description": "Full detail of one task, with its `ref` — how to name it in a commit message, branch or PR so cac links it by itself: its space key and number (`proteus-12`), or a client's folio (`acme-7`): its `handoff` (where the last session left it: read this before the thread), `tracker` when the task IS an outside ticket (`tickets`: the keys on its **Jira:** line, or in its title; `since`: when the handoff was written — read that ticket's comments after it with the tracker's own tool), what it waits for (`blockedBy`, each with whether it is still open), the decisions that apply to it (`decisions`; one superseded says by which, read with get_decision), its markdown description, status, priority, tags, assignees, attachments, the comment thread (people and agents only: GitHub's commit notes are left out, they are the same commits as `git.commits`), its subtasks — which are its checklist — and `git`: the GitHub branches, pull requests (with state open/draft/merged/closed) and commits linked to it, by the task named in a commit/PR or by the branch name (cac-12-…, acme-7-…); each commit carries `releasedIn` {tag, at, url} once it went out in a GitHub release of its repo. get_board does not list subtasks; it only shows how many are done.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "id": { "type": "string", "description": "The task id, or its ref as people write it: `proteus-12` (space key and number) or a client's folio `acme-7`. A tracker key in capitals (`PROTEUS-165`, Jira) resolves to the task that names it in its title or description — numbered apart from refs, so `proteus-165` is another task; several tasks naming it are listed instead. `cac#12` does not resolve: a number without its space." } },
@@ -4163,6 +4163,7 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
             }
             drop_mirrored_commit_notes(&mut d);
             hoist_handoff(&mut d);
+            tracker_hint(&mut d);
             Ok(d)
         }
 
@@ -6209,6 +6210,18 @@ fn hoist_handoff(d: &mut Value) {
     d["handoff"] = json!({ "text": text, "at": at, "by": by });
 }
 
+/// Si la tarea es un ticket de fuera, lo dice junto a desde cuándo no se lee:
+/// `tracker: { tickets, since }`, con `since` la hora del último handoff. Es
+/// lo que la skill usa para pedirle al tracker sólo los comentarios nuevos
+/// (command-and-control-355). Sin handoff, `since` es nulo: se lee todo.
+fn tracker_hint(d: &mut Value) {
+    let Some(tickets) = d.get("tickets").filter(|t| t.as_array().is_some_and(|a| !a.is_empty())).cloned() else {
+        return;
+    };
+    let since = d.get("handoff").and_then(|h| h.get("at")).cloned().unwrap_or(Value::Null);
+    d["tracker"] = json!({ "tickets": tickets, "since": since });
+}
+
 /// A quién va un mensaje: un canal (el chat de un espacio) o una persona.
 enum ChatTarget {
     Channel { id: String, name: String },
@@ -6774,7 +6787,9 @@ fn instructions(state: Option<SkillState>) -> String {
          that guards it), not as a comment in a long task; a fact useful to whoever comes next, whatever their \
          task, goes with remember. When the project also lives in a tracker (Jira, Basecamp), cac is the source \
          of truth: every move there is mirrored in the cac task in the same turn, and tell the user in one line what \
-         you left in cac. To talk to people (a channel, a teammate, \
+         you left in cac. When get_task brings `tracker`, the task is that outside ticket: read the ticket and its \
+         comments since the handoff with the tracker's own tool, and propose the decisions made there before \
+         recording them (record_decision with sourceUrl). To talk to people (a channel, a teammate, \
          another agent) use send_message, which goes out in the user's name marked as an agent's: send what they \
          asked to send, and show them words you wrote yourself before sending.\n\
          4. CLOSE HONESTLY. Before you tell the user you are done, write the task's handoff (update_task handoff: \
@@ -8206,11 +8221,22 @@ mod tests {
                         "recorded": { "id": "dec-1", "title": "El DSD se paga por parte", "sourceUrl": body["sourceUrl"],
                                       "sourceAuthor": "Itzel", "alreadyRecorded": already } })
             } else {
-                json!({ "task": { "id": "t1", "seq": 7 }, "ref": "proteus-7", "comments": [] })
+                json!({ "task": { "id": "t1", "seq": 7 }, "ref": "proteus-7", "comments": [], "tickets": [] })
             }
         });
-        call_tool(&cfg, "get_task", &json!({ "id": "PROTEUS-165" })).unwrap();
+        let plain = call_tool(&cfg, "get_task", &json!({ "id": "PROTEUS-165" })).unwrap();
         assert_eq!(log.lock().unwrap()[0].1, "/api/v1/tasks/by-ref/PROTEUS-165");
+        assert!(plain.get("tracker").is_none(), "una tarea sin ticket no tiene nada que leer fuera: {plain}");
+        // Con ticket, dice cuál y desde cuándo no se lee: la hora del handoff.
+        let (with_ticket, _) = fake_cac(|_, p, _| {
+            let handoff = if p.ends_with("/t-sin") { json!(null) } else { json!("2026-11-10T18:00:00Z") };
+            json!({ "task": { "id": "t1", "seq": 7, "handoff": "quedó en revisión", "handoffAt": handoff },
+                    "ref": "proteus-7", "comments": [], "keys": ["PROTEUS-165", "PROTEUS-12"], "tickets": ["PROTEUS-165"] })
+        });
+        let t = call_tool(&with_ticket, "get_task", &json!({ "id": "t1" })).unwrap();
+        assert_eq!(t["tracker"], json!({ "tickets": ["PROTEUS-165"], "since": "2026-11-10T18:00:00Z" }), "{t}");
+        let never = call_tool(&with_ticket, "get_task", &json!({ "id": "t-sin" })).unwrap();
+        assert_eq!(never["tracker"]["since"], Value::Null, "sin hora de handoff se lee todo: {never}");
         for not_a_key in ["Proteus-165", "PROTEUS-", "PROTEUS-12a", "P-1", "PROTEUS165"] {
             assert!(!looks_like_tracker_key(not_a_key), "{not_a_key}");
         }
@@ -9004,6 +9030,7 @@ mod tests {
             ("list_incidents by server or area", "`list_incidents`"),
             ("goes with record_incident", "`record_incident`"),
             ("mirrored in the cac task in the same turn", "**en el mismo turno**"),
+            ("comments since the handoff", "comentarios posteriores a `since`"),
             ("what you left in cac", "qué dejaste en cac"),
         ] {
             assert!(instr.contains(en), "las instrucciones ya no dicen «{en}»");
