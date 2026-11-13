@@ -5,6 +5,12 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
  * El campo «Lista» del detalle (command-and-control-328). Roturas que atrapa:
  * no mandar el `listId` elegido, cambiar de espacio sin preguntar (la ref
  * cambia), y enseñar el campo en una subtarea, que sólo se mueve con su padre.
+ *
+ * Desde el 13-nov-2026 pregunta siempre (jose, command-and-control-365):
+ * dentro del mismo espacio se movía al elegir en el desplegable, y un clic
+ * equivocado la sacaba del tablero donde se miraba. Roturas que atrapa: mover
+ * sin preguntar dentro del espacio, mover aunque se cancele, no decir a qué
+ * lista va, y avisar del cambio de ref cuando no cambia o callarlo cuando sí.
  */
 const get = vi.fn();
 const patch = vi.fn();
@@ -64,16 +70,33 @@ afterEach(() => {
 const patchedLists = () => patch.mock.calls.map((c) => (c[1] as { listId?: string }).listId).filter(Boolean);
 
 describe("mover la tarea a otra lista", () => {
-  it("dentro del espacio, manda el listId sin preguntar", async () => {
+  it("dentro del espacio también pregunta, dice a qué lista va y manda el listId", async () => {
     montar();
     await pick(screen.getByRole("combobox", { name: "Move to another list" }), "Hermana");
+    expect(await screen.findByText("Move to “Hermana”?")).toBeTruthy();
+    // La ref no cambia, y no se asusta con que cambia.
+    expect(screen.getByText(/Its ref stays the same/)).toBeTruthy();
+    expect(screen.queryByText(/stops being its ref/)).toBeNull();
+    expect(patchedLists()).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "Move" }));
     await waitFor(() => expect(patchedLists()).toEqual(["l-hermana"]));
   });
 
-  it("a otro espacio, pregunta antes porque la ref cambia", async () => {
+  it("si se cancela, no se mueve", async () => {
+    montar();
+    await pick(screen.getByRole("combobox", { name: "Move to another list" }), "Hermana");
+    await screen.findByText("Move to “Hermana”?");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByText("Move to “Hermana”?")).toBeNull());
+    expect(patchedLists()).toEqual([]);
+  });
+
+  it("a otro espacio, nombra el espacio y avisa de que la ref cambia", async () => {
     montar();
     await pick(screen.getByRole("combobox", { name: "Move to another list" }), "B · ref changes");
-    expect(await screen.findByText(/uno-7 stops being its ref/)).toBeTruthy();
+    expect(await screen.findByText("Move to “Dos › B”?")).toBeTruthy();
+    expect(screen.getByText(/uno-7 stops being its ref/)).toBeTruthy();
+    expect(screen.queryByText(/Its ref stays the same/)).toBeNull();
     expect(patchedLists()).toEqual([]);
     fireEvent.click(screen.getByRole("button", { name: "Move" }));
     await waitFor(() => expect(patchedLists()).toEqual(["l-b"]));

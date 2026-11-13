@@ -1099,15 +1099,19 @@ function Content() {
             <MoveToList
               listId={task.listId}
               targets={moveTargets(tree, task)}
-              onMove={async (listId, crossesSpace) => {
-                if (crossesSpace) {
-                  const ok = await confirm({
-                    title: t("work:task.moveListTitle"),
-                    description: t("work:task.moveListRefChanges", { ref: detail.ref ?? "" }),
-                    confirmText: t("work:task.moveListConfirm"),
-                  });
-                  if (!ok) return;
-                }
+              onMove={async (listId, crossesSpace, label) => {
+                // Siempre se pregunta (jose, 13-nov-2026): elegir en un
+                // desplegable se hace sin querer, y mover saca la tarea del
+                // tablero donde se miraba. A otro espacio, además, le cambia
+                // la ref: eso es lo que dice el cuerpo.
+                const ok = await confirm({
+                  title: t("work:task.moveListTitle", { list: label }),
+                  description: crossesSpace
+                    ? t("work:task.moveListRefChanges", { ref: detail.ref ?? "" })
+                    : t("work:task.moveListSameSpace"),
+                  confirmText: t("work:task.moveListConfirm"),
+                });
+                if (!ok) return;
                 await updateTask(task.id, { listId }).catch((e) =>
                   toast.error(t("work:task.errMoveList"), { description: String(e) }),
                 );
@@ -1497,10 +1501,15 @@ function MoveToList({
 }: {
   listId: string;
   targets: ReturnType<typeof moveTargets>;
-  onMove: (listId: string, crossesSpace: boolean) => void;
+  onMove: (listId: string, crossesSpace: boolean, label: string) => void;
 }) {
   const { t } = useT();
-  const crosses = new Map(targets.flatMap((g) => g.targets.map((x) => [x.id, x.crossesSpace] as const)));
+  // Con el espacio delante cuando es otro: «App» puede haber una en cada uno.
+  const byId = new Map(
+    targets.flatMap((g) =>
+      g.targets.map((x) => [x.id, { crosses: x.crossesSpace, label: x.crossesSpace ? `${g.space} › ${x.label}` : x.label }] as const),
+    ),
+  );
   return (
     <>
       <span className="mb-1 flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -1514,7 +1523,8 @@ function MoveToList({
           value={listId}
           onChange={(next) => {
             if (!next || next === listId) return;
-            onMove(next, crosses.get(next) ?? false);
+            const target = byId.get(next);
+            if (target) onMove(next, target.crosses, target.label);
           }}
           groups={targets.map((g) => ({
             label: g.space,
