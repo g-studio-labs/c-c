@@ -67,6 +67,22 @@ func (r *TaskRepository) ExternalKeysOf(taskIDs []string) map[string][]string {
 	return out
 }
 
+// TicketsOf: los tickets de fuera que **son** esa tarea: las claves de su
+// línea **Jira:**, o, si no tiene, las de su título. Lo que sólo cita no es su
+// ticket: al retomar la tarea se lee el suyo, no todos los que nombra
+// (command-and-control-355).
+func (r *TaskRepository) TicketsOf(taskID string) []string {
+	for _, kind := range []domain.ExternalKeyKind{domain.ExternalKeyTicket, domain.ExternalKeyTitle} {
+		var keys []string
+		r.db.Model(&domain.TaskExternalKey{}).Where("task_id = ? AND kind = ?", taskID, kind).
+			Order("created_at ASC, key ASC").Pluck("key", &keys)
+		if len(keys) > 0 {
+			return keys
+		}
+	}
+	return nil
+}
+
 // BackfillTaskExternalKeys rellena una vez las claves de las tareas que ya
 // existían. Sólo con la tabla vacía: después, cada guardado se ocupa.
 func BackfillTaskExternalKeys(db *gorm.DB) {

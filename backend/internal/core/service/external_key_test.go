@@ -111,7 +111,9 @@ func TestATrackerKeyLeadsToTheTaskThatNamesIt(t *testing.T) {
 // Roturas que atrapa: tratar igual una cita y la línea **Jira:**; contar como
 // ticket lo que va tras **Referencias** en la misma línea; no mirar el título
 // antes que las citas; no rehacer cómo la nombra al mover la clave de sitio;
-// juntar los grupos en vez de quedarse con el primero que tiene alguna.
+// juntar los grupos en vez de quedarse con el primero que tiene alguna; dar
+// por ticket de una tarea lo que sólo cita, o su título cuando tiene línea
+// **Jira:**.
 func TestTheTaskOfATicketIsNotAnyTaskThatMentionsIt(t *testing.T) {
 	kinds := func(title, description string) map[string]domain.ExternalKeyKind {
 		out := map[string]domain.ExternalKeyKind{}
@@ -132,7 +134,8 @@ func TestTheTaskOfATicketIsNotAnyTaskThatMentionsIt(t *testing.T) {
 	}
 
 	db := incidentDB(t)
-	if err := db.AutoMigrate(&domain.GraphLink{}, &domain.SpaceKeyAlias{}, &domain.ItemComment{}, &domain.TaskExternalKey{}); err != nil {
+	if err := db.AutoMigrate(&domain.GraphLink{}, &domain.SpaceKeyAlias{}, &domain.ItemComment{}, &domain.TaskExternalKey{},
+		&domain.TaskTag{}, &domain.TaskTagLink{}, &domain.ItemAttachment{}, &domain.ItemWatcher{}, &domain.OrgMembership{}); err != nil {
 		t.Fatal(err)
 	}
 	tasks := repository.NewTaskRepository(db)
@@ -163,6 +166,20 @@ func TestTheTaskOfATicketIsNotAnyTaskThatMentionsIt(t *testing.T) {
 	ticket := create("El registro de configuración", "**Jira:** PROTEUS-165")
 	if got := leadsTo("PROTEUS-165"); len(got) != 1 || got[0] != ticket {
 		t.Errorf("con una tarea que lo lleva en **Jira:**, lleva a %v; quiero sólo ésa (%s)", got, ticket)
+	}
+	// El detalle de la tarea lo lleva: es lo que lee `get_task`.
+	if d, err := NewTaskService(tasks, repository.NewReportRepository(db), repository.NewOrganizationRepository(db), nil).Detail(ticket); err != nil ||
+		len(d.Tickets) != 1 || d.Tickets[0] != "PROTEUS-165" {
+		t.Errorf("el detalle no trae su ticket: %+v %v", d, err)
+	}
+	// Y desde la tarea: su ticket es el de su línea **Jira:**; sin ella, el de
+	// su título; lo que sólo cita no es su ticket (command-and-control-355).
+	both := create("Cierra PROTEUS-400", "**Jira:** PROTEUS-401 · **Referencias:** PROTEUS-402")
+	for id, want := range map[string]string{ticket: "PROTEUS-165", titled: "PROTEUS-165", both: "PROTEUS-401", cites: ""} {
+		got := tasks.TicketsOf(id)
+		if (want == "" && len(got) != 0) || (want != "" && (len(got) != 1 || got[0] != want)) {
+			t.Errorf("el ticket de %s = %v; quiero [%s]", id, got, want)
+		}
 	}
 	// Mover la clave de la línea **Jira:** a una cita cambia cómo la nombra.
 	if err := tasks.UpdateTask(ticket, map[string]any{"description": "Ya no es su ticket, sólo cita PROTEUS-165."}); err != nil {

@@ -1233,6 +1233,8 @@ type TaskDetail struct {
 	Ref string `json:"ref,omitempty"`
 	// Keys: las claves de fuera que nombra (`PROTEUS-165`). Ver TaskExternalKey.
 	Keys []string `json:"keys,omitempty"`
+	// Tickets: de ésas, las que son su ticket (ver TaskRepository.TicketsOf).
+	Tickets []string `json:"tickets,omitempty"`
 	// HandoffBy: quién escribió el «dónde quedó» (Item.Handoff), con su nombre
 	// visible; la fecha va en la propia tarea.
 	HandoffBy string `json:"handoffBy,omitempty"`

@@ -992,6 +992,7 @@ func (s *TaskService) Detail(id string) (*domain.TaskDetail, error) {
 		detail.HandoffBy = s.repo.DisplayName(t.HandoffByID)
 	}
 	detail.Keys = s.repo.ExternalKeysOf([]string{id})[id]
+	detail.Tickets = s.repo.TicketsOf(id)
 	// Las decisiones que se le aplican (#91). Como los bloqueos: si fallan,
 	// la tarea se abre igual.
 	detail.Decisions = []domain.DecisionRef{}
