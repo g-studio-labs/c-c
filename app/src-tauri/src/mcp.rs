@@ -594,6 +594,12 @@ fn doc_target(cfg: &Cfg, args: &Value) -> Result<(String, String), String> {
     Ok((k, urlencode(&resolved)))
 }
 
+/// Una lista vacía viaja sin `data` y llega como nulo: para quien la lee es
+/// «ninguna», no «no se sabe».
+fn list_or_empty(v: Value) -> Value {
+    if v.is_null() { json!([]) } else { v }
+}
+
 /// El espacio que nombra `space`: un id tal cual, o su nombre como lo enseña
 /// el mapa, resuelto en el navegador.
 fn space_target(cfg: &Cfg, args: &Value) -> Result<String, String> {
@@ -4314,7 +4320,7 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
         "get_space_sources" => {
             let space = space_target(cfg, args)?;
             let data = api_get(cfg, &format!("/api/v1/task-spaces/{}/sources", urlencode(&space)))?;
-            Ok(json!({ "spaceId": space, "sources": data }))
+            Ok(json!({ "spaceId": space, "sources": list_or_empty(data) }))
         }
 
         "set_space_sources" => {
@@ -4349,7 +4355,7 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                 api_post(cfg, &format!("{path}/{}/synced", urlencode(id)), body)?;
                 out = api_get(cfg, &path)?;
             }
-            Ok(json!({ "spaceId": space, "sources": out }))
+            Ok(json!({ "spaceId": space, "sources": list_or_empty(out) }))
         }
 
         "get_related" => {
@@ -8788,6 +8794,11 @@ mod tests {
             json!([])
         });
         let calls = |seen: &std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>| -> Vec<String> { seen.lock().unwrap().drain(..).map(|(m, p, _)| format!("{m} {p}")).collect() };
+
+        // Un espacio sin fuentes contesta una lista vacía, no un nulo.
+        let (empty, _) = fake_cac(|_, _, _| Value::Null);
+        let none = call_tool(&empty, "get_space_sources", &json!({ "space": "1b0add6d-6ff5-40c2-ae60-8477fbb434ce" })).unwrap();
+        assert_eq!(none["sources"], json!([]));
 
         let got = call_tool(&cfg, "get_space_sources", &json!({ "space": "tcg" })).unwrap();
         assert_eq!(got["spaceId"], "sp-tcg");
