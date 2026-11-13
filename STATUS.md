@@ -36,8 +36,16 @@ espacio, decisión 0caaffbe: cac es la fuente, Jira y Notion son copias).
   `get_related R-012` en el MCP; `tracker` en `get_task` y la skill
   cac-work v27, que lee el ticket, su épica y los comentarios posteriores al
   handoff y propone sus decisiones con la fuente.
-- **Falta:** la skill de puesta al día
-  (356), el registro de reglas de TCG como página (357, lo carga jose desde
+- **Desplegado (backend), 356:** `rules-copy` como fuente (la copia del
+  registro que lee el cliente en Notion), y la corrección de un comentario
+  ya copiado entra sustituyendo a la que había (`supersedes` + la misma
+  `sourceUrl`).
+- **Espera release de la app, 356:** la skill `cac-catch-up` (puesta al día
+  de un espacio: lee Jira y Notion desde el cursor, propone todo en una
+  tabla, escribe sólo lo aprobado, nunca en el tracker, y mueve el cursor
+  sólo si terminó). `install_skill` la instala con las otras dos. Probada en
+  seco contra PROTEUS (sólo lectura), no con un agente de punta a punta.
+- **Falta:** el registro de reglas de TCG como página (357, lo carga jose desde
   la sesión de TCG) y decidir el webhook con una semana de datos (358).
 
 **11-nov, en `main`: cac como segundo cerebro, fases 0 y 1**
