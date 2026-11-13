@@ -2377,7 +2377,8 @@ fn tool_defs() -> Value {
                     },
                     "clearDueAt": { "type": "boolean", "description": "Remove the task's due date." },
                     "handoff": { "type": "string", "description": "Where the work was left, for whoever picks it up next: what is done, the next step, and how to check whether it shipped. Three lines, markdown. It REPLACES the previous handoff and is stamped with your name and the time; write it before you stop, and every time the state changes. An empty string clears it. Findings and discussion go in comments; this is the summary." },
-                    "comment": { "type": "string", "description": "Optional. A markdown comment added to the thread after the other changes, in the same call: closing a task is handoff + status + comment at once. Append-only, like add_task_comment (needs `tasks:write`)." },
+                    "comment": { "type": "string", "description": "Optional. A markdown comment added to the thread after the other changes, in the same call: closing a task is handoff + status + comment at once. Append-only, like add_task_comment (needs `tasks:write`), and like it an internal note unless commentVisibility says public." },
+                    "commentVisibility": { "type": "string", "enum": ["internal", "public"], "description": "Who reads `comment`. internal (default): the team. public: the client too, on a task they can see; only when the user asked for it." },
                     "claim": { "type": "boolean", "description": "Take the task: you become an assignee (the current ones stay) and it moves to in progress, atomically. Refused with `claimed: false` when it is already in progress with someone else." },
                     "ifStatus": { "type": "string", "enum": ["pending", "in_progress", "resolved", "closed"], "description": "Only if the task is still in this state; otherwise nothing changes and the answer carries `conflict` with the real state and handoff. Use it when you read the task a while ago." },
                     "blockedBy": { "type": "array", "items": { "type": "string" }, "description": "The tasks this one waits for, by ref (`proteus-12`) or id. Replaces the list; an empty list clears it. get_context then shows it in `blockedBy` and leaves the task out of `ready` while any of them is open." },
@@ -2437,12 +2438,13 @@ fn tool_defs() -> Value {
         },
         {
             "name": "add_task_comment",
-            "description": "Append a markdown comment to a task. Append-only: it cannot overwrite anything, which makes it the right place for an agent to record findings. Needs `tasks:write`.",
+            "description": "Append a markdown comment to a task. Append-only: it cannot overwrite anything, which makes it the right place for an agent to record findings. What you write is an INTERNAL NOTE: on a task a client can see, they do not read it, and the app shows it apart from the conversation as an agent's note, with whose agent wrote it. To answer the client, pass visibility: \"public\" — only when the user asked for it and has seen the words. Needs `tasks:write`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "id": { "type": "string" },
                     "body": { "type": "string", "description": "Markdown." },
+                    "visibility": { "type": "string", "enum": ["internal", "public"], "description": "internal (default): a note for the team. public: the client reads it and is notified; only meaningful on a task they can see." },
                     "dryRun": { "type": "boolean", "description": "Validate without writing." }
                 },
                 "required": ["id", "body"]
@@ -4608,7 +4610,7 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
             }
             // El comentario, al final: dice lo que ya quedó hecho.
             if let Some(c) = comment {
-                api_post(cfg, &format!("/api/v1/tasks/{}/comments", urlencode(&id)), json!({ "body": c }))?;
+                api_post(cfg, &format!("/api/v1/tasks/{}/comments", urlencode(&id)), comment_body(&c, args, "commentVisibility")?)?;
                 changed.push("comment");
             }
             let after = api_get(cfg, &format!("/api/v1/tasks/{}", urlencode(&id)))?;
@@ -4724,12 +4726,15 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
             let detail = api_post(
                 cfg,
                 &format!("/api/v1/tasks/{}/comments", urlencode(&id)),
-                json!({ "body": body_md }),
+                comment_body(&body_md, args, "visibility")?,
             )?;
             let comments = detail.get("comments").and_then(|v| v.as_array());
             let added = comments.and_then(|c| c.last());
             Ok(json!({
                 "id": added.and_then(|c| c.get("id")),
+                // Quién lo lee, dicho siempre: una nota que el agente cree
+                // interna y no lo es, es justo lo que hay que ver.
+                "visibility": added.and_then(|c| c.get("visibility")),
                 "author": added.and_then(|c| c.get("authorName")),
                 "createdAt": added.and_then(|c| c.get("createdAt")),
                 "taskId": id,
@@ -6220,6 +6225,19 @@ fn tracker_hint(d: &mut Value) {
     };
     let since = d.get("handoff").and_then(|h| h.get("at")).cloned().unwrap_or(Value::Null);
     d["tracker"] = json!({ "tickets": tickets, "since": since });
+}
+
+/// El cuerpo de un comentario de tarea. Sin decir nada, lo que escribe un
+/// agente es una **nota interna**: el servidor lo decide por el token, y aquí
+/// se manda igual para que no dependa de la versión del servidor. `public`
+/// hay que pedirlo: es hablarle al cliente (command-and-control-359).
+fn comment_body(text: &str, args: &Value, key: &str) -> Result<Value, String> {
+    let visibility = match arg_str(args, key).as_deref() {
+        None | Some("internal") => "internal",
+        Some("public") => "public",
+        Some(other) => return Err(format!("unknown {key} `{other}`: use internal or public")),
+    };
+    Ok(json!({ "body": text, "visibility": visibility }))
 }
 
 /// A quién va un mensaje: un canal (el chat de un espacio) o una persona.
@@ -8930,6 +8948,37 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert!(seen.iter().any(|(m, p, _)| m == "POST" && p == "/api/v1/tasks/t1/comments"));
         assert!(!seen.iter().any(|(m, _, _)| m == "PATCH"), "un comentario solo manda un PATCH");
+    }
+
+    /// Lo que comenta un agente es una nota interna salvo que pida publicarla
+    /// (command-and-control-359): en un tablero que ve el cliente, sus notas de
+    /// trabajo le salían a él. Roturas que detecta: no mandar la visibilidad
+    /// (queda a lo que decida el servidor), mandar `public` sin que se pida,
+    /// no dejar publicar a propósito, aceptar un valor inventado, y lo mismo
+    /// por el comentario de `update_task`.
+    #[test]
+    fn an_agents_comment_is_an_internal_note_unless_it_asks() {
+        let (cfg, seen) = fake_cac(|_, _, body| {
+            json!({ "task": { "id": "t1", "seq": 7 }, "ref": "proteus-7",
+                    "comments": [{ "id": "c1", "authorName": "jose", "visibility": body["visibility"] }] })
+        });
+        let sent = |seen: &std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>| -> Value {
+            let all: Vec<_> = seen.lock().unwrap().drain(..).collect();
+            all.into_iter().find(|(m, p, _)| m == "POST" && p.ends_with("/comments")).expect("no comentó").2
+        };
+        let note = call_tool(&cfg, "add_task_comment", &json!({ "id": "t1", "body": "medí 40 ms" })).unwrap();
+        assert_eq!(sent(&seen)["visibility"], "internal");
+        assert_eq!(note["visibility"], "internal", "no dice quién lo lee: {note}");
+
+        call_tool(&cfg, "add_task_comment", &json!({ "id": "t1", "body": "Ya quedó.", "visibility": "public" })).unwrap();
+        assert_eq!(sent(&seen)["visibility"], "public");
+        call_tool(&cfg, "add_task_comment", &json!({ "id": "t1", "body": "x", "visibility": "cliente" })).unwrap_err();
+        assert!(seen.lock().unwrap().drain(..).all(|(m, _, _)| m != "POST"), "comentó con una visibilidad inventada");
+
+        call_tool(&cfg, "update_task", &json!({ "id": "t1", "comment": "cerrada" })).unwrap();
+        assert_eq!(sent(&seen)["visibility"], "internal");
+        call_tool(&cfg, "update_task", &json!({ "id": "t1", "comment": "Listo, ya puede probarlo.", "commentVisibility": "public" })).unwrap();
+        assert_eq!(sent(&seen)["visibility"], "public");
     }
 
     /// Claude Code no pide permiso para lo que sólo lee y lo puede correr en

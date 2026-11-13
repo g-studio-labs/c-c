@@ -216,7 +216,11 @@ Por el camino:
   llamada, una release), eso va en el `handoff`: basta con decir qué falta.
 - **Lo que descubras de esta tarea** va con `add_task_comment`: un fallo
   de base, un dato medido, un callejón sin salida. Los comentarios sólo se
-  añaden; no pisan nada de nadie.
+  añaden; no pisan nada de nadie. **Lo que comentas es una nota interna**: en
+  una tarea que ve un cliente, él no la lee, y la app la enseña aparte del
+  hilo, como nota de agente. Para contestarle al cliente hay que pedirlo
+  (`visibility: "public"`, o `commentVisibility` en `update_task`), y sólo
+  cuando el usuario lo pidió y vio las palabras.
 - **Lo que descubras y le sirva al siguiente, sea cual sea su tarea** (un
   truco, un número medido, un comando, algo que no funciona) va con
   `remember`: una línea con fecha en la página «Notas de agentes» del
