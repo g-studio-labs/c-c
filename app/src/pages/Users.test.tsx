@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 /**
@@ -52,6 +52,11 @@ function fillAll() {
 }
 
 describe("crear un usuario", () => {
+  // También al acabar: sin esto, lo que montó la última prueba seguía vivo al
+  // desmontarse el entorno, y un render pendiente de React corría ya sin
+  // `window` («window is not defined» después de 371 ficheros en verde; tiró el
+  // CI de la web el 13-nov-2026).
+  afterEach(cleanup);
   beforeEach(() => {
     cleanup();
     createUser.mockClear();
