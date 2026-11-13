@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -985,6 +986,28 @@ func createTaskRequest(r *http.Request) (domain.CreateTaskRequest, error) {
 	return req, nil
 }
 
+// commentOrigin: por dónde entra un comentario y, con eso, quién lo lee si
+// nadie lo dice. Una persona en la app comenta a la vista del cliente, como
+// siempre; un **token** (un agente) deja una nota interna salvo que diga
+// `public`, igual que la tarea que crea (ver createTaskRequest).
+//
+// Hasta el 13-nov-2026 un agente comentaba público por defecto: en Portento,
+// donde el cliente ve el tablero, las 252 notas de trabajo de las tareas a su
+// vista le salían a él, y ninguna era interna (command-and-control-359).
+//
+// Y queda marcado como de un agente aunque el token no lo declare: un token es
+// una máquina, y la app pone aparte lo que escribe una.
+func commentOrigin(r *http.Request, want domain.ItemVisibility) (context.Context, domain.ItemVisibility) {
+	ctx := r.Context()
+	if c, ok := currentUser(r); ok && c.ViaToken {
+		ctx = domain.WithVia(ctx, domain.ViaMCP)
+		if want == "" {
+			want = domain.VisibilityInternal
+		}
+	}
+	return ctx, want
+}
+
 func (h *taskHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	l, sp, ok := h.resolveList(w, r, chi.URLParam(r, "id"), true)
 	if !ok {
@@ -1215,7 +1238,8 @@ func (h *taskHandler) AddComment(w http.ResponseWriter, r *http.Request) {
 		SendErrorResponse(w, http.StatusBadRequest, "A decision needs somewhere to come back to", "decision-no-origin")
 		return
 	}
-	c, err := h.svc.AddComment(r.Context(), t.ID, user.UserID, req.Body, req.Visibility)
+	ctx, visibility := commentOrigin(r, req.Visibility)
+	c, err := h.svc.AddComment(ctx, t.ID, user.UserID, req.Body, visibility)
 	if err != nil {
 		SendErrorResponse(w, http.StatusInternalServerError, "Failed to add comment", err.Error())
 		return

@@ -1217,6 +1217,8 @@ func (s *TaskService) AddComment(ctx context.Context, taskID, userID, body strin
 	// that can leak, and the column default is the permissive one so the contract
 	// test keeps working. Nothing writes this table around it.
 	c := newComment(taskID, userID, body, visibility)
+	// Por dónde entró: lo que escribe un agente se pone aparte en el hilo.
+	c.Via = domain.ViaFrom(ctx)
 	if err := s.repo.CreateComment(c); err != nil {
 		return nil, err
 	}

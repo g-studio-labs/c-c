@@ -1203,7 +1203,10 @@ type TaskCommentResponse struct {
 	// Source: de dónde vino una línea de sistema que escribió algo de fuera
 	// («gh», «deploy»). Sin esto la pantalla no distinguía una línea de GitHub
 	// de un cambio de estado, y firmaba las dos como «unknown».
-	Source      string           `json:"source,omitempty"`
+	Source string `json:"source,omitempty"`
+	// Via: `mcp` si lo escribió un agente con el token de `AuthorName`. La app
+	// pone esas notas aparte del hilo (command-and-control-359).
+	Via         string           `json:"via,omitempty"`
 	Body        string           `json:"body"`
 	Attachments []TaskAttachment `json:"attachments"`
 	CreatedAt   time.Time        `json:"createdAt"`

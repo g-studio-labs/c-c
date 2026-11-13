@@ -310,7 +310,12 @@ type ItemComment struct {
 	// (`gh:push:<sha>`, `gh:pr:<n>:<acción>`). Con el índice único parcial
 	// `(item_id, source_key)` es lo que impide que un commit comente dos veces
 	// la misma tarea. Vacío en todo lo que escribe una persona.
-	SourceKey          string  `gorm:"type:varchar(120)" json:"-"`
+	SourceKey string `gorm:"type:varchar(120)" json:"-"`
+	// Via: por dónde entró (ver via.go): vacío, la app; `mcp`, un agente con el
+	// token de su dueño. Es lo que deja poner aparte las notas de los agentes
+	// en el hilo de una tarea (command-and-control-359). Fuera del JSON: esta
+	// fila también es la del hilo del cliente, y a él no le dice nada.
+	Via                string  `gorm:"type:varchar(20)"  json:"-"`
 	AuthorUserID       *string `gorm:"type:varchar(36)"       json:"authorUserId,omitempty"`
 	AuthorProjectID    *string `gorm:"type:varchar(36);index" json:"-"`
 	AuthorExternalID   string  `gorm:"type:varchar(255)"      json:"-"`

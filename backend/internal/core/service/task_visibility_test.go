@@ -541,6 +541,61 @@ func TestCommentingOnAClientsCardReachesThem(t *testing.T) {
 	}
 }
 
+// Lo que anota un agente en la tarjeta de un cliente queda marcado como suyo,
+// para que la app lo ponga aparte del hilo, y el cliente no recibe esa marca
+// ni la nota (command-and-control-359).
+//
+// Roturas que atrapa: no guardar por dónde entró el comentario; marcar como de
+// un agente lo que escribe una persona; no devolverle la marca al tablero del
+// equipo; que la nota interna de un agente llegue al cliente.
+func TestAnAgentsNoteIsMarkedAsOneAndStaysInside(t *testing.T) {
+	db, cleanup := visibilityDB(t)
+	defer cleanup()
+	repo := repository.NewTaskRepository(db)
+	reports := repository.NewReportRepository(db)
+	svc := NewTaskService(repo, reports, repository.NewOrganizationRepository(db), nil)
+	list, err := repo.FindList("list-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.BindListToChannel("list-1", "proj-1"); err != nil {
+		t.Fatal(err)
+	}
+	card, err := svc.CreateTask(context.Background(), list, "org-1", "u-1", domain.CreateTaskRequest{Title: "algo suyo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := domain.WithVia(context.Background(), domain.ViaMCP)
+	if _, err := svc.AddComment(agent, card.ID, "u-1", "medí la consulta: 40 ms", domain.VisibilityInternal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.AddComment(context.Background(), card.ID, "u-1", "ya quedó", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	thread, err := repo.Comments(card.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	via := map[string]string{}
+	for _, c := range thread {
+		via[c.Body] = c.Via
+	}
+	if via["medí la consulta: 40 ms"] != domain.ViaMCP {
+		t.Errorf("la nota del agente no dice que es de un agente: %v", via)
+	}
+	if v, ok := via["ya quedó"]; !ok || v != domain.ViaApp {
+		t.Errorf("lo que escribe una persona sale como de un agente: %v", via)
+	}
+	outside, err := reports.ListComments(card.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outside) != 1 || outside[0].Body != "ya quedó" {
+		t.Errorf("al cliente le llega otra cosa que la respuesta de la persona: %+v", outside)
+	}
+}
+
 // On a card no client can see, every comment is internal — including one that
 // asks to be public, because there is nobody to show it to.
 func TestCommentingOnAnInternalCardStaysInternal(t *testing.T) {

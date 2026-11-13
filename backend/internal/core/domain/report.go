@@ -625,7 +625,9 @@ type ReportCommentResponse struct {
 	// Source: de qué fuera vino una línea de sistema («gh», «deploy»), el
 	// prefijo de su `source_key`. Scan-only como Visibility: sólo lo lee el
 	// tablero.
-	Source             string `json:"-"`
+	Source string `json:"-"`
+	// Via: por dónde entró (ItemComment.Via). Sólo para el tablero del equipo.
+	Via                string `json:"-"`
 	AuthorProjectID    string `json:"-"`
 	AuthorProjectName  string `json:"-"`
 	AuthorExternalID   string `json:"-"`
