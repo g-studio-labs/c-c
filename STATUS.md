@@ -30,9 +30,13 @@ espacio, decisión 0caaffbe: cac es la fuente, Jira y Notion son copias).
   - con un registro apuntado (`role: rules`, la página de cac y su patrón,
     `R-\d+`), una regla citada en un texto del espacio es una arista a la
     sección que **es** esa regla, y `GET /graph/rule/R-012` la encuentra.
+- **Desplegado (backend), 355:** el detalle de una tarea dice cuál es su
+  ticket (`tickets`: el de su línea **Jira:**, o el de su título).
 - **Espera release de la app:** `get_space_sources`, `set_space_sources` y
-  `get_related R-012` en el MCP.
-- **Falta:** que cac-work lea el ticket (355), la skill de puesta al día
+  `get_related R-012` en el MCP; `tracker` en `get_task` y la skill
+  cac-work v27, que lee el ticket, su épica y los comentarios posteriores al
+  handoff y propone sus decisiones con la fuente.
+- **Falta:** la skill de puesta al día
   (356), el registro de reglas de TCG como página (357, lo carga jose desde
   la sesión de TCG) y decidir el webhook con una semana de datos (358).
 
