@@ -736,7 +736,7 @@ func (r *DocRepository) DecisionBySourceURL(orgID, url string) *domain.Decision 
 	}
 	var id string
 	r.db.Raw(`SELECT x.id FROM decisions x JOIN docs d ON d.id = x.doc_id
-		WHERE d.org_id = ? AND x.source_url = ? ORDER BY x.decided_at ASC LIMIT 1`, orgID, url).Scan(&id)
+		WHERE d.org_id = ? AND x.source_url = ? ORDER BY x.decided_at DESC, x.id DESC LIMIT 1`, orgID, url).Scan(&id)
 	if id == "" {
 		return nil
 	}

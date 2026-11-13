@@ -222,8 +222,11 @@ func (s *DocService) AddDecision(
 	}
 	// Si viene de fuera y ya está apuntada, es ésa: no se escribe otra.
 	// Sin fuente no hay nada que comparar (`DecisionBySourceURL` da nil).
+	// Salvo que venga a sustituirla: el comentario de fuera se corrigió después
+	// de copiarlo (pasó el 12-nov en PROTEUS-314), y la corrección entra como
+	// la que reemplaza a la que había, con la misma fuente.
 	source := strings.TrimSpace(req.SourceURL)
-	if ya := s.repo.DecisionBySourceURL(orgID, source); ya != nil {
+	if ya := s.repo.DecisionBySourceURL(orgID, source); ya != nil && strings.TrimSpace(req.Supersedes) != ya.ID {
 		ya.AlreadyRecorded = true
 		return ya, nil
 	}
