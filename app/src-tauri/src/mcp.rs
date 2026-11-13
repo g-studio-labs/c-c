@@ -2566,7 +2566,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "install_skill",
-            "description": "Install (or update) the cac skills for Claude Code on this machine: cac-work (how to find a repository's place in cac, read its docs before starting, register the work as a task, record decisions and keep it all up to date) and cac-consolidar (the weekly pass that proposes what to promote, record or retire). Writes two fixed files, skills/cac-work/SKILL.md and skills/cac-consolidar/SKILL.md in the Claude Code config folder, with the text shipped inside this cac app — nothing is downloaded. ASK THE USER FIRST; call it only when they agreed. It takes effect in the next session. Needs no scope; it never touches cac.",
+            "description": "Install (or update) the cac skills for Claude Code on this machine: cac-work (how to find a repository's place in cac, read its docs before starting, register the work as a task, record decisions and keep it all up to date) cac-consolidar (the weekly pass that proposes what to promote, record or retire) and cac-catch-up (the catch-up that brings into a space what happened outside, in Jira and Notion, since the last time). Writes three fixed files, skills/cac-work/SKILL.md, skills/cac-consolidar/SKILL.md and skills/cac-catch-up/SKILL.md in the Claude Code config folder, with the text shipped inside this cac app — nothing is downloaded. ASK THE USER FIRST; call it only when they agreed. It takes effect in the next session. Needs no scope; it never touches cac.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2787,7 +2787,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "get_space_sources",
-            "description": "The sources of a space: where what cac must bring in lives outside (the Jira board that is this space's `tracker`, the Notion pages where the client writes `decisions` and `open-questions`) and which cac page is its `rules` registry, with the pattern that names a rule (`R-\\d+`). Each with `lastSyncAt`: up to when it was already read, so a catch-up asks only for what is newer. With a rules registry set, a rule named in any text of the space (`R-012` in a task, a comment, a decision) is an edge to the section of the registry that IS that rule (`## R-012 · …`): get_related with the rule's name shows who cites it.",
+            "description": "The sources of a space: where what cac must bring in lives outside (the Jira board that is this space's `tracker`, the Notion pages where the client writes `decisions` and `open-questions`) and which cac page is its `rules` registry, with the pattern that names a rule (`R-\\d+`), and its `rules-copy` outside if the client reads one. Each with `lastSyncAt`: up to when it was already read, so a catch-up asks only for what is newer. With a rules registry set, a rule named in any text of the space (`R-012` in a task, a comment, a decision) is an edge to the section of the registry that IS that rule (`## R-012 · …`): get_related with the rule's name shows who cites it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2810,7 +2810,7 @@ fn tool_defs() -> Value {
                             "type": "object",
                             "properties": {
                                 "id": { "type": "string", "description": "Only for one that already exists, from get_space_sources." },
-                                "role": { "type": "string", "enum": ["tracker", "rules", "decisions", "open-questions"] },
+                                "role": { "type": "string", "enum": ["tracker", "rules", "rules-copy", "decisions", "open-questions"], "description": "`rules-copy`: the copy of the registry the client reads outside (a Notion page), regenerated from cac." },
                                 "system": { "type": "string", "enum": ["jira", "notion", "cac", "other"], "description": "`rules` is always cac: the registry is a cac page." },
                                 "ref": { "type": "string", "description": "How it is named there: the Jira project key (PROTEUS), the page's URL, or for `rules` the id of the cac page." },
                                 "pattern": { "type": "string", "description": "Only for `rules`: a regular expression matching a whole rule id, e.g. R-\\d+." },
@@ -6692,6 +6692,10 @@ const WORK_SKILL_NAME: &str = "cac-work";
 /// versión que comparar: la última que trae la app.
 const CONSOLIDATE_SKILL: &str = include_str!("../skills/cac-consolidar/SKILL.md");
 const CONSOLIDATE_SKILL_NAME: &str = "cac-consolidar";
+/// Y la tercera: la puesta al día de un espacio con lo que pasó fuera
+/// (command-and-control-356). Como la de consolidar, sin versión que comparar.
+const CATCH_UP_SKILL: &str = include_str!("../skills/cac-catch-up/SKILL.md");
+const CATCH_UP_SKILL_NAME: &str = "cac-catch-up";
 
 /// La versión de una copia de la skill, de su marca final `<!-- cac-work vN -->`.
 /// Se sube a mano al cambiar la skill: es lo que hace que se ofrezca actualizar.
@@ -6796,7 +6800,9 @@ fn instructions(state: Option<SkillState>) -> String {
          what is done, the next step, how to check it shipped) and update the task: done means published, not \
          committed; committed but not yet released stays in progress with a comment saying where it ships, so the \
          next session knows what to check. Once a week, or when asked to consolidate, the cac-consolidar skill (the \
-         weekly pass) proposes what to promote to the pitfalls, which decision is missing and what went stale.",
+         weekly pass) proposes what to promote to the pitfalls, which decision is missing and what went stale; and \
+         when a space has outside sources (get_space_sources), the cac-catch-up skill (the catch-up) proposes what \
+         happened in Jira and Notion since the last time, before writing any of it.",
     );
     match state {
         Some(SkillState::Missing) => s.push_str(
@@ -6839,12 +6845,16 @@ fn install_skill(dir: &std::path::Path, dry_run: bool) -> Result<Value, String> 
     std::fs::create_dir_all(path.parent().unwrap_or(dir))
         .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
     std::fs::write(&path, WORK_SKILL).map_err(|e| format!("Could not write {}: {e}", path.display()))?;
-    let second = dir.join(CONSOLIDATE_SKILL_NAME).join("SKILL.md");
-    std::fs::create_dir_all(second.parent().unwrap_or(dir))
-        .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
-    std::fs::write(&second, CONSOLIDATE_SKILL).map_err(|e| format!("Could not write {}: {e}", second.display()))?;
+    let mut also = vec![];
+    for (name, text) in [(CONSOLIDATE_SKILL_NAME, CONSOLIDATE_SKILL), (CATCH_UP_SKILL_NAME, CATCH_UP_SKILL)] {
+        let other = dir.join(name).join("SKILL.md");
+        std::fs::create_dir_all(other.parent().unwrap_or(dir))
+            .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+        std::fs::write(&other, text).map_err(|e| format!("Could not write {}: {e}", other.display()))?;
+        also.push(other.display().to_string());
+    }
     let mut result = result;
-    result["also"] = json!(second.display().to_string());
+    result["also"] = json!(also);
     Ok(result)
 }
 
@@ -9018,6 +9028,7 @@ mod tests {
             ("supersedes the old one", "`supersedes`"),
             ("goes with remember", "`remember`"),
             ("the weekly pass", "cac-consolidar"),
+            ("the catch-up", "cac-catch-up"),
             ("use send_message", "`send_message`"),
             ("bring the board up to date", "## 3 · Poner el tablero al día"),
             ("claim it", "`claim: true`"),
@@ -9117,6 +9128,22 @@ mod tests {
         // Y la de consolidar, a su lado.
         assert_eq!(std::fs::read_to_string(d.join(CONSOLIDATE_SKILL_NAME).join("SKILL.md")).unwrap(), CONSOLIDATE_SKILL);
         assert!(CONSOLIDATE_SKILL.starts_with("---\nname: cac-consolidar\n"));
+        // Y la de ponerse al día (command-and-control-356).
+        assert_eq!(std::fs::read_to_string(d.join(CATCH_UP_SKILL_NAME).join("SKILL.md")).unwrap(), CATCH_UP_SKILL);
+        assert!(CATCH_UP_SKILL.starts_with("---\nname: cac-catch-up\n"));
+        assert_eq!(out["also"].as_array().map(|a| a.len()), Some(2), "{out}");
+        // Lo que la skill promete es lo que el MCP sabe hacer: las
+        // herramientas que nombra existen, y los papeles son los del esquema.
+        let defs = tool_defs();
+        for tool in ["get_space_sources", "set_space_sources", "record_decision", "update_task", "add_task_comment",
+            "append_doc_page", "write_doc_page_section", "create_task", "get_related", "get_doc_page", "get_task", "search"] {
+            assert!(CATCH_UP_SKILL.contains(&format!("`{tool}`")), "la skill ya no nombra {tool}");
+            assert!(defs.as_array().unwrap().iter().any(|t| t["name"] == tool), "la skill nombra {tool}, que no existe");
+        }
+        let roles = tool(&defs, "set_space_sources")["inputSchema"]["properties"]["sources"]["items"]["properties"]["role"]["enum"].clone();
+        for role in roles.as_array().unwrap() {
+            assert!(CATCH_UP_SKILL.contains(&format!("| `{}` |", role.as_str().unwrap())), "la skill no dice qué es {role}");
+        }
 
         write_installed(&d, "vieja");
         assert_eq!(install_skill(&d, false).unwrap()["replaced"], json!(true));

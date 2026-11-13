@@ -471,6 +471,10 @@ Una vez por semana, o cuando digan «consolida», la skill `cac-consolidar`
 pasa por lo que entró y propone qué sube a Trampas, qué decisión falta y qué
 quedó viejo.
 
+Y cuando el espacio tiene fuentes de fuera (`get_space_sources`: un tablero
+de Jira, páginas de Notion), la skill `cac-catch-up` trae lo que pasó allí
+desde la última vez: una vez al día, o cuando digan «ponte al día».
+
 ---
 
 _Escrita por Claude (Anthropic) con jose (guz-studio), del 20 al 22 de octubre
