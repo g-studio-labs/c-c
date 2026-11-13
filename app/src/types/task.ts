@@ -272,6 +272,11 @@ export interface TaskComment {
   /** De qué fuera vino una línea de sistema: GitHub o un deploy. */
   source?: "gh" | "deploy";
   /**
+   * `mcp` si lo escribió un agente con el token de `authorName`. El hilo pone
+   * esas notas aparte (ver `lib/thread.ts`).
+   */
+  via?: "mcp";
+  /**
    * La entrada del registro que salió de este comentario, si salió alguna.
    *
    * El id y no un booleano: un booleano diría que hubo una decisión sin decir

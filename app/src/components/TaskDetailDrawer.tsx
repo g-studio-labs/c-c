@@ -27,6 +27,7 @@ import {
   Github,
   Link2,
   FolderInput,
+  Bot,
 } from "lucide-react";
 import Picker from "@/components/ui/picker";
 import { moveTargets } from "@/lib/move-targets";
@@ -55,6 +56,9 @@ import PdfAttachment, { isPdfFile } from "@/components/PdfAttachment";
 import CopyId from "@/components/CopyId";
 import TelemetryTimeline from "@/components/TelemetryTimeline";
 import { commentByline } from "@/lib/byline";
+import { isAgentNote, splitThread } from "@/lib/thread";
+import TabIndicator from "@/components/ui/tab-indicator";
+import { useSlidingIndicator } from "@/lib/use-sliding-indicator";
 import TaskGitPanel from "@/components/TaskGitPanel";
 import DecisionForm, { type DecisionDraft } from "@/components/docs/DecisionForm";
 import TaskDecisions from "@/components/tasks/TaskDecisions";
@@ -233,6 +237,13 @@ function CommentItem({
           {c.source === "gh" ? (
             <>
               <Github className="size-3" aria-hidden /> {t("work:task.git.byGitHub")}
+            </>
+          ) : isAgentNote(c) ? (
+            // Lo escribió un agente: se dice de quién es, que es a quien
+            // preguntarle por ello.
+            <>
+              <Bot className="size-3" aria-hidden />{" "}
+              {t("work:task.agentOf", { name: commentByline(c.author, c.authorName) })}
             </>
           ) : (
             commentByline(c.author, c.authorName)
@@ -471,6 +482,10 @@ function Content() {
   // the one here have to be the same conversation, or both are misleading.
   const clientReads = Boolean(task.projectId) && task.visibility !== "internal";
   const [commentInternal, setCommentInternal] = useState(false);
+  // El hilo, en dos: la conversación y lo que anotaron los agentes.
+  const [threadTab, setThreadTab] = useState<"talk" | "notes">("talk");
+  const thread = useMemo(() => splitThread(detail.comments), [detail.comments]);
+  const threadBar = useSlidingIndicator<HTMLDivElement>(`${threadTab}|${thread.talk.length}|${thread.notes.length}`);
   const [registrando, setRegistrando] = useState(false);
   // El cliente puede leer esto, pero **no hay a quién avisar**.
   //
@@ -916,10 +931,38 @@ function Content() {
           onFiles={(fs) => commentEditor.current?.insertFiles(fs)}
         >
           <section className="space-y-3">
-            <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Activity ({detail.comments.length})
-            </h3>
-            {detail.comments.map((c) => (
+            {thread.notes.length === 0 ? (
+              <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                {t("work:task.thread.talk")} ({thread.talk.length})
+              </h3>
+            ) : (
+              // Con notas de agentes, el hilo tiene dos pestañas: sin ellas
+              // no hay nada que separar y sobra la barra.
+              <div ref={threadBar.ref} role="tablist" className="relative flex gap-4 border-b">
+                {(["talk", "notes"] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    role="tab"
+                    aria-selected={threadTab === tab}
+                    onClick={() => setThreadTab(tab)}
+                    className={cn(
+                      "-mb-px flex items-center gap-1.5 border-b-2 pb-1.5 text-xs font-medium uppercase tracking-wide transition-colors",
+                      threadTab === tab
+                        ? cn("text-foreground", threadBar.rect ? "border-transparent" : "border-primary")
+                        : "border-transparent text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {tab === "notes" && <Bot className="size-3.5" aria-hidden />}
+                    {t(tab === "talk" ? "work:task.thread.talk" : "work:task.thread.agentNotes")} ({thread[tab].length})
+                  </button>
+                ))}
+                <TabIndicator rect={threadBar.rect} first={threadBar.first} />
+              </div>
+            )}
+            {threadTab === "notes" && thread.notes.length > 0 && (
+              <p className="text-xs text-muted-foreground">{t("work:task.thread.agentNotesHint")}</p>
+            )}
+            {(threadTab === "notes" && thread.notes.length > 0 ? thread.notes : thread.talk).map((c) => (
               <CommentItem key={c.id} comment={c} taskId={task.id} onUpload={upload} clientReads={clientReads} />
             ))}
 

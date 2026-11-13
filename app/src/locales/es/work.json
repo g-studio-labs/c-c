@@ -101,6 +101,12 @@
     "scopeNone": "Ningún espacio ni lista se llama así"
   },
   "task": {
+    "agentOf": "Agente de {{name}}",
+    "thread": {
+      "talk": "Conversación",
+      "agentNotes": "Notas de agentes",
+      "agentNotesHint": "Lo que anotaron los agentes mientras trabajaban. Sólo lo ve el equipo."
+    },
     "edited": "editado",
     "internal": "interno",
     "clientSees": "el cliente ve esto",

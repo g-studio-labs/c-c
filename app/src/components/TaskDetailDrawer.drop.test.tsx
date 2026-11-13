@@ -100,7 +100,7 @@ describe("soltar en una tarea", () => {
         </PromptProvider>
       </ConfirmProvider>,
     );
-    const comentarios = screen.getByText(/Activity/).closest("section")!;
+    const comentarios = screen.getByText(/^(Conversation|Conversación) \(/).closest("section")!;
     await soltar(comentarios, "log.png");
     await waitFor(() => expect(recibido).toEqual([{ editor: "comentario", names: ["log.png"] }]));
   });
