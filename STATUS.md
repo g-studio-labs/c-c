@@ -13,6 +13,19 @@ tablero: **App** `ca0bfd49-0909-43eb-8135-bc8ecd0f282c` y **Backend**
 
 ## 🟢 Al día
 
+**13-nov, en `main`: las notas de agentes no las lee el cliente y van aparte**
+(command-and-control-359, decisión 2c342250; salió de Portento, donde el
+cliente ve el tablero: 252 comentarios a su vista, ninguno interno).
+- **Desplegado (backend):** un comentario que entra con un token es interno
+  si no dice nada y queda marcado `via: mcp`. Vale con cualquier versión del
+  MCP. Comprobado en producción.
+- **Espera release de la app:** la pestaña «Notas de agentes» del hilo de una
+  tarea, con de quién es el agente (falta la revisión visual de jose), y
+  `visibility: public` en `add_task_comment` / `commentVisibility` en
+  `update_task` para hablarle al cliente a propósito.
+- **Sin resolver:** los comentarios anteriores no se pueden separar (no quedó
+  guardado cuáles escribió un agente) ni pasar a internos.
+
 **12-nov, en `main`: Jira y fuentes externas en cac, parte 0 y fuentes del espacio**
 (command-and-control-352; diseño «Jira y fuentes externas en cac» en el
 espacio, decisión 0caaffbe: cac es la fuente, Jira y Notion son copias).
