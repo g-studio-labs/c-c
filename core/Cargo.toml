@@ -1,0 +1,14 @@
+[package]
+name = "cac-core"
+version = "0.1.0"
+license = "AGPL-3.0-or-later"
+description = "La lógica de cac que comparten todas sus apps, sin interfaz"
+edition = "2021"
+publish = false
+
+# Aquí no entra nada que pinte ni nada de una plataforma concreta: este crate lo
+# consumen el escritorio (Tauri hoy), Android e iOS (por UniFFI) y el MCP. Lo
+# que es propio de cada sitio —dónde se guarda un token, cómo se avisa a la
+# pantalla— entra por un trait que implementa quien lo usa.
+# Guardián: `tests::the_core_depends_on_no_ui`.
+[dependencies]

@@ -124,6 +124,7 @@ dependencies = [
  "bech32",
  "blake2",
  "block2",
+ "cac-core",
  "cpal",
  "crypto_box",
  "cuid2",
@@ -707,6 +708,10 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "cac-core"
+version = "0.1.0"
 
 [[package]]
 name = "cairo-rs"

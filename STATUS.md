@@ -13,6 +13,16 @@ tablero: **App** `ca0bfd49-0909-43eb-8135-bc8ecd0f282c` y **Backend**
 
 ## 🟢 Al día
 
+**14-nov, empieza el core en Rust compartido** (command-and-control-366), en
+la rama `command-and-control-366-rust-core`, que no se fusiona hasta tener la
+base, la sesión y «Mi trabajo». La lógica del cliente se muda por rebanadas a
+`core/` (`cac-core`, sin interfaz) para que la consuman el escritorio, Android
+y el MCP. Diseño y lo decidido (Android primero, la web se retira al llegar el
+móvil, GPUI al final), en cac: «Diseño · Core en Rust compartido», en App.
+- **Hecho:** Fase 0 (367): el crate, la dependencia desde `app/src-tauri` y
+  su `cargo test` en `app.yml`.
+- **Sigue:** la sesión en el core (368, 369) y «Mi trabajo» (370, 371).
+
 **14-nov, publicada la v1.33.0** (sólo app): los vencimientos con el día de la
 organización (363), el clic en un espacio del árbol enseña sus tareas en «Mi
 trabajo» y su documentación queda en el menú (command-and-control-364), y

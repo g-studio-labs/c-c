@@ -14,6 +14,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# La lógica que comparten todas las apps de cac (escritorio, móvil, MCP). Por
+# ruta y sin workspace a propósito: así `target/`, `Cargo.lock` y la caché del
+# CI de release se quedan donde están.
+cac-core = { path = "../../core" }
 # Sólo para escuchar a libwebrtc. El SDK ya instala un sumidero de sus registros
 # a nivel VERBOSE y los reenvía a `log::debug!(target: "libwebrtc")`; sin una
 # implementación de `log` en el proceso, esa macro no hace nada y todo lo que

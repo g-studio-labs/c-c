@@ -17,6 +17,7 @@ on:
     branches: [main]
     paths:
       - "app/**"
+      - "core/**"
       - ".github/workflows/app.yml"
   workflow_dispatch:
   workflow_call:
@@ -56,3 +57,29 @@ jobs:
       # revés sigue escondido. Así se vio el 30 que se pintaba en el 29.
       - name: Test (UTC, UTC−6, UTC+13)
         run: bun run test:timezones
+
+  # El core en Rust que comparten las apps (`core/`). Es la primera prueba de
+  # Rust que corre en el CI: el resto del lado Rust (`app/src-tauri`) sigue sin
+  # red, porque compilarlo pide WebKit y libwebrtc. Éste no enlaza ninguna
+  # interfaz —lo guarda `the_core_depends_on_no_ui`—, así que corre en un runner
+  # limpio en segundos. Y como `app-release.yml` llama a este workflow, un core
+  # en rojo tampoco sale.
+  core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: core
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./core -> target"
+
+      - name: Test
+        run: cargo test --locked

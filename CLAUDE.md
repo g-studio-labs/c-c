@@ -1,6 +1,7 @@
 # cac — lo que hay que saber antes de tocar
 
-Monorepo: `app/` (Tauri 2 + React 19, el cliente de escritorio), `backend/` (Go +
+Monorepo: `app/` (Tauri 2 + React 19, el cliente de escritorio), `core/` (Rust,
+la lógica que comparten todas las apps, sin interfaz), `backend/` (Go +
 chi + GORM + Postgres, la API en `cac.guz-studio.dev`), `swarm-manage/` (agente
 por host), `infra/`.
 
@@ -184,7 +185,7 @@ Las cuatro suites corren **por delante** de lo que publican, así que rojo no sa
 | Workflow | Qué corre | Qué frena |
 |---|---|---|
 | `backend.yml` | `go test` con Postgres de verdad | el despliegue a producción (#38) |
-| `app.yml` | tipos, eslint, y la suite **bajo las tres zonas** | la release: `app-release.yml` lo llama antes de compilar (#69) |
+| `app.yml` | tipos, eslint, la suite **bajo las tres zonas**, y `cargo test` del core (`core/`) | la release: `app-release.yml` lo llama antes de compilar (#69) |
 | `transcriber.yml` | `pytest` | la imagen del worker |
 | `swarm-manage.yml` | `go test` del agente | su imagen (`:vN` desde `swarm-manage/VERSION`) |
 
@@ -192,7 +193,7 @@ Al encender cada una salió algo que llevaba tiempo escondido: una prueba del
 backend roja desde hacía meses, y en la app un error huérfano de tiptap que hacía
 salir la suite con código 1 con todo en verde (tapado en `test-setup.ts`).
 
-**Sin red sigue** el lado Rust de la app, que no tiene pruebas propias en el CI:
+**Sin red sigue** el lado Rust de la app (`app/src-tauri`; el core sí corre), que no tiene pruebas propias en el CI:
 lo único que lo comprueba es que la release compile en las tres plataformas.
 
 Una release con `app.yml` en rojo **se queda publicada sin instaladores**. El
@@ -233,6 +234,7 @@ Entera, antes de dar algo por hecho. Desde la raíz del repo:
 ```sh
 (cd app           && npx tsc --noEmit)                            # tipos
 (cd app           && bun run test)                                # eslint + vitest
+(cd core          && cargo test)                                  # el core compartido
 (cd app/src-tauri && cargo check)                                 # el lado Rust
 (cd backend       && go build ./... && go vet ./... && go test ./...)
 python3 .claude/hooks/hooks_test.py                                 # los hooks de cac
