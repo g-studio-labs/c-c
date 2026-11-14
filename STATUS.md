@@ -13,13 +13,20 @@ tablero: **App** `ca0bfd49-0909-43eb-8135-bc8ecd0f282c` y **Backend**
 
 ## 🟢 Al día
 
-**13-nov, en `main`: un vencimiento se mide con el día de la organización**
+**14-nov, publicada la v1.33.0** (sólo app): los vencimientos con el día de la
+organización (363), el clic en un espacio del árbol enseña sus tareas en «Mi
+trabajo» y su documentación queda en el menú (command-and-control-364), y
+cambiar una tarea de lista desde su detalle pregunta siempre
+(command-and-control-365). Falta la revisión visual de jose de las tres, y
+poner la zona de cada organización.
+
+**13-nov: un vencimiento se mide con el día de la organización**
 (command-and-control-363). «Hoy» es el de la zona de la organización (sin
 zona, el reloj de quien mira); lo que vence hoy va en ámbar y rojo desde
 ayer, igual en tarjetas, lista, «Mi trabajo» y calendario; a quien está en
 otra hora se le dice de quién es el día (escrito en el detalle, al pasar el
 cursor en tarjetas y filas).
-- **Espera release de la app** y la revisión visual de jose.
+- **Publicado en la v1.33.0**; falta la revisión visual de jose.
 - **Falta:** poner la zona en Dwit México, G Studio y Nuke AI (hoy vacía en
   las tres: hasta entonces nada cambia salvo el ámbar de «hoy»).
 
