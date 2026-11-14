@@ -135,6 +135,11 @@ impl Core {
         self.inner.listener.session_changed(None);
     }
 
+    /// Con qué servidor habla, sin barra final.
+    pub fn base_url(&self) -> &str {
+        &self.inner.config.base_url
+    }
+
     /// Quién está dentro, si hay alguien.
     pub fn session(&self) -> Option<Session> {
         self.held().map(|held| held.session)
@@ -277,10 +282,14 @@ impl Core {
         // Si no se pudo guardar, la sesión sigue en la mano: este proceso
         // puede continuar, y la siguiente renovación lo vuelve a intentar.
         let _ = self.keep(Held {
-            session: held.session,
+            session: held.session.clone(),
             access_token: data.access_token,
             refresh_token: data.refresh_token,
         });
+        // La persona es la misma, pero quien tenga una copia del token de
+        // acceso (el stream de eventos, una subida) tiene que enterarse de
+        // que cambió: si no, sigue llamando con el caducado.
+        self.inner.listener.session_changed(Some(held.session));
         Some(access_token)
     }
 

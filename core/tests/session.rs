@@ -158,6 +158,30 @@ async fn a_new_pair_is_stored_before_it_is_used() {
     assert_eq!(rig.core.access_token().as_deref(), Some("new-access"));
 }
 
+/// Renovar avisa, aunque la persona sea la misma.
+///
+/// El escritorio guarda una copia del token de acceso para el stream de
+/// eventos y las subidas. Rotura que atrapa: renovar en silencio, que deja
+/// esa copia caducada para siempre.
+#[tokio::test]
+async fn a_renewed_token_is_announced() {
+    let rig = signed_in().await;
+    mount_tasks(&rig.server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/refresh"))
+        .respond_with(refreshed())
+        .mount(&rig.server)
+        .await;
+
+    rig.core.request("GET", "/api/v1/tasks/", None, true).await.unwrap();
+
+    assert_eq!(
+        *rig.recorder.seen.lock().unwrap(),
+        [Some("ana".to_string()), Some("ana".to_string())],
+        "uno al entrar y otro al renovar",
+    );
+}
+
 /// Un servidor que no pudo mirar no echa a nadie.
 ///
 /// Rotura que atrapa: cerrar la sesión ante cualquier error del refresh.

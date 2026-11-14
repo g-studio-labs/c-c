@@ -11,16 +11,18 @@
 //! settles, and the UI looks frozen. Here the pool is ours: idle sockets are
 //! dropped on a schedule we choose, and every request has a hard deadline.
 
+//!
+//! El pool y sus plazos viven ya en el core (`cac_core::transport`), que es
+//! quien lleva las llamadas con sesión (`core_request`). Esto queda para lo
+//! que la pantalla todavía manda con sus propias cabeceras.
+
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use cac_core::transport;
 use serde::{Deserialize, Serialize};
 
-/// Below the typical 60s server/proxy idle close, so a socket is retired by us
-/// before the other end retires it behind our back.
-const POOL_IDLE: Duration = Duration::from_secs(30);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,59 +50,29 @@ pub struct ApiResponse {
 fn client() -> Result<&'static reqwest::Client, String> {
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .pool_idle_timeout(POOL_IDLE)
-                .connect_timeout(CONNECT_TIMEOUT)
-                // An API call that redirects is a misconfiguration, not a
-                // destination change: better a visible error than a silent hop.
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|e| e.to_string())
-        })
+        .get_or_init(|| transport::new_client().map_err(|e| e.to_string()))
         .as_ref()
         .map_err(|e| e.clone())
 }
 
 pub async fn execute(req: ApiRequest) -> Result<ApiResponse, String> {
-    let method = reqwest::Method::from_bytes(req.method.to_uppercase().as_bytes())
-        .map_err(|_| format!("network: unsupported method {}", req.method))?;
-
-    let mut builder = client()?
-        .request(method, &req.url)
-        .timeout(Duration::from_millis(
-            req.timeout_ms.unwrap_or(DEFAULT_TIMEOUT.as_millis() as u64),
-        ));
-
-    for (k, v) in &req.headers {
-        if !k.is_empty() {
-            builder = builder.header(k, v);
-        }
-    }
-    if let Some(body) = req.body {
-        builder = builder.body(body);
-    }
-
     // The `network:` prefix is a contract with the caller: transport failure, as
-    // opposed to a response that merely carries an error status.
-    let res = builder.send().await.map_err(|e| {
-        let reason = if e.is_timeout() {
-            "timed out".to_string()
-        } else if e.is_connect() {
-            "could not connect".to_string()
-        } else {
-            e.to_string()
-        };
-        format!("network: {reason}")
-    })?;
+    // opposed to a response that merely carries an error status. It comes from
+    // `ApiError::Network`'s own wording.
+    let reply = transport::send(
+        client()?,
+        transport::Request {
+            method: req.method,
+            url: req.url,
+            headers: req.headers,
+            body: req.body,
+            timeout: req.timeout_ms.map(Duration::from_millis).unwrap_or(DEFAULT_TIMEOUT),
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
-    let status = res.status().as_u16();
-    let body = res
-        .text()
-        .await
-        .map_err(|e| format!("network: response body: {e}"))?;
-
-    Ok(ApiResponse { status, body })
+    Ok(ApiResponse { status: reply.status, body: reply.body })
 }
 
 #[cfg(test)]

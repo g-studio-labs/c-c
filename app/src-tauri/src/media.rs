@@ -11,20 +11,7 @@
 //! caching. A reference that only lives inside one page has already bitten this
 //! app once (pasted images used to be stored as `blob:` URLs).
 
-use std::sync::Mutex;
-
 use tauri::http::{Request, Response};
-
-/// The access token, mirrored from the frontend's auth store.
-///
-/// The protocol handler runs outside any request the UI made, so it has no way
-/// to be handed credentials per call — it needs the current token to be
-/// somewhere it can read.
-#[derive(Default)]
-pub struct Session {
-    pub token: Mutex<Option<String>>,
-    pub base_url: Mutex<Option<String>>,
-}
 
 /// The scheme the webview uses. `convertFileSrc(path, "cacmedia")` on the
 /// frontend builds the platform-correct URL for it.

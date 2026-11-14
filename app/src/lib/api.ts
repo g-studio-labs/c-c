@@ -97,6 +97,17 @@ function parse(reply: Reply): any {
 }
 
 async function tryRefresh(): Promise<string | null> {
+  // En el escritorio renueva el core, que es quien tiene el refresh: una sola
+  // vez por proceso, y guardando el par nuevo antes de usarlo. El token llega
+  // al store por el evento `core://session`.
+  if (inTauri) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      return await invoke<string | null>("core_refresh");
+    } catch {
+      return null;
+    }
+  }
   if (refreshPromise) return refreshPromise;
 
   refreshPromise = (async () => {
@@ -132,8 +143,48 @@ async function tryRefresh(): Promise<string | null> {
 }
 
 
+/**
+ * Una llamada con sesión, por el core.
+ *
+ * El core pone el token, renueva si caducó y repite la llamada, y reintenta
+ * una vez si el socket estaba muerto: lo que en la web hace `request` más
+ * abajo, aquí ya viene hecho. Vuelve la respuesta tal cual, con su estado.
+ */
+async function sendThroughCore(
+  path: string,
+  method: string,
+  body: string | undefined,
+  auth: boolean,
+): Promise<Reply> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  try {
+    return await invoke<Reply>("core_request", { method, path, body: body ?? null, auth });
+  } catch (e) {
+    // El core contesta `session-expired` cuando no pudo renovar; lo demás es
+    // que no hubo respuesta.
+    if (String(e) === "session-expired") throw new Error("session-expired");
+    useConnectionStore.getState().markFail("Can't reach the server");
+    throw new Error("network-error");
+  }
+}
+
 async function request<T>(path: string, options: RequestOptions = {}, retry = true): Promise<T> {
   const { auth = false, ...init } = options;
+
+  if (inTauri) {
+    const reply = await sendThroughCore(
+      path,
+      (init.method as string) ?? "GET",
+      typeof init.body === "string" ? init.body : undefined,
+      auth,
+    );
+    return settle<T>(reply, () => {
+      // Sigue caducado después de que el core renovara y repitiera: no hay
+      // más que hacer aquí. Sin sesión de por medio es un error como otro.
+      if (auth) throw new Error("session-expired");
+      return undefined;
+    });
+  }
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -160,6 +211,26 @@ async function request<T>(path: string, options: RequestOptions = {}, retry = tr
     useConnectionStore.getState().markFail("Can't reach the server");
     throw new Error("network-error");
   }
+  return settle<T>(reply, async () => {
+    if (!auth || !retry) return undefined;
+    const newToken = await tryRefresh();
+    if (newToken) return request<T>(path, options, false);
+    throw new Error("session-expired");
+  });
+}
+
+/**
+ * Qué hacer con una respuesta: marcar la conexión, y devolver el cuerpo o
+ * lanzar el error del servidor.
+ *
+ * `onExpired` decide qué pasa con un `expired-token`: la web renueva y repite;
+ * el escritorio ya lo intentó en el core. Si devuelve `undefined`, el error
+ * sale como cualquier otro.
+ */
+async function settle<T>(
+  reply: Reply,
+  onExpired: () => Promise<T | undefined> | T | undefined,
+): Promise<T> {
   // A 5xx is a degraded backend, not a successful round trip — a reachable
   // gateway in front of a dead API would otherwise read as healthy.
   if (reply.status >= 500) useConnectionStore.getState().markFail(`Server error (${reply.status})`);
@@ -184,10 +255,9 @@ async function request<T>(path: string, options: RequestOptions = {}, retry = tr
     const detalle: string = json?.error ?? "";
     const errorMsg: string = json?.message ?? json?.error ?? "Request failed";
 
-    if (detalle === "expired-token" && auth && retry) {
-      const newToken = await tryRefresh();
-      if (newToken) return request<T>(path, options, false);
-      throw new Error("session-expired");
+    if (detalle === "expired-token") {
+      const again = await onExpired();
+      if (again !== undefined) return again;
     }
 
     throw errorDeApi(detalle, errorMsg);

@@ -1,5 +1,6 @@
 import { registerServiceWorker } from "./lib/push";
-import { isWebBuild } from "./lib/platform";
+import { isTauri, isWebBuild } from "./lib/platform";
+import { startCoreSession } from "./lib/core-session";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
@@ -44,8 +45,15 @@ installPauseWhenHidden();
 // la app cerrada (W2). En el escritorio no hay.
 if (isWebBuild) void registerServiceWorker();
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+// En el escritorio la sesión la tiene el core en Rust, y hay que preguntársela
+// antes de pintar: si no, el primer render no sabe si hay alguien dentro y
+// enseña el login un instante. Es una llamada local, sin red.
+const ready = isTauri ? startCoreSession().catch(() => {}) : Promise.resolve();
+
+void ready.then(() => {
+  ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>,
+  );
+});

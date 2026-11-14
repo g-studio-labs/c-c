@@ -13,6 +13,7 @@ mod secrets;
 mod op_env;
 mod paste_guard;
 mod api_client;
+mod core_bridge;
 mod crypto_tools;
 mod dropped;
 mod download;
@@ -1485,22 +1486,6 @@ async fn api_request(req: api_client::ApiRequest) -> Result<api_client::ApiRespo
     api_client::execute(req).await
 }
 
-/// Mirrors the frontend's session into Rust. The media protocol handler runs
-/// outside any UI request, so it has no other way to learn the current token.
-#[tauri::command]
-fn set_session(
-    state: tauri::State<'_, media::Session>,
-    token: Option<String>,
-    base_url: Option<String>,
-) {
-    if let Ok(mut t) = state.token.lock() {
-        *t = token;
-    }
-    if let Ok(mut b) = state.base_url.lock() {
-        *b = base_url;
-    }
-}
-
 /// Downloads an attachment to a temp file and hands it to the OS.
 ///
 /// A `cacmedia://` URL is only meaningful inside this webview, so links to
@@ -1508,14 +1493,12 @@ fn set_session(
 /// keeps the token out of any URL, which is the point of the exercise.
 #[tauri::command]
 async fn open_attachment(
-    state: tauri::State<'_, media::Session>,
+    state: tauri::State<'_, core_bridge::CoreSlot>,
     path: String,
     file_name: String,
 ) -> Result<(), String> {
 
-    let token = state.token.lock().ok().and_then(|t| t.as_ref().cloned());
-    let base = state.base_url.lock().ok().and_then(|b| b.as_ref().cloned());
-    let (Some(token), Some(base)) = (token, base) else {
+    let Some((token, base)) = core_bridge::credentials(&state) else {
         return Err("Not signed in".into());
     };
     let path = media::backend_path(&format!("cacmedia://localhost{path}"))
@@ -1560,16 +1543,14 @@ async fn open_attachment(
 #[tauri::command]
 async fn save_attachment(
     app: tauri::AppHandle,
-    state: tauri::State<'_, media::Session>,
+    state: tauri::State<'_, core_bridge::CoreSlot>,
     path: String,
     file_name: String,
 ) -> Result<String, String> {
     use std::io::Write;
     use tauri::Manager;
 
-    let token = state.token.lock().ok().and_then(|t| t.as_ref().cloned());
-    let base = state.base_url.lock().ok().and_then(|b| b.as_ref().cloned());
-    let (Some(token), Some(base)) = (token, base) else {
+    let Some((token, base)) = core_bridge::credentials(&state) else {
         return Err("Not signed in".into());
     };
     let path = media::backend_path(&format!("cacmedia://localhost{path}"))
@@ -1844,16 +1825,14 @@ fn pick_dialog_dir(candidates: &[Option<std::path::PathBuf>]) -> Option<std::pat
 #[tauri::command]
 async fn export_notes(
     app: tauri::AppHandle,
-    state: tauri::State<'_, media::Session>,
+    state: tauri::State<'_, core_bridge::CoreSlot>,
     subfolder: String,
 ) -> Result<Option<notes_export::ExportSummary>, String> {
     use tauri_plugin_dialog::DialogExt;
 
     // Copied out before the await: the guard is not Send, and holding it across
     // one would make this command fail to compile.
-    let token = state.token.lock().ok().and_then(|t| t.as_ref().cloned());
-    let base = state.base_url.lock().ok().and_then(|b| b.as_ref().cloned());
-    let (Some(token), Some(base)) = (token, base) else {
+    let Some((token, base)) = core_bridge::credentials(&state) else {
         return Err("Not signed in".into());
     };
 
@@ -1911,7 +1890,9 @@ pub fn run() {
             }
         })
         .manage(TokenCache(Mutex::new(HashMap::new())))
-        .manage(media::Session::default())
+        // La sesión ya no se copia desde la pantalla (`set_session`): es del
+        // core, y quien necesita el token se lo pide a él.
+        .manage(core_bridge::CoreSlot::default())
         // Attachments are served under our own scheme so an <img> can carry
         // credentials in a header instead of the URL. See media.rs.
         .register_asynchronous_uri_scheme_protocol(video_frames::SCHEME, |_ctx, req, responder| {
@@ -1937,9 +1918,8 @@ pub fn run() {
         })
         .register_asynchronous_uri_scheme_protocol(media::SCHEME, |ctx, req, responder| {
             use tauri::Manager;
-            let state = ctx.app_handle().state::<media::Session>();
-            let token = state.token.lock().ok().and_then(|t| t.as_ref().cloned());
-            let base = state.base_url.lock().ok().and_then(|b| b.as_ref().cloned());
+            let (token, base) =
+                core_bridge::credentials(&ctx.app_handle().state::<core_bridge::CoreSlot>()).unzip();
             tauri::async_runtime::spawn(async move {
                 responder.respond(media::serve(token, base, req).await);
             });
@@ -2050,7 +2030,14 @@ pub fn run() {
             encode_decode,
             send_http_request,
             api_request,
-            set_session,
+            core_bridge::core_init,
+            core_bridge::core_session,
+            core_bridge::core_request,
+            core_bridge::core_sign_in,
+            core_bridge::core_adopt_session,
+            core_bridge::core_update_session,
+            core_bridge::core_refresh,
+            core_bridge::core_logout,
             open_attachment,
             save_attachment,
             read_dropped_file,
