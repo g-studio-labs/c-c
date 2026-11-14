@@ -5,7 +5,10 @@ use std::rc::Rc;
 
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{v_virtual_list, ActiveTheme, Icon, IconName, Theme, ThemeMode};
+use gpui_kit::component::scroll::Scrollbar;
+use gpui_kit::component::{
+    v_virtual_list, ActiveTheme, Icon, IconName, Theme, ThemeMode, VirtualListScrollHandle,
+};
 use gpui_kit::*;
 
 /// Cuántas filas tiene la lista de prueba. «Mi trabajo» pide 200 como mucho;
@@ -66,6 +69,11 @@ pub struct Spike {
     /// la lista es virtual de verdad: mil filas en datos, unas decenas en
     /// pantalla.
     rows_built: Rc<Cell<usize>>,
+    /// La primera fila del último pintado: lo que dice si el scroll movió algo.
+    first_row: Rc<Cell<usize>>,
+    /// Sin esto la lista se pinta pero no se mueve: es lo que la rueda del
+    /// ratón y la barra desplazan.
+    scroll: VirtualListScrollHandle,
 }
 
 impl Spike {
@@ -79,6 +87,8 @@ impl Spike {
             }),
             row_sizes: Rc::new(vec![size(px(0.), px(ROW_HEIGHT)); ROWS]),
             rows_built: Rc::new(Cell::new(0)),
+            first_row: Rc::new(Cell::new(0)),
+            scroll: VirtualListScrollHandle::new(),
         }
     }
 }
@@ -102,9 +112,10 @@ impl Render for Spike {
         let (border, muted, hover, primary) =
             (theme.border, theme.muted_foreground, theme.list_hover, theme.primary);
 
-        let rows_built = self.rows_built.clone();
+        let (rows_built, first_row) = (self.rows_built.clone(), self.first_row.clone());
         let list = v_virtual_list(cx.entity(), "rows", self.row_sizes.clone(), move |_, range, _, _| {
             rows_built.set(range.len());
+            first_row.set(range.start);
             range
                 .map(|index| {
                     div()
@@ -120,7 +131,8 @@ impl Render for Spike {
                         .child(row_label(index))
                 })
                 .collect::<Vec<_>>()
-        });
+        })
+        .track_scroll(&self.scroll);
 
         div()
             .size_full()
@@ -146,7 +158,18 @@ impl Render for Spike {
                             .child(Icon::new(IconName::Inbox).text_color(primary))
                             .child(format!("Lista virtual · {ROWS} filas")),
                     )
-                    .child(div().flex_1().overflow_hidden().child(list)),
+                    .child(
+                        div()
+                            .id("rows-viewport")
+                            // Para que una prueba pueda apuntar aquí con la
+                            // rueda; fuera de las pruebas no hace nada.
+                            .test_support()
+                            .relative()
+                            .flex_1()
+                            .overflow_hidden()
+                            .child(list)
+                            .child(Scrollbar::vertical(&self.scroll)),
+                    ),
             )
             // Columna derecha: texto, markdown.
             .child(
@@ -193,8 +216,8 @@ mod tests {
     use super::{apply_cac_theme, Spike, ROWS};
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{
-        px, size, AnyWindowHandle, AppContext, Bounds, Entity, Point, TestAppContext, WindowBounds,
-        WindowOptions,
+        point, px, size, AnyWindowHandle, AppContext, Bounds, Entity, Point, ScrollDelta,
+        TestAppContext, WindowBounds, WindowOptions,
     };
 
     fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Spike>) {
@@ -244,6 +267,27 @@ mod tests {
             let built = spike.read(cx).rows_built.get();
             assert!(built > 0, "no se pintó ninguna fila");
             assert!(built < 100, "se construyeron {built} filas de {ROWS}");
+        })
+        .unwrap();
+    }
+
+    /// La rueda del ratón mueve la lista.
+    ///
+    /// jose abrió la primera versión y la lista no se movía: se pintaba, pero
+    /// no tenía a qué engancharse el scroll (14-nov-2026). Rotura que atrapa:
+    /// quitarle a la lista su manejador de scroll.
+    #[gpui_kit::test]
+    fn the_wheel_moves_the_list(cx: &mut TestAppContext) {
+        let (window, spike) = open(cx);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(spike.read(cx).first_row.get(), 0);
+
+            window.scroll("rows-viewport", ScrollDelta::Pixels(point(px(0.), px(-640.))), cx);
+            window.render_frame(cx);
+
+            let first = spike.read(cx).first_row.get();
+            assert!(first >= 15, "tras bajar 640px la primera fila es la {first}");
         })
         .unwrap();
     }
