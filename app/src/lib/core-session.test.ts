@@ -36,6 +36,11 @@ function core(answers: Record<string, unknown>) {
   );
 }
 
+/** Lo que se le pidió al core sobre la sesión, en orden. */
+function sessionCommands() {
+  return invoke.mock.calls.map(([command]) => command as string).filter((c) => c.startsWith("core_"));
+}
+
 function desktop() {
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
 }
@@ -124,8 +129,7 @@ describe("el arranque de la sesión", () => {
 
     await startCoreSession();
 
-    const order = invoke.mock.calls.map(([command]) => command);
-    expect(order).toEqual(["core_init", "core_adopt_session", "core_session"]);
+    expect(sessionCommands()).toEqual(["core_init", "core_adopt_session", "core_session"]);
   });
 
   it("sin nada de antes no ofrece nada", async () => {
@@ -135,7 +139,7 @@ describe("el arranque de la sesión", () => {
 
     await startCoreSession();
 
-    expect(invoke.mock.calls.map(([command]) => command)).toEqual(["core_init", "core_session"]);
+    expect(sessionCommands()).toEqual(["core_init", "core_session"]);
   });
 
   it("pone en el store lo que diga el core, no lo que hubiera guardado", async () => {
@@ -162,6 +166,18 @@ describe("el arranque de la sesión", () => {
     const { startCoreSession } = await import("./core-session");
 
     await expect(startCoreSession()).resolves.toBeUndefined();
+  });
+
+  it("después de la sesión engancha «Mi trabajo» al core", async () => {
+    desktop();
+    core({ core_session: { session: ana, accessToken: "access" } });
+    const { startCoreSession } = await import("./core-session");
+
+    await startCoreSession();
+
+    const commands = invoke.mock.calls.map(([command]) => command);
+    expect(commands.indexOf("mywork_state")).toBeGreaterThan(commands.indexOf("core_session"));
+    expect(listeners.has("core://mywork")).toBe(true);
   });
 
   it("lo que el core avise después llega al store", async () => {

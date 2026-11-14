@@ -156,6 +156,11 @@ export interface OpenTask {
   parentTitle?: string;
   /** The primary assignee's name; the card shows their initials. */
   assignee?: string;
+  /**
+   * El día del vencimiento, `YYYY-MM-DD`, ya resuelto. Lo pone el core en el
+   * escritorio; en la web no viene, y se sigue leyendo `dueAt` con `dueDay`.
+   */
+  dueDay?: string;
 }
 
 export interface TaskCard {

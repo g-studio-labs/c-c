@@ -8,12 +8,14 @@
 
 use std::sync::{Arc, OnceLock};
 
-use cac_core::{Config, Core, FileStorage, Listener, Session};
+use cac_core::{Config, Core, FileStorage, Listener, MyWorkState, Session, WorkLens, WorkScope};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// El evento con el que la pantalla se entera de un cambio de sesión.
 pub const SESSION_EVENT: &str = "core://session";
+/// Y el de «Mi trabajo»: lleva el estado entero, para pintarlo tal cual.
+pub const MY_WORK_EVENT: &str = "core://mywork";
 
 /// El core de este proceso. Vacío hasta `core_init`: la URL del servidor la
 /// sabe la pantalla (`VITE_API_URL`), y hasta que no la dice no hay con quién
@@ -68,6 +70,10 @@ impl Listener for Forward {
         if let Ok(core) = self.app.state::<CoreSlot>().get() {
             let _ = self.app.emit(SESSION_EVENT, view(core));
         }
+    }
+
+    fn my_work_changed(&self, state: MyWorkState) {
+        let _ = self.app.emit(MY_WORK_EVENT, state);
     }
 }
 
@@ -152,5 +158,76 @@ pub async fn core_refresh(slot: State<'_, CoreSlot>) -> Result<Option<String>, S
 pub async fn core_logout(slot: State<'_, CoreSlot>) -> Result<(), String> {
     let core = slot.get()?.clone();
     core.logout().await;
+    Ok(())
+}
+
+// ── «Mi trabajo» ────────────────────────────────────────────────────────────
+//
+// Uno por intención de la pantalla. El estado no se devuelve: llega por
+// `core://mywork`, igual a quien lo pidió que a cualquier otra ventana.
+
+#[tauri::command]
+pub fn mywork_state(slot: State<'_, CoreSlot>) -> Result<MyWorkState, String> {
+    Ok(slot.get()?.my_work().state())
+}
+
+#[tauri::command]
+pub fn mywork_set_lens(slot: State<'_, CoreSlot>, lens: WorkLens) -> Result<(), String> {
+    slot.get()?.my_work().set_lens(lens);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn mywork_set_include_closed(slot: State<'_, CoreSlot>, on: bool) -> Result<(), String> {
+    slot.get()?.my_work().set_include_closed(on);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn mywork_set_scope(slot: State<'_, CoreSlot>, scope: Option<WorkScope>) -> Result<(), String> {
+    slot.get()?.my_work().set_scope(scope);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn mywork_load(slot: State<'_, CoreSlot>, org_id: Option<String>) -> Result<(), String> {
+    let core = slot.get()?.clone();
+    core.my_work().load(org_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn mywork_ensure_loaded(slot: State<'_, CoreSlot>, org_id: Option<String>) -> Result<(), String> {
+    let core = slot.get()?.clone();
+    core.my_work().ensure_loaded(org_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn mywork_set_watching(slot: State<'_, CoreSlot>, task_id: String, on: bool) -> Result<(), String> {
+    let core = slot.get()?.clone();
+    core.my_work().set_watching(&task_id, on).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn mywork_forget(slot: State<'_, CoreSlot>, task_id: String) -> Result<(), String> {
+    slot.get()?.my_work().forget(&task_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn mywork_set_due_local(
+    slot: State<'_, CoreSlot>,
+    task_id: String,
+    due_at: Option<String>,
+) -> Result<Option<String>, String> {
+    Ok(slot.get()?.my_work().set_due_local(&task_id, due_at))
+}
+
+/// `async` aunque no espere nada: la recarga con respiro se lanza con
+/// `tokio::spawn`, y un comando síncrono corre fuera del runtime de tokio.
+#[tauri::command]
+pub async fn mywork_task_event(slot: State<'_, CoreSlot>, task_id: String, new: bool) -> Result<(), String> {
+    slot.get()?.my_work().task_event(&task_id, new);
     Ok(())
 }

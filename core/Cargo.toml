@@ -24,6 +24,14 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 chrono-tz = "0.10"
 # Para buscar sin acentos: «revision» encuentra «Revisión».
 unicode-normalization = "0.1"
+# Los bindings de Kotlin y Swift. Opcional: el escritorio no lo necesita, y
+# sin la feature no se compila. Todavía no se generan bindings; la feature
+# existe para que el CI compruebe que los tipos del core se pueden exportar
+# (`cargo check --features uniffi`), antes de que haga falta en Android.
+uniffi = { version = "0.29", optional = true }
+
+[features]
+uniffi = ["dep:uniffi"]
 
 [dev-dependencies]
 tempfile = "3"

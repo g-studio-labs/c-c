@@ -7,6 +7,7 @@
 
 /// Un fallo del core.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 pub enum ApiError {
     /// No hubo respuesta: sin red, sin conexión, o se agotó el plazo.
     ///

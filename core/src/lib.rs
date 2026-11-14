@@ -5,6 +5,9 @@
 //! aquí, y cada plataforma sólo pinta y aporta lo suyo del sistema. El diseño
 //! entero está en cac, en la página «Diseño · Core en Rust compartido».
 
+#[cfg(feature = "uniffi")]
+uniffi::setup_scaffolding!();
+
 pub mod dates;
 pub mod error;
 pub mod events;

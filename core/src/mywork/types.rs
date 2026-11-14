@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// Una tarea abierta, tal como la cuenta `GET /api/v1/tasks/`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct OpenTask {
     pub id: String,
@@ -53,6 +54,7 @@ pub struct OpenTask {
 
 /// Las preguntas que se le hacen a «Mi trabajo».
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(rename_all = "lowercase")]
 pub enum WorkLens {
     #[default]
@@ -84,6 +86,7 @@ impl WorkLens {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(rename_all = "lowercase")]
 pub enum ScopeKind {
     Space,
@@ -92,6 +95,7 @@ pub enum ScopeKind {
 
 /// A qué ha acotado el árbol esta vista, si a algo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct WorkScope {
     pub kind: ScopeKind,
@@ -105,6 +109,7 @@ pub struct WorkScope {
 
 /// «Mi trabajo», entero: lo que la pantalla pinta.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct MyWorkState {
     pub lens: WorkLens,

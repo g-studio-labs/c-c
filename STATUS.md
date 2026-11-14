@@ -19,9 +19,18 @@ base, la sesión y «Mi trabajo». La lógica del cliente se muda por rebanadas 
 `core/` (`cac-core`, sin interfaz) para que la consuman el escritorio, Android
 y el MCP. Diseño y lo decidido (Android primero, la web se retira al llegar el
 móvil, GPUI al final), en cac: «Diseño · Core en Rust compartido», en App.
-- **Hecho:** Fase 0 (367): el crate, la dependencia desde `app/src-tauri` y
-  su `cargo test` en `app.yml`.
-- **Sigue:** la sesión en el core (368, 369) y «Mi trabajo» (370, 371).
+- **Hecho, en la rama:** el crate y su `cargo test` en `app.yml` (367); la
+  sesión en el core, con refresh único por proceso y el par guardado antes de
+  usarse (368); el escritorio usándola, sin tokens en `localStorage` (369);
+  «Mi trabajo» en el core con su contrato contra el backend (370); y
+  `mywork.store.ts` de espejo, más la feature `uniffi` comprobada en el CI
+  (371).
+- **Falta antes de fusionar:** probarlo a mano con la app abierta (la sesión,
+  la migración desde `localStorage` y «Mi trabajo»). Lo que no se portó:
+  `scope-options` y las opciones de los desplegables del filtro, que dependen
+  del árbol y siguen en TypeScript.
+- **Después:** Android, y decidir qué pasa con el MCP (propuesta en la página
+  de diseño).
 
 **14-nov, publicada la v1.33.0** (sólo app): los vencimientos con el día de la
 organización (363), el clic en un espacio del árbol enseña sus tareas en «Mi

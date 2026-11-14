@@ -27,6 +27,7 @@ const STORAGE_KEY: &str = "session";
 
 /// Quién está dentro. Espejo de `domain.Session` del backend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     pub id: String,

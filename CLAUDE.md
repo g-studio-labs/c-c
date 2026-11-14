@@ -234,7 +234,7 @@ Entera, antes de dar algo por hecho. Desde la raíz del repo:
 ```sh
 (cd app           && npx tsc --noEmit)                            # tipos
 (cd app           && bun run test)                                # eslint + vitest
-(cd core          && cargo test)                                  # el core compartido
+(cd core          && cargo test && cargo check --features uniffi) # el core compartido
 (cd app/src-tauri && cargo check)                                 # el lado Rust
 (cd backend       && go build ./... && go vet ./... && go test ./...)
 python3 .claude/hooks/hooks_test.py                                 # los hooks de cac

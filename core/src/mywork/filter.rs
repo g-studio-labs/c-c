@@ -9,6 +9,7 @@ pub const NOBODY: &str = "-";
 
 /// Lo que filtra una lista. Vacío es «cualquiera» en cada campo.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct TaskFilter {
     /// Texto del título, o el folio (`12` o `#12`).
     pub query: String,

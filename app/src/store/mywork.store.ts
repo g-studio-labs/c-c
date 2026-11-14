@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { api } from "@/lib/api";
+import { isTauri } from "@/lib/platform";
 import { useOrgsStore } from "@/store/orgs.store";
 import type { APIResponse } from "@/types/auth";
 import type { OpenTask, TaskView } from "@/types/task";
@@ -162,6 +163,84 @@ interface MyWorkState {
  */
 const COALESCE_MS = 400;
 
+/**
+ * En el escritorio «Mi trabajo» vive en el core en Rust (`cac-core`).
+ *
+ * Las reglas de abajo —qué pregunta cada lente, cuándo se tira un ámbito,
+ * cuándo se recarga— están allí, una sola vez, para que Android no las vuelva
+ * a escribir. Este store queda de **espejo**: cada acción le dice al core lo
+ * que se quiere, y el estado que pinta la pantalla llega por el evento
+ * `core://mywork`. La versión web no tiene core y sigue con lo de abajo.
+ *
+ * Los cambios que tienen que verse al instante (la lente, quitar una fila,
+ * mover un vencimiento) se aplican además aquí; el core contesta lo mismo.
+ *
+ * En cola, una detrás de otra: «cambia la lente» y «carga» salen seguidas, y
+ * si la carga llegara antes preguntaría con la lente anterior.
+ */
+let queue: Promise<unknown> = Promise.resolve();
+
+function tellCore<T = void>(command: string, args?: Record<string, unknown>): Promise<T> {
+  const next = queue.then(async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<T>(command, args);
+  });
+  // Un fallo no atasca la cola: lo recibe quien lo pidió y lo siguiente sigue.
+  queue = next.catch(() => {});
+  return next;
+}
+
+/** Lo que el core cuenta de «Mi trabajo». */
+type CoreState = Pick<
+  MyWorkState,
+  "lens" | "scope" | "orgId" | "includeClosed" | "tasks" | "loading" | "error" | "loadedKey"
+>;
+
+function mirror(state: CoreState) {
+  useMyWorkStore.setState({
+    lens: state.lens,
+    scope: state.scope,
+    orgId: state.orgId,
+    includeClosed: state.includeClosed,
+    tasks: state.tasks,
+    loading: state.loading,
+    error: state.error,
+    loadedKey: state.loadedKey,
+  });
+}
+
+const STORAGE_KEY = "cac-mywork";
+
+/**
+ * La lente y el interruptor que una versión anterior guardó aquí. Leídos al
+ * cargar el módulo, antes de que el store reescriba lo guardado sin ellos.
+ */
+function readLegacyPreferences(): { lens?: WorkLens; includeClosed?: boolean } | null {
+  if (!isTauri) return null;
+  try {
+    const state = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null")?.state;
+    return state && ("lens" in state || "includeClosed" in state) ? state : null;
+  } catch {
+    return null;
+  }
+}
+
+const legacyPreferences = readLegacyPreferences();
+
+/**
+ * Engancha el store al core: escucha sus cambios y trae lo que tenga. Lo llama
+ * el arranque del escritorio, después de `core_init`.
+ */
+export async function connectMyWorkToCore(): Promise<void> {
+  const { listen } = await import("@tauri-apps/api/event");
+  await listen<CoreState>("core://mywork", (event) => mirror(event.payload));
+  // Una vez: la preferencia que estaba aquí pasa al core, que la guarda desde
+  // ahora. Sin esto, actualizar devolvería a todo el mundo a «asignadas».
+  if (legacyPreferences?.lens) await tellCore("mywork_set_lens", { lens: legacyPreferences.lens });
+  if (legacyPreferences?.includeClosed) await tellCore("mywork_set_include_closed", { on: true });
+  mirror(await tellCore<CoreState>("mywork_state"));
+}
+
 /** Qué pregunta responde una carga. */
 const keyOf = (orgId: string | null, s: { lens: string; includeClosed: boolean }) =>
   `${orgId ?? ""}|${s.lens}|${s.includeClosed}`;
@@ -182,16 +261,30 @@ export const useMyWorkStore = create<MyWorkState>()(
       error: null,
       loadedKey: null,
 
-      setLens: (lens) => set({ lens }),
-      setScope: (scope) =>
-        set({
-          scope: scope && { ...scope, orgId: useOrgsStore.getState().currentOrgId },
-        }),
-      setIncludeClosed: (includeClosed) => set({ includeClosed }),
+      setLens: (lens) => {
+        if (isTauri) void tellCore("mywork_set_lens", { lens }).catch(() => {});
+        set({ lens });
+      },
+      setScope: (scope) => {
+        const sealed = scope && { ...scope, orgId: useOrgsStore.getState().currentOrgId };
+        if (isTauri) void tellCore("mywork_set_scope", { scope: sealed }).catch(() => {});
+        set({ scope: sealed });
+      },
+      setIncludeClosed: (includeClosed) => {
+        if (isTauri) void tellCore("mywork_set_include_closed", { on: includeClosed }).catch(() => {});
+        set({ includeClosed });
+      },
 
       setVista: (v) => set({ vista: v }),
 
   load: async (orgId) => {
+        if (isTauri) {
+          await tellCore("mywork_load", { orgId });
+          // El evento ya lo trajo; se vuelve a leer por si quien espera esta
+          // promesa mira el estado antes de que el evento llegue.
+          mirror(await tellCore<CoreState>("mywork_state"));
+          return;
+        }
         // Un filtro de otra organización se tira.
         //
         // Una lista es de una organización concreta, así que al cambiar se
@@ -227,6 +320,11 @@ export const useMyWorkStore = create<MyWorkState>()(
       },
 
       ensureLoaded: async (orgId) => {
+        if (isTauri) {
+          await tellCore("mywork_ensure_loaded", { orgId });
+          mirror(await tellCore<CoreState>("mywork_state"));
+          return;
+        }
         const s = get();
         // Un ámbito de otra org lo tira `load`; si lo hay, se carga.
         if (s.scope && s.scope.orgId !== orgId) return get().load(orgId);
@@ -234,16 +332,24 @@ export const useMyWorkStore = create<MyWorkState>()(
         return get().load(orgId);
       },
 
-      olvidar: (taskId) =>
-        set((s) => ({ tasks: s.tasks.filter((t) => t.id !== taskId) })),
+      olvidar: (taskId) => {
+        if (isTauri) void tellCore("mywork_forget", { taskId }).catch(() => {});
+        set((s) => ({ tasks: s.tasks.filter((t) => t.id !== taskId) }));
+      },
 
       setDueLocal: (taskId, dueAt) => {
+        if (isTauri) void tellCore("mywork_set_due_local", { taskId, dueAt }).catch(() => {});
         const prev = get().tasks.find((t) => t.id === taskId)?.dueAt;
         set((s) => ({ tasks: s.tasks.map((t) => (t.id === taskId ? { ...t, dueAt } : t)) }));
         return prev;
       },
 
       refrescarSiEsNuestra: (taskId, nueva = false) => {
+        if (isTauri) {
+          // Si es nuestra, y el respiro entre recargas, lo decide el core.
+          void tellCore("mywork_task_event", { taskId, new: nueva }).catch(() => {});
+          return;
+        }
         // Sólo si ya la tenemos. Una organización con movimiento emite eventos
         // de tarjetas que a ti no te tocan, y recargar por cada una convertiría
         // esta pantalla en una encuesta continua.
@@ -266,6 +372,11 @@ export const useMyWorkStore = create<MyWorkState>()(
       },
 
       setWatching: async (taskId, on) => {
+        if (isTauri) {
+          // El core quita la fila si deja de responder a la lente.
+          await tellCore("mywork_set_watching", { taskId, on });
+          return;
+        }
         const path = `/api/v1/tasks/${taskId}/watch`;
         if (on) await api.post<APIResponse<unknown>>(path, {}, true);
         else await api.delete<APIResponse<unknown>>(path, true);
@@ -277,7 +388,7 @@ export const useMyWorkStore = create<MyWorkState>()(
       },
     }),
     {
-      name: "cac-mywork",
+      name: STORAGE_KEY,
       // Only the lens and the toggle: the work itself is asked for fresh, since
       // a stale list of what is pending is worse than a moment with none.
       // The scope is not kept: it is where you clicked a moment ago, and
@@ -287,7 +398,10 @@ export const useMyWorkStore = create<MyWorkState>()(
       // mira, no un sitio donde se estaba. Quien prefiere el kanban lo prefiere
       // siempre, y volver a la lista en cada arranque es pedirle el mismo clic
       // todos los días.
-      partialize: (s) => ({ lens: s.lens, includeClosed: s.includeClosed, vista: s.vista }),
+      // En el escritorio la lente y el interruptor los guarda el core; aquí
+      // sólo queda la vista, que es cosa de la pantalla.
+      partialize: (s) =>
+        isTauri ? { vista: s.vista } : { lens: s.lens, includeClosed: s.includeClosed, vista: s.vista },
     },
   ),
 );

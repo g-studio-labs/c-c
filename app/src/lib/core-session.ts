@@ -1,4 +1,5 @@
 import { legacySession, useAuthStore } from "@/store/auth.store";
+import { connectMyWorkToCore } from "@/store/mywork.store";
 import type { Session } from "@/types/auth";
 
 const BASE_URL = import.meta.env.VITE_API_URL ?? "https://cac.guz-studio.dev";
@@ -48,4 +49,8 @@ export async function startCoreSession(): Promise<void> {
   }
 
   mirror(await invoke<SessionView>("core_session"));
+
+  // «Mi trabajo» también vive en el core. Si esto falla la app arranca igual:
+  // la pantalla se queda sin lista, no sin sesión.
+  await connectMyWorkToCore().catch(() => {});
 }

@@ -83,3 +83,10 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+      # Todavía no se generan bindings: esto sólo comprueba que los tipos que
+      # el core enseña se pueden exportar a Kotlin y Swift. Un campo de un tipo
+      # que UniFFI no sabe pasar compila sin la feature y falla aquí, mucho
+      # antes de que alguien lo descubra montando la app de Android.
+      - name: Los tipos se pueden exportar (UniFFI)
+        run: cargo check --locked --features uniffi

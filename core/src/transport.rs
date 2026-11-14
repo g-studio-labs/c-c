@@ -34,6 +34,7 @@ pub struct Request {
 /// Lo que contestó el servidor. Un estado de error **es** una respuesta, no un
 /// fallo de transporte: vuelve aquí para que quien llama lea el porqué.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct Reply {
     pub status: u16,
     pub body: String,
