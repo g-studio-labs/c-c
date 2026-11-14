@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use cac_core::{OpenTask, Session};
+use cac_core::{OpenTask, Organization, Session, SpaceTree};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
@@ -73,4 +73,31 @@ fn a_login_answer_is_read_whole() {
 fn a_refresh_answer_carries_the_new_pair() {
     let written = fixture("auth_refresh_response.json");
     assert_eq!(keys(&written), BTreeSet::from(["accessToken".to_string(), "refreshToken".to_string()]));
+}
+
+#[test]
+fn an_organization_is_read_whole() {
+    let org: Organization = reads_every_field(&fixture("organization.json"));
+
+    assert_eq!(org.role, "admin");
+    assert_eq!(org.timezone, "America/Mexico_City");
+    assert!(org.done_needs_subtasks_done);
+}
+
+/// El árbol se lee entero **en cada nivel**: el espacio, sus carpetas (también
+/// las de dentro), sus listas y su gente.
+#[test]
+fn a_space_tree_is_read_whole_at_every_level() {
+    let written = fixture("space_tree.json");
+    let space: SpaceTree = reads_every_field(&written);
+    let rewritten = serde_json::to_value(&space).unwrap();
+
+    for pointer in ["/folders/0", "/folders/0/folders/0", "/folders/0/lists/0", "/lists/0", "/people/0"] {
+        let (server, core) = (written.pointer(pointer).unwrap(), rewritten.pointer(pointer).unwrap());
+        let unknown: Vec<_> = keys(server).difference(&keys(core)).cloned().collect();
+        assert!(unknown.is_empty(), "en {pointer} el core no lee: {unknown:?}");
+    }
+    assert!(space.is_general());
+    assert_eq!(space.folders[0].lists[0].open_count, 6);
+    assert_eq!(space.people[0].name.as_deref(), Some("Ana Pérez"));
 }

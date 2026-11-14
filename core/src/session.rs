@@ -252,6 +252,12 @@ impl Core {
         Ok(reply)
     }
 
+    /// Un GET con sesión que devuelve el `data` del sobre, ya con su tipo.
+    pub(crate) async fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, ApiError> {
+        let reply = self.request("GET", path, None, true).await?;
+        unwrap_data(&reply)
+    }
+
     /// Fuerza un token nuevo. Para quien recibió el rechazo por su cuenta: el
     /// stream de eventos, o una subida que hizo la pantalla.
     pub async fn refresh_access_token(&self) -> Option<String> {

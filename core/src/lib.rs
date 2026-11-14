@@ -12,9 +12,12 @@ pub mod dates;
 pub mod error;
 pub mod events;
 pub mod mywork;
+pub mod nav;
+pub mod orgs;
 pub mod session;
 pub mod storage;
 pub mod transport;
+pub mod tree;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,7 +25,10 @@ use std::time::Duration;
 pub use error::ApiError;
 pub use events::{Listener, NoListener};
 pub use mywork::{MyWork, MyWorkState, OpenTask, ScopeKind, TaskFilter, WorkLens, WorkScope};
+pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClick};
+pub use orgs::{Organization, Orgs, OrgsState};
 pub use session::Session;
+pub use tree::{FolderTree, ListSummary, SpacePerson, SpaceTree, Tree, TreeState};
 pub use storage::{FileStorage, Storage};
 pub use transport::Reply;
 
@@ -64,6 +70,8 @@ pub(crate) struct Inner {
     /// El turno para renovar la sesión: ver `Core::refresh`.
     pub(crate) refreshing: tokio::sync::Mutex<()>,
     pub(crate) my_work: Mutex<MyWorkState>,
+    pub(crate) orgs: Mutex<OrgsState>,
+    pub(crate) tree: Mutex<TreeState>,
     /// Cuántas recargas de «Mi trabajo» se han pedido: la que espera su
     /// respiro sólo carga si sigue siendo la última.
     pub(crate) my_work_reloads: std::sync::atomic::AtomicU64,
@@ -85,12 +93,15 @@ impl Core {
                 held: Mutex::new(None),
                 refreshing: tokio::sync::Mutex::new(()),
                 my_work: Mutex::new(MyWorkState::default()),
+                orgs: Mutex::new(OrgsState::default()),
+                tree: Mutex::new(TreeState::default()),
                 my_work_reloads: std::sync::atomic::AtomicU64::new(0),
             }),
         };
         let held = core.load_held();
         *core.inner.held.lock().expect("held lock") = held;
         core.my_work().restore_preferences();
+        core.orgs().restore();
         Ok(core)
     }
 }

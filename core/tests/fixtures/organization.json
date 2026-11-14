@@ -1,0 +1,14 @@
+{
+  "id": "35d32154-922f-47dc-a6d9-051d4e78ae8a",
+  "name": "G Studio",
+  "slug": "g-studio",
+  "role": "admin",
+  "memberCount": 4,
+  "createdAt": "2026-06-09T12:00:00Z",
+  "domain": "guz-studio.dev",
+  "defaultInviteRole": "member",
+  "clientsSeeOnlyTheirSpace": true,
+  "guestsCanUseDevTools": true,
+  "doneNeedsSubtasksDone": true,
+  "timezone": "America/Mexico_City"
+}

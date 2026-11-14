@@ -67,6 +67,40 @@ func TestTheCoreReadsWhatTheServerWrites(t *testing.T) {
 			AccessToken:  "access",
 			RefreshToken: "refresh",
 		},
+		"organization.json": OrganizationResponse{
+			ID:                       "35d32154-922f-47dc-a6d9-051d4e78ae8a",
+			Name:                     "G Studio",
+			Slug:                     "g-studio",
+			Role:                     OrgRoleAdmin,
+			MemberCount:              4,
+			CreatedAt:                time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC),
+			Domain:                   "guz-studio.dev",
+			DefaultInviteRole:        OrgRoleMember,
+			ClientsSeeOnlyTheirSpace: true,
+			GuestsCanUseDevTools:     true,
+			DoneNeedsSubtasksDone:    true,
+			Timezone:                 "America/Mexico_City",
+		},
+		"space_tree.json": SpaceTree{
+			ID:        "e8bd6d46-a9ab-494e-ac29-de84d80a55f4",
+			Key:       "command-and-control",
+			OrgID:     "35d32154-922f-47dc-a6d9-051d4e78ae8a",
+			Name:      "Command and control",
+			Color:     "#20D9E8",
+			ProjectID: "p1",
+			Kind:      "general",
+			Folders: []FolderTree{{
+				ID:      "4d087751-3496-4a0d-a335-56212a84a54d",
+				Name:    "App",
+				Folders: []FolderTree{{ID: "f2", Name: "Dentro", Folders: []FolderTree{}, Lists: []ListSummary{}}},
+				Lists: []ListSummary{{
+					ID: "ca0bfd49-0909-43eb-8135-bc8ecd0f282c", Name: "tasks",
+					OpenCount: 6, ProjectID: "p2", TaskCount: 40,
+				}},
+			}},
+			Lists:  []ListSummary{{ID: "l0", Name: "sueltas", OpenCount: 1, ProjectID: "p3", TaskCount: 2}},
+			People: []SpacePerson{{UserID: "u1", Username: "ana", Name: "Ana Pérez"}},
+		},
 	}
 
 	dir := filepath.Join("..", "..", "..", "..", "core", "tests", "fixtures")

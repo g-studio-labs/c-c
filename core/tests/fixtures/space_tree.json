@@ -1,0 +1,48 @@
+{
+  "id": "e8bd6d46-a9ab-494e-ac29-de84d80a55f4",
+  "key": "command-and-control",
+  "orgId": "35d32154-922f-47dc-a6d9-051d4e78ae8a",
+  "name": "Command and control",
+  "color": "#20D9E8",
+  "projectId": "p1",
+  "kind": "general",
+  "folders": [
+    {
+      "id": "4d087751-3496-4a0d-a335-56212a84a54d",
+      "name": "App",
+      "folders": [
+        {
+          "id": "f2",
+          "name": "Dentro",
+          "folders": [],
+          "lists": []
+        }
+      ],
+      "lists": [
+        {
+          "id": "ca0bfd49-0909-43eb-8135-bc8ecd0f282c",
+          "name": "tasks",
+          "openCount": 6,
+          "projectId": "p2",
+          "taskCount": 40
+        }
+      ]
+    }
+  ],
+  "lists": [
+    {
+      "id": "l0",
+      "name": "sueltas",
+      "openCount": 1,
+      "projectId": "p3",
+      "taskCount": 2
+    }
+  ],
+  "people": [
+    {
+      "userId": "u1",
+      "username": "ana",
+      "name": "Ana Pérez"
+    }
+  ]
+}

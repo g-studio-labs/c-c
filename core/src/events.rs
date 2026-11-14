@@ -4,6 +4,8 @@
 //! convierte en lo suyo (un evento de Tauri, un `StateFlow`, un `@Published`).
 
 use crate::mywork::MyWorkState;
+use crate::orgs::OrgsState;
+use crate::tree::TreeState;
 use crate::session::Session;
 
 pub trait Listener: Send + Sync {
@@ -15,6 +17,12 @@ pub trait Listener: Send + Sync {
     /// fila. Va el estado entero, no la diferencia: la pantalla lo pinta tal
     /// cual y no tiene nada que reconstruir.
     fn my_work_changed(&self, _state: MyWorkState) {}
+
+    /// Llegaron las organizaciones, o se cambió de una a otra.
+    fn orgs_changed(&self, _state: OrgsState) {}
+
+    /// Llegó el árbol de espacios, o se vació al cambiar de organización.
+    fn tree_changed(&self, _state: TreeState) {}
 }
 
 /// Para quien no necesita enterarse (el MCP, una prueba).
