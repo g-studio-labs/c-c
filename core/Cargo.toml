@@ -12,3 +12,14 @@ publish = false
 # pantalla— entra por un trait que implementa quien lo usa.
 # Guardián: `tests::the_core_depends_on_no_ui`.
 [dependencies]
+# Las mismas features que usa la app, para que Cargo compile reqwest una vez.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util"] }
+wiremock = "0.6"

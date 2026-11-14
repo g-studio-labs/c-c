@@ -1,0 +1,314 @@
+//! La sesión: quién está dentro y con qué par de tokens.
+//!
+//! Vivía en la pantalla —`app/src/lib/api.ts` y `auth.store.ts`, con los
+//! tokens en `localStorage`— y eso tenía dos problemas. Cada plataforma nueva
+//! tendría que volver a escribir las mismas reglas; y un refresh recién rotado
+//! que la pantalla no llegaba a guardar antes de un reinicio dejaba la app
+//! arrancando con el anterior, que el servidor toma por robado (22898591).
+//!
+//! Las reglas son las de `api.ts`, una por una, y cada una tiene su prueba en
+//! `tests/session.rs`:
+//!
+//! - se renueva sólo cuando el servidor dice `expired-token`, **una vez por
+//!   proceso** aunque fallen diez llamadas a la vez, y la llamada se repite;
+//! - sólo un 401 del refresh cierra la sesión: un 500 es el servidor que no
+//!   pudo mirar, y echar a alguien por eso convierte un hipo de la base en un
+//!   cierre masivo;
+//! - el par nuevo se guarda **antes** de usarse.
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::ApiError;
+use crate::transport::{self, Reply, Request};
+use crate::Core;
+
+/// La clave bajo la que se guarda la sesión en el `Storage`.
+const STORAGE_KEY: &str = "session";
+
+/// Quién está dentro. Espejo de `domain.Session` del backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Session {
+    pub id: String,
+    pub username: String,
+    /// Cómo se le llama. Puede faltar: quien pinte cae al usuario.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub superadmin: bool,
+    #[serde(default)]
+    pub must_change_password: bool,
+    /// En qué idioma lee cac; vacío es «pregúntale a la máquina».
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+}
+
+/// Lo que el core tiene en la mano y lo que guarda: la sesión y su par.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Held {
+    pub session: Session,
+    pub access_token: String,
+    pub refresh_token: String,
+}
+
+/// El sobre de toda respuesta del backend (`domain.APIResponse`).
+#[derive(Deserialize)]
+struct Envelope<T> {
+    #[serde(default)]
+    success: bool,
+    data: Option<T>,
+    /// La etiqueta para el código.
+    error: Option<String>,
+    /// La frase para leer.
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthData {
+    access_token: String,
+    refresh_token: String,
+    session: Session,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RefreshData {
+    access_token: String,
+    refresh_token: String,
+}
+
+/// La etiqueta de error que trae un cuerpo, si la trae.
+fn error_code(body: &str) -> String {
+    serde_json::from_str::<Envelope<serde_json::Value>>(body)
+        .ok()
+        .and_then(|envelope| envelope.error)
+        .unwrap_or_default()
+}
+
+/// Saca el `data` de una respuesta, o el error del servidor con sus dos campos.
+fn unwrap_data<T: for<'de> Deserialize<'de>>(reply: &Reply) -> Result<T, ApiError> {
+    let envelope = serde_json::from_str::<Envelope<T>>(&reply.body).ok();
+    if reply.status < 400 {
+        if let Some(Envelope { success: true, data: Some(data), .. }) = envelope {
+            return Ok(data);
+        }
+    }
+    // Un cuerpo de error puede no encajar en `T`: se vuelve a leer sin tipo.
+    let loose = serde_json::from_str::<Envelope<serde_json::Value>>(&reply.body).ok();
+    let code = loose.as_ref().and_then(|e| e.error.clone()).unwrap_or_default();
+    let message = loose
+        .and_then(|e| e.message)
+        .unwrap_or_else(|| if code.is_empty() { "Request failed".into() } else { code.clone() });
+    Err(ApiError::Server { status: reply.status, code, message })
+}
+
+impl Core {
+    /// Lo guardado en el arranque, si lo hay y se deja leer.
+    pub(crate) fn load_held(&self) -> Option<Held> {
+        let raw = self.inner.storage.get(STORAGE_KEY)?;
+        serde_json::from_str(&raw).ok()
+    }
+
+    fn held(&self) -> Option<Held> {
+        self.inner.held.lock().expect("held lock").clone()
+    }
+
+    /// Guarda y luego pone en la mano, en ese orden.
+    ///
+    /// Al revés, otra llamada podría usar el token nuevo —y el servidor dar el
+    /// viejo por gastado— antes de que esté a salvo: un corte ahí deja la app
+    /// arrancando con un refresh que ya no vale.
+    fn keep(&self, held: Held) -> Result<(), ApiError> {
+        let raw = serde_json::to_string(&held).map_err(|e| ApiError::Storage(e.to_string()))?;
+        let stored = self.inner.storage.set(STORAGE_KEY, &raw).map_err(ApiError::Storage);
+        *self.inner.held.lock().expect("held lock") = Some(held);
+        stored
+    }
+
+    fn forget(&self) {
+        self.inner.storage.remove(STORAGE_KEY);
+        *self.inner.held.lock().expect("held lock") = None;
+        self.inner.listener.session_changed(None);
+    }
+
+    /// Quién está dentro, si hay alguien.
+    pub fn session(&self) -> Option<Session> {
+        self.held().map(|held| held.session)
+    }
+
+    /// El token de acceso de ahora, para lo que el core todavía no hace por sí
+    /// mismo (una subida multipart desde la pantalla). Puede estar caducado:
+    /// quien reciba `expired-token` pide `refresh_access_token`.
+    pub fn access_token(&self) -> Option<String> {
+        self.held().map(|held| held.access_token)
+    }
+
+    /// Alguien acaba de entrar por un camino que no es `login` (una
+    /// invitación, un cambio de contraseña): ésta es su sesión desde ahora.
+    pub fn sign_in(
+        &self,
+        session: Session,
+        access_token: String,
+        refresh_token: String,
+    ) -> Result<(), ApiError> {
+        let result = self.keep(Held { session: session.clone(), access_token, refresh_token });
+        self.inner.listener.session_changed(Some(session));
+        result
+    }
+
+    /// Recoge la sesión que una versión anterior guardaba en otro sitio
+    /// (`localStorage`), **sólo si el core no tiene ya una**.
+    ///
+    /// La que tiene el core es más nueva por definición —es la que se ha ido
+    /// renovando—, y pisarla con la copia vieja sería reintroducir a mano el
+    /// refresh gastado que esto venía a quitar. Devuelve si la adoptó.
+    pub fn adopt_legacy_session(
+        &self,
+        session: Session,
+        access_token: String,
+        refresh_token: String,
+    ) -> Result<bool, ApiError> {
+        if self.held().is_some() {
+            return Ok(false);
+        }
+        self.sign_in(session, access_token, refresh_token)?;
+        Ok(true)
+    }
+
+    /// Los datos de la persona cambiaron (vienen de `/auth/me`); el par sigue.
+    pub fn update_session(&self, session: Session) -> Result<(), ApiError> {
+        let Some(held) = self.held() else { return Ok(()) };
+        let result = self.keep(Held { session: session.clone(), ..held });
+        self.inner.listener.session_changed(Some(session));
+        result
+    }
+
+    pub async fn login(&self, username: &str, password: &str) -> Result<Session, ApiError> {
+        let mut body = serde_json::json!({ "username": username, "password": password });
+        if let Some(client) = &self.inner.config.client {
+            body["client"] = serde_json::Value::String(client.clone());
+        }
+        let reply = self.request("POST", "/api/v1/auth/login", Some(body.to_string()), false).await?;
+        let data: AuthData = unwrap_data(&reply)?;
+        self.sign_in(data.session.clone(), data.access_token, data.refresh_token)?;
+        Ok(data.session)
+    }
+
+    /// Sale, **también en el servidor**: revoca el refresh y los que salieron
+    /// de él. Mejor esfuerzo: sin red se sale igual en local.
+    pub async fn logout(&self) {
+        if let Some(held) = self.held() {
+            let _ = self
+                .send("POST", "/api/v1/auth/logout", None, Some(&held.refresh_token))
+                .await;
+        }
+        self.forget();
+    }
+
+    /// Vuelve a pedir quién es, para que lleguen los campos que se añadieron
+    /// después de entrar.
+    pub async fn me(&self) -> Result<Session, ApiError> {
+        let reply = self.request("GET", "/api/v1/auth/me", None, true).await?;
+        let session: Session = unwrap_data(&reply)?;
+        self.update_session(session.clone())?;
+        Ok(session)
+    }
+
+    /// Una llamada al backend, con la sesión puesta y renovada si hace falta.
+    ///
+    /// Un estado de error vuelve como respuesta, no como `Err`: quien llama
+    /// lee el código y la frase. `Err` es que no hubo respuesta, o que la
+    /// sesión caducó y no se pudo renovar.
+    pub async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<String>,
+        auth: bool,
+    ) -> Result<Reply, ApiError> {
+        let token = if auth { self.access_token() } else { None };
+        let reply = self.send(method, path, body.clone(), token.as_deref()).await?;
+
+        if auth && reply.status >= 400 && error_code(&reply.body) == "expired-token" {
+            let Some(fresh) = self.refresh(token).await else {
+                return Err(ApiError::SessionExpired);
+            };
+            return self.send(method, path, body, Some(&fresh)).await;
+        }
+        Ok(reply)
+    }
+
+    /// Fuerza un token nuevo. Para quien recibió el rechazo por su cuenta: el
+    /// stream de eventos, o una subida que hizo la pantalla.
+    pub async fn refresh_access_token(&self) -> Option<String> {
+        self.refresh(self.access_token()).await
+    }
+
+    /// Renueva el par, una sola vez aunque lo pidan muchos a la vez.
+    ///
+    /// `stale` es el token con el que falló quien llama. Si al conseguir el
+    /// turno el de la mano ya es otro, alguien renovó mientras esperábamos y
+    /// ése es el que vale: pedir otro gastaría un refresh que ya está rotado.
+    async fn refresh(&self, stale: Option<String>) -> Option<String> {
+        let _turn = self.inner.refreshing.lock().await;
+
+        let held = self.held()?;
+        if stale.as_deref() != Some(held.access_token.as_str()) {
+            return Some(held.access_token);
+        }
+
+        let reply = self
+            .send("POST", "/api/v1/auth/refresh", None, Some(&held.refresh_token))
+            .await
+            .ok()?; // red o plazo: pasajero, la sesión se queda
+
+        if reply.status == 401 {
+            // Caducado, revocado, o reutilizado y dado por robado.
+            self.forget();
+            return None;
+        }
+        let data: RefreshData = unwrap_data(&reply).ok()?;
+
+        let access_token = data.access_token.clone();
+        // Si no se pudo guardar, la sesión sigue en la mano: este proceso
+        // puede continuar, y la siguiente renovación lo vuelve a intentar.
+        let _ = self.keep(Held {
+            session: held.session,
+            access_token: data.access_token,
+            refresh_token: data.refresh_token,
+        });
+        Some(access_token)
+    }
+
+    /// El viaje, con un reintento si no llegó.
+    ///
+    /// Un socket muerto se cura solo con una conexión nueva; sin esto, el
+    /// primer clic tras un rato sin usar la app era un error.
+    async fn send(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<String>,
+        bearer: Option<&str>,
+    ) -> Result<Reply, ApiError> {
+        let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
+        if let Some(token) = bearer {
+            headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+        }
+        let request = Request {
+            method: method.to_string(),
+            url: format!("{}{}", self.inner.config.base_url, path),
+            headers,
+            body,
+            timeout: self.inner.config.request_timeout,
+        };
+        match transport::send(&self.inner.http, request.clone()).await {
+            Err(ApiError::Network(_)) => transport::send(&self.inner.http, request).await,
+            other => other,
+        }
+    }
+}

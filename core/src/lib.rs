@@ -5,6 +5,83 @@
 //! aquí, y cada plataforma sólo pinta y aporta lo suyo del sistema. El diseño
 //! entero está en cac, en la página «Diseño · Core en Rust compartido».
 
+pub mod error;
+pub mod events;
+pub mod session;
+pub mod storage;
+pub mod transport;
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+pub use error::ApiError;
+pub use events::{Listener, NoListener};
+pub use session::Session;
+pub use storage::{FileStorage, Storage};
+pub use transport::Reply;
+
+/// Con qué servidor habla el core y cómo se presenta.
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// Sin barra final: `https://cac.guz-studio.dev`.
+    pub base_url: String,
+    /// Qué cliente es, tal como lo espera el login (`desktop`, `web`). El
+    /// servidor decide con eso qué rutas le abre.
+    pub client: Option<String>,
+    /// El plazo de cada petición.
+    pub request_timeout: Duration,
+}
+
+impl Config {
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            client: None,
+            request_timeout: Duration::from_secs(12),
+        }
+    }
+}
+
+/// El core. Uno por proceso; clonarlo es barato y todos los clones son el
+/// mismo.
+#[derive(Clone)]
+pub struct Core {
+    pub(crate) inner: Arc<Inner>,
+}
+
+pub(crate) struct Inner {
+    pub(crate) config: Config,
+    pub(crate) http: reqwest::Client,
+    pub(crate) storage: Arc<dyn Storage>,
+    pub(crate) listener: Arc<dyn Listener>,
+    pub(crate) held: Mutex<Option<session::Held>>,
+    /// El turno para renovar la sesión: ver `Core::refresh`.
+    pub(crate) refreshing: tokio::sync::Mutex<()>,
+}
+
+impl Core {
+    /// Arranca con la sesión que hubiera guardada.
+    pub fn new(
+        config: Config,
+        storage: Arc<dyn Storage>,
+        listener: Arc<dyn Listener>,
+    ) -> Result<Self, ApiError> {
+        let core = Self {
+            inner: Arc::new(Inner {
+                config,
+                http: transport::new_client()?,
+                storage,
+                listener,
+                held: Mutex::new(None),
+                refreshing: tokio::sync::Mutex::new(()),
+            }),
+        };
+        let held = core.load_held();
+        *core.inner.held.lock().expect("held lock") = held;
+        Ok(core)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// Las dependencias que declara el manifiesto, por su nombre.
