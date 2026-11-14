@@ -5,8 +5,10 @@
 //! aquí, y cada plataforma sólo pinta y aporta lo suyo del sistema. El diseño
 //! entero está en cac, en la página «Diseño · Core en Rust compartido».
 
+pub mod dates;
 pub mod error;
 pub mod events;
+pub mod mywork;
 pub mod session;
 pub mod storage;
 pub mod transport;
@@ -16,6 +18,7 @@ use std::time::Duration;
 
 pub use error::ApiError;
 pub use events::{Listener, NoListener};
+pub use mywork::{MyWork, MyWorkState, OpenTask, ScopeKind, TaskFilter, WorkLens, WorkScope};
 pub use session::Session;
 pub use storage::{FileStorage, Storage};
 pub use transport::Reply;
@@ -57,6 +60,10 @@ pub(crate) struct Inner {
     pub(crate) held: Mutex<Option<session::Held>>,
     /// El turno para renovar la sesión: ver `Core::refresh`.
     pub(crate) refreshing: tokio::sync::Mutex<()>,
+    pub(crate) my_work: Mutex<MyWorkState>,
+    /// Cuántas recargas de «Mi trabajo» se han pedido: la que espera su
+    /// respiro sólo carga si sigue siendo la última.
+    pub(crate) my_work_reloads: std::sync::atomic::AtomicU64,
 }
 
 impl Core {
@@ -74,10 +81,13 @@ impl Core {
                 listener,
                 held: Mutex::new(None),
                 refreshing: tokio::sync::Mutex::new(()),
+                my_work: Mutex::new(MyWorkState::default()),
+                my_work_reloads: std::sync::atomic::AtomicU64::new(0),
             }),
         };
         let held = core.load_held();
         *core.inner.held.lock().expect("held lock") = held;
+        core.my_work().restore_preferences();
         Ok(core)
     }
 }

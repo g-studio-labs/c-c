@@ -40,6 +40,10 @@ pub struct Session {
     pub superadmin: bool,
     #[serde(default)]
     pub must_change_password: bool,
+    /// Lo que puede hacer, cuando quien entra es un token personal. Una
+    /// persona con su contraseña no los trae.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
     /// En qué idioma lee cac; vacío es «pregúntale a la máquina».
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locale: Option<String>,

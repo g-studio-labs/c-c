@@ -58,6 +58,7 @@ fn ana() -> Session {
         email: None,
         superadmin: false,
         must_change_password: false,
+        scopes: Vec::new(),
         locale: None,
     }
 }

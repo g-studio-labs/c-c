@@ -1,0 +1,17 @@
+{
+  "accessToken": "access",
+  "refreshToken": "refresh",
+  "expiresIn": 900,
+  "session": {
+    "id": "u1",
+    "username": "ana",
+    "name": "Ana Pérez",
+    "email": "ana@example.com",
+    "superadmin": true,
+    "mustChangePassword": true,
+    "scopes": [
+      "tasks:write"
+    ],
+    "locale": "es"
+  }
+}
