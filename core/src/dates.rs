@@ -35,6 +35,47 @@ pub fn today_in<Viewer: TimeZone>(zone: Option<&str>, now: DateTime<Utc>, viewer
     }
 }
 
+/// Cómo está un vencimiento respecto a hoy.
+///
+/// Vino de `cuando()` en `app/src/components/tasks/TaskCardMini.tsx`. El color
+/// y el texto los pone cada interfaz; **cuál de los cinco casos es** se decide
+/// aquí, para que una tarea no esté vencida en el escritorio y vigente en el
+/// teléfono.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum DueState {
+    /// Venció antes de ayer o más atrás: se enseña su fecha, en rojo.
+    Overdue,
+    /// Venció ayer: «ayer», en rojo.
+    Yesterday,
+    /// Vence hoy: ámbar, y con peso.
+    Today,
+    /// Vence mañana: ámbar.
+    Tomorrow,
+    /// Más adelante: su fecha, sin color.
+    Later,
+}
+
+impl DueState {
+    /// Si ya pasó su día. Lo que vence hoy **no** está vencido: tiene el día
+    /// entero.
+    pub fn is_overdue(self) -> bool {
+        matches!(self, DueState::Overdue | DueState::Yesterday)
+    }
+}
+
+/// Clasifica un vencimiento, dado qué día es hoy (`today_in`).
+pub fn due_state(due_at: Option<&str>, today: NaiveDate) -> Option<DueState> {
+    let days = (due_day(due_at)? - today).num_days();
+    Some(match days {
+        0 => DueState::Today,
+        -1 => DueState::Yesterday,
+        1 => DueState::Tomorrow,
+        days if days < -1 => DueState::Overdue,
+        _ => DueState::Later,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,5 +129,42 @@ mod tests {
         let mexico = FixedOffset::west_opt(6 * 3600).unwrap();
         assert_eq!(today_in(None, now, &mexico), day(2026, 11, 12));
         assert_eq!(today_in(Some("Marte/Olympus"), now, &mexico), day(2026, 11, 12));
+    }
+
+    /// Los cinco casos, alrededor del 12 de noviembre.
+    ///
+    /// Roturas que atrapa: dar por vencido lo que vence hoy; contar «ayer»
+    /// como una fecha más; pintar de «mañana» lo que vence pasado mañana.
+    #[test]
+    fn a_due_date_is_one_of_five_things() {
+        let today = day(2026, 11, 12);
+        let state = |iso: &str| due_state(Some(iso), today);
+
+        assert_eq!(state("2026-11-10T00:00:00Z"), Some(DueState::Overdue));
+        assert_eq!(state("2026-11-11T00:00:00Z"), Some(DueState::Yesterday));
+        assert_eq!(state("2026-11-12T00:00:00Z"), Some(DueState::Today));
+        assert_eq!(state("2026-11-13T00:00:00Z"), Some(DueState::Tomorrow));
+        assert_eq!(state("2026-11-14T00:00:00Z"), Some(DueState::Later));
+        assert_eq!(due_state(None, today), None);
+
+        assert!(DueState::Overdue.is_overdue() && DueState::Yesterday.is_overdue());
+        assert!(!DueState::Today.is_overdue(), "lo que vence hoy tiene el día entero");
+    }
+
+    /// El caso de `due.test.ts`: lo que vence el 12 vence hoy en México y ya
+    /// venció en Auckland, en el mismo instante.
+    ///
+    /// Rotura que atrapa: clasificar con el día de quien mira y no con el de
+    /// la organización.
+    #[test]
+    fn the_same_task_is_due_today_in_mexico_and_overdue_in_auckland() {
+        let now = Utc.with_ymd_and_hms(2026, 11, 13, 3, 0, 0).unwrap();
+        let due = Some("2026-11-12T00:00:00.000Z");
+
+        let mexico = today_in(Some("America/Mexico_City"), now, &Utc);
+        let auckland = today_in(Some("Pacific/Auckland"), now, &Utc);
+
+        assert_eq!(due_state(due, mexico), Some(DueState::Today));
+        assert_eq!(due_state(due, auckland), Some(DueState::Yesterday));
     }
 }

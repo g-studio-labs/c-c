@@ -22,6 +22,7 @@ pub mod tree;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+pub use dates::{due_day, due_state, today_in, DueState};
 pub use error::ApiError;
 pub use events::{Listener, NoListener};
 pub use mywork::{MyWork, MyWorkState, OpenTask, ScopeKind, TaskFilter, WorkLens, WorkScope};
