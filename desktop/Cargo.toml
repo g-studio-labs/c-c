@@ -1,0 +1,19 @@
+[package]
+name = "cac-desktop"
+version = "0.1.0"
+license = "AGPL-3.0-or-later"
+description = "cac de escritorio, nativo: la interfaz en GPUI sobre cac-core"
+edition = "2021"
+publish = false
+
+[dependencies]
+# La lógica. Aquí no se decide nada: toda regla va al core con su prueba.
+cac-core = { path = "../core" }
+# GPUI y sus componentes. Versión **exacta**: cada release puede cambiar la API
+# de GPUI por debajo (su propio manifiesto lo avisa), así que subirla es una
+# tarea aparte, no algo que pasa con un `cargo update`.
+gpui-kit = "=0.9.1"
+
+[dev-dependencies]
+# El arnés de pruebas de GPUI: ventanas sin pantalla, clics y teclado de verdad.
+gpui-kit = { version = "=0.9.1", features = ["test-support"] }

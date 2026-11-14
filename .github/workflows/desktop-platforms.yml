@@ -1,0 +1,40 @@
+name: desktop-platforms
+
+# Que la app de escritorio nativa compile en macOS y en Windows.
+#
+# Aparte de `desktop.yml`, y sólo cuando cambian sus dependencias: es donde
+# puede dejar de compilar en un sistema que no es el de quien escribe (GPUI
+# enlaza Metal en uno y DirectX en otro), y los minutos de macOS y Windows son
+# los caros. Linux ya lo cubre `desktop.yml` en cada cambio.
+on:
+  push:
+    paths:
+      - "desktop/Cargo.toml"
+      - "desktop/Cargo.lock"
+      - ".github/workflows/desktop-platforms.yml"
+  workflow_dispatch:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    defaults:
+      run:
+        working-directory: desktop
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./desktop -> target"
+
+      - name: Check
+        run: cargo check --locked

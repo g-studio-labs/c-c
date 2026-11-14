@@ -1,0 +1,48 @@
+name: desktop
+
+# Las pruebas de la app de escritorio nativa (`desktop/`, en GPUI).
+#
+# Corren sin pantalla: el arnés de GPUI abre ventanas de mentira y les manda
+# clics y teclado de verdad. Lo que no cubren —cómo se pinta, el método de
+# entrada del sistema— se mira a mano.
+#
+# En cualquier rama, no sólo en `main`: la app nueva se construye en una rama
+# hasta su primera entrega, y un verde que sólo existe tras fusionar llega
+# tarde.
+on:
+  push:
+    paths:
+      - "desktop/**"
+      - "core/**"
+      - ".github/workflows/desktop.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    defaults:
+      run:
+        working-directory: desktop
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Lo que GPUI enlaza en Linux. La lista es la del CI de GPUI Kit
+      # (`script/install-linux.sh`), menos WebKit: aquí no hay webview.
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ clang libfontconfig-dev libwayland-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev libasound2-dev \
+            vulkan-validationlayers libvulkan1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./desktop -> target"
+
+      - name: Test
+        run: cargo test --locked
