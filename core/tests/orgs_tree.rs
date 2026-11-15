@@ -864,6 +864,9 @@ async fn showing_all_work_or_switching_organization_closes_the_docs() {
 
     rig.core.click_node("a").await;
     rig.core.open_scope_docs().await;
+    // Y una tarea abierta (no hace falta que llegue: basta con que lo esté).
+    rig.core.tasks().open("t1").await;
     assert!(rig.core.switch_org("o2").await);
     assert!(rig.core.docs().state().target.is_none(), "el documento de la otra organización sigue abierto");
+    assert!(rig.core.tasks().state().task_id.is_none(), "la tarea de la otra organización sigue abierta");
 }

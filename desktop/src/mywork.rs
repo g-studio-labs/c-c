@@ -280,6 +280,14 @@ impl MyWorkView {
             .border_b_1()
             .border_color(border)
             .hover(move |style| style.bg(hover.opacity(0.4)))
+            .cursor_pointer()
+            .on_click({
+                let id = row.id.clone();
+                move |_, _, cx| {
+                    let id = id.clone();
+                    Backend::run(cx, move |core| async move { core.tasks().open(&id).await });
+                }
+            })
             .child(div().w(px(44.)).flex_none().text_xs().text_color(muted).child(format!("#{}", row.seq)))
             .child(
                 div()

@@ -15,6 +15,7 @@ mod mywork;
 mod platform;
 mod shell;
 mod spike;
+mod task;
 mod theme;
 mod workspace;
 #[cfg(test)]

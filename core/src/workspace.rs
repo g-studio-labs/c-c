@@ -23,8 +23,9 @@ impl Core {
         if !self.orgs().set_current(org_id) {
             return false;
         }
-        // El documento abierto es de un nodo de la organización que se deja.
+        // El documento y la tarea abiertos son de la organización que se deja.
         self.docs().close();
+        self.tasks().close();
         self.load_current_org().await;
         true
     }

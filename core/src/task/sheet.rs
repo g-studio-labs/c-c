@@ -148,6 +148,21 @@ pub fn task_sheet(detail: &TaskDetail, statuses: &[StatusOption], locale: Locale
     }
 }
 
+impl super::TaskState {
+    /// Por qué no hay detalle que leer, como clave del catálogo; `None` si
+    /// lo hay. Una recarga que falla deja lo que había: sigue siendo lo
+    /// último que se supo, y no se cambia por un aviso.
+    pub fn waiting_reason(&self) -> Option<&'static str> {
+        if self.detail.is_some() {
+            None
+        } else if self.error.is_some() {
+            Some("common:last.requestsFailing")
+        } else {
+            Some("work:tree.loading")
+        }
+    }
+}
+
 impl Tasks {
     /// El detalle de la tarea abierta, dicho; `None` mientras no ha llegado.
     ///
@@ -319,6 +334,20 @@ mod tests {
         detail["attachments"] = json!([of_comment, of_task]);
 
         assert_eq!(sheet_of(detail, json!([])).attachments, ["plan.pdf"]);
+    }
+
+    /// Roturas que atrapa: un panel en blanco mientras llega o cuando falla;
+    /// tapar con un aviso una tarea que ya se estaba leyendo.
+    #[test]
+    fn a_sheet_that_is_not_there_says_why() {
+        use crate::task::TaskState;
+        let arriving = TaskState { task_id: Some("t1".into()), loading: true, ..TaskState::default() };
+        assert_eq!(arriving.waiting_reason(), Some("work:tree.loading"));
+        let failed = TaskState { task_id: Some("t1".into()), error: Some("x".into()), ..TaskState::default() };
+        assert_eq!(failed.waiting_reason(), Some("common:last.requestsFailing"));
+        let read: TaskDetail = serde_json::from_value(contract()).unwrap();
+        let stale = TaskState { detail: Some(read), error: Some("x".into()), ..TaskState::default() };
+        assert_eq!(stale.waiting_reason(), None);
     }
 
     /// Rotura que atrapa: la hora de un comentario en Greenwich, o sin hora.

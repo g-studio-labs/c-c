@@ -16,6 +16,7 @@ use crate::backend::Backend;
 use crate::docs::DocsView;
 use crate::lang::{locale, tr};
 use crate::mywork::MyWorkView;
+use crate::task::TaskView;
 
 /// Las medidas de la app de siempre: el riel y el panel.
 const RAIL_WIDTH: f32 = 48.;
@@ -29,6 +30,7 @@ const INDENT: f32 = 14.;
 pub struct Workspace {
     pub(crate) my_work: Entity<MyWorkView>,
     docs: Entity<DocsView>,
+    task: Entity<TaskView>,
 }
 
 impl Workspace {
@@ -36,7 +38,7 @@ impl Workspace {
         // Quien entra, entra a trabajar: organizaciones, árbol, tareas y el
         // stream de eventos.
         Backend::run(cx, |core| async move { core.open_workspace().await });
-        Self { my_work: cx.new(|cx| MyWorkView::new(window, cx)), docs: cx.new(|_| DocsView) }
+        Self { my_work: cx.new(|cx| MyWorkView::new(window, cx)), docs: cx.new(|_| DocsView), task: cx.new(|_| TaskView::new()) }
     }
 
     fn switch_org(org_id: String, cx: &App) {
@@ -311,6 +313,8 @@ impl Render for Workspace {
         let lasting = snapshot.connection.lasting;
         // Con un documento abierto se lee documentación; si no, las tareas.
         let main: AnyView = if snapshot.docs.target.is_some() { self.docs.clone().into() } else { self.my_work.clone().into() };
+        // La tarea abierta, sobre lo que se estuviera mirando.
+        let task = snapshot.task.task_id.is_some().then(|| self.task.clone());
         div()
             .id("open")
             .test_support()
@@ -325,7 +329,20 @@ impl Render for Workspace {
                     .overflow_hidden()
                     .child(self.render_rail(cx))
                     .child(self.render_panel(cx))
-                    .child(div().flex_1().h_full().overflow_hidden().child(main)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .relative()
+                            .overflow_hidden()
+                            .child(main)
+                            // Un cajón sobre la vista, no al lado: en una ventana
+                            // estrecha, al lado dejaba la lista en nada. Lo que
+                            // tapa no recibe el ratón.
+                            .children(task.map(|task| {
+                                div().absolute().top_0().right_0().bottom_0().max_w_full().occlude().shadow_lg().child(task)
+                            })),
+                    ),
             )
     }
 }
