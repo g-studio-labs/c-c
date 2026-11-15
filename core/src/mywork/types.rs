@@ -11,8 +11,8 @@ pub struct OpenTask {
     pub id: String,
     pub seq: i64,
     pub title: String,
-    /// `medium` es como se guarda la prioridad media; la API de tareas la
-    /// llama `normal`. Aquí llega la guardada.
+    /// La media se guarda `medium` y la API de tareas la contesta `normal`.
+    /// Quien compare pasa por `canonical_priority`, llegue como llegue.
     pub priority: String,
     /// Una fecha guardada como instante. **No se lee**: para saber en qué día
     /// cae está `due_day`, ya calculado.

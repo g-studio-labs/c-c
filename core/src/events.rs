@@ -7,6 +7,7 @@ use crate::mywork::MyWorkState;
 use crate::orgs::OrgsState;
 use crate::tree::TreeState;
 use crate::session::Session;
+use crate::task::TaskState;
 
 pub trait Listener: Send + Sync {
     /// La sesión cambió: alguien entró, salió, o el servidor la dio por
@@ -23,6 +24,9 @@ pub trait Listener: Send + Sync {
 
     /// Llegó el árbol de espacios, o se vació al cambiar de organización.
     fn tree_changed(&self, _state: TreeState) {}
+
+    /// La tarea abierta cambió: se abrió, llegó, se editó o se cerró.
+    fn task_changed(&self, _state: TaskState) {}
 }
 
 /// Para quien no necesita enterarse (el MCP, una prueba).

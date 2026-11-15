@@ -1,0 +1,490 @@
+{
+  "flows": [
+    {
+      "projectId": "",
+      "visibility": "",
+      "flow": "internal"
+    },
+    {
+      "projectId": "",
+      "visibility": "public",
+      "flow": "internal"
+    },
+    {
+      "projectId": "",
+      "visibility": "internal",
+      "flow": "internal"
+    },
+    {
+      "projectId": "p1",
+      "visibility": "",
+      "flow": "client"
+    },
+    {
+      "projectId": "p1",
+      "visibility": "public",
+      "flow": "client"
+    },
+    {
+      "projectId": "p1",
+      "visibility": "internal",
+      "flow": "internal"
+    }
+  ],
+  "priorities": [
+    {
+      "stored": "none",
+      "wire": "none"
+    },
+    {
+      "stored": "low",
+      "wire": "low"
+    },
+    {
+      "stored": "medium",
+      "wire": "normal"
+    },
+    {
+      "stored": "high",
+      "wire": "high"
+    },
+    {
+      "stored": "urgent",
+      "wire": "urgent"
+    }
+  ],
+  "transitions": [
+    {
+      "flow": "client",
+      "from": "pending",
+      "to": "pending",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "pending",
+      "to": "in_progress",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "pending",
+      "to": "resolved",
+      "allowed": false
+    },
+    {
+      "flow": "client",
+      "from": "pending",
+      "to": "closed",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "pending",
+      "to": "open",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "pending",
+      "to": "done",
+      "allowed": false
+    },
+    {
+      "flow": "client",
+      "from": "in_progress",
+      "to": "pending",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "in_progress",
+      "to": "in_progress",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "in_progress",
+      "to": "resolved",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "in_progress",
+      "to": "closed",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "in_progress",
+      "to": "open",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "in_progress",
+      "to": "done",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "resolved",
+      "to": "pending",
+      "allowed": false
+    },
+    {
+      "flow": "client",
+      "from": "resolved",
+      "to": "in_progress",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "resolved",
+      "to": "resolved",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "resolved",
+      "to": "closed",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "resolved",
+      "to": "open",
+      "allowed": false
+    },
+    {
+      "flow": "client",
+      "from": "resolved",
+      "to": "done",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "closed",
+      "to": "pending",
+      "allowed": false
+    },
+    {
+      "flow": "client",
+      "from": "closed",
+      "to": "in_progress",
+      "allowed": false
+    },
+    {
+      "flow": "client",
+      "from": "closed",
+      "to": "resolved",
+      "allowed": false
+    },
+    {
+      "flow": "client",
+      "from": "closed",
+      "to": "closed",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "closed",
+      "to": "open",
+      "allowed": false
+    },
+    {
+      "flow": "client",
+      "from": "closed",
+      "to": "done",
+      "allowed": false
+    },
+    {
+      "flow": "client",
+      "from": "open",
+      "to": "pending",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "open",
+      "to": "in_progress",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "open",
+      "to": "resolved",
+      "allowed": false
+    },
+    {
+      "flow": "client",
+      "from": "open",
+      "to": "closed",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "open",
+      "to": "open",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "open",
+      "to": "done",
+      "allowed": false
+    },
+    {
+      "flow": "client",
+      "from": "done",
+      "to": "pending",
+      "allowed": false
+    },
+    {
+      "flow": "client",
+      "from": "done",
+      "to": "in_progress",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "done",
+      "to": "resolved",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "done",
+      "to": "closed",
+      "allowed": true
+    },
+    {
+      "flow": "client",
+      "from": "done",
+      "to": "open",
+      "allowed": false
+    },
+    {
+      "flow": "client",
+      "from": "done",
+      "to": "done",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "pending",
+      "to": "pending",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "pending",
+      "to": "in_progress",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "pending",
+      "to": "resolved",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "pending",
+      "to": "closed",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "pending",
+      "to": "open",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "pending",
+      "to": "done",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "in_progress",
+      "to": "pending",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "in_progress",
+      "to": "in_progress",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "in_progress",
+      "to": "resolved",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "in_progress",
+      "to": "closed",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "in_progress",
+      "to": "open",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "in_progress",
+      "to": "done",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "resolved",
+      "to": "pending",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "resolved",
+      "to": "in_progress",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "resolved",
+      "to": "resolved",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "resolved",
+      "to": "closed",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "resolved",
+      "to": "open",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "resolved",
+      "to": "done",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "closed",
+      "to": "pending",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "closed",
+      "to": "in_progress",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "closed",
+      "to": "resolved",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "closed",
+      "to": "closed",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "closed",
+      "to": "open",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "closed",
+      "to": "done",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "open",
+      "to": "pending",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "open",
+      "to": "in_progress",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "open",
+      "to": "resolved",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "open",
+      "to": "closed",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "open",
+      "to": "open",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "open",
+      "to": "done",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "done",
+      "to": "pending",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "done",
+      "to": "in_progress",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "done",
+      "to": "resolved",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "done",
+      "to": "closed",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "done",
+      "to": "open",
+      "allowed": true
+    },
+    {
+      "flow": "internal",
+      "from": "done",
+      "to": "done",
+      "allowed": true
+    }
+  ]
+}

@@ -16,6 +16,7 @@ pub mod nav;
 pub mod orgs;
 pub mod session;
 pub mod storage;
+pub mod task;
 pub mod transport;
 pub mod tree;
 
@@ -31,6 +32,12 @@ pub use orgs::{Organization, Orgs, OrgsState};
 pub use session::Session;
 pub use tree::{FolderTree, ListSummary, SpacePerson, SpaceTree, Tree, TreeState};
 pub use storage::{FileStorage, Storage};
+pub use task::{
+    can_transition, canonical_priority, canonical_status, due_instant, flow_for, new_task_body, patch_body,
+    CommentAuthor, DecisionRef, DueChange, Flow, GitSummary, NewTask, ReleaseRef, StatusOption, Task,
+    TaskAttachment, TaskBlocker, TaskCard, TaskComment, TaskDetail, TaskGitLink, TaskGitLinks, TaskPatch,
+    TaskState, TaskStatus, TaskTag, Tasks, UserSummary,
+};
 pub use transport::Reply;
 
 /// Con qué servidor habla el core y cómo se presenta.
@@ -73,6 +80,7 @@ pub(crate) struct Inner {
     pub(crate) my_work: Mutex<MyWorkState>,
     pub(crate) orgs: Mutex<OrgsState>,
     pub(crate) tree: Mutex<TreeState>,
+    pub(crate) task: Mutex<TaskState>,
     /// Cuántas recargas de «Mi trabajo» se han pedido: la que espera su
     /// respiro sólo carga si sigue siendo la última.
     pub(crate) my_work_reloads: std::sync::atomic::AtomicU64,
@@ -96,6 +104,7 @@ impl Core {
                 my_work: Mutex::new(MyWorkState::default()),
                 orgs: Mutex::new(OrgsState::default()),
                 tree: Mutex::new(TreeState::default()),
+                task: Mutex::new(TaskState::default()),
                 my_work_reloads: std::sync::atomic::AtomicU64::new(0),
             }),
         };

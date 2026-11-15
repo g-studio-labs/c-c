@@ -101,6 +101,8 @@ func TestTheCoreReadsWhatTheServerWrites(t *testing.T) {
 			Lists:  []ListSummary{{ID: "l0", Name: "sueltas", OpenCount: 1, ProjectID: "p3", TaskCount: 2}},
 			People: []SpacePerson{{UserID: "u1", Username: "ana", Name: "Ana Pérez"}},
 		},
+		"task_detail.json":    fullTaskDetail(day),
+		"state_machines.json": stateMachines(),
 	}
 
 	dir := filepath.Join("..", "..", "..", "..", "core", "tests", "fixtures")
@@ -130,4 +132,126 @@ func TestTheCoreReadsWhatTheServerWrites(t *testing.T) {
 				"ahora:\n%s\nfichero:\n%s", name, got, want)
 		}
 	}
+}
+
+// fullTaskDetail es el detalle de una tarea con **todos** los campos puestos,
+// también los de dentro: un campo con su valor cero y `omitempty` no saldría
+// en el fichero, y el core no se enteraría de que existe.
+func fullTaskDetail(day time.Time) TaskDetail {
+	at := time.Date(2026, 11, 14, 20, 17, 40, 0, time.UTC)
+	str := func(s string) *string { return &s }
+	base := func(id string) BaseModel { return BaseModel{ID: id, CreatedAt: at, UpdatedAt: at} }
+	tag := TaskTag{BaseModel: base("tag1"), OrgID: "o1", Name: "urgente", Color: "#f00"}
+	ana := UserSummary{ID: "u1", Username: "ana", Name: "Ana Pérez"}
+	file := TaskAttachment{
+		BaseModel: base("a1"), ItemID: "t1", CommentID: str("c1"),
+		URL: "/api/v1/tasks/t1/attachments/a1/raw", FileName: "captura.png",
+		ContentType: "image/png", Bytes: 2048, UploadedBy: "u1",
+	}
+	card := TaskCard{
+		ID: "t2", Seq: 13, Title: "Una línea del checklist", Priority: "normal", StatusID: "s1",
+		DueAt: &day, HasDescription: true, CommentCount: 2, AttachmentCount: 1,
+		SubtaskCount: 3, SubtaskDone: 1, Tags: []TaskTag{tag}, Assignees: []UserSummary{ana},
+		UpdatedAt: at, Category: "bug", Area: "login", CreatedAt: at, Flow: FlowInternal,
+		Git:  &GitSummary{Branches: 1, PRs: 2, Commits: 3, PRBadge: PRStateOpen},
+		Keys: []string{"PROTEUS-165"},
+	}
+	link := TaskGitLink{
+		BaseModel: base("g1"), ItemID: "t1", RepoID: 7, RepoFullName: "g-studio-labs/c-c",
+		Kind: "commit", Key: "0fbe389", Title: "feat(core): …", HTMLURL: "https://github.com/x/y/commit/0fbe389",
+		AuthorLogin: "ana", State: "open", HeadBranch: "rama", BaseBranch: "main", HeadSha: "0fbe389",
+		Via: "text", MergedAt: &at, OccurredAt: at,
+		ReleasedIn: &ReleaseRef{Tag: "v1.33.0", At: at, URL: "https://github.com/x/y/releases/v1.33.0"},
+	}
+	return TaskDetail{
+		Task: Task{
+			BaseModel: base("t1"), OrgID: "o1", ListID: "l1", SpaceID: "sp1", ProjectID: "p1", Seq: 12,
+			Title: "Subir el backend", Description: "Con **markdown**.", Status: ReportInProgress,
+			Category: CategoryBug, Priority: "normal", Area: "login", Origin: "user",
+			URL: "https://app.example.com/login", UserAgent: "Mozilla/5.0", Viewport: "1280x720",
+			TelemetryPurgeAt: &at, ReporterName: "Ana", ReporterEmail: "ana@example.com", ReporterID: "ext-1",
+			AssigneeUserID: str("u1"), Visibility: VisibilityPublic, ParentID: str("t0"),
+			StartAt: &at, DueAt: &day, ResolvedAt: &at, Handoff: "Dónde quedó.", HandoffAt: &at,
+			HandoffByID: "u1", CreatedByID: "u1", ArchivedAt: &at,
+		},
+		ListName:  "tasks",
+		SpaceName: "Command and control",
+		Status: TaskStatus{
+			BaseModel: base("s1"), ListID: "l1", Name: "In progress", Color: "#20D9E8",
+			Kind: StatusKindActive, Status: ReportInProgress,
+		},
+		Tags:      []TaskTag{tag},
+		Assignees: []UserSummary{ana},
+		Comments: []TaskCommentResponse{{
+			ID: "c1",
+			Author: &CommentAuthor{
+				Kind: "team", Name: "Ana Pérez", UserID: "u1",
+				ProjectID: "p1", ProjectName: "Acme", ExternalID: "ext-1",
+			},
+			AuthorUserID: "u1", AuthorName: "Ana Pérez", Visibility: VisibilityInternal,
+			Kind: "user", Source: "gh", Via: "mcp", Body: "Una nota.",
+			Attachments: []TaskAttachment{file}, CreatedAt: at, UpdatedAt: at,
+		}},
+		Attachments: []TaskAttachment{file},
+		Subtasks:    []TaskCard{card},
+		Parent:      &card,
+		Folio:       "acme-7",
+		ProjectSlug: "acme",
+		Ref:         "acme-7",
+		Keys:        []string{"PROTEUS-165"},
+		Tickets:     []string{"PROTEUS-165"},
+		HandoffBy:   "Ana Pérez",
+		BlockedBy:   []TaskBlocker{{ID: "t9", Ref: "command-and-control-9", Title: "La de antes", Status: ReportPending, Open: true}},
+		Decisions: []DecisionRef{{
+			ID: "d1", Title: "GPUI Kit", OwnerKind: "space", OwnerID: "sp1",
+			DecidedAt: at, SupersededByID: "d2",
+		}},
+		Telemetry: json.RawMessage(`{"breadcrumbs":[]}`),
+		Git: &TaskGitLinks{
+			Summary:  GitSummary{Branches: 1, PRs: 1, Commits: 1, PRBadge: PRStateOpen},
+			Branches: []TaskGitLink{link}, PRs: []TaskGitLink{link}, Commits: []TaskGitLink{link},
+		},
+	}
+}
+
+// stateMachines son las dos máquinas de estados tal como las decide el
+// servidor, par por par, más a quién le toca cada una y los nombres que se
+// aceptan. El core las repite a mano (`core/src/task/flow.rs`) para no ofrecer
+// un cambio que va a contestar 409; aquí se le da con qué comprobarse.
+func stateMachines() map[string]any {
+	statuses := []ReportStatus{ReportPending, ReportInProgress, ReportResolved, ReportClosed, "open", "done"}
+	type pair struct {
+		Flow    ItemFlow     `json:"flow"`
+		From    ReportStatus `json:"from"`
+		To      ReportStatus `json:"to"`
+		Allowed bool         `json:"allowed"`
+	}
+	pairs := []pair{}
+	for _, f := range []ItemFlow{FlowClient, FlowInternal} {
+		for _, from := range statuses {
+			for _, to := range statuses {
+				pairs = append(pairs, pair{f, from, to, CanTransition(f, from, to)})
+			}
+		}
+	}
+	type owner struct {
+		ProjectID  string         `json:"projectId"`
+		Visibility ItemVisibility `json:"visibility"`
+		Flow       ItemFlow       `json:"flow"`
+	}
+	owners := []owner{}
+	for _, projectID := range []string{"", "p1"} {
+		for _, v := range []ItemVisibility{"", VisibilityPublic, VisibilityInternal} {
+			owners = append(owners, owner{projectID, v, FlowFor(projectID, v)})
+		}
+	}
+	type priority struct {
+		Stored ItemPriority `json:"stored"`
+		Wire   ItemPriority `json:"wire"`
+	}
+	priorities := []priority{}
+	for _, p := range ItemPriorities() {
+		priorities = append(priorities, priority{p, p.TaskWire()})
+	}
+	return map[string]any{"transitions": pairs, "flows": owners, "priorities": priorities}
 }

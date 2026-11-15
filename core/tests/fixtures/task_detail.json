@@ -1,0 +1,327 @@
+{
+  "task": {
+    "id": "t1",
+    "createdAt": "2026-11-14T20:17:40Z",
+    "updatedAt": "2026-11-14T20:17:40Z",
+    "orgId": "o1",
+    "listId": "l1",
+    "spaceId": "sp1",
+    "projectId": "p1",
+    "seq": 12,
+    "title": "Subir el backend",
+    "description": "Con **markdown**.",
+    "status": "in_progress",
+    "category": "bug",
+    "priority": "normal",
+    "area": "login",
+    "origin": "user",
+    "url": "https://app.example.com/login",
+    "userAgent": "Mozilla/5.0",
+    "viewport": "1280x720",
+    "telemetryPurgeAt": "2026-11-14T20:17:40Z",
+    "reporterName": "Ana",
+    "reporterEmail": "ana@example.com",
+    "reporterId": "ext-1",
+    "assigneeUserId": "u1",
+    "visibility": "public",
+    "parentId": "t0",
+    "startAt": "2026-11-14T20:17:40Z",
+    "dueAt": "2026-09-30T00:00:00Z",
+    "resolvedAt": "2026-11-14T20:17:40Z",
+    "handoff": "Dónde quedó.",
+    "handoffAt": "2026-11-14T20:17:40Z",
+    "handoffById": "u1",
+    "createdById": "u1",
+    "archivedAt": "2026-11-14T20:17:40Z"
+  },
+  "listName": "tasks",
+  "spaceName": "Command and control",
+  "status": {
+    "id": "s1",
+    "createdAt": "2026-11-14T20:17:40Z",
+    "updatedAt": "2026-11-14T20:17:40Z",
+    "listId": "l1",
+    "name": "In progress",
+    "color": "#20D9E8",
+    "kind": "active",
+    "status": "in_progress"
+  },
+  "tags": [
+    {
+      "id": "tag1",
+      "createdAt": "2026-11-14T20:17:40Z",
+      "updatedAt": "2026-11-14T20:17:40Z",
+      "orgId": "o1",
+      "name": "urgente",
+      "color": "#f00"
+    }
+  ],
+  "assignees": [
+    {
+      "id": "u1",
+      "username": "ana",
+      "name": "Ana Pérez"
+    }
+  ],
+  "comments": [
+    {
+      "id": "c1",
+      "author": {
+        "kind": "team",
+        "name": "Ana Pérez",
+        "userId": "u1",
+        "projectId": "p1",
+        "projectName": "Acme",
+        "externalId": "ext-1"
+      },
+      "authorUserId": "u1",
+      "authorName": "Ana Pérez",
+      "visibility": "internal",
+      "kind": "user",
+      "source": "gh",
+      "via": "mcp",
+      "body": "Una nota.",
+      "attachments": [
+        {
+          "id": "a1",
+          "createdAt": "2026-11-14T20:17:40Z",
+          "updatedAt": "2026-11-14T20:17:40Z",
+          "itemId": "t1",
+          "commentId": "c1",
+          "url": "/api/v1/tasks/t1/attachments/a1/raw",
+          "fileName": "captura.png",
+          "contentType": "image/png",
+          "bytes": 2048,
+          "uploadedBy": "u1"
+        }
+      ],
+      "createdAt": "2026-11-14T20:17:40Z",
+      "updatedAt": "2026-11-14T20:17:40Z"
+    }
+  ],
+  "attachments": [
+    {
+      "id": "a1",
+      "createdAt": "2026-11-14T20:17:40Z",
+      "updatedAt": "2026-11-14T20:17:40Z",
+      "itemId": "t1",
+      "commentId": "c1",
+      "url": "/api/v1/tasks/t1/attachments/a1/raw",
+      "fileName": "captura.png",
+      "contentType": "image/png",
+      "bytes": 2048,
+      "uploadedBy": "u1"
+    }
+  ],
+  "subtasks": [
+    {
+      "id": "t2",
+      "seq": 13,
+      "title": "Una línea del checklist",
+      "priority": "normal",
+      "statusId": "s1",
+      "dueAt": "2026-09-30T00:00:00Z",
+      "hasDescription": true,
+      "commentCount": 2,
+      "attachmentCount": 1,
+      "subtaskCount": 3,
+      "subtaskDone": 1,
+      "tags": [
+        {
+          "id": "tag1",
+          "createdAt": "2026-11-14T20:17:40Z",
+          "updatedAt": "2026-11-14T20:17:40Z",
+          "orgId": "o1",
+          "name": "urgente",
+          "color": "#f00"
+        }
+      ],
+      "assignees": [
+        {
+          "id": "u1",
+          "username": "ana",
+          "name": "Ana Pérez"
+        }
+      ],
+      "updatedAt": "2026-11-14T20:17:40Z",
+      "category": "bug",
+      "area": "login",
+      "createdAt": "2026-11-14T20:17:40Z",
+      "flow": "internal",
+      "git": {
+        "branches": 1,
+        "prs": 2,
+        "commits": 3,
+        "prBadge": "open"
+      },
+      "keys": [
+        "PROTEUS-165"
+      ]
+    }
+  ],
+  "parent": {
+    "id": "t2",
+    "seq": 13,
+    "title": "Una línea del checklist",
+    "priority": "normal",
+    "statusId": "s1",
+    "dueAt": "2026-09-30T00:00:00Z",
+    "hasDescription": true,
+    "commentCount": 2,
+    "attachmentCount": 1,
+    "subtaskCount": 3,
+    "subtaskDone": 1,
+    "tags": [
+      {
+        "id": "tag1",
+        "createdAt": "2026-11-14T20:17:40Z",
+        "updatedAt": "2026-11-14T20:17:40Z",
+        "orgId": "o1",
+        "name": "urgente",
+        "color": "#f00"
+      }
+    ],
+    "assignees": [
+      {
+        "id": "u1",
+        "username": "ana",
+        "name": "Ana Pérez"
+      }
+    ],
+    "updatedAt": "2026-11-14T20:17:40Z",
+    "category": "bug",
+    "area": "login",
+    "createdAt": "2026-11-14T20:17:40Z",
+    "flow": "internal",
+    "git": {
+      "branches": 1,
+      "prs": 2,
+      "commits": 3,
+      "prBadge": "open"
+    },
+    "keys": [
+      "PROTEUS-165"
+    ]
+  },
+  "folio": "acme-7",
+  "projectSlug": "acme",
+  "ref": "acme-7",
+  "keys": [
+    "PROTEUS-165"
+  ],
+  "tickets": [
+    "PROTEUS-165"
+  ],
+  "handoffBy": "Ana Pérez",
+  "blockedBy": [
+    {
+      "id": "t9",
+      "ref": "command-and-control-9",
+      "title": "La de antes",
+      "status": "pending",
+      "open": true
+    }
+  ],
+  "decisions": [
+    {
+      "id": "d1",
+      "title": "GPUI Kit",
+      "ownerKind": "space",
+      "ownerId": "sp1",
+      "decidedAt": "2026-11-14T20:17:40Z",
+      "supersededById": "d2"
+    }
+  ],
+  "telemetry": {
+    "breadcrumbs": []
+  },
+  "git": {
+    "summary": {
+      "branches": 1,
+      "prs": 1,
+      "commits": 1,
+      "prBadge": "open"
+    },
+    "branches": [
+      {
+        "id": "g1",
+        "createdAt": "2026-11-14T20:17:40Z",
+        "updatedAt": "2026-11-14T20:17:40Z",
+        "itemId": "t1",
+        "repoId": 7,
+        "repoFullName": "g-studio-labs/c-c",
+        "kind": "commit",
+        "key": "0fbe389",
+        "title": "feat(core): …",
+        "htmlUrl": "https://github.com/x/y/commit/0fbe389",
+        "authorLogin": "ana",
+        "state": "open",
+        "headBranch": "rama",
+        "baseBranch": "main",
+        "headSha": "0fbe389",
+        "via": "text",
+        "mergedAt": "2026-11-14T20:17:40Z",
+        "occurredAt": "2026-11-14T20:17:40Z",
+        "releasedIn": {
+          "tag": "v1.33.0",
+          "at": "2026-11-14T20:17:40Z",
+          "url": "https://github.com/x/y/releases/v1.33.0"
+        }
+      }
+    ],
+    "prs": [
+      {
+        "id": "g1",
+        "createdAt": "2026-11-14T20:17:40Z",
+        "updatedAt": "2026-11-14T20:17:40Z",
+        "itemId": "t1",
+        "repoId": 7,
+        "repoFullName": "g-studio-labs/c-c",
+        "kind": "commit",
+        "key": "0fbe389",
+        "title": "feat(core): …",
+        "htmlUrl": "https://github.com/x/y/commit/0fbe389",
+        "authorLogin": "ana",
+        "state": "open",
+        "headBranch": "rama",
+        "baseBranch": "main",
+        "headSha": "0fbe389",
+        "via": "text",
+        "mergedAt": "2026-11-14T20:17:40Z",
+        "occurredAt": "2026-11-14T20:17:40Z",
+        "releasedIn": {
+          "tag": "v1.33.0",
+          "at": "2026-11-14T20:17:40Z",
+          "url": "https://github.com/x/y/releases/v1.33.0"
+        }
+      }
+    ],
+    "commits": [
+      {
+        "id": "g1",
+        "createdAt": "2026-11-14T20:17:40Z",
+        "updatedAt": "2026-11-14T20:17:40Z",
+        "itemId": "t1",
+        "repoId": 7,
+        "repoFullName": "g-studio-labs/c-c",
+        "kind": "commit",
+        "key": "0fbe389",
+        "title": "feat(core): …",
+        "htmlUrl": "https://github.com/x/y/commit/0fbe389",
+        "authorLogin": "ana",
+        "state": "open",
+        "headBranch": "rama",
+        "baseBranch": "main",
+        "headSha": "0fbe389",
+        "via": "text",
+        "mergedAt": "2026-11-14T20:17:40Z",
+        "occurredAt": "2026-11-14T20:17:40Z",
+        "releasedIn": {
+          "tag": "v1.33.0",
+          "at": "2026-11-14T20:17:40Z",
+          "url": "https://github.com/x/y/releases/v1.33.0"
+        }
+      }
+    ]
+  }
+}

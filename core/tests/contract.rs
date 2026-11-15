@@ -12,7 +12,9 @@
 
 use std::collections::BTreeSet;
 
-use cac_core::{OpenTask, Organization, Session, SpaceTree};
+use cac_core::{
+    can_transition, canonical_priority, flow_for, Flow, OpenTask, Organization, Session, SpaceTree, TaskDetail,
+};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
@@ -25,15 +27,46 @@ fn keys(value: &Value) -> BTreeSet<String> {
     value.as_object().unwrap().keys().cloned().collect()
 }
 
+/// Las claves que el servidor escribió y el core no devuelve, con su ruta
+/// (`comments[0].author.userId`). Mira también dentro de objetos y listas: un
+/// campo que falte en una subtarea es tan invisible como uno de arriba.
+fn unread(written: &Value, rewritten: &Value, at: &str, out: &mut Vec<String>) {
+    match (written, rewritten) {
+        (Value::Object(written), Value::Object(rewritten)) => {
+            for (key, value) in written {
+                let path = if at.is_empty() { key.clone() } else { format!("{at}.{key}") };
+                match rewritten.get(key) {
+                    Some(read) => unread(value, read, &path, out),
+                    None => out.push(path),
+                }
+            }
+        }
+        (Value::Array(written), Value::Array(rewritten)) => {
+            for (index, value) in written.iter().enumerate() {
+                match rewritten.get(index) {
+                    Some(read) => unread(value, read, &format!("{at}[{index}]"), out),
+                    None => out.push(format!("{at}[{index}]")),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Lee `written` con el tipo del core y comprueba que no se dejó ningún campo
-/// por el camino: lo que el core vuelve a escribir tiene, como poco, todas las
-/// claves que escribió el servidor.
-fn reads_every_field<T: DeserializeOwned + Serialize>(written: &Value) -> T {
+/// por el camino, salvo los de `skipped`, que se nombran a propósito.
+fn reads_every_field_but<T: DeserializeOwned + Serialize>(written: &Value, skipped: &[&str]) -> T {
     let read: T = serde_json::from_value(written.clone()).expect("el core no sabe leer esta forma");
     let rewritten = serde_json::to_value(&read).unwrap();
-    let unknown: Vec<_> = keys(written).difference(&keys(&rewritten)).cloned().collect();
+    let mut unknown = Vec::new();
+    unread(written, &rewritten, "", &mut unknown);
+    unknown.retain(|path| !skipped.contains(&path.as_str()));
     assert!(unknown.is_empty(), "el servidor manda campos que el core no lee: {unknown:?}");
     read
+}
+
+fn reads_every_field<T: DeserializeOwned + Serialize>(written: &Value) -> T {
+    reads_every_field_but(written, &[])
 }
 
 #[test]
@@ -100,4 +133,112 @@ fn a_space_tree_is_read_whole_at_every_level() {
     assert!(space.is_general());
     assert_eq!(space.folders[0].lists[0].open_count, 6);
     assert_eq!(space.people[0].name.as_deref(), Some("Ana Pérez"));
+}
+
+/// El detalle de una tarea se lee entero, también lo de dentro.
+///
+/// Roturas que atrapa: un campo que el servidor manda y el core no lee, en la
+/// tarea o en cualquiera de sus comentarios, subtareas, adjuntos o enlaces de
+/// git; y leer `ref` (palabra reservada en Rust) con otro nombre.
+#[test]
+fn a_task_detail_is_read_whole() {
+    // `telemetry` es lo único que el core no lee: ver `TaskDetail`.
+    let detail: TaskDetail = reads_every_field_but(&fixture("task_detail.json"), &["telemetry"]);
+
+    assert_eq!(detail.task.seq, 12);
+    assert_eq!(detail.reference.as_deref(), Some("acme-7"));
+    assert_eq!(detail.blocked_by[0].reference.as_deref(), Some("command-and-control-9"));
+    assert_eq!(detail.comments[0].attachments[0].file_name, "captura.png");
+    assert_eq!(detail.git.unwrap().commits[0].released_in.as_ref().unwrap().tag, "v1.33.0");
+}
+
+/// Go escribe `null` donde una lista no se creó, y el core lo lee como vacía.
+///
+/// Rotura que atrapa: que una tarea sin etiquetas ni comentarios no se pueda
+/// abrir («invalid type: null, expected a sequence»).
+#[test]
+fn a_task_with_empty_lists_written_as_null_is_read() {
+    let mut written = fixture("task_detail.json");
+    for key in ["tags", "assignees", "comments", "attachments", "subtasks", "blockedBy", "decisions"] {
+        written[key] = Value::Null;
+    }
+    let detail: TaskDetail = serde_json::from_value(written).expect("un null es una lista vacía");
+    assert!(detail.tags.is_empty() && detail.comments.is_empty() && detail.blocked_by.is_empty());
+}
+
+#[derive(Deserialize)]
+struct Transition {
+    flow: String,
+    from: String,
+    to: String,
+    allowed: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FlowOwner {
+    project_id: String,
+    visibility: String,
+    flow: String,
+}
+
+#[derive(Deserialize)]
+struct PriorityName {
+    stored: String,
+    wire: String,
+}
+
+/// Las dos máquinas de estados del core son las del servidor, par por par.
+///
+/// Roturas que atrapa: dejar pasar en el flujo del cliente `pendiente →
+/// resuelta` (el servidor contesta 409); tratar una tarea interna con la
+/// máquina estricta (botones que no hacen nada: así se murió el check de las
+/// subtareas); no entender `open` y `done`.
+#[test]
+fn the_state_machines_are_the_servers() {
+    let written = fixture("state_machines.json");
+    let transitions: Vec<Transition> = serde_json::from_value(written["transitions"].clone()).unwrap();
+    assert_eq!(transitions.len(), 72, "dos máquinas, seis nombres de estado");
+
+    for t in transitions {
+        let ours = can_transition(Flow::named(&t.flow), &t.from, &t.to);
+        assert_eq!(ours, t.allowed, "{}: {} → {}", t.flow, t.from, t.to);
+    }
+}
+
+/// A quién le toca cada máquina.
+///
+/// Rotura que atrapa: darle la del cliente a una tarea interna que vive en la
+/// lista de un cliente, o la interna a una que el cliente ve.
+#[test]
+fn each_task_gets_the_machine_the_server_gives_it() {
+    let written = fixture("state_machines.json");
+    let owners: Vec<FlowOwner> = serde_json::from_value(written["flows"].clone()).unwrap();
+    assert_eq!(owners.len(), 6);
+
+    for o in owners {
+        assert_eq!(
+            flow_for(&o.project_id, &o.visibility),
+            Flow::named(&o.flow),
+            "proyecto «{}», visibilidad «{}»",
+            o.project_id,
+            o.visibility
+        );
+    }
+}
+
+/// La prioridad tiene un solo nombre en el core: el que habla la API.
+///
+/// Rotura que atrapa: mandar o comparar `medium`, el nombre guardado, que es
+/// como convivieron dos nombres para la misma prioridad (#83).
+#[test]
+fn a_priority_has_the_name_the_api_speaks() {
+    let written = fixture("state_machines.json");
+    let names: Vec<PriorityName> = serde_json::from_value(written["priorities"].clone()).unwrap();
+    assert_eq!(names.len(), 5);
+
+    for name in names {
+        assert_eq!(canonical_priority(&name.stored), name.wire);
+        assert_eq!(canonical_priority(&name.wire), name.wire);
+    }
 }

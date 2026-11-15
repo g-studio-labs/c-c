@@ -32,16 +32,10 @@ pub fn fold(text: &str) -> String {
         .to_lowercase()
 }
 
-/// La prioridad guardada `medium` es la `normal` de la API de tareas. Se
-/// comparan por el mismo nombre, o una tarea que llegue con el guardado no
-/// saldría al filtrar por «media».
-fn canonical_priority(priority: &str) -> &str {
-    match priority {
-        "medium" => "normal",
-        "" => "none",
-        other => other,
-    }
-}
+// La prioridad guardada `medium` es la `normal` de la API de tareas. Se
+// comparan por el mismo nombre, o una tarea que llegue con el guardado no
+// saldría al filtrar por «media».
+use crate::task::canonical_priority;
 
 /// El número de un folio escrito como `12` o `#12`.
 fn as_seq(query: &str) -> Option<i64> {

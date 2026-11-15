@@ -258,6 +258,32 @@ impl Core {
         unwrap_data(&reply)
     }
 
+    /// Una petición con sesión y cuerpo JSON que devuelve el `data` del sobre.
+    pub(crate) async fn call<T: for<'de> Deserialize<'de>>(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<T, ApiError> {
+        let reply = self.request(method, path, body.map(|body| body.to_string()), true).await?;
+        unwrap_data(&reply)
+    }
+
+    /// Lo mismo para las rutas que contestan sin `data` («Task moved»): sólo
+    /// importa si salió bien.
+    pub(crate) async fn call_ok(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<(), ApiError> {
+        let reply = self.request(method, path, body.map(|body| body.to_string()), true).await?;
+        if reply.status < 400 {
+            return Ok(());
+        }
+        unwrap_data::<serde_json::Value>(&reply).map(|_| ())
+    }
+
     /// Fuerza un token nuevo. Para quien recibió el rechazo por su cuenta: el
     /// stream de eventos, o una subida que hizo la pantalla.
     pub async fn refresh_access_token(&self) -> Option<String> {
