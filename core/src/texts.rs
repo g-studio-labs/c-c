@@ -66,6 +66,8 @@ pub fn pick_locale(preferred: Option<&str>, system: Option<&str>) -> Locale {
 /// Guardián: `tests::every_catalog_file_is_embedded`.
 macro_rules! catalogs {
     ($($namespace:literal),* $(,)?) => {
+        // Sólo lo lee la prueba que compara esta lista con la carpeta.
+        #[cfg(test)]
         const NAMESPACES: &[&str] = &[$($namespace),*];
 
         fn sources() -> Vec<(Locale, &'static str, &'static str)> {

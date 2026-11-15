@@ -7,7 +7,7 @@ use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::{
-    v_virtual_list, ActiveTheme, Icon, IconName, Theme, ThemeMode, VirtualListScrollHandle,
+    v_virtual_list, ActiveTheme, Icon, IconName, VirtualListScrollHandle,
 };
 use gpui_kit::*;
 
@@ -15,33 +15,6 @@ use gpui_kit::*;
 /// con mil se ve si el scroll aguanta de sobra.
 pub const ROWS: usize = 1000;
 const ROW_HEIGHT: f32 = 32.;
-
-/// Los colores de cac, tomados del tema oscuro de `app/src/index.css` (`.dark`).
-///
-/// Sólo los que esta ventana enseña: el tema entero, claro y oscuro, es de la
-/// Fase 2. Aquí se comprueba que el tema de GPUI Kit se deja vestir de cac.
-pub fn apply_cac_theme(cx: &mut App) {
-    Theme::change(ThemeMode::Dark, None, cx);
-    let theme = Theme::global_mut(cx);
-    let colors = &mut theme.colors;
-    colors.background = rgb(0x101013).into();
-    colors.foreground = rgb(0xECECEE).into();
-    colors.primary = rgb(0x20D9E8).into();
-    colors.primary_foreground = rgb(0x0B0B0E).into();
-    colors.muted = rgb(0x131317).into();
-    colors.muted_foreground = rgb(0x9A9AA4).into();
-    colors.accent = rgb(0x212128).into();
-    colors.accent_foreground = rgb(0xECECEE).into();
-    colors.border = rgb(0x2B2B33).into();
-    colors.input = rgb(0x2B2B33).into();
-    colors.ring = rgb(0x20D9E8).into();
-    colors.sidebar = rgb(0x0A0A0D).into();
-    colors.sidebar_border = rgb(0x23232A).into();
-    colors.list_hover = rgb(0x212128).into();
-    // La base de cac son 14px, no los 16 de GPUI Kit.
-    theme.font_size = px(14.);
-    theme.radius = px(8.);
-}
 
 const MARKDOWN: &str = "\
 ## Markdown pintado
@@ -213,7 +186,7 @@ impl Render for Spike {
 mod tests {
     // Sin `use super::*`: arriba se importa `gpui_kit::*`, que trae una macro
     // `test`, y `#[gpui_kit::test]` se expandiría sobre sí misma sin fin.
-    use super::{apply_cac_theme, Spike, ROWS};
+    use super::{Spike, ROWS};
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{
         point, px, size, AnyWindowHandle, AppContext, Bounds, Entity, Point, ScrollDelta,
@@ -223,7 +196,7 @@ mod tests {
     fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Spike>) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            apply_cac_theme(cx);
+            crate::theme::apply(gpui_kit::component::ThemeMode::Dark, cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: Point::default(),

@@ -26,7 +26,7 @@ pub mod tree;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub use account::{check_new_password, check_sign_in, FormCheck, MIN_PASSWORD};
+pub use account::{check_new_password, check_sign_in, gate, FormCheck, Gate, MIN_PASSWORD};
 pub use dates::{due_day, due_state, today_in, DueState};
 pub use error::ApiError;
 pub use events::{Listener, NoListener};

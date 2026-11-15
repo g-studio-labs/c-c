@@ -60,6 +60,28 @@ pub fn check_new_password(current: &str, next: &str, confirm: &str) -> FormCheck
     FormCheck::Ready
 }
 
+/// Qué puede ver quien abre la app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum Gate {
+    /// Nadie dentro: la pantalla de entrar.
+    SignIn,
+    /// Dentro, pero con una contraseña que puso otro (un alta, un
+    /// restablecimiento): no pasa de aquí hasta poner la suya.
+    NewPassword,
+    /// Dentro.
+    Open,
+}
+
+/// Hasta dónde llega una sesión.
+pub fn gate(session: Option<&Session>) -> Gate {
+    match session {
+        None => Gate::SignIn,
+        Some(session) if session.must_change_password => Gate::NewPassword,
+        Some(_) => Gate::Open,
+    }
+}
+
 /// Lo que devuelve cambiar la contraseña. Un servidor de antes del barrido
 /// del 6-oct-2026 no devolvía par: por eso son opcionales.
 #[derive(Deserialize, Default)]

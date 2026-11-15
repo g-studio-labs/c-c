@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use cac_core::{
-    check_new_password, check_sign_in, error_phrase, pick_locale, text, text_with, ApiError, Config, Core,
-    FormCheck, Locale, NoListener, Session, Storage,
+    check_new_password, check_sign_in, error_phrase, gate, pick_locale, text, text_with, ApiError, Config, Core,
+    FormCheck, Gate, Locale, NoListener, Session, Storage,
 };
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -143,6 +143,18 @@ fn ana(must_change_password: bool) -> Session {
         scopes: Vec::new(),
         locale: None,
     }
+}
+
+/// Quien tiene una contraseña que puso otro no pasa de cambiarla.
+///
+/// Roturas que atrapa: dejar entrar a la app con la contraseña que mandó un
+/// administrador; pedirle que la cambie a quien ya puso la suya; enseñar la
+/// app sin nadie dentro.
+#[test]
+fn a_password_set_by_someone_else_stops_at_changing_it() {
+    assert_eq!(gate(None), Gate::SignIn);
+    assert_eq!(gate(Some(&ana(true))), Gate::NewPassword);
+    assert_eq!(gate(Some(&ana(false))), Gate::Open);
 }
 
 async fn core_at(server: &MockServer) -> (Core, Arc<MemoryStorage>) {

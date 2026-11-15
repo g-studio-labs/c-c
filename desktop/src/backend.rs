@@ -145,6 +145,8 @@ impl Backend {
     }
 
     /// Para lo que el core contesta sin esperar (una regla, un filtro).
+    /// Todavía sin pantalla que lo use: la primera es el árbol.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn core(cx: &App) -> Core {
         cx.global::<Backend>().core.clone()
     }
@@ -162,52 +164,39 @@ impl Backend {
         // dos cosas sólo existen ahí dentro.
         backend.runtime.spawn(work(backend.core.clone()));
     }
+
+    /// Lo mismo, para quien necesita la respuesta (un formulario que tiene
+    /// que decir por qué falló). La respuesta se espera desde la pantalla.
+    pub fn ask<F, Fut, T>(cx: &App, work: F) -> tokio::sync::oneshot::Receiver<T>
+    where
+        F: FnOnce(Core) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let (answer, receiver) = tokio::sync::oneshot::channel();
+        Self::run(cx, |core| async move {
+            // Sin nadie esperando, la pantalla que preguntó ya no está.
+            let _ = answer.send(work(core).await);
+        });
+        receiver
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use super::Backend;
-    use cac_core::{Config, Connection, Storage, WorkLens};
+    use crate::testing::{wait_until, MemoryStorage};
+    use cac_core::{Config, Connection, WorkLens};
     use gpui_kit::TestAppContext;
-
-    #[derive(Default)]
-    struct MemoryStorage(Mutex<HashMap<String, String>>);
-
-    impl Storage for MemoryStorage {
-        fn get(&self, key: &str) -> Option<String> {
-            self.0.lock().unwrap().get(key).cloned()
-        }
-        fn set(&self, key: &str, value: &str) -> Result<(), String> {
-            self.0.lock().unwrap().insert(key.into(), value.into());
-            Ok(())
-        }
-        fn remove(&self, key: &str) {
-            self.0.lock().unwrap().remove(key);
-        }
-    }
 
     /// Un servidor que no existe: el puerto 9 de esta máquina no contesta.
     fn install(cx: &mut TestAppContext) {
         let mut config = Config::new("http://127.0.0.1:9");
         config.stream_backoff = Duration::from_millis(20);
         cx.update(|cx| Backend::install(config, Arc::new(MemoryStorage::default()), cx).unwrap());
-    }
-
-    /// Espera a algo que viene de otro hilo (el runtime del core).
-    fn wait_until(cx: &mut TestAppContext, what: &str, done: impl Fn(&mut TestAppContext) -> bool) {
-        cx.executor().allow_parking();
-        for _ in 0..300 {
-            cx.run_until_parked();
-            if done(cx) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        panic!("no llegó a pasar: {what}");
     }
 
     /// Lo que cambia en el core llega a lo que la pantalla lee, y la pantalla

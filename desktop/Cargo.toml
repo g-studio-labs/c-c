@@ -25,3 +25,5 @@ log = "0.4"
 gpui-kit = { version = "=0.9.1", features = ["test-support"] }
 # Para fabricar una sesión de prueba.
 serde_json = "1"
+# El servidor de mentira de las pruebas de pantalla, el mismo que usa el core.
+wiremock = "0.6"

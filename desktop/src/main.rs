@@ -1,15 +1,24 @@
-//! La prueba de viabilidad de cac de escritorio en GPUI (Fase 0).
+//! cac de escritorio, nativo, en GPUI.
 //!
-//! No es la app: es una ventana con lo mínimo para **medir** si GPUI Kit sirve
-//! en las máquinas del equipo antes de construir nada encima. Lo que hay que
-//! mirar está escrito en la propia ventana, y los resultados van a la tarea
-//! command-and-control-374.
+//! La ventana y sus pantallas. Sin lógica propia: toda regla vive en
+//! `cac-core`, y aquí se pinta lo que el core diga.
+//!
+//! Con `CAC_SPIKE=1` abre la prueba de viabilidad de la Fase 0 en vez de la
+//! app (command-and-control-374).
 
-// Todavía sin pantalla que lo use: la primera es el login (Fase 2).
-#[cfg_attr(not(test), allow(dead_code))]
+mod auth;
 mod backend;
+mod lang;
+mod platform;
+mod shell;
 mod spike;
+mod theme;
+#[cfg(test)]
+mod testing;
 
+use std::sync::Arc;
+
+use cac_core::{Config, FileStorage};
 use gpui_kit::*;
 
 /// Lo que GPUI cuenta de sí mismo, a la salida de errores.
@@ -57,9 +66,24 @@ fn main() {
         None => std::env::remove_var(GPUI_DEVICE_VAR),
     }
 
-    gpui_kit::application().run(|cx| {
+    let var = |name: &str| std::env::var(name).ok();
+    let spike = std::env::var_os("CAC_SPIKE").is_some();
+    let Some(data_dir) = platform::data_dir(platform::Os::current(), var) else {
+        eprintln!("cac: esta máquina no dice dónde guardar los datos de su usuario");
+        std::process::exit(1);
+    };
+    let mut config = Config::new(platform::server_url(var));
+    config.client = Some("desktop".to_string());
+    let system_language = platform::system_language(var);
+
+    gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
-        spike::apply_cac_theme(cx);
+        theme::apply(gpui_kit::component::ThemeMode::Dark, cx);
+        cx.set_global(lang::SystemLanguage(system_language));
+        if let Err(error) = backend::Backend::install(config, Arc::new(FileStorage::new(data_dir)), cx) {
+            eprintln!("cac: no se pudo arrancar: {error}");
+            std::process::exit(1);
+        }
 
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
@@ -69,8 +93,13 @@ fn main() {
             ))),
             ..WindowOptions::default()
         };
-        gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| spike::Spike::new(window, cx)))
-            .expect("no se pudo abrir la ventana");
+        if spike {
+            gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| spike::Spike::new(window, cx)))
+                .expect("no se pudo abrir la ventana");
+        } else {
+            gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| shell::Shell::new(window, cx)))
+                .expect("no se pudo abrir la ventana");
+        }
     });
 }
 
