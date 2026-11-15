@@ -34,8 +34,8 @@ pub use dates::{due_day, due_state, today_in, DueState};
 pub use error::ApiError;
 pub use events::{Listener, NoListener};
 pub use mywork::{
-    day_and_month, due_label, empty_reason, work_groups, DueLabel, MyWork, MyWorkState, OpenTask, ScopeKind, TaskFilter, WorkGroup,
-    WorkLens, WorkRow, WorkScope,
+    day_and_month, due_label, empty_reason, filter_options, work_groups, DueLabel, FilterOptions, MyWork, MyWorkState, OpenTask,
+    ScopeKind, TaskFilter, WorkGroup, WorkLens, WorkRow, WorkScope, NOBODY, PRIORITIES,
 };
 pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClick};
 pub use orgs::{Organization, Orgs, OrgsState};

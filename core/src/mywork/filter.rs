@@ -72,6 +72,55 @@ pub fn matches_filter(task: &OpenTask, filter: &TaskFilter) -> bool {
     true
 }
 
+/// Las prioridades, de la peor a la mejor: el orden en que se ofrecen.
+pub const PRIORITIES: [&str; 5] = ["urgent", "high", "normal", "low", "none"];
+
+/// Qué se puede elegir en cada desplegable de filtro. Una lista vacía es «no
+/// ofrezcas ese desplegable».
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct FilterOptions {
+    /// Los responsables, por nombre y en orden alfabético.
+    pub assignees: Vec<String>,
+    /// Si alguna tarea no tiene responsable: entonces se ofrece «sin asignar».
+    pub unassigned: bool,
+    pub priorities: Vec<String>,
+}
+
+/// Las opciones salen de las tareas que hay, no de un catálogo: filtrar por
+/// alguien que no tiene ninguna sólo enseña una lista vacía.
+///
+/// Un desplegable se ofrece si hay algo que separar (dos valores o más), o si
+/// ya tiene algo elegido: sin eso, un filtro puesto no tendría cómo quitarse
+/// cuando las tareas cambian por debajo.
+pub fn filter_options(tasks: &[OpenTask], filter: &TaskFilter) -> FilterOptions {
+    let mut people: Vec<String> = Vec::new();
+    let mut unassigned = false;
+    let mut priorities: Vec<&str> = Vec::new();
+    for task in tasks {
+        match task.assignee.as_deref() {
+            Some(name) if !people.iter().any(|known| known == name) => people.push(name.to_string()),
+            Some(_) => {}
+            None => unassigned = true,
+        }
+        let priority = canonical_priority(&task.priority);
+        if !priorities.contains(&priority) {
+            priorities.push(priority);
+        }
+    }
+    people.sort_by_key(|name| fold(name));
+    let offer = |count: usize, chosen: &str| count >= 2 || !chosen.is_empty();
+    FilterOptions {
+        assignees: if offer(people.len() + usize::from(unassigned), &filter.assignee) { people } else { Vec::new() },
+        unassigned,
+        priorities: if offer(priorities.len(), &filter.priority) {
+            PRIORITIES.iter().filter(|known| priorities.contains(known)).map(|known| known.to_string()).collect()
+        } else {
+            Vec::new()
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +178,52 @@ mod tests {
         let ana = TaskFilter { assignee: "ana".into(), ..TaskFilter::default() };
         assert!(matches_filter(&task(1, "a", "none", Some("ana")), &ana));
         assert!(!matches_filter(&task(1, "a", "none", Some("luis")), &ana));
+    }
+
+    /// Roturas que atrapa: ofrecer a alguien dos veces; desordenar los
+    /// nombres o las prioridades; olvidar «sin asignar»; ofrecer la prioridad
+    /// guardada `medium` aparte de `normal`.
+    #[test]
+    fn the_options_are_what_the_tasks_have() {
+        let tasks = [
+            task(1, "a", "low", Some("Luis")),
+            task(2, "b", "urgent", Some("ana")),
+            task(3, "c", "medium", Some("Luis")),
+            task(4, "d", "normal", None),
+        ];
+        let options = filter_options(&tasks, &TaskFilter::default());
+        // Por nombre como lo lee una persona: la mayúscula no va delante.
+        assert_eq!(options.assignees, ["ana", "Luis"]);
+        assert!(options.unassigned);
+        assert_eq!(options.priorities, ["urgent", "normal", "low"]);
+
+        let assigned = filter_options(&tasks[..3], &TaskFilter::default());
+        assert!(!assigned.unassigned);
+
+        // La guardada y la de la API son la misma prioridad: no separan nada.
+        let one = filter_options(&tasks[2..], &TaskFilter::default());
+        assert!(one.priorities.is_empty(), "ofrece {:?}", one.priorities);
+    }
+
+    /// Roturas que atrapa: un desplegable con una sola opción, que no separa
+    /// nada; y un filtro ya puesto que se queda sin desplegable para quitarlo.
+    #[test]
+    fn a_picker_is_offered_when_it_separates_or_is_already_set() {
+        let same = [task(1, "a", "high", Some("ana")), task(2, "b", "high", Some("ana"))];
+        let nothing = filter_options(&same, &TaskFilter::default());
+        assert!(nothing.assignees.is_empty() && nothing.priorities.is_empty());
+
+        // Cada desplegable mira lo suyo: elegir persona no ofrece prioridades.
+        let person = filter_options(&same, &TaskFilter { assignee: "ana".into(), ..TaskFilter::default() });
+        assert_eq!(person.assignees, ["ana"]);
+        assert!(person.priorities.is_empty());
+        let priority = filter_options(&same, &TaskFilter { priority: "high".into(), ..TaskFilter::default() });
+        assert_eq!(priority.priorities, ["high"]);
+        assert!(priority.assignees.is_empty());
+
+        // Una persona y tareas sin nadie ya son dos cosas que separar.
+        let mixed = [task(1, "a", "high", Some("ana")), task(2, "b", "high", None)];
+        assert_eq!(filter_options(&mixed, &TaskFilter::default()).assignees, ["ana"]);
     }
 
     /// Rotura que atrapa: dar por puesto un filtro de espacios.

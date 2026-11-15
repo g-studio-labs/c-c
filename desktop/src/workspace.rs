@@ -26,7 +26,7 @@ const INDENT: f32 = 14.;
 /// Casi sin estado propio: lo que pinta lo lee del core al pintarse, y GPUI
 /// repinta una vista cuando cambia algo que leyó. No hace falta suscribirse.
 pub struct Workspace {
-    my_work: Entity<MyWorkView>,
+    pub(crate) my_work: Entity<MyWorkView>,
 }
 
 impl Workspace {

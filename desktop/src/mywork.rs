@@ -5,10 +5,11 @@
 //! cada lente lo decide el core. Aquí está el buscador, que es lo único que
 //! esta pantalla tiene propio, y la pintura.
 
-use cac_core::{DueState, ScopeKind, TaskFilter, WorkGroup, WorkLens, WorkRow};
+use cac_core::{DueState, ScopeKind, TaskFilter, WorkGroup, WorkLens, WorkRow, NOBODY};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -27,16 +28,110 @@ const LENSES: [(WorkLens, &str); 5] = [
 
 pub struct MyWorkView {
     search: Entity<InputState>,
+    /// Lo elegido en los desplegables; vacío es «cualquiera».
+    assignee: String,
+    priority: String,
 }
 
 impl MyWorkView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let placeholder = tr(cx, "work:board.filter.search");
-        Self { search: cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)) }
+        Self {
+            search: cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)),
+            assignee: String::new(),
+            priority: String::new(),
+        }
     }
 
     fn filter(&self, cx: &App) -> TaskFilter {
-        TaskFilter { query: self.search.read(cx).value().to_string(), ..TaskFilter::default() }
+        TaskFilter {
+            query: self.search.read(cx).value().to_string(),
+            assignee: self.assignee.clone(),
+            priority: self.priority.clone(),
+        }
+    }
+
+    pub(crate) fn choose_assignee(&mut self, assignee: String, cx: &mut Context<Self>) {
+        self.assignee = assignee;
+        cx.notify();
+    }
+
+    pub(crate) fn choose_priority(&mut self, priority: String, cx: &mut Context<Self>) {
+        self.priority = priority;
+        cx.notify();
+    }
+
+    /// Quita todo lo que filtra, también lo escrito en el buscador: un
+    /// «quitar filtros» que deja la lista a medias no ha quitado los filtros.
+    pub(crate) fn clear_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.assignee.clear();
+        self.priority.clear();
+        self.search.update(cx, |search, cx| search.set_value("", window, cx));
+        cx.notify();
+    }
+
+    /// Los desplegables de filtro y, si algo filtra, cómo quitarlo. Qué se
+    /// ofrece en cada uno lo decide el core con las tareas que hay.
+    fn render_filters(&self, filter: &TaskFilter, cx: &mut Context<Self>) -> impl IntoElement {
+        let options = Backend::core(cx).my_work().filter_options(filter);
+        let here = locale(cx);
+        let phrase = move |key: &str| cac_core::text(here, key);
+        let view = cx.entity().downgrade();
+
+        let assignee = (!options.assignees.is_empty()).then(|| {
+            let chosen = self.assignee.clone();
+            let label = match chosen.as_str() {
+                "" => phrase("work:board.filter.anyone"),
+                NOBODY => phrase("work:board.filter.nobody"),
+                name => name.to_string(),
+            };
+            let mut choices = vec![(String::new(), phrase("work:board.filter.anyone"))];
+            if options.unassigned {
+                choices.push((NOBODY.to_string(), phrase("work:board.filter.nobody")));
+            }
+            choices.extend(options.assignees.iter().map(|name| (name.clone(), name.clone())));
+            let view = view.clone();
+            Button::new("filter-assignee").ghost().small().label(label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+                for (value, label) in choices.clone() {
+                    let view = view.clone();
+                    menu = menu.item(PopupMenuItem::new(label).checked(chosen == value).on_click(move |_, _, cx| {
+                        let _ = view.update(cx, |this, cx| this.choose_assignee(value.clone(), cx));
+                    }));
+                }
+                menu
+            })
+        });
+
+        let priority = (!options.priorities.is_empty()).then(|| {
+            let chosen = self.priority.clone();
+            let label = match chosen.as_str() {
+                "" => phrase("work:board.filter.anyPriority"),
+                name => phrase(&format!("work:taskPriority.{name}")),
+            };
+            let mut choices = vec![(String::new(), phrase("work:board.filter.anyPriority"))];
+            choices.extend(options.priorities.iter().map(|name| (name.clone(), phrase(&format!("work:taskPriority.{name}")))));
+            let view = view.clone();
+            Button::new("filter-priority").ghost().small().label(label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+                for (value, label) in choices.clone() {
+                    let view = view.clone();
+                    menu = menu.item(PopupMenuItem::new(label).checked(chosen == value).on_click(move |_, _, cx| {
+                        let _ = view.update(cx, |this, cx| this.choose_priority(value.clone(), cx));
+                    }));
+                }
+                menu
+            })
+        });
+
+        let clear = filter.is_filtering().then(|| {
+            Button::new("filter-clear")
+                .ghost()
+                .small()
+                .icon(Icon::new(Lucide::X))
+                .label(phrase("work:board.filter.clear"))
+                .on_click(cx.listener(|this, _, window, cx| this.clear_filters(window, cx)))
+        });
+
+        div().flex().items_center().gap_1().pb_1().children(assignee).children(priority).children(clear)
     }
 
     fn show_lens(lens: WorkLens, cx: &App) {
@@ -47,7 +142,8 @@ impl MyWorkView {
         Backend::run(cx, move |core| async move { core.show_closed(on).await });
     }
 
-    fn render_header(&self, shown: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_header(&self, shown: usize, filter: &TaskFilter, cx: &mut Context<Self>) -> impl IntoElement {
+        let filters = self.render_filters(filter, cx);
         let theme = cx.theme();
         let (border, muted, foreground, primary, accent) =
             (theme.border, theme.muted_foreground, theme.foreground, theme.primary, theme.accent);
@@ -120,7 +216,7 @@ impl MyWorkView {
                     .cursor_pointer()
                     .on_click(move |_, _, cx| Self::show_lens(lens, cx))
                     .child(tr(cx, &format!("work:myWork.lens.{name}")))
-            })))
+            })).child(div().flex_1()).child(filters))
     }
 
     fn render_row(&self, row: WorkRow, cx: &mut Context<Self>) -> impl IntoElement {
@@ -233,7 +329,7 @@ impl Render for MyWorkView {
             .flex_col()
             .bg(background)
             .text_color(foreground)
-            .child(self.render_header(shown, cx))
+            .child(self.render_header(shown, &filter, cx))
             .child(
                 div()
                     .id("work-list")
@@ -252,14 +348,19 @@ impl Render for MyWorkView {
 #[cfg(test)]
 mod tests {
     // Sin `use super::*`: ver la nota en `shell.rs`.
+    use super::MyWorkView;
     use crate::backend::Backend;
     use crate::testing::{contract_task, server_with_tasks, sign_in, wait_until, FakeServer};
     use crate::workspace::Workspace;
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{px, size, AnyWindowHandle, AppContext, Bounds, Point, TestAppContext, WindowBounds, WindowOptions};
+    use gpui_kit::{px, size, AnyWindowHandle, AppContext, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowOptions};
     use serde_json::json;
 
     fn open(server: &FakeServer, cx: &mut TestAppContext) -> AnyWindowHandle {
+        open_with_view(server, cx).0
+    }
+
+    fn open_with_view(server: &FakeServer, cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<MyWorkView>) {
         server.install(cx);
         sign_in(cx);
         cx.update(|cx| {
@@ -270,9 +371,10 @@ mod tests {
                 })),
                 ..WindowOptions::default()
             };
-            gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx)))
-                .expect("open test window")
-                .0
+            let (window, workspace) =
+                gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx)))
+                    .expect("open test window");
+            (window, workspace.read(cx).my_work.clone())
         })
     }
 
@@ -360,6 +462,83 @@ mod tests {
 
         assert!(on_screen(window, "work-row-t2", cx));
         assert!(!on_screen(window, "work-row-t1", cx), "el buscador no quitó lo que no coincide");
+        stop(cx);
+    }
+
+    fn mixed_tasks() -> Vec<serde_json::Value> {
+        vec![
+            contract_task("t1", "b", |task| {
+                task["priority"] = json!("urgent");
+                task["assignee"] = json!("ana");
+            }),
+            contract_task("t2", "a", |task| {
+                task["priority"] = json!("low");
+                task["assignee"] = json!("luis");
+            }),
+        ]
+    }
+
+    /// Los desplegables salen cuando hay algo que separar, y elegir en uno
+    /// deja sólo lo que coincide.
+    ///
+    /// Roturas que atrapa: un desplegable que elige y no filtra; que el de
+    /// responsable filtre por prioridad o al revés; desplegables que no salen.
+    #[gpui_kit::test]
+    fn choosing_in_a_picker_narrows_the_list(cx: &mut TestAppContext) {
+        let server = server_with_tasks(mixed_tasks());
+        let (window, view) = open_with_view(&server, cx);
+        wait_until(cx, "las tareas llegan", |cx| on_screen(window, "work-row-t1", cx));
+        assert!(on_screen(window, "filter-assignee", cx) && on_screen(window, "filter-priority", cx));
+        assert!(!on_screen(window, "filter-clear", cx), "ofrece quitar filtros sin ninguno puesto");
+
+        cx.update(|cx| view.update(cx, |view, cx| view.choose_priority("low".into(), cx)));
+        assert!(on_screen(window, "work-row-t2", cx));
+        assert!(!on_screen(window, "work-row-t1", cx), "la prioridad elegida no filtró");
+
+        cx.update(|cx| view.update(cx, |view, cx| view.choose_priority(String::new(), cx)));
+        cx.update(|cx| view.update(cx, |view, cx| view.choose_assignee("ana".into(), cx)));
+        assert!(on_screen(window, "work-row-t1", cx));
+        assert!(!on_screen(window, "work-row-t2", cx), "el responsable elegido no filtró");
+        stop(cx);
+    }
+
+    /// Sin nada que separar no hay desplegables: una sola persona con una
+    /// sola prioridad.
+    ///
+    /// Rotura que atrapa: desplegables de una opción ocupando la cabecera.
+    #[gpui_kit::test]
+    fn pickers_with_nothing_to_separate_are_not_shown(cx: &mut TestAppContext) {
+        let server = server_with_tasks(tasks());
+        let window = open(&server, cx);
+        wait_until(cx, "las tareas llegan", |cx| on_screen(window, "work-row-t1", cx));
+
+        assert!(!on_screen(window, "filter-assignee", cx));
+        assert!(!on_screen(window, "filter-priority", cx));
+        stop(cx);
+    }
+
+    /// «Quitar filtros» lo quita todo, también lo escrito en el buscador.
+    ///
+    /// Roturas que atrapa: un botón que deja un filtro puesto; uno que
+    /// limpia los desplegables y deja la búsqueda escondiendo tareas.
+    #[gpui_kit::test]
+    fn clearing_the_filters_brings_everything_back(cx: &mut TestAppContext) {
+        let server = server_with_tasks(mixed_tasks());
+        let (window, view) = open_with_view(&server, cx);
+        wait_until(cx, "las tareas llegan", |cx| on_screen(window, "work-row-t1", cx));
+        cx.update_window(window, |_, window, cx| {
+            window.click("work-search", cx);
+            window.input("nada que exista", cx);
+        })
+        .unwrap();
+        cx.update(|cx| view.update(cx, |view, cx| view.choose_assignee("ana".into(), cx)));
+        cx.update(|cx| view.update(cx, |view, cx| view.choose_priority("urgent".into(), cx)));
+        assert!(!on_screen(window, "work-row-t1", cx) && !on_screen(window, "work-row-t2", cx));
+
+        click(window, "filter-clear", cx);
+
+        assert!(on_screen(window, "work-row-t1", cx) && on_screen(window, "work-row-t2", cx), "quedó algún filtro puesto");
+        assert!(!on_screen(window, "filter-clear", cx));
         stop(cx);
     }
 
