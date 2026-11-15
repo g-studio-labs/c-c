@@ -377,6 +377,47 @@ async fn a_comment_says_who_reads_it_only_when_someone_chose() {
     assert_eq!(rig.core.tasks().state().detail.unwrap().comments[0].body, "hola");
 }
 
+/// Comentar manda «interno» sólo donde un cliente lo leería y alguien lo
+/// pidió; y un comentario en blanco no se manda.
+///
+/// Roturas que atrapa: una nota para el equipo que acaba en el tablero del
+/// cliente; marcar como interno lo de una tarea que nunca sale del equipo;
+/// mandar espacios como si fueran un comentario.
+#[tokio::test]
+async fn saying_something_keeps_it_internal_only_where_a_client_would_read_it() {
+    let rig = rig().await;
+    for (id, project, visibility) in [("client", "p1", "public"), ("team", "", "")] {
+        mount_task(&rig.server, id, detail(id, "Tarea", "pending", project, visibility)).await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/tasks/{id}/comments")))
+            .respond_with(ResponseTemplate::new(201).set_body_json(
+                json!({ "success": true, "data": detail(id, "Tarea", "pending", project, visibility) }),
+            ))
+            .mount(&rig.server)
+            .await;
+    }
+    mount_columns(&rig.server).await;
+
+    rig.core.tasks().open("client").await;
+    assert!(rig.core.tasks().sheet(cac_core::Locale::Es).unwrap().client_reads);
+    rig.core.tasks().say("  para el cliente  ", false).await.expect("se escribió");
+    rig.core.tasks().say("entre nosotros", true).await.expect("se escribió");
+    assert!(rig.core.tasks().say("   ", false).await.is_err());
+
+    rig.core.tasks().open("team").await;
+    assert!(!rig.core.tasks().sheet(cac_core::Locale::Es).unwrap().client_reads);
+    rig.core.tasks().say("del equipo", true).await.expect("se escribió");
+
+    assert_eq!(
+        requests_to(&rig.server, "POST", "/comments").await,
+        [
+            json!({ "body": "para el cliente" }),
+            json!({ "body": "entre nosotros", "visibility": "internal" }),
+            json!({ "body": "del equipo" }),
+        ]
+    );
+}
+
 /// Marcar una línea del checklist la lleva a «resuelta» aunque la madre sea de
 /// un cliente y esté pendiente.
 ///

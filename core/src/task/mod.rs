@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 pub use flow::{can_transition, canonical_priority, canonical_status, flow_for, Flow};
-pub use sheet::{is_agent_note, task_sheet, SheetComment, SheetSubtask, SheetTag, TaskSheet};
+pub use sheet::{client_reads, is_agent_note, task_sheet, SheetComment, SheetSubtask, SheetTag, TaskSheet};
 pub use types::{
     CommentAuthor, DecisionRef, GitSummary, ReleaseRef, Task, TaskAttachment, TaskBlocker, TaskCard,
     TaskComment, TaskDetail, TaskGitLink, TaskGitLinks, TaskStatus, TaskTag, UserSummary,

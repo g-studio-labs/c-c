@@ -8,6 +8,7 @@
 use cac_core::{DueState, SheetComment, SheetSubtask, StatusOption, TaskSheet};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
@@ -35,11 +36,114 @@ pub struct TaskView {
     /// Lo último que no se pudo guardar, dicho, y de qué tarea: no hay otro
     /// sitio donde enseñarlo, y callarlo deja un botón que parece no hacer nada.
     problem: Option<(String, String)>,
+    /// Lo que se está escribiendo para comentar.
+    comment: Entity<TextareaState>,
+    /// Que el cliente no lo lea. Sólo cuenta donde un cliente podría leerlo.
+    internal: bool,
 }
 
 impl TaskView {
-    pub fn new() -> Self {
-        Self { thread: Thread::Talk, thread_of: None, problem: None }
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let placeholder = tr(cx, "work:task.writeComment");
+        Self {
+            thread: Thread::Talk,
+            thread_of: None,
+            problem: None,
+            comment: cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 8).placeholder(placeholder)),
+            internal: false,
+        }
+    }
+
+    /// Le pide al core algo que se guarda en la tarea abierta y, si no se
+    /// pudo, lo deja dicho en el cajón. `done` corre si salió bien.
+    fn save<F, Fut>(
+        &mut self,
+        fallback_key: &'static str,
+        work: F,
+        done: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) where
+        F: FnOnce(cac_core::Core) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), cac_core::ApiError>> + Send + 'static,
+    {
+        let Some(task_id) = Backend::snapshot(cx).read(cx).task.task_id.clone() else { return };
+        self.problem = None;
+        cx.notify();
+        let answer = Backend::ask(cx, work);
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(result) = answer.await else { return };
+            this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(()) => done(this, window, cx),
+                    Err(error) => this.problem = Some((task_id, error_text(cx, &error, fallback_key))),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Marca o desmarca una línea del checklist.
+    pub(crate) fn tick_subtask(&mut self, subtask_id: String, done: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.save(
+            "work:task.errMoveList",
+            move |core| async move { core.tasks().set_subtask_done(&subtask_id, done).await },
+            |_, _, _| {},
+            window,
+            cx,
+        );
+    }
+
+    /// Manda lo escrito como comentario y, si se guardó, vacía la caja. Si
+    /// no, lo escrito se queda: perderlo por un fallo de red es lo peor.
+    pub(crate) fn send_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let body = self.comment.read(cx).value().to_string();
+        if body.trim().is_empty() {
+            return;
+        }
+        let internal = self.internal;
+        self.save(
+            "work:task.errComment",
+            move |core| async move { core.tasks().say(&body, internal).await },
+            |this, window, cx| this.comment.update(cx, |comment, cx| comment.set_value("", window, cx)),
+            window,
+            cx,
+        );
+    }
+
+    pub(crate) fn set_internal(&mut self, internal: bool, cx: &mut Context<Self>) {
+        self.internal = internal;
+        cx.notify();
+    }
+
+    /// La caja de comentar. Donde un cliente lee, dice quién va a leerlo y
+    /// deja cambiarlo antes de mandar.
+    fn render_composer(&self, client_reads: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let internal = client_reads && self.internal;
+        let audience = client_reads.then(|| {
+            Button::new("comment-audience")
+                .ghost()
+                .small()
+                .label(tr(cx, if internal { "work:task.internalNote" } else { "work:task.theClientReads" }))
+                .tooltip(tr(cx, if internal { "work:task.onlyTeamWillSee" } else { "work:task.clientReadsSwitch" }))
+                .on_click(cx.listener(move |this, _, _, cx| this.set_internal(!internal, cx)))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().id("comment-input").test_support().child(Textarea::new(&self.comment)))
+            .child(
+                div().flex().items_center().gap_2().child(div().flex_1()).children(audience).child(
+                    Button::new("comment-send")
+                        .primary()
+                        .small()
+                        .label(tr(cx, if internal { "work:task.commentInternally" } else { "work:task.comment" }))
+                        .on_click(cx.listener(|this, _, window, cx| this.send_comment(window, cx))),
+                ),
+            )
     }
 
     fn show_thread(&mut self, thread: Thread, task_id: String, cx: &mut Context<Self>) {
@@ -50,20 +154,14 @@ impl TaskView {
 
     /// Mueve la tarea abierta a otra columna. Si se puede lo decide el core
     /// (y el servidor); aquí sólo se enseña lo que conteste.
-    pub(crate) fn move_to(&mut self, status_id: String, cx: &mut Context<Self>) {
-        let Some(task_id) = Backend::snapshot(cx).read(cx).task.task_id.clone() else { return };
-        self.problem = None;
-        cx.notify();
-        let answer = Backend::ask(cx, move |core| async move { core.tasks().set_status(&status_id).await });
-        cx.spawn(async move |this, cx| {
-            let Ok(Err(error)) = answer.await else { return };
-            this.update(cx, |this, cx| {
-                this.problem = Some((task_id, error_text(cx, &error, "work:task.errMoveList")));
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+    pub(crate) fn move_to(&mut self, status_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.save(
+            "work:task.errMoveList",
+            move |core| async move { core.tasks().set_status(&status_id).await },
+            |_, _, _| {},
+            window,
+            cx,
+        );
     }
 
     fn section(&self, title: String, cx: &mut Context<Self>) -> Div {
@@ -126,8 +224,8 @@ impl TaskView {
                                         PopupMenuItem::new(option.status.name.clone())
                                             .checked(option.status.name == current)
                                             .disabled(!option.allowed)
-                                            .on_click(move |_, _, cx| {
-                                                let _ = view.update(cx, |this, cx| this.move_to(id.clone(), cx));
+                                            .on_click(move |_, window, cx| {
+                                                let _ = view.update(cx, |this, cx| this.move_to(id.clone(), window, cx));
                                             }),
                                     );
                                 }
@@ -153,6 +251,8 @@ impl TaskView {
             .text_sm()
             .child(
                 div()
+                    .id(SharedString::from(format!("subtask-tick-{}", subtask.id)))
+                    .test_support()
                     .size(px(14.))
                     .flex()
                     .flex_none()
@@ -161,6 +261,11 @@ impl TaskView {
                     .rounded_sm()
                     .border_1()
                     .border_color(if subtask.done { success } else { border })
+                    .cursor_pointer()
+                    .on_click({
+                        let (id, done) = (subtask.id.clone(), subtask.done);
+                        cx.listener(move |this, _, window, cx| this.tick_subtask(id.clone(), !done, window, cx))
+                    })
                     .children(subtask.done.then(|| {
                         div()
                             .id(SharedString::from(format!("subtask-done-{}", subtask.id)))
@@ -324,6 +429,8 @@ impl TaskView {
                 this.child(div().text_xs().text_color(muted).child(tr(cx, "work:task.thread.agentNotesHint")))
             })
             .child(div().flex().flex_col().gap_3().children(comments.iter().map(|comment| self.render_comment(comment, cx))))
+            // Se comenta en la conversación; las notas de agentes son suyas.
+            .when(thread == Thread::Talk, |this| this.child(self.render_composer(sheet.client_reads, cx)))
     }
 }
 
@@ -476,6 +583,11 @@ mod tests {
         });
     }
 
+    fn move_to(window: AnyWindowHandle, view: &Entity<TaskView>, status: &str, cx: &mut TestAppContext) {
+        let status = status.to_string();
+        cx.update_window(window, |_, window, cx| view.update(cx, |view, cx| view.move_to(status, window, cx))).unwrap();
+    }
+
     fn moves(server: &FakeServer) -> Vec<String> {
         server
             .requests()
@@ -537,7 +649,7 @@ mod tests {
         open_first_task(window, cx);
         assert!(moves(&server).is_empty());
 
-        cx.update(|cx| view.update(cx, |view, cx| view.move_to("s1".into(), cx)));
+        move_to(window, &view, "s1", cx);
         wait_until(cx, "llega la petición de mover", |_| !moves(&server).is_empty());
 
         assert!(moves(&server)[0].contains("\"statusId\":\"s1\""), "mandó {:?}", moves(&server));
@@ -569,11 +681,11 @@ mod tests {
         open_first_task(window, cx);
         assert!(!on_screen(window, "task-problem", cx));
 
-        cx.update(|cx| view.update(cx, |view, cx| view.move_to("s1".into(), cx)));
+        move_to(window, &view, "s1", cx);
         wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
 
         // Al volver a intentarlo y salir bien, el aviso de antes se quita.
-        cx.update(|cx| view.update(cx, |view, cx| view.move_to("s1".into(), cx)));
+        move_to(window, &view, "s1", cx);
         wait_until(cx, "el segundo intento sale bien", |cx| moves(&server).len() == 2 && !on_screen(window, "task-problem", cx));
         stop(cx);
     }
@@ -588,7 +700,7 @@ mod tests {
         let (window, view) = open_with_view(&server, cx);
         open_first_task(window, cx);
         // Sin ruta de mover montada: el servidor contesta 404.
-        cx.update(|cx| view.update(cx, |view, cx| view.move_to("s1".into(), cx)));
+        move_to(window, &view, "s1", cx);
         wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
 
         click(window, "work-row-t2", cx);
@@ -597,6 +709,138 @@ mod tests {
         });
 
         assert!(!on_screen(window, "task-problem", cx));
+        stop(cx);
+    }
+
+    fn bodies(server: &FakeServer, route: &str) -> Vec<String> {
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.method.as_str() == "POST" && request.url.path() == route)
+            .map(|request| String::from_utf8_lossy(&request.body).to_string())
+            .collect()
+    }
+
+    fn typed(view: &Entity<TaskView>, cx: &mut TestAppContext) -> String {
+        cx.update(|cx| view.read(cx).comment.read(cx).value().to_string())
+    }
+
+    fn write(window: AnyWindowHandle, text: &str, cx: &mut TestAppContext) {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("comment-input", cx);
+            window.input(text, cx);
+        })
+        .unwrap();
+    }
+
+    /// Pulsar la casilla de una subtarea sin hacer la manda a la columna de
+    /// «hecho» de su lista.
+    ///
+    /// Roturas que atrapa: una casilla que no hace nada; mover la tarea madre
+    /// en vez de la subtarea; desmarcar lo que se quería marcar.
+    #[gpui_kit::test]
+    fn ticking_a_subtask_moves_it_to_done(cx: &mut TestAppContext) {
+        let mut done = detail("t1")["status"].clone();
+        done["id"] = json!("s-done");
+        done["kind"] = json!("done");
+        done["status"] = json!("resolved");
+        // Dos columnas: la abierta, donde está la subtarea, y la de «hecho».
+        let mut open_column = detail("t1")["status"].clone();
+        open_column["kind"] = json!("active");
+        let server_columns = json!([open_column, done]);
+        let server = {
+            let server = server_with_tasks(vec![contract_task("t1", "a", |_| {})]);
+            server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(detail("t1"))));
+            server.mount(
+                Mock::given(method("GET")).and(path_regex("^/api/v1/task-lists/[^/]+/statuses$")).respond_with(ok(server_columns)),
+            );
+            server.mount(Mock::given(method("POST")).and(path("/api/v1/tasks/t2/move")).respond_with(ok(json!(null))));
+            server
+        };
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+        assert!(!on_screen(window, "subtask-done-t2", cx));
+
+        click(window, "subtask-tick-t2", cx);
+        wait_until(cx, "pide mover la subtarea", |_| !bodies(&server, "/api/v1/tasks/t2/move").is_empty());
+
+        assert!(bodies(&server, "/api/v1/tasks/t2/move")[0].contains("\"statusId\":\"s-done\""));
+        assert!(bodies(&server, "/api/v1/tasks/t1/move").is_empty(), "movió la tarea madre");
+        stop(cx);
+    }
+
+    /// Si la casilla no se puede guardar, se dice.
+    ///
+    /// Rotura que atrapa: una casilla que parece no hacer nada (aquí la
+    /// lista no tiene columna de «pendiente» a la que devolverla).
+    #[gpui_kit::test]
+    fn a_tick_that_cannot_be_saved_is_said(cx: &mut TestAppContext) {
+        let server = server();
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+        assert!(on_screen(window, "subtask-done-t2", cx));
+
+        click(window, "subtask-tick-t2", cx);
+
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+        stop(cx);
+    }
+
+    /// Lo escrito se manda como comentario y la caja se vacía; donde un
+    /// cliente lee, se puede dejar en interno antes de mandar.
+    ///
+    /// Roturas que atrapa: un botón que no manda; mandar otra cosa que lo
+    /// escrito; una caja que se queda con lo ya mandado (y se manda dos
+    /// veces); un interruptor de «interno» que no llega al servidor.
+    #[gpui_kit::test]
+    fn what_is_written_is_sent_and_can_be_kept_internal(cx: &mut TestAppContext) {
+        let server = server();
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path("/api/v1/tasks/t1/comments"))
+                .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": detail("t1") }))),
+        );
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        let sent = |server: &FakeServer| bodies(server, "/api/v1/tasks/t1/comments");
+
+        write(window, "para todos", cx);
+        click(window, "comment-send", cx);
+        wait_until(cx, "llega y la caja se vacía", |cx| sent(&server).len() == 1 && typed(&view, cx).is_empty());
+        assert_eq!(sent(&server)[0], r#"{"body":"para todos"}"#);
+
+        click(window, "comment-audience", cx);
+        write(window, "entre nosotros", cx);
+        click(window, "comment-send", cx);
+        wait_until(cx, "llega el segundo", |_| sent(&server).len() == 2);
+        assert!(sent(&server)[1].contains(r#""visibility":"internal""#), "mandó {:?}", sent(&server)[1]);
+
+        // Con la caja vacía no se manda nada, y tampoco es un fallo que avisar.
+        wait_until(cx, "la caja se vacía", |cx| typed(&view, cx).is_empty());
+        click(window, "comment-send", cx);
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        cx.run_until_parked();
+        assert_eq!(sent(&server).len(), 2);
+        assert!(!on_screen(window, "task-problem", cx), "avisa de un fallo por pulsar con la caja vacía");
+        stop(cx);
+    }
+
+    /// Un comentario que no se pudo mandar se dice, y lo escrito se queda.
+    ///
+    /// Rotura que atrapa: perder lo escrito por un fallo de red.
+    #[gpui_kit::test]
+    fn a_comment_that_fails_keeps_what_was_written(cx: &mut TestAppContext) {
+        let server = server();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+
+        write(window, "no se pierde", cx);
+        click(window, "comment-send", cx);
+
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+        assert_eq!(typed(&view, cx), "no se pierde");
         stop(cx);
     }
 

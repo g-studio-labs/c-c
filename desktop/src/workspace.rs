@@ -38,7 +38,7 @@ impl Workspace {
         // Quien entra, entra a trabajar: organizaciones, árbol, tareas y el
         // stream de eventos.
         Backend::run(cx, |core| async move { core.open_workspace().await });
-        Self { my_work: cx.new(|cx| MyWorkView::new(window, cx)), docs: cx.new(|_| DocsView), task: cx.new(|_| TaskView::new()) }
+        Self { my_work: cx.new(|cx| MyWorkView::new(window, cx)), docs: cx.new(|_| DocsView), task: cx.new(|cx| TaskView::new(window, cx)) }
     }
 
     fn switch_org(org_id: String, cx: &App) {

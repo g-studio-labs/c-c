@@ -85,6 +85,14 @@ pub struct TaskSheet {
     pub notes: Vec<SheetComment>,
     /// Los ficheros de la tarea, por su nombre. Los de un comentario van con él.
     pub attachments: Vec<String>,
+    /// Si un cliente lee esta tarea: entonces lo que se comente lo lee él,
+    /// salvo que se diga que es interno, y la pantalla tiene que decirlo.
+    pub client_reads: bool,
+}
+
+/// Si un cliente lee la tarea: es de su proyecto y no se le ha escondido.
+pub fn client_reads(detail: &TaskDetail) -> bool {
+    !detail.task.project_id.is_empty() && detail.task.visibility != "internal"
 }
 
 fn said_at(locale: Locale, instant: &str) -> String {
@@ -97,8 +105,7 @@ fn said_at(locale: Locale, instant: &str) -> String {
 /// qué subtarea está hecha) y `today` el día de la organización.
 pub fn task_sheet(detail: &TaskDetail, statuses: &[StatusOption], locale: Locale, today: NaiveDate) -> TaskSheet {
     let task = &detail.task;
-    // El cliente lee una tarea de su proyecto que no se le ha escondido.
-    let client_reads = !task.project_id.is_empty() && task.visibility != "internal";
+    let client_reads = client_reads(detail);
     let comment = |comment: &TaskComment| SheetComment {
         id: comment.id.clone(),
         author: if is_agent_note(comment) {
@@ -145,6 +152,7 @@ pub fn task_sheet(detail: &TaskDetail, statuses: &[StatusOption], locale: Locale
             .filter(|file| file.comment_id.is_none())
             .map(|file| file.file_name.clone())
             .collect(),
+        client_reads,
     }
 }
 
@@ -164,6 +172,20 @@ impl super::TaskState {
 }
 
 impl Tasks {
+    /// Comenta en la tarea abierta. `internal` es «que el cliente no lo lea»,
+    /// y sólo viaja donde un cliente podría leerlo: en una tarea del equipo
+    /// todo es interno ya, y lo decide el servidor.
+    ///
+    /// Un comentario en blanco no se manda.
+    pub async fn say(&self, body: &str, internal: bool) -> Result<(), crate::ApiError> {
+        let body = body.trim();
+        if body.is_empty() {
+            return Err(super::refused("empty-comment", "A comment needs some text"));
+        }
+        let to_the_client = self.state().detail.as_ref().is_some_and(client_reads);
+        self.add_comment(body, (to_the_client && internal).then_some("internal")).await
+    }
+
     /// El detalle de la tarea abierta, dicho; `None` mientras no ha llegado.
     ///
     /// «Hoy» es el de la organización que se mira, no el de la máquina.
