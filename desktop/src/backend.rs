@@ -17,7 +17,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use cac_core::{
-    ApiError, Config, ConnectionState, Core, Listener, MyWorkState, OrgsState, Session, Storage, TaskState,
+    ApiError, Config, ConnectionState, Core, DocsState, Listener, MyWorkState, OrgsState, Session, Storage, TaskState,
     TreeState,
 };
 use gpui_kit::{App, AppContext, Entity, Global};
@@ -29,6 +29,7 @@ enum CoreEvent {
     MyWork(MyWorkState),
     Orgs(OrgsState),
     Tree(TreeState),
+    Docs(DocsState),
     Task(TaskState),
     Connection(ConnectionState),
 }
@@ -57,6 +58,9 @@ impl Listener for Forwarder {
     fn tree_changed(&self, state: TreeState) {
         self.send(CoreEvent::Tree(state));
     }
+    fn docs_changed(&self, state: DocsState) {
+        self.send(CoreEvent::Docs(state));
+    }
     fn task_changed(&self, state: TaskState) {
         self.send(CoreEvent::Task(state));
     }
@@ -75,6 +79,7 @@ pub struct Snapshot {
     pub my_work: MyWorkState,
     pub orgs: OrgsState,
     pub tree: TreeState,
+    pub docs: DocsState,
     pub task: TaskState,
     pub connection: ConnectionState,
 }
@@ -86,6 +91,7 @@ impl Snapshot {
             CoreEvent::MyWork(state) => self.my_work = state,
             CoreEvent::Orgs(state) => self.orgs = state,
             CoreEvent::Tree(state) => self.tree = state,
+            CoreEvent::Docs(state) => self.docs = state,
             CoreEvent::Task(state) => self.task = state,
             CoreEvent::Connection(state) => self.connection = state,
         }

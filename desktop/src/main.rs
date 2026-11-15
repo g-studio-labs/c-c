@@ -9,6 +9,7 @@
 mod assets;
 mod auth;
 mod backend;
+mod docs;
 mod lang;
 mod mywork;
 mod platform;

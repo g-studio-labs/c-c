@@ -156,6 +156,7 @@ impl MyWorkView {
             ScopeKind::List => tr(cx, "work:myWork.scopeList"),
         });
         let closed = my_work.include_closed;
+        let docs = cac_core::docs_reachable_from_scope(my_work.scope.as_ref().map(|scope| scope.kind));
 
         div()
             .flex()
@@ -192,6 +193,17 @@ impl MyWorkView {
                             .child(Icon::new(Lucide::X).xsmall())
                     }))
                     .child(div().flex_1())
+                    // La documentación del nodo, a un clic con cualquier
+                    // ámbito, sea lista o espacio (command-and-control-372).
+                    .when(docs, |this| {
+                        this.child(
+                            Button::new("open-docs")
+                                .ghost()
+                                .small()
+                                .label(tr(cx, "work:board.view.docs"))
+                                .on_click(|_, _, cx| Backend::run(cx, |core| async move { core.open_scope_docs().await })),
+                        )
+                    })
                     .child(div().w(px(240.)).child(Input::new(&self.search).id("work-search").small().cleanable(true)))
                     .child(
                         Button::new("toggle-closed")

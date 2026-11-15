@@ -9,7 +9,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::mywork::day_and_month;
 use crate::nav::{docs_reachable_from_scope, Looking, NodeKind, TreeClick};
+use crate::texts::Locale;
 use crate::tree_rows::find_node;
 use crate::Core;
 
@@ -52,6 +54,16 @@ pub struct DocDecision {
     /// La decisión que dejó a ésta sin efecto.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by_id: Option<String>,
+}
+
+impl DocDecision {
+    /// Cuándo se decidió, dicho: «30 sept 2026». Es un instante, así que el
+    /// día es el de quien lo lee.
+    pub fn decided_on(&self, locale: Locale) -> String {
+        let Ok(at) = chrono::DateTime::parse_from_rfc3339(&self.decided_at) else { return String::new() };
+        let day = at.with_timezone(&chrono::Local).date_naive();
+        format!("{} {}", day_and_month(locale, day), chrono::Datelike::year(&day))
+    }
 }
 
 /// El sobre con que el servidor contesta `GET /api/v1/docs/{kind}/{id}`. Un
@@ -269,5 +281,16 @@ mod tests {
             ..DocsState::default()
         };
         assert_eq!(reloading.empty_reason(), None);
+    }
+
+    /// Rotura que atrapa: enseñar el instante crudo, o una fecha sin año en
+    /// un registro que se lee años después.
+    #[test]
+    fn a_decision_says_the_day_it_was_made() {
+        // A mediodía de Greenwich es el mismo día en casi cualquier zona.
+        let decision = DocDecision { decided_at: "2026-09-30T12:00:00Z".into(), ..DocDecision::default() };
+        assert_eq!(decision.decided_on(Locale::Es), "30 sept 2026");
+        assert_eq!(decision.decided_on(Locale::En), "Sep 30 2026");
+        assert_eq!(DocDecision { decided_at: "ayer".into(), ..DocDecision::default() }.decided_on(Locale::Es), "");
     }
 }

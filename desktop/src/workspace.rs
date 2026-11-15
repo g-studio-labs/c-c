@@ -4,7 +4,7 @@
 //! Qué filas tiene el árbol, cuáles van abiertas, qué hace un clic y qué se
 //! trae al entrar lo dice el core. Aquí se pinta y se le pasa cada gesto.
 
-use cac_core::{Locale, Looking, NodeKind, ThemePreference, TreeClick, TreeRow};
+use cac_core::{Locale, NodeKind, ThemePreference, TreeRow};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::assets::IconName as Lucide;
@@ -13,6 +13,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
+use crate::docs::DocsView;
 use crate::lang::{locale, tr};
 use crate::mywork::MyWorkView;
 
@@ -27,6 +28,7 @@ const INDENT: f32 = 14.;
 /// repinta una vista cuando cambia algo que leyó. No hace falta suscribirse.
 pub struct Workspace {
     pub(crate) my_work: Entity<MyWorkView>,
+    docs: Entity<DocsView>,
 }
 
 impl Workspace {
@@ -34,7 +36,7 @@ impl Workspace {
         // Quien entra, entra a trabajar: organizaciones, árbol, tareas y el
         // stream de eventos.
         Backend::run(cx, |core| async move { core.open_workspace().await });
-        Self { my_work: cx.new(|cx| MyWorkView::new(window, cx)) }
+        Self { my_work: cx.new(|cx| MyWorkView::new(window, cx)), docs: cx.new(|_| DocsView) }
     }
 
     fn switch_org(org_id: String, cx: &App) {
@@ -94,13 +96,13 @@ impl Workspace {
         })
     }
 
+    /// Qué hace el clic (acotar las tareas o abrir la documentación) lo
+    /// decide el core con lo que se esté mirando.
     fn click_row(row: &TreeRow, cx: &App) {
-        let tree = Backend::core(cx).tree();
-        // Una carpeta abre su documentación, que esta app todavía no enseña
-        // (llega con «Mi trabajo»): mientras, su clic la abre y la cierra.
-        if tree.click(&row.id, Looking::Tasks) == Some(TreeClick::OpenDocs) && row.kind == NodeKind::Folder {
-            tree.toggle(&row.id);
-        }
+        let id = row.id.clone();
+        Backend::run(cx, move |core| async move {
+            core.click_node(&id).await;
+        });
     }
 
     fn render_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -234,7 +236,7 @@ impl Workspace {
         let (sidebar, border, muted, hover, foreground) =
             (theme.sidebar, theme.sidebar_border, theme.muted_foreground, theme.sidebar_accent, theme.sidebar_foreground);
         let snapshot = Backend::snapshot(cx).read(cx);
-        let everything = snapshot.my_work.scope.is_none();
+        let everything = snapshot.my_work.scope.is_none() && snapshot.docs.target.is_none();
         let session = snapshot.session.clone();
         let rows = Backend::core(cx).tree().rows();
         let name = session.as_ref().map(|s| s.name.clone().unwrap_or_else(|| s.username.clone())).unwrap_or_default();
@@ -267,7 +269,7 @@ impl Workspace {
                     .when(everything, |this| this.bg(hover).font_weight(FontWeight::MEDIUM))
                     .hover(move |style| style.bg(hover))
                     .cursor_pointer()
-                    .on_click(|_, _, cx| Backend::core(cx).my_work().set_scope(None))
+                    .on_click(|_, _, cx| Backend::core(cx).show_all_work())
                     .child(Icon::new(IconName::Inbox).small())
                     .child(tr(cx, "nav:item.myWork")),
             )
@@ -305,7 +307,10 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let lasting = Backend::snapshot(cx).read(cx).connection.lasting;
+        let snapshot = Backend::snapshot(cx).read(cx);
+        let lasting = snapshot.connection.lasting;
+        // Con un documento abierto se lee documentación; si no, las tareas.
+        let main: AnyView = if snapshot.docs.target.is_some() { self.docs.clone().into() } else { self.my_work.clone().into() };
         div()
             .id("open")
             .test_support()
@@ -320,7 +325,7 @@ impl Render for Workspace {
                     .overflow_hidden()
                     .child(self.render_rail(cx))
                     .child(self.render_panel(cx))
-                    .child(div().flex_1().h_full().overflow_hidden().child(self.my_work.clone())),
+                    .child(div().flex_1().h_full().overflow_hidden().child(main)),
             )
     }
 }
@@ -470,6 +475,113 @@ mod tests {
 
         click(window, "tree-everything", cx);
         wait_until(cx, "quita el filtro", |cx| scope(cx).is_none());
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// El servidor de arriba, que además contesta la documentación de
+    /// cualquier nodo: resumen escrito, runbook vacío, y dos decisiones, una
+    /// de ellas sin efecto.
+    fn server_with_docs() -> FakeServer {
+        let server = server();
+        let doc = json!({
+            "doc": null, "orgId": "o1", "attachments": [],
+            "tabs": [{ "key": "overview", "body": "# Qué es\n\nUn párrafo." }, { "key": "runbook", "body": "" }],
+            "decisions": [
+                { "id": "d0", "title": "La vieja", "body": "", "decidedAt": "2026-09-30T12:00:00Z", "supersededById": "d1" },
+                { "id": "d1", "title": "La nueva", "body": "Porque sí.", "decidedAt": "2026-10-30T12:00:00Z", "authorName": "Ana" },
+            ],
+        });
+        server.mount(
+            Mock::given(method("GET"))
+                .and(wiremock::matchers::path_regex("^/api/v1/docs/(space|folder|list)/[^/]+$"))
+                .respond_with(ok(doc)),
+        );
+        server
+    }
+
+    fn doc_open(cx: &mut TestAppContext) -> Option<String> {
+        cx.update(|cx| Backend::snapshot(cx).read(cx).docs.target.as_ref().map(|target| target.id.clone()))
+    }
+
+    /// Pulsar una carpeta abre su documentación en el sitio de la vista, y
+    /// «Lista» devuelve a las tareas.
+    ///
+    /// Roturas que atrapa: una carpeta cuyo clic no hace nada; abrir el
+    /// documento en el core y seguir pintando la lista; no tener cómo volver.
+    #[gpui_kit::test]
+    fn a_folder_opens_its_docs_and_the_list_brings_the_tasks_back(cx: &mut TestAppContext) {
+        let server = server_with_docs();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-f-a", cx));
+        assert!(on_screen(window, "view-title", cx) && !on_screen(window, "docs", cx));
+
+        click(window, "tree-f-a", cx);
+        wait_until(cx, "llega su documentación", |cx| on_screen(window, "doc-body", cx));
+        assert!(!on_screen(window, "view-title", cx), "la lista sigue pintada debajo del documento");
+        assert_eq!(scope(cx), None, "una carpeta no acota");
+
+        click(window, "view-list", cx);
+        wait_until(cx, "vuelven las tareas", |cx| on_screen(window, "view-title", cx));
+        assert!(!on_screen(window, "docs", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Con un espacio acotado hay botón de documentación (372); leyendo, el
+    /// árbol abre la del nodo que se pulse; y «Mi trabajo» saca de ahí.
+    ///
+    /// Roturas que atrapa: ofrecer la documentación sólo con una lista
+    /// delante, o sin nada acotado; que un clic en el árbol saque de la
+    /// documentación a quien la lee; pulsar «Mi trabajo» y seguir en un
+    /// documento.
+    #[gpui_kit::test]
+    fn the_docs_button_opens_the_scoped_nodes_docs(cx: &mut TestAppContext) {
+        let server = server_with_docs();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        assert!(!on_screen(window, "open-docs", cx), "ofrece documentación sin un nodo delante");
+
+        click(window, "tree-a", cx);
+        wait_until(cx, "acotado al espacio, ofrece su documentación", |cx| on_screen(window, "open-docs", cx));
+        click(window, "open-docs", cx);
+        wait_until(cx, "llega la del espacio", |cx| on_screen(window, "doc-body", cx));
+        assert_eq!(doc_open(cx).as_deref(), Some("a"));
+
+        click(window, "tree-l-a", cx);
+        wait_until(cx, "abre la de la lista", |cx| doc_open(cx).as_deref() == Some("l-a"));
+        assert!(on_screen(window, "docs", cx), "el clic en el árbol sacó de la documentación");
+
+        click(window, "tree-everything", cx);
+        wait_until(cx, "vuelve a «Mi trabajo» entero", |cx| on_screen(window, "view-title", cx));
+        assert!(doc_open(cx).is_none() && scope(cx).is_none());
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Cada pestaña enseña lo suyo: el texto, «no hay nada» si está vacía, y
+    /// en la de decisiones sólo las que siguen vigentes.
+    ///
+    /// Roturas que atrapa: pestañas que cambian de color y enseñan lo mismo;
+    /// una pestaña vacía en blanco; el registro repetido bajo cada pestaña;
+    /// una decisión sin efecto pintada como vigente.
+    #[gpui_kit::test]
+    fn each_tab_shows_its_own(cx: &mut TestAppContext) {
+        let server = server_with_docs();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-f-a", cx));
+        click(window, "tree-f-a", cx);
+        wait_until(cx, "llega su documentación", |cx| on_screen(window, "doc-body", cx));
+        assert!(!on_screen(window, "doc-empty", cx) && !on_screen(window, "doc-decision-d1", cx));
+
+        click(window, "doc-tab-runbook", cx);
+        wait_until(cx, "el runbook está vacío y lo dice", |cx| on_screen(window, "doc-empty", cx));
+        assert!(!on_screen(window, "doc-body", cx), "sigue el texto de la otra pestaña");
+
+        click(window, "doc-tab-decisions", cx);
+        wait_until(cx, "sale la decisión vigente", |cx| on_screen(window, "doc-decision-d1", cx));
+        assert!(!on_screen(window, "doc-decision-d0", cx), "pinta una decisión que otra dejó sin efecto");
+        assert!(!on_screen(window, "doc-empty", cx));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
