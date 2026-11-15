@@ -4,19 +4,16 @@
 //! sólo se cambia de una a otra cuando esa respuesta cambia.
 
 use cac_core::{gate, Gate};
-use gpui_kit::component::button::Button;
-use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 
 use crate::auth::{NewPassword, SignIn};
 use crate::backend::Backend;
-use crate::lang::tr;
+use crate::workspace::Workspace;
 
 enum Screen {
     SignIn(Entity<SignIn>),
     NewPassword(Entity<NewPassword>),
-    /// Dentro. Todavía sin la app: el riel y el árbol son lo siguiente.
-    Open,
+    Open(Entity<Workspace>),
 }
 
 pub struct Shell {
@@ -48,7 +45,7 @@ impl Shell {
         match gate {
             Gate::SignIn => Screen::SignIn(cx.new(|cx| SignIn::new(window, cx))),
             Gate::NewPassword => Screen::NewPassword(cx.new(|cx| NewPassword::new(window, cx))),
-            Gate::Open => Screen::Open,
+            Gate::Open => Screen::Open(cx.new(Workspace::new)),
         }
     }
 
@@ -57,45 +54,17 @@ impl Shell {
         match self.screen {
             Screen::SignIn(_) => "sign-in",
             Screen::NewPassword(_) => "new-password",
-            Screen::Open => "open",
+            Screen::Open(_) => "open",
         }
-    }
-
-    fn render_open(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (background, foreground, muted) = (theme.background, theme.foreground, theme.muted_foreground);
-        let session = Backend::snapshot(cx).read(cx).session.clone();
-        let (name, username) = session
-            .map(|session| (session.name.clone().unwrap_or_else(|| session.username.clone()), session.username))
-            .unwrap_or_default();
-        div()
-            .id("open")
-            .test_support()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_3()
-            .bg(background)
-            .text_color(foreground)
-            .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(name))
-            .child(div().text_sm().text_color(muted).child(format!("@{username}")))
-            .child(
-                Button::new("log-out")
-                    .outline()
-                    .label(tr(cx, "nav:account.logOut"))
-                    .on_click(|_, _, cx| Backend::run(cx, |core| async move { core.logout().await })),
-            )
     }
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         match &self.screen {
             Screen::SignIn(view) => div().size_full().child(view.clone()),
             Screen::NewPassword(view) => div().size_full().child(view.clone()),
-            Screen::Open => div().size_full().child(self.render_open(cx)),
+            Screen::Open(view) => div().size_full().child(view.clone()),
         }
     }
 }

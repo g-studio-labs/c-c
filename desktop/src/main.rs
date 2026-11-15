@@ -6,6 +6,7 @@
 //! Con `CAC_SPIKE=1` abre la prueba de viabilidad de la Fase 0 en vez de la
 //! app (command-and-control-374).
 
+mod assets;
 mod auth;
 mod backend;
 mod lang;
@@ -13,6 +14,7 @@ mod platform;
 mod shell;
 mod spike;
 mod theme;
+mod workspace;
 #[cfg(test)]
 mod testing;
 
@@ -76,7 +78,7 @@ fn main() {
     config.client = Some("desktop".to_string());
     let system_language = platform::system_language(var);
 
-    gpui_kit::application().run(move |cx| {
+    gpui_kit::application().with_assets(assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
         theme::apply(gpui_kit::component::ThemeMode::Dark, cx);
         cx.set_global(lang::SystemLanguage(system_language));

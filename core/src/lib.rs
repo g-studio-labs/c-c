@@ -46,7 +46,7 @@ pub use task::{
     TaskAttachment, TaskBlocker, TaskCard, TaskComment, TaskDetail, TaskGitLink, TaskGitLinks, TaskPatch,
     TaskState, TaskStatus, TaskTag, Tasks, UserSummary,
 };
-pub use texts::{error_phrase, pick_locale, text, text_with, Locale};
+pub use texts::{error_phrase, pick_locale, text, text_count, text_with, Locale};
 pub use transport::Reply;
 
 /// Con qué servidor habla el core y cómo se presenta.

@@ -58,9 +58,15 @@ impl FakeServer {
 
     /// El core de la app, hablando con este servidor, en castellano.
     pub fn install(&self, cx: &mut TestAppContext) {
+        self.install_with(cx, |_| {});
+    }
+
+    /// Lo mismo, retocando la configuración (las esperas del stream).
+    pub fn install_with(&self, cx: &mut TestAppContext, edit: impl FnOnce(&mut Config)) {
         let mut config = Config::new(self.server.uri());
         config.client = Some("desktop".into());
         config.stream_backoff = Duration::from_millis(20);
+        edit(&mut config);
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::theme::apply(gpui_kit::component::ThemeMode::Dark, cx);
@@ -81,4 +87,17 @@ pub fn wait_until(cx: &mut TestAppContext, what: &str, done: impl Fn(&mut TestAp
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!("no llegó a pasar: {what}");
+}
+
+/// Deja a Ana dentro, sin pasar por el login.
+pub fn sign_in(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        let ana = serde_json::from_value(serde_json::json!({ "id": "u1", "username": "ana", "name": "Ana Ruiz" }));
+        Backend::core(cx).sign_in(ana.unwrap(), "access".into(), "refresh".into()).unwrap();
+    });
+}
+
+/// Una respuesta buena del servidor con ese `data`.
+pub fn ok(data: serde_json::Value) -> wiremock::ResponseTemplate {
+    wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": data }))
 }

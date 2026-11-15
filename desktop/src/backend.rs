@@ -145,8 +145,6 @@ impl Backend {
     }
 
     /// Para lo que el core contesta sin esperar (una regla, un filtro).
-    /// Todavía sin pantalla que lo use: la primera es el árbol.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn core(cx: &App) -> Core {
         cx.global::<Backend>().core.clone()
     }

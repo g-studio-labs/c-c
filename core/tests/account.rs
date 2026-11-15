@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use cac_core::{
-    check_new_password, check_sign_in, error_phrase, gate, pick_locale, text, text_with, ApiError, Config, Core,
+    check_new_password, check_sign_in, error_phrase, gate, pick_locale, text, text_count, text_with, ApiError, Config, Core,
     FormCheck, Gate, Locale, NoListener, Session, Storage,
 };
 use wiremock::matchers::{body_json, header, method, path};
@@ -45,6 +45,17 @@ fn a_phrase_comes_in_the_language_asked() {
     assert_eq!(text(Locale::Es, "misc.signIn"), "Entrar");
     assert_eq!(text(Locale::Es, "nav:panel.spaces"), "Espacios");
     assert_eq!(text_with(Locale::Es, "common:account.welcomeTitle", &[("name", "Ana")]), "Hola, Ana");
+}
+
+/// Una cantidad se dice en singular o en plural.
+///
+/// Roturas que atrapa: «1 visibles»; «0 visible» (el cero va en plural);
+/// dejar el número sin poner.
+#[test]
+fn a_count_is_said_in_singular_or_plural() {
+    assert_eq!(text_count(Locale::Es, "work:myWork.visible", 1), "1 visible");
+    assert_eq!(text_count(Locale::Es, "work:myWork.visible", 0), "0 visibles");
+    assert_eq!(text_count(Locale::Es, "work:myWork.visible", 12), "12 visibles");
 }
 
 /// El idioma es el que eligió la persona, y si no el de su máquina.

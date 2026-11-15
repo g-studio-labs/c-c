@@ -157,6 +157,14 @@ pub fn text_with(locale: Locale, key: &str, values: &[(&str, &str)]) -> String {
     phrase
 }
 
+/// Una frase que cambia con la cantidad: la clave lleva `_one` para una y
+/// `_other` para las demás (cero incluido), que es lo que piden el inglés y
+/// el castellano. El hueco `{{count}}` se rellena con el número.
+pub fn text_count(locale: Locale, key: &str, count: i64) -> String {
+    let form = if count == 1 { "one" } else { "other" };
+    text_with(locale, &format!("{key}_{form}"), &[("count", &count.to_string())])
+}
+
 /// La clave de «sin conexión».
 const OFFLINE_KEY: &str = "nav:panel.serverStatus.offline";
 
