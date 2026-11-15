@@ -23,9 +23,12 @@ toda regla va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
   detalle de tarea, stream de eventos y textos (375); y la carcasa (376):
   entrar, «olvidé mi contraseña», cambio obligado, y dentro el riel, la
   organización, el árbol que acota «Mi trabajo», el aviso de corte y salir.
-- **En curso (377):** «Mi trabajo» en lista — grupos por espacio, lentes,
-  «sólo lo abierto», buscador y ámbito ya están; faltan los filtros de
-  responsable y prioridad y la documentación del nodo a un clic.
+- **A falta de probarlo jose (377):** «Mi trabajo» en lista — grupos por
+  espacio, lentes, «sólo lo abierto», buscador, ámbito, filtros de
+  responsable y prioridad, y la documentación del nodo a un clic con
+  cualquier ámbito (372), en sólo lectura: cuatro pestañas y las decisiones
+  vigentes. Una carpeta abre la suya. Sin hacer: subpáginas del documento,
+  cambio a tablero y calendario (379) y lista virtual.
 - **Falta:** de la carcasa, las fuentes incrustadas y el filtro del panel;
   después el detalle (378), tablero y calendario (379) y los instaladores
   (380). Pulsar una tarea todavía no abre nada.
