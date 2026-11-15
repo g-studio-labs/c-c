@@ -80,12 +80,12 @@ fn main() {
 
     gpui_kit::application().with_assets(assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
-        theme::apply(gpui_kit::component::ThemeMode::Dark, cx);
         cx.set_global(lang::SystemLanguage(system_language));
         if let Err(error) = backend::Backend::install(config, Arc::new(FileStorage::new(data_dir)), cx) {
             eprintln!("cac: no se pudo arrancar: {error}");
             std::process::exit(1);
         }
+        theme::apply_preference(cx);
 
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(

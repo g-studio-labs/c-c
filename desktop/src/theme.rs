@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 
 use gpui_kit::component::{Theme, ThemeMode};
-use gpui_kit::{px, rgb, App, Hsla};
+use gpui_kit::{px, rgb, App, Hsla, WindowAppearance};
+
+use crate::backend::Backend;
 
 const CSS: &str = include_str!("../../app/src/index.css");
 
@@ -67,6 +69,15 @@ fn selector(mode: ThemeMode) -> &'static str {
     } else {
         ":root"
     }
+}
+
+/// Pone el tema que eligió quien mira (el core lo recuerda y sabe qué hacer
+/// con «el del sistema»). Al arrancar y cada vez que se elige otro.
+pub fn apply_preference(cx: &mut App) {
+    let system_is_dark = matches!(cx.window_appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark);
+    let preference = Backend::core(cx).theme();
+    let mode = if cac_core::is_dark(preference, Some(system_is_dark)) { ThemeMode::Dark } else { ThemeMode::Light };
+    apply(mode, cx);
 }
 
 /// Viste el tema de GPUI Kit de cac.

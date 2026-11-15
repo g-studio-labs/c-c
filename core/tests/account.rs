@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use cac_core::{
-    check_new_password, check_sign_in, error_phrase, gate, pick_locale, text, text_count, text_with, ApiError, Config, Core,
-    FormCheck, Gate, Locale, NoListener, Session, Storage,
+    check_new_password, check_sign_in, error_phrase, gate, is_dark, pick_locale, text, text_count, text_with, ApiError, Config, Core,
+    FormCheck, Gate, Locale, ThemePreference, NoListener, Session, Storage,
 };
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -324,4 +324,71 @@ async fn a_server_that_returns_no_pair_gets_a_regular_refresh() {
     core.change_password("vieja-clave", "nueva-clave").await.unwrap();
 
     assert_eq!(core.access_token().as_deref(), Some("renewed-access"));
+}
+
+// ── Preferencias ────────────────────────────────────────────────────────
+
+/// El tema es oscuro hasta que alguien elige otro, y lo elegido se recuerda.
+///
+/// Roturas que atrapa: abrir en claro una herramienta que se mira de noche;
+/// olvidar lo elegido al cerrar; que «sistema» con un sistema que no contesta
+/// salga en claro; que «claro» obedezca al sistema.
+#[tokio::test]
+async fn the_theme_is_dark_until_chosen_and_then_remembered() {
+    let server = MockServer::start().await;
+    let (core, storage) = core_at(&server).await;
+    assert_eq!(core.theme(), ThemePreference::Dark);
+
+    core.set_theme(ThemePreference::Light).unwrap();
+    assert_eq!(core.theme(), ThemePreference::Light);
+    let reopened = Core::new(Config::new(server.uri()), storage.clone(), Arc::new(NoListener)).unwrap();
+    assert_eq!(reopened.theme(), ThemePreference::Light);
+
+    assert!(is_dark(ThemePreference::Dark, Some(false)));
+    assert!(!is_dark(ThemePreference::Light, Some(true)));
+    assert!(is_dark(ThemePreference::System, Some(true)));
+    assert!(!is_dark(ThemePreference::System, Some(false)));
+    assert!(is_dark(ThemePreference::System, None));
+}
+
+/// Elegir idioma cambia ya en esta pantalla y se guarda en la cuenta.
+///
+/// Roturas que atrapa: esperar al servidor para cambiar el idioma en
+/// pantalla; no decírselo al servidor (en otro dispositivo seguiría el de
+/// antes); mandar «el del sistema» como una ausencia en vez de como vacío;
+/// perder lo elegido porque el servidor no pudo guardarlo.
+#[tokio::test]
+async fn choosing_a_language_changes_it_here_and_saves_it_on_the_account() {
+    let server = MockServer::start().await;
+    let (core, storage) = core_at(&server).await;
+    core.sign_in(ana(false), "access".into(), "refresh".into()).unwrap();
+    assert_eq!(core.locale_preference(), None);
+
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/auth/locale"))
+        .and(header("Authorization", "Bearer access"))
+        .and(body_json(serde_json::json!({ "locale": "es" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    core.set_locale(Some(Locale::Es)).await.unwrap();
+    assert_eq!(core.locale_preference(), Some(Locale::Es));
+    assert!(storage.get("session").unwrap().contains("\"locale\":\"es\""), "no quedó guardado con la sesión");
+
+    // «El del sistema» viaja como vacío; y si el servidor no puede guardarlo,
+    // se dice, pero lo elegido aquí se queda.
+    server.reset().await;
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/auth/locale"))
+        .and(body_json(serde_json::json!({ "locale": "" })))
+        .respond_with(ResponseTemplate::new(500).set_body_json(
+            serde_json::json!({ "success": false, "message": "Could not save the language", "error": "locale-not-saved" }),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let failed = core.set_locale(None).await.unwrap_err();
+    assert!(matches!(failed, ApiError::Server { status: 500, ref code, .. } if code == "locale-not-saved"));
+    assert_eq!(core.locale_preference(), None);
 }

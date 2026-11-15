@@ -4,7 +4,7 @@
 //! Qué filas tiene el árbol, cuáles van abiertas, qué hace un clic y qué se
 //! trae al entrar lo dice el core. Aquí se pinta y se le pasa cada gesto.
 
-use cac_core::{Looking, NodeKind, TreeClick, TreeRow};
+use cac_core::{Locale, Looking, NodeKind, ThemePreference, TreeClick, TreeRow};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::assets::IconName as Lucide;
@@ -38,6 +38,57 @@ impl Workspace {
         Backend::run(cx, move |core| async move {
             core.switch_org(&org_id).await;
         });
+    }
+
+    /// Elige el tema: el core lo recuerda y la app se viste ya.
+    fn choose_theme(preference: ThemePreference, cx: &mut App) {
+        if Backend::core(cx).set_theme(preference).is_ok() {
+            crate::theme::apply_preference(cx);
+        }
+    }
+
+    /// Elige el idioma (`None` es el del sistema). El core lo cambia aquí al
+    /// momento y lo guarda en la cuenta; si el servidor no pudo, lo elegido
+    /// se queda en esta máquina.
+    fn choose_language(preference: Option<Locale>, cx: &App) {
+        Backend::run(cx, move |core| async move {
+            let _ = core.set_locale(preference).await;
+        });
+    }
+
+    fn render_account(&self, name: String) -> impl IntoElement {
+        Button::new("account-menu").ghost().small().label(name).dropdown_caret(true).dropdown_menu(|menu, _, cx| {
+            let core = Backend::core(cx);
+            let (theme, language) = (core.theme(), core.locale_preference());
+            let here = locale(cx);
+            let phrase = |key: &str| cac_core::text(here, key);
+
+            let mut menu = menu.label(phrase("nav:account.theme"));
+            for (preference, key) in [
+                (ThemePreference::System, "nav:account.themeAuto"),
+                (ThemePreference::Light, "nav:account.themeLight"),
+                (ThemePreference::Dark, "nav:account.themeDark"),
+            ] {
+                menu = menu.item(
+                    PopupMenuItem::new(phrase(key))
+                        .checked(theme == preference)
+                        .on_click(move |_, _, cx| Self::choose_theme(preference, cx)),
+                );
+            }
+            menu = menu.separator().label(phrase("nav:account.language"));
+            for (preference, key) in [
+                (None, "common:language.system"),
+                (Some(Locale::En), "common:language.en"),
+                (Some(Locale::Es), "common:language.es"),
+            ] {
+                menu = menu.item(
+                    PopupMenuItem::new(phrase(key))
+                        .checked(language == preference)
+                        .on_click(move |_, _, cx| Self::choose_language(preference, cx)),
+                );
+            }
+            menu
+        })
     }
 
     fn click_row(row: &TreeRow, cx: &App) {
@@ -236,7 +287,7 @@ impl Workspace {
                     .p_2()
                     .border_t_1()
                     .border_color(border)
-                    .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().text_sm().child(name))
+                    .child(div().flex_1().overflow_hidden().child(self.render_account(name)))
                     .child(
                         Button::new("log-out")
                             .ghost()
@@ -461,6 +512,51 @@ mod tests {
         wait_until(cx, "llega el árbol de la otra", |cx| on_screen(window, "tree-z", cx));
         assert!(!on_screen(window, "tree-a", cx));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Elegir tema viste la app en el acto y se recuerda para el arranque.
+    ///
+    /// Roturas que atrapa: un menú de tema que no cambia nada; cambiarlo sólo
+    /// hasta cerrar la app; arrancar siempre en oscuro aunque se eligió claro.
+    #[gpui_kit::test]
+    fn choosing_a_theme_dresses_the_app_and_is_remembered(cx: &mut TestAppContext) {
+        use cac_core::ThemePreference;
+        use gpui_kit::component::ActiveTheme;
+        let server = server();
+        server.install(cx);
+        let background = |cx: &mut TestAppContext| cx.update(|cx| cx.theme().background);
+        let dark = background(cx);
+
+        cx.update(|cx| Workspace::choose_theme(ThemePreference::Light, cx));
+
+        let light = background(cx);
+        assert_ne!(light, dark, "el tema no cambió");
+        assert_eq!(cx.update(|cx| Backend::core(cx).theme()), ThemePreference::Light);
+
+        // Como al arrancar: otro tema puesto, y se vuelve al elegido.
+        cx.update(|cx| crate::theme::apply(gpui_kit::component::ThemeMode::Dark, cx));
+        assert_eq!(background(cx), dark);
+        cx.update(crate::theme::apply_preference);
+        assert_eq!(background(cx), light);
+    }
+
+    /// Elegir idioma cambia los textos y se le dice al servidor.
+    ///
+    /// Roturas que atrapa: un menú de idioma que no hace nada; cambiar el
+    /// idioma sólo en esta máquina.
+    #[gpui_kit::test]
+    fn choosing_a_language_changes_the_texts(cx: &mut TestAppContext) {
+        use cac_core::Locale;
+        let server = server();
+        server.mount(Mock::given(method("PATCH")).and(path("/api/v1/auth/locale")).respond_with(ok(json!(null))));
+        server.install(cx);
+        sign_in(cx);
+        assert_eq!(cx.update(|cx| crate::lang::tr(cx, "nav:item.myWork")), "Mi trabajo");
+
+        cx.update(|cx| Workspace::choose_language(Some(Locale::En), cx));
+
+        wait_until(cx, "los textos pasan a inglés", |cx| cx.update(|cx| crate::lang::tr(cx, "nav:item.myWork")) == "My work");
+        wait_until(cx, "se le dice al servidor", |_| server.hits("/api/v1/auth/locale") == 1);
     }
 
     /// Un corte que dura se avisa, y «Reconectar» vuelve a pedirlo todo.
