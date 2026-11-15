@@ -27,6 +27,21 @@ impl Core {
         true
     }
 
+    /// Cambia de lente («asignado a mí», «siguiendo»…) y trae sus tareas si
+    /// lo cargado no responde ya a esa pregunta: cada lente es otra pregunta
+    /// al servidor, no un filtro sobre lo descargado.
+    pub async fn show_lens(&self, lens: crate::mywork::WorkLens) {
+        self.my_work().set_lens(lens);
+        self.my_work().ensure_loaded(self.orgs().state().current_org_id).await;
+    }
+
+    /// Enseña también lo terminado, o sólo lo abierto. Lo terminado no se
+    /// pide hasta que alguien lo quiere ver.
+    pub async fn show_closed(&self, on: bool) {
+        self.my_work().set_include_closed(on);
+        self.my_work().ensure_loaded(self.orgs().state().current_org_id).await;
+    }
+
     /// El árbol, sus marcas de documentación y «Mi trabajo» de la
     /// organización que se mira, a la vez.
     async fn load_current_org(&self) {

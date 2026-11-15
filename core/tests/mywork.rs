@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cac_core::{
-    Config, Core, Listener, MyWorkState, ScopeKind, Session, Storage, TaskFilter, WorkLens, WorkScope,
+    day_and_month, due_label, work_groups, Config, Core, DueState, Listener, Locale, MyWorkState, OpenTask, ScopeKind,
+    Session, Storage, TaskFilter, WorkLens, WorkScope,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -371,4 +372,161 @@ async fn every_change_is_announced() {
     assert!(seen.first().unwrap().loading, "primero dice que está cargando");
     assert_eq!(seen[1].tasks.len(), 1);
     assert!(seen.last().unwrap().tasks.is_empty());
+}
+
+// ── La lista ────────────────────────────────────────────────────────────
+
+fn open_task(id: &str, space: &str, edit: impl FnOnce(&mut serde_json::Value)) -> OpenTask {
+    let mut raw = task(id, "l1", space);
+    raw["spaceName"] = serde_json::json!(format!("Espacio {space}"));
+    edit(&mut raw);
+    serde_json::from_value(raw).unwrap()
+}
+
+fn day(year: i32, month: u32, day: u32) -> chrono::NaiveDate {
+    chrono::NaiveDate::from_ymd_opt(year, month, day).unwrap()
+}
+
+/// La lista se agrupa por espacio en el orden del árbol, y lo que el árbol
+/// no trae va al final.
+///
+/// Roturas que atrapa: ordenar por orden de llegada (el panel y la lista
+/// dejarían de leerse igual); perder las tareas de un espacio que el árbol no
+/// enseña; mezclar tareas de dos espacios; barajar las de dentro de un grupo.
+#[test]
+fn the_list_is_grouped_by_space_in_the_trees_order() {
+    let tasks = vec![
+        open_task("t1", "c", |_| {}),
+        open_task("t2", "ghost", |_| {}),
+        open_task("t3", "a", |_| {}),
+        open_task("t4", "c", |_| {}),
+        open_task("t5", "other-ghost", |_| {}),
+    ];
+    let order = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+    let groups = work_groups(&tasks, &order, Locale::Es, day(2026, 9, 30));
+
+    let shape: Vec<(&str, Vec<&str>)> =
+        groups.iter().map(|group| (group.space_id.as_str(), group.rows.iter().map(|row| row.id.as_str()).collect())).collect();
+    assert_eq!(
+        shape,
+        [("a", vec!["t3"]), ("c", vec!["t1", "t4"]), ("ghost", vec!["t2"]), ("other-ghost", vec!["t5"])]
+    );
+    assert_eq!(groups[1].name, "Espacio c");
+}
+
+/// Cada fila trae su vencimiento ya dicho, su prioridad con el nombre de la
+/// API y de qué tarea es subtarea.
+///
+/// Roturas que atrapa: «medium» donde la pantalla espera «normal» (la
+/// etiqueta de prioridad saldría vacía); una subtarea que parece una tarea
+/// suelta; decir «30 sept» de lo que vence hoy.
+#[test]
+fn a_row_says_its_due_date_priority_and_parent() {
+    let tasks = vec![
+        open_task("hoy", "a", |_| {}),
+        open_task("sub", "a", |raw| {
+            raw["parentSeq"] = serde_json::json!(289);
+            raw["parentTitle"] = serde_json::json!("La madre");
+            raw["dueAt"] = serde_json::Value::Null;
+            raw["priority"] = serde_json::json!("urgent");
+        }),
+        open_task("sub-sin-titulo", "a", |raw| raw["parentSeq"] = serde_json::json!(7)),
+    ];
+
+    let groups = work_groups(&tasks, &[], Locale::Es, day(2026, 9, 30));
+    let rows = &groups[0].rows;
+
+    assert_eq!(rows[0].priority, "normal");
+    assert_eq!(rows[0].parent, None);
+    let due = rows[0].due.as_ref().unwrap();
+    assert_eq!((due.text.as_str(), due.state), ("hoy", DueState::Today));
+    assert_eq!(rows[1].priority, "urgent");
+    assert_eq!(rows[1].parent.as_deref(), Some("› #289 La madre"));
+    assert_eq!(rows[1].due, None);
+    assert_eq!(rows[2].parent.as_deref(), Some("› #7"));
+}
+
+/// Un vencimiento se dice con una palabra cuando está cerca y con su día y
+/// su mes cuando no, en el idioma de quien lee.
+///
+/// Roturas que atrapa: «30 sept» en inglés o «Sep 30» en castellano; el mes
+/// corrido uno (enero por febrero); «ayer» para lo de hace una semana.
+#[test]
+fn a_due_date_is_said_in_words_or_as_day_and_month() {
+    let due = "2026-09-30T00:00:00Z";
+    let said = |locale, today| due_label(locale, Some(due), today).map(|label| (label.text, label.state)).unwrap();
+
+    assert_eq!(said(Locale::Es, day(2026, 9, 30)), ("hoy".into(), DueState::Today));
+    assert_eq!(said(Locale::Es, day(2026, 10, 1)), ("ayer".into(), DueState::Yesterday));
+    assert_eq!(said(Locale::Es, day(2026, 9, 29)), ("mañana".into(), DueState::Tomorrow));
+    assert_eq!(said(Locale::Es, day(2026, 10, 8)), ("30 sept".into(), DueState::Overdue));
+    assert_eq!(said(Locale::Es, day(2026, 9, 1)), ("30 sept".into(), DueState::Later));
+    assert_eq!(said(Locale::En, day(2026, 9, 1)), ("Sep 30".into(), DueState::Later));
+    assert_eq!(said(Locale::En, day(2026, 9, 30)), ("today".into(), DueState::Today));
+    assert_eq!(due_label(Locale::Es, None, day(2026, 9, 30)), None);
+
+    assert_eq!(day_and_month(Locale::Es, day(2026, 1, 5)), "5 ene");
+    assert_eq!(day_and_month(Locale::En, day(2026, 12, 25)), "Dec 25");
+}
+
+/// Lo que la lista pinta respeta el ámbito y el filtro, con el «hoy» de la
+/// organización.
+///
+/// Roturas que atrapa: agrupar todo lo cargado ignorando a qué se acotó;
+/// ignorar lo escrito en el buscador.
+#[tokio::test]
+async fn what_the_list_paints_respects_scope_and_filter() {
+    let mut other = task("t2", "l2", "s2");
+    other["title"] = serde_json::json!("Revisión del diseño");
+    let rig = rig(vec![task("t1", "l1", "s1"), other]).await;
+    rig.core.my_work().load(Some("o1".into())).await;
+    let my_work = rig.core.my_work();
+
+    assert_eq!(my_work.groups(&TaskFilter::default(), Locale::Es).len(), 2);
+
+    // En el orden del árbol que hay cargado, no en el de llegada.
+    let spaces = serde_json::json!([
+        { "id": "s2", "orgId": "o1", "name": "Dos", "color": "", "folders": [], "lists": [], "people": [] },
+        { "id": "s1", "orgId": "o1", "name": "Uno", "color": "", "folders": [], "lists": [], "people": [] },
+    ]);
+    Mock::given(method("GET"))
+        .and(path("/api/v1/task-spaces/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": spaces })))
+        .mount(&rig.server)
+        .await;
+    rig.core.tree().load("o1").await;
+    let order: Vec<String> =
+        my_work.groups(&TaskFilter::default(), Locale::Es).into_iter().map(|group| group.space_id).collect();
+    assert_eq!(order, ["s2", "s1"]);
+
+    my_work.set_scope(Some(scope(ScopeKind::Space, "s2", "o1")));
+    let groups = my_work.groups(&TaskFilter::default(), Locale::Es);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].rows[0].id, "t2");
+
+    my_work.set_scope(None);
+    let filter = TaskFilter { query: "revision".into(), ..TaskFilter::default() };
+    let groups = my_work.groups(&filter, Locale::Es);
+    assert_eq!(groups.iter().map(|group| group.rows.len()).sum::<usize>(), 1);
+}
+
+/// Cambiar de lente o pedir lo terminado trae las tareas de esa pregunta, y
+/// volver a lo mismo no pregunta dos veces.
+///
+/// Roturas que atrapa: cambiar la pestaña y seguir enseñando las tareas de la
+/// anterior; pedir la lista entera en cada clic aunque no cambie nada.
+#[tokio::test]
+async fn changing_lens_or_asking_for_closed_brings_that_question() {
+    let rig = rig(vec![task("t1", "l1", "s1")]).await;
+
+    rig.core.show_lens(WorkLens::Watching).await;
+    rig.core.show_lens(WorkLens::Watching).await;
+    rig.core.show_closed(true).await;
+
+    let asked = queries(&rig.server).await;
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert!(asked[0].contains("watcher=me") && !asked[0].contains("status=all"));
+    assert!(asked[1].contains("watcher=me") && asked[1].contains("status=all"));
+    assert_eq!(rig.core.my_work().state().tasks.len(), 1);
 }

@@ -33,7 +33,10 @@ pub use account::{check_new_password, check_sign_in, gate, FormCheck, Gate, MIN_
 pub use dates::{due_day, due_state, today_in, DueState};
 pub use error::ApiError;
 pub use events::{Listener, NoListener};
-pub use mywork::{MyWork, MyWorkState, OpenTask, ScopeKind, TaskFilter, WorkLens, WorkScope};
+pub use mywork::{
+    day_and_month, due_label, work_groups, DueLabel, MyWork, MyWorkState, OpenTask, ScopeKind, TaskFilter, WorkGroup,
+    WorkLens, WorkRow, WorkScope,
+};
 pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClick};
 pub use orgs::{Organization, Orgs, OrgsState};
 pub use prefs::{is_dark, ThemePreference};

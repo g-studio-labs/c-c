@@ -7,6 +7,7 @@
 //! `Listener::my_work_changed`.
 
 pub mod filter;
+pub mod list;
 mod types;
 
 use std::sync::atomic::Ordering;
@@ -19,6 +20,7 @@ use crate::error::ApiError;
 use crate::Core;
 
 pub use filter::{matches_filter, TaskFilter};
+pub use list::{day_and_month, due_label, work_groups, DueLabel, WorkGroup, WorkRow};
 pub use types::{MyWorkState, OpenTask, ScopeKind, WorkLens, WorkScope};
 
 /// Un respiro antes de recargar.
@@ -58,7 +60,7 @@ fn key_of(org_id: Option<&str>, lens: WorkLens, include_closed: bool) -> String 
 
 /// «Mi trabajo» de este core. Barato de pedir: es el mismo cada vez.
 pub struct MyWork {
-    core: Core,
+    pub(crate) core: Core,
 }
 
 impl Core {
