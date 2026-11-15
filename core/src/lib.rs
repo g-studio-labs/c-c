@@ -53,6 +53,7 @@ pub use task::{
     TaskAttachment, TaskBlocker, TaskCard, TaskComment, TaskDetail, TaskGitLink, TaskGitLinks, TaskPatch,
     TaskState, TaskStatus, TaskTag, Tasks, UserSummary,
 };
+pub use task::{is_agent_note, task_sheet, SheetComment, SheetSubtask, SheetTag, TaskSheet};
 pub use texts::{error_phrase, pick_locale, text, text_count, text_with, Locale};
 pub use transport::Reply;
 
