@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cac_core::{
-    day_and_month, due_label, work_groups, Config, Core, DueState, Listener, Locale, MyWorkState, OpenTask, ScopeKind,
+    day_and_month, due_label, empty_reason, text, work_groups, Config, Core, DueState, Listener, Locale, MyWorkState, OpenTask, ScopeKind,
     Session, Storage, TaskFilter, WorkLens, WorkScope,
 };
 use wiremock::matchers::{method, path};
@@ -509,6 +509,13 @@ async fn what_the_list_paints_respects_scope_and_filter() {
     let filter = TaskFilter { query: "revision".into(), ..TaskFilter::default() };
     let groups = my_work.groups(&filter, Locale::Es);
     assert_eq!(groups.iter().map(|group| group.rows.len()).sum::<usize>(), 1);
+
+    // Un filtro que lo quita todo no es «no tienes nada»; un ámbito vacío sí.
+    let nothing = TaskFilter { query: "zzz".into(), ..TaskFilter::default() };
+    assert!(my_work.groups(&nothing, Locale::Es).is_empty());
+    assert_eq!(my_work.empty_reason(), "work:board.filter.noMatch");
+    my_work.set_scope(Some(scope(ScopeKind::Space, "vacio", "o1")));
+    assert_eq!(my_work.empty_reason(), "work:myWork.nothingHere");
 }
 
 /// Cambiar de lente o pedir lo terminado trae las tareas de esa pregunta, y
@@ -529,4 +536,27 @@ async fn changing_lens_or_asking_for_closed_brings_that_question() {
     assert!(asked[0].contains("watcher=me") && !asked[0].contains("status=all"));
     assert!(asked[1].contains("watcher=me") && asked[1].contains("status=all"));
     assert_eq!(rig.core.my_work().state().tasks.len(), 1);
+}
+
+/// Una lista vacía dice por qué lo está.
+///
+/// Roturas que atrapa: «aquí no hay nada» mientras todavía carga, o cuando
+/// la petición falló (parece que no tienes trabajo); «no tienes nada» cuando
+/// es el buscador quien lo quitó todo; no explicar la lente de «siguiendo».
+#[test]
+fn an_empty_list_says_why() {
+    let state = |edit: fn(&mut MyWorkState)| {
+        let mut state = MyWorkState::default();
+        edit(&mut state);
+        state
+    };
+    assert_eq!(empty_reason(&state(|_| {}), false), "work:myWork.nothingHere");
+    assert_eq!(empty_reason(&state(|s| s.lens = WorkLens::Watching), false), "work:myWork.nothingFollowed");
+    assert_eq!(empty_reason(&state(|s| s.lens = WorkLens::Watching), true), "work:board.filter.noMatch");
+    assert_eq!(empty_reason(&state(|s| s.error = Some("x".into())), true), "common:last.requestsFailing");
+    assert_eq!(empty_reason(&state(|s| { s.loading = true; s.error = Some("x".into()); }), true), "work:tree.loading");
+    // Las claves existen.
+    for key in ["work:myWork.nothingHere", "work:myWork.nothingFollowed", "work:board.filter.noMatch", "common:last.requestsFailing", "work:tree.loading"] {
+        assert_ne!(text(Locale::En, key), key);
+    }
 }

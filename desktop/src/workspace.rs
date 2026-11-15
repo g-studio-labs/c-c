@@ -14,6 +14,7 @@ use gpui_kit::*;
 
 use crate::backend::Backend;
 use crate::lang::{locale, tr};
+use crate::mywork::MyWorkView;
 
 /// Las medidas de la app de siempre: el riel y el panel.
 const RAIL_WIDTH: f32 = 48.;
@@ -22,16 +23,18 @@ const ROW_HEIGHT: f32 = 28.;
 /// Lo que entra una fila por cada nivel que cuelga.
 const INDENT: f32 = 14.;
 
-/// Sin estado propio: todo lo que pinta lo lee del core al pintarse, y GPUI
+/// Casi sin estado propio: lo que pinta lo lee del core al pintarse, y GPUI
 /// repinta una vista cuando cambia algo que leyó. No hace falta suscribirse.
-pub struct Workspace;
+pub struct Workspace {
+    my_work: Entity<MyWorkView>,
+}
 
 impl Workspace {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Quien entra, entra a trabajar: organizaciones, árbol, tareas y el
         // stream de eventos.
         Backend::run(cx, |core| async move { core.open_workspace().await });
-        Self
+        Self { my_work: cx.new(|cx| MyWorkView::new(window, cx)) }
     }
 
     fn switch_org(org_id: String, cx: &App) {
@@ -298,32 +301,6 @@ impl Workspace {
                     ),
             )
     }
-
-    /// Donde va «Mi trabajo». Todavía sin la lista: dice a qué se está
-    /// mirando y cuántas tareas hay, que es lo que cambia al pulsar el árbol.
-    fn render_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (background, foreground, muted) = (theme.background, theme.foreground, theme.muted_foreground);
-        let my_work = Backend::snapshot(cx).read(cx).my_work.clone();
-        let title = my_work.scope.as_ref().map(|scope| scope.name.clone()).unwrap_or_else(|| tr(cx, "work:myWork.title"));
-        let visible = Backend::core(cx).my_work().visible().len() as i64;
-        let detail = if my_work.loading {
-            tr(cx, "work:tree.loading")
-        } else {
-            cac_core::text_count(locale(cx), "work:myWork.visible", visible)
-        };
-        div()
-            .flex_1()
-            .h_full()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_6()
-            .bg(background)
-            .text_color(foreground)
-            .child(div().id("view-title").test_support().text_xl().font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(div().text_sm().text_color(muted).child(detail))
-    }
 }
 
 impl Render for Workspace {
@@ -343,7 +320,7 @@ impl Render for Workspace {
                     .overflow_hidden()
                     .child(self.render_rail(cx))
                     .child(self.render_panel(cx))
-                    .child(self.render_view(cx)),
+                    .child(div().flex_1().h_full().overflow_hidden().child(self.my_work.clone())),
             )
     }
 }
@@ -424,7 +401,7 @@ mod tests {
                 })),
                 ..WindowOptions::default()
             };
-            gpui_kit::open_window(options, cx, |_, cx| cx.new(Workspace::new)).expect("open test window").0
+            gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx))).expect("open test window").0
         })
     }
 
@@ -568,10 +545,16 @@ mod tests {
     fn an_outage_that_lasts_is_announced(cx: &mut TestAppContext) {
         // Sin ruta de eventos: el stream se cae en cada intento.
         let server = server();
-        server.install_with(cx, |config| config.stream_grace = Duration::from_millis(150));
+        server.install_with(cx, |config| config.stream_grace = Duration::from_millis(400));
         let window = open(cx);
-        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        // Nada más abrir, sin esperar a nada: el corte todavía no puede durar.
+        // (Esperar aquí al árbol hacía la prueba depender de lo cargada que
+        // estuviera la máquina.)
         assert!(!on_screen(window, "connection-banner", cx), "avisa antes de que el corte dure");
+        // Y el aviso sale exactamente cuando el core dice que dura.
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        let lasting = cx.update(|cx| Backend::snapshot(cx).read(cx).connection.lasting);
+        assert_eq!(on_screen(window, "connection-banner", cx), lasting);
 
         wait_until(cx, "avisa del corte", |cx| on_screen(window, "connection-banner", cx));
         let asked = server.hits("/api/v1/organizations/");

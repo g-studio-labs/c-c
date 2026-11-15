@@ -10,6 +10,7 @@ mod assets;
 mod auth;
 mod backend;
 mod lang;
+mod mywork;
 mod platform;
 mod shell;
 mod spike;

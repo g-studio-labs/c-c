@@ -108,7 +108,33 @@ pub fn work_groups(tasks: &[OpenTask], space_order: &[String], locale: Locale, t
     groups
 }
 
+/// Por qué la lista está vacía, como clave del catálogo: no es lo mismo «no
+/// ha llegado», «se rompió», «nada coincide con lo que buscas» y «no tienes
+/// nada», y una lista en blanco no distingue ninguna.
+///
+/// `hidden_by_filter` es que hay tareas cargadas en el ámbito y el filtro las
+/// quitó todas.
+pub fn empty_reason(state: &crate::mywork::MyWorkState, hidden_by_filter: bool) -> &'static str {
+    if state.loading {
+        "work:tree.loading"
+    } else if state.error.is_some() {
+        "common:last.requestsFailing"
+    } else if hidden_by_filter {
+        "work:board.filter.noMatch"
+    } else if state.lens == crate::mywork::WorkLens::Watching {
+        "work:myWork.nothingFollowed"
+    } else {
+        "work:myWork.nothingHere"
+    }
+}
+
 impl MyWork {
+    /// Por qué la lista no tiene filas. Si en el ámbito hay tareas y aun así
+    /// no se pinta ninguna, es el filtro quien las quitó.
+    pub fn empty_reason(&self) -> &'static str {
+        empty_reason(&self.state(), !self.visible().is_empty())
+    }
+
     /// Lo que la lista pinta ahora: lo visible que pasa el filtro, agrupado.
     ///
     /// «Hoy» es el de la organización que se mira, no el de la máquina.

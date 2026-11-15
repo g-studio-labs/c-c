@@ -101,3 +101,47 @@ pub fn sign_in(cx: &mut TestAppContext) {
 pub fn ok(data: serde_json::Value) -> wiremock::ResponseTemplate {
     wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": data }))
 }
+
+/// Una tarea como la manda el servidor: la del contrato del core, retocada.
+pub fn contract_task(id: &str, space: &str, edit: impl FnOnce(&mut serde_json::Value)) -> serde_json::Value {
+    let mut task: serde_json::Value =
+        serde_json::from_str(include_str!("../../core/tests/fixtures/open_task.json")).unwrap();
+    task["id"] = serde_json::json!(id);
+    task["spaceId"] = serde_json::json!(space);
+    task["spaceName"] = serde_json::json!(format!("Espacio {space}"));
+    task["listId"] = serde_json::json!(format!("l-{space}"));
+    edit(&mut task);
+    task
+}
+
+/// Un servidor con una organización, dos espacios (`a` y `b`, en ese orden)
+/// y las tareas que se le den.
+pub fn server_with_tasks(tasks: Vec<serde_json::Value>) -> FakeServer {
+    use wiremock::matchers::{method, path};
+    let server = FakeServer::start();
+    let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+    let org = serde_json::json!({
+        "id": "o1", "name": "G Studio", "slug": "g", "role": "member", "memberCount": 2,
+        "createdAt": "2026-06-09T12:00:00Z", "timezone": "",
+    });
+    let space = |id: &str| serde_json::json!({
+        "id": id, "orgId": "o1", "name": format!("Espacio {id}"), "color": "#888", "folders": [],
+        "lists": [{ "id": format!("l-{id}"), "name": "Lista", "openCount": 1, "taskCount": 1 }], "people": [],
+    });
+    server.mount(get("/api/v1/organizations/").respond_with(ok(serde_json::json!([org]))));
+    server.mount(get("/api/v1/task-spaces/").respond_with(ok(serde_json::json!([space("a"), space("b")]))));
+    server.mount(get("/api/v1/docs/").respond_with(ok(serde_json::json!({}))));
+    server.mount(get("/api/v1/tasks/").respond_with(ok(serde_json::Value::Array(tasks))));
+    server
+}
+
+impl FakeServer {
+    /// Las consultas que llegaron a esa ruta, en orden.
+    pub fn queries(&self, path: &str) -> Vec<String> {
+        self.requests()
+            .iter()
+            .filter(|request| request.url.path() == path)
+            .map(|request| request.url.query().unwrap_or("").to_string())
+            .collect()
+    }
+}

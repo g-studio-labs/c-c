@@ -45,7 +45,7 @@ impl Shell {
         match gate {
             Gate::SignIn => Screen::SignIn(cx.new(|cx| SignIn::new(window, cx))),
             Gate::NewPassword => Screen::NewPassword(cx.new(|cx| NewPassword::new(window, cx))),
-            Gate::Open => Screen::Open(cx.new(Workspace::new)),
+            Gate::Open => Screen::Open(cx.new(|cx| Workspace::new(window, cx))),
         }
     }
 

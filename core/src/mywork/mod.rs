@@ -20,7 +20,7 @@ use crate::error::ApiError;
 use crate::Core;
 
 pub use filter::{matches_filter, TaskFilter};
-pub use list::{day_and_month, due_label, work_groups, DueLabel, WorkGroup, WorkRow};
+pub use list::{day_and_month, due_label, empty_reason, work_groups, DueLabel, WorkGroup, WorkRow};
 pub use types::{MyWorkState, OpenTask, ScopeKind, WorkLens, WorkScope};
 
 /// Un respiro antes de recargar.
