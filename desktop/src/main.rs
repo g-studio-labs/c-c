@@ -5,6 +5,9 @@
 //! mirar está escrito en la propia ventana, y los resultados van a la tarea
 //! command-and-control-374.
 
+// Todavía sin pantalla que lo use: la primera es el login (Fase 2).
+#[cfg_attr(not(test), allow(dead_code))]
+mod backend;
 mod spike;
 
 use gpui_kit::*;

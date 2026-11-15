@@ -848,6 +848,8 @@ dependencies = [
  "cac-core",
  "gpui-kit",
  "log",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
