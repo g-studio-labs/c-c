@@ -29,9 +29,13 @@ toda regla va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
   cualquier ámbito (372), en sólo lectura: cuatro pestañas y las decisiones
   vigentes. Una carpeta abre la suya. Sin hacer: subpáginas del documento,
   cambio a tablero y calendario (379) y lista virtual.
+- **En curso (378):** el detalle de una tarea. Pulsar una fila la abre en un
+  cajón para leerla (estado, prioridad, vencimiento, «dónde quedó»,
+  descripción, subtareas, adjuntos por nombre, y el hilo con las notas de
+  agentes en su pestaña). Todavía no se edita nada.
 - **Falta:** de la carcasa, las fuentes incrustadas y el filtro del panel;
-  después el detalle (378), tablero y calendario (379) y los instaladores
-  (380). Pulsar una tarea todavía no abre nada.
+  del detalle, editar; después tablero y calendario (379) y los instaladores
+  (380).
 - **Cómo se mira:** `cd desktop && cargo run --release`. Su sesión va aparte
   de la de Tauri (`~/.local/share/cac-desktop`): se entra una vez en cada una.
 
