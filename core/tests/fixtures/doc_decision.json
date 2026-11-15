@@ -1,0 +1,29 @@
+{
+  "id": "dec1",
+  "createdAt": "2026-11-14T20:17:40Z",
+  "updatedAt": "2026-11-14T20:17:40Z",
+  "docId": "d1",
+  "title": "La interfaz se construye con GPUI Kit",
+  "body": "Porque trae los componentes.",
+  "tag": "arquitectura",
+  "authorId": "u1",
+  "authorName": "Ana Pérez",
+  "decidedAt": "2026-09-30T00:00:00Z",
+  "origin": "task",
+  "originTaskId": "task1",
+  "originTitle": "cac de escritorio en GPUI",
+  "sourceUrl": "https://example.com/ticket/1",
+  "sourceAuthor": "Luis",
+  "via": "agent",
+  "supersedesId": "dec0",
+  "supersededById": "dec2",
+  "links": [
+    {
+      "id": "k1",
+      "kind": "task",
+      "taskId": "task2",
+      "taskRef": "acme-2",
+      "addedAt": "2026-09-30T00:00:00Z"
+    }
+  ]
+}

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use cac_core::{
-    doc_key, Config, Connection, Core, Listener, Looking, NodeKind, OrgsState, ScopeKind, Session, Storage, TreeClick, TreeRow,
+    doc_key, DocsState, Config, Connection, Core, Listener, Looking, NodeKind, OrgsState, ScopeKind, Session, Storage, TreeClick, TreeRow,
     TreeState,
 };
 use wiremock::matchers::{method, path, query_param};
@@ -31,6 +31,7 @@ impl Storage for MemoryStorage {
 struct Recorder {
     orgs: Mutex<Vec<OrgsState>>,
     trees: Mutex<Vec<TreeState>>,
+    docs: Mutex<Vec<DocsState>>,
 }
 
 impl Listener for Recorder {
@@ -40,6 +41,9 @@ impl Listener for Recorder {
     }
     fn tree_changed(&self, state: TreeState) {
         self.trees.lock().unwrap().push(state);
+    }
+    fn docs_changed(&self, state: DocsState) {
+        self.docs.lock().unwrap().push(state);
     }
 }
 
@@ -623,4 +627,243 @@ async fn switching_organization_brings_what_belongs_to_the_new_one() {
     assert_eq!(rig.core.tree().state().org_id.as_deref(), Some("o2"));
     let asked_o9 = rig.server.received_requests().await.unwrap().iter().any(|request| request.url.query().unwrap_or("").contains("o9"));
     assert!(!asked_o9, "se pidió algo de una organización ajena");
+}
+
+// ── La documentación de un nodo ─────────────────────────────────────────
+
+fn doc(tabs: &[(&str, &str)], decisions: serde_json::Value) -> serde_json::Value {
+    let tabs: Vec<_> = tabs.iter().map(|(key, body)| serde_json::json!({ "key": key, "body": body })).collect();
+    serde_json::json!({ "doc": null, "orgId": "o1", "tabs": tabs, "decisions": decisions, "attachments": [] })
+}
+
+async fn mount_doc(server: &MockServer, kind: &str, id: &str, doc: serde_json::Value) {
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/docs/{kind}/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": doc })))
+        .mount(server)
+        .await;
+}
+
+/// Abrir la documentación de un nodo la pide por su clase y su id, y la deja
+/// para leer en su primera pestaña.
+///
+/// Roturas que atrapa: pedir la de una carpeta como si fuera una lista (el
+/// servidor contesta la de otro nodo, o ninguna); abrir en una pestaña que no
+/// es la primera; no avisar a quien pinta; abrir algo que no está en el árbol.
+#[tokio::test]
+async fn opening_a_nodes_docs_asks_for_them_by_kind_and_id() {
+    let rig = loaded_tree(vec![nested_space("a")]).await;
+    mount_doc(&rig.server, "folder", "f-a", doc(&[("overview", "  # La carpeta\n"), ("runbook", "pasos")], serde_json::json!([]))).await;
+
+    rig.core.docs().open("f-a").await;
+
+    let state = rig.core.docs().state();
+    let target = state.target.clone().unwrap();
+    assert_eq!((target.kind, target.id.as_str(), target.name.as_str()), (NodeKind::Folder, "f-a", "Carpeta"));
+    assert_eq!(state.tab, "overview");
+    assert_eq!(state.body(), "# La carpeta");
+    assert!(!state.loading && state.error.is_none());
+    assert_eq!(state.empty_reason(), None);
+    assert_eq!(rig.recorder.docs.lock().unwrap().last(), Some(&state), "quien pinta no se enteró");
+
+    rig.core.docs().open("no-existe").await;
+    assert_eq!(rig.core.docs().state().target.unwrap().id, "f-a");
+}
+
+/// Cambiar de pestaña enseña su texto, y sólo existen las cuatro.
+///
+/// Roturas que atrapa: una pestaña que cambia de color y enseña lo mismo;
+/// aceptar una clave inventada y quedarse leyendo nada.
+#[tokio::test]
+async fn a_tab_shows_its_own_text() {
+    let rig = loaded_tree(vec![nested_space("a")]).await;
+    mount_doc(&rig.server, "space", "a", doc(&[("overview", "qué es"), ("runbook", "cómo se levanta")], serde_json::json!([]))).await;
+    rig.core.docs().open("a").await;
+
+    rig.core.docs().show_tab("runbook");
+    assert_eq!(rig.core.docs().state().body(), "cómo se levanta");
+
+    rig.core.docs().show_tab("inventada");
+    assert_eq!(rig.core.docs().state().tab, "runbook");
+}
+
+/// Las decisiones salen en su pestaña, y sólo las que siguen vigentes.
+///
+/// Roturas que atrapa: enseñar como vigente una decisión que otra dejó sin
+/// efecto; repetir el registro bajo las cuatro pestañas.
+#[tokio::test]
+async fn only_standing_decisions_show_and_only_in_their_tab() {
+    let rig = loaded_tree(vec![nested_space("a")]).await;
+    let decisions = serde_json::json!([
+        { "id": "d1", "title": "La vieja", "body": "", "decidedAt": "2026-09-30T00:00:00Z", "supersededById": "d2" },
+        { "id": "d2", "title": "La nueva", "body": "porque sí", "decidedAt": "2026-10-30T00:00:00Z" },
+    ]);
+    mount_doc(&rig.server, "space", "a", doc(&[("overview", "qué es")], decisions)).await;
+    rig.core.docs().open("a").await;
+    assert!(rig.core.docs().state().standing_decisions().is_empty());
+
+    rig.core.docs().show_tab("decisions");
+
+    let standing: Vec<String> = rig.core.docs().state().standing_decisions().into_iter().map(|decision| decision.title).collect();
+    assert_eq!(standing, ["La nueva"]);
+    assert_eq!(rig.core.docs().state().empty_reason(), None, "con una decisión vigente, la pestaña no está vacía");
+}
+
+/// Una pestaña sin nada dice que no hay nada, y un fallo dice que falló.
+///
+/// Roturas que atrapa: una página en blanco que no distingue «vacío» de
+/// «roto»; decir «no hay nada escrito» de un documento que no se pudo traer.
+#[tokio::test]
+async fn an_empty_tab_and_a_failed_load_say_which_they_are() {
+    let rig = loaded_tree(vec![nested_space("a")]).await;
+    mount_doc(&rig.server, "space", "a", doc(&[("overview", "   ")], serde_json::json!([]))).await;
+    rig.core.docs().open("a").await;
+    assert_eq!(rig.core.docs().state().empty_reason(), Some("work:docs.emptyTab"));
+    rig.core.docs().show_tab("decisions");
+    assert_eq!(rig.core.docs().state().empty_reason(), Some("work:decisions.empty"));
+
+    // La de esta lista no está montada: el servidor contesta 404.
+    rig.core.docs().open("l-a").await;
+    let state = rig.core.docs().state();
+    assert!(state.error.is_some() && !state.loading);
+    assert_eq!(state.empty_reason(), Some("common:last.requestsFailing"));
+
+    // Al volver a pedirla y llegar, el fallo de antes no se queda puesto.
+    mount_doc(&rig.server, "list", "l-a", doc(&[("overview", "ya está")], serde_json::json!([]))).await;
+    rig.core.docs().open("l-a").await;
+    let state = rig.core.docs().state();
+    assert_eq!((state.error.as_deref(), state.body()), (None, "ya está"));
+}
+
+/// Una respuesta que llega tarde, de un documento que ya no es el que se
+/// mira, no se pone.
+///
+/// Rotura que atrapa: pulsar dos nodos seguidos y acabar leyendo el texto
+/// del primero bajo el nombre del segundo.
+#[tokio::test]
+async fn a_late_answer_for_another_node_is_dropped() {
+    let rig = loaded_tree(vec![nested_space("a"), nested_space("b")]).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/docs/space/a"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(300))
+                .set_body_json(serde_json::json!({ "success": true, "data": doc(&[("overview", "lo de a")], serde_json::json!([])) })),
+        )
+        .mount(&rig.server)
+        .await;
+    mount_doc(&rig.server, "space", "b", doc(&[("overview", "lo de b")], serde_json::json!([]))).await;
+
+    let slow = {
+        let core = rig.core.clone();
+        tokio::spawn(async move { core.docs().open("a").await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    rig.core.docs().open("b").await;
+    slow.await.unwrap();
+
+    let state = rig.core.docs().state();
+    assert_eq!((state.target.as_ref().unwrap().id.as_str(), state.body()), ("b", "lo de b"));
+}
+
+/// Al abrir la de otro nodo no se queda a la vista la del anterior.
+///
+/// Rotura que atrapa: leer el runbook de un espacio bajo el nombre de otro
+/// mientras llega el suyo (o para siempre, si el suyo falla).
+#[tokio::test]
+async fn another_nodes_docs_are_not_shown_under_this_ones_name() {
+    let rig = loaded_tree(vec![nested_space("a"), nested_space("b")]).await;
+    mount_doc(&rig.server, "space", "a", doc(&[("overview", "lo de a")], serde_json::json!([]))).await;
+    rig.core.docs().open("a").await;
+    rig.core.docs().show_tab("runbook");
+
+    // La de `b` no está montada: falla, y lo de `a` no puede seguir ahí.
+    rig.core.docs().open("b").await;
+
+    let state = rig.core.docs().state();
+    assert_eq!(state.target.as_ref().unwrap().id, "b");
+    assert!(state.tabs.is_empty());
+    assert_eq!(state.tab, "overview", "la pestaña elegida en otro documento no se hereda");
+}
+
+/// Desde las tareas, un espacio o una lista acotan y una carpeta abre su
+/// documentación; con documentación abierta, cualquier nodo abre la suya.
+///
+/// Roturas que atrapa: sacar de la documentación a quien la lee; una carpeta
+/// cuyo clic no hace nada; abrir documentación al acotar.
+#[tokio::test]
+async fn a_click_follows_what_is_being_looked_at() {
+    let rig = loaded_tree(vec![nested_space("a")]).await;
+    mount_doc(&rig.server, "folder", "f-a", doc(&[("overview", "carpeta")], serde_json::json!([]))).await;
+    mount_doc(&rig.server, "list", "l-a", doc(&[("overview", "lista")], serde_json::json!([]))).await;
+    assert_eq!(rig.core.looking(), Looking::Tasks);
+
+    assert_eq!(rig.core.click_node("l-a").await, Some(TreeClick::ScopeTasks { kind: ScopeKind::List }));
+    assert!(rig.core.docs().state().target.is_none(), "acotar abrió documentación");
+
+    assert_eq!(rig.core.click_node("f-a").await, Some(TreeClick::OpenDocs));
+    assert_eq!(rig.core.looking(), Looking::Docs);
+    assert_eq!(rig.core.docs().state().body(), "carpeta");
+
+    // Ya leyendo documentación, la lista abre la suya en vez de acotar.
+    assert_eq!(rig.core.click_node("l-a").await, Some(TreeClick::OpenDocs));
+    assert_eq!(rig.core.docs().state().body(), "lista");
+}
+
+/// El botón de documentación abre la del nodo acotado, sea espacio o lista, y
+/// volver deja en las tareas de ese mismo nodo (command-and-control-372).
+///
+/// Roturas que atrapa: ofrecer la documentación sólo con una lista delante;
+/// volver de la documentación de un nodo a las tareas de otro; que una
+/// carpeta, que no acota, se lleve el ámbito que había.
+#[tokio::test]
+async fn the_docs_button_opens_the_scoped_nodes_docs_and_back_returns_to_its_tasks() {
+    let rig = loaded_tree(vec![nested_space("a"), nested_space("b")]).await;
+    for (kind, id) in [("space", "a"), ("space", "b"), ("folder", "f-b")] {
+        mount_doc(&rig.server, kind, id, doc(&[("overview", id)], serde_json::json!([]))).await;
+    }
+
+    // Sin acotar no hay nodo del que colgar.
+    rig.core.open_scope_docs().await;
+    assert!(rig.core.docs().state().target.is_none());
+
+    rig.core.click_node("a").await;
+    rig.core.open_scope_docs().await;
+    assert_eq!(rig.core.docs().state().body(), "a");
+
+    // Leyendo, se pasa a la de otro espacio, y al volver las tareas son suyas.
+    rig.core.click_node("b").await;
+    rig.core.back_to_tasks();
+    assert!(rig.core.docs().state().target.is_none());
+    assert_eq!(rig.core.my_work().state().scope.unwrap().id, "b");
+
+    rig.core.click_node("f-b").await;
+    rig.core.back_to_tasks();
+    assert_eq!(rig.core.looking(), Looking::Tasks);
+    assert_eq!(rig.core.my_work().state().scope.unwrap().id, "b", "una carpeta no acota");
+}
+
+/// «Mi trabajo» entero quita el ámbito y cierra el documento, y cambiar de
+/// organización también lo cierra.
+///
+/// Roturas que atrapa: pulsar «Mi trabajo» y seguir en un documento; quedarse
+/// leyendo el documento de una organización dentro de otra.
+#[tokio::test]
+async fn showing_all_work_or_switching_organization_closes_the_docs() {
+    let rig = loaded_tree(vec![nested_space("a")]).await;
+    mount_orgs(&rig.server, vec![org("o1", ""), org("o2", "")]).await;
+    mount_tree(&rig.server, "o2", vec![]).await;
+    mount_doc(&rig.server, "space", "a", doc(&[("overview", "a")], serde_json::json!([]))).await;
+    rig.core.orgs().load().await;
+    rig.core.click_node("a").await;
+    rig.core.open_scope_docs().await;
+
+    rig.core.show_all_work();
+    assert!(rig.core.docs().state().target.is_none());
+    assert!(rig.core.my_work().state().scope.is_none());
+
+    rig.core.click_node("a").await;
+    rig.core.open_scope_docs().await;
+    assert!(rig.core.switch_org("o2").await);
+    assert!(rig.core.docs().state().target.is_none(), "el documento de la otra organización sigue abierto");
 }

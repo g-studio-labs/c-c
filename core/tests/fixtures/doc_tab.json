@@ -1,0 +1,19 @@
+{
+  "id": "t1",
+  "createdAt": "2026-06-09T12:00:00Z",
+  "updatedAt": "2026-11-14T20:17:40Z",
+  "docId": "d1",
+  "key": "runbook",
+  "body": "## Desplegar\n\nEl backend antes que la app.",
+  "bodyHash": "abc123",
+  "updatedBy": "u1",
+  "updatedByName": "Ana Pérez",
+  "sections": [
+    {
+      "id": "s1",
+      "heading": "Desplegar",
+      "level": 2,
+      "index": 0
+    }
+  ]
+}

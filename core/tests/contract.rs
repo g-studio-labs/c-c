@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 
 use cac_core::{
-    can_transition, canonical_priority, flow_for, DocMark, Flow, OpenTask, Organization, Session, SpaceTree, TaskDetail,
+    can_transition, canonical_priority, flow_for, DocDecision, DocMark, DocTab, Flow, OpenTask, Organization, Session, SpaceTree, TaskDetail,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -245,6 +245,32 @@ fn a_priority_has_the_name_the_api_speaks() {
 
 /// La marca de un documento se lee entera.
 ///
+/// De una pestaña y de una decisión el core lee lo que hace falta para
+/// leerlas; lo demás es para editarlas, y se nombra aquí campo por campo.
+///
+/// Rotura que atrapa: renombrar en Go el cuerpo, la clave de la pestaña o
+/// quién dejó sin efecto una decisión, y que la pantalla salga vacía o enseñe
+/// como vigente lo que ya no lo es.
+#[test]
+fn a_doc_tab_and_a_decision_are_read_for_reading() {
+    let tab: DocTab =
+        reads_every_field_but(&fixture("doc_tab.json"), &["id", "createdAt", "docId", "bodyHash", "updatedBy", "sections"]);
+    assert_eq!(tab.key, "runbook");
+    assert!(tab.body.starts_with("## Desplegar"));
+    assert_eq!(tab.updated_by_name.as_deref(), Some("Ana Pérez"));
+
+    let decision: DocDecision = reads_every_field_but(
+        &fixture("doc_decision.json"),
+        &[
+            "createdAt", "updatedAt", "docId", "authorId", "origin", "originTaskId", "sourceUrl", "sourceAuthor", "via",
+            "supersedesId", "links",
+        ],
+    );
+    assert_eq!(decision.title, "La interfaz se construye con GPUI Kit");
+    assert_eq!(decision.superseded_by_id.as_deref(), Some("dec2"));
+    assert_eq!(decision.decided_at, "2026-09-30T00:00:00Z");
+}
+
 /// Rotura que atrapa: un campo que el servidor manda y el core no lee (la
 /// línea fijada sobre el tablero, cuántas páginas tiene).
 #[test]

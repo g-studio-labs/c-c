@@ -23,6 +23,8 @@ impl Core {
         if !self.orgs().set_current(org_id) {
             return false;
         }
+        // El documento abierto es de un nodo de la organización que se deja.
+        self.docs().close();
         self.load_current_org().await;
         true
     }

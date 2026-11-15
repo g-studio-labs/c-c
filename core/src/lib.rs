@@ -11,6 +11,7 @@ uniffi::setup_scaffolding!();
 pub mod account;
 pub mod dates;
 pub mod error;
+pub mod docs;
 pub mod events;
 pub mod mywork;
 pub mod nav;
@@ -31,6 +32,7 @@ use std::time::Duration;
 
 pub use account::{check_new_password, check_sign_in, gate, FormCheck, Gate, MIN_PASSWORD};
 pub use dates::{due_day, due_state, today_in, DueState};
+pub use docs::{DocDecision, DocTab, DocTarget, Docs, DocsState, DOC_TABS};
 pub use error::ApiError;
 pub use events::{Listener, NoListener};
 pub use mywork::{
@@ -106,6 +108,7 @@ pub(crate) struct Inner {
     pub(crate) my_work: Mutex<MyWorkState>,
     pub(crate) orgs: Mutex<OrgsState>,
     pub(crate) tree: Mutex<TreeState>,
+    pub(crate) docs: Mutex<DocsState>,
     pub(crate) task: Mutex<TaskState>,
     pub(crate) connection: Mutex<ConnectionState>,
     /// Qué stream de eventos es el vigente: ver `Stream::current`.
@@ -133,6 +136,7 @@ impl Core {
                 my_work: Mutex::new(MyWorkState::default()),
                 orgs: Mutex::new(OrgsState::default()),
                 tree: Mutex::new(TreeState::default()),
+                docs: Mutex::new(DocsState::default()),
                 task: Mutex::new(TaskState::default()),
                 connection: Mutex::new(ConnectionState::default()),
                 stream_turn: std::sync::atomic::AtomicU64::new(0),

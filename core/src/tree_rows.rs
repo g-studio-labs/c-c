@@ -236,7 +236,7 @@ impl Tree {
 }
 
 /// Qué es un nodo y cómo se llama, esté donde esté del árbol.
-fn find_node(spaces: &[SpaceTree], id: &str) -> Option<(NodeKind, String)> {
+pub(crate) fn find_node(spaces: &[SpaceTree], id: &str) -> Option<(NodeKind, String)> {
     fn in_folder(folder: &FolderTree, id: &str) -> Option<(NodeKind, String)> {
         if folder.id == id {
             return Some((NodeKind::Folder, folder.name.clone()));

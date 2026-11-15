@@ -3,6 +3,7 @@
 //! El core no sabe qué pinta: avisa por este trait, y cada plataforma lo
 //! convierte en lo suyo (un evento de Tauri, un `StateFlow`, un `@Published`).
 
+use crate::docs::DocsState;
 use crate::mywork::MyWorkState;
 use crate::orgs::OrgsState;
 use crate::tree::TreeState;
@@ -25,6 +26,10 @@ pub trait Listener: Send + Sync {
 
     /// Llegó el árbol de espacios, o se vació al cambiar de organización.
     fn tree_changed(&self, _state: TreeState) {}
+
+    /// La documentación abierta cambió: se abrió, llegó, se cambió de
+    /// pestaña o se cerró.
+    fn docs_changed(&self, _state: DocsState) {}
 
     /// La tarea abierta cambió: se abrió, llegó, se editó o se cerró.
     fn task_changed(&self, _state: TaskState) {}
