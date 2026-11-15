@@ -137,6 +137,8 @@ impl Core {
     fn forget(&self) {
         self.inner.storage.remove(STORAGE_KEY);
         *self.inner.held.lock().expect("held lock") = None;
+        // Sin sesión no hay stream: el que hubiera se retira en su próximo turno.
+        self.stream().stop();
         self.inner.listener.session_changed(None);
     }
 
@@ -295,7 +297,7 @@ impl Core {
     /// `stale` es el token con el que falló quien llama. Si al conseguir el
     /// turno el de la mano ya es otro, alguien renovó mientras esperábamos y
     /// ése es el que vale: pedir otro gastaría un refresh que ya está rotado.
-    async fn refresh(&self, stale: Option<String>) -> Option<String> {
+    pub(crate) async fn refresh(&self, stale: Option<String>) -> Option<String> {
         let _turn = self.inner.refreshing.lock().await;
 
         let held = self.held()?;

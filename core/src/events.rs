@@ -7,6 +7,7 @@ use crate::mywork::MyWorkState;
 use crate::orgs::OrgsState;
 use crate::tree::TreeState;
 use crate::session::Session;
+use crate::stream::{ConnectionState, ServerEvent};
 use crate::task::TaskState;
 
 pub trait Listener: Send + Sync {
@@ -27,6 +28,14 @@ pub trait Listener: Send + Sync {
 
     /// La tarea abierta cambió: se abrió, llegó, se editó o se cerró.
     fn task_changed(&self, _state: TaskState) {}
+
+    /// La conexión con el servidor cambió: para el aviso de «sin conexión».
+    fn connection_changed(&self, _state: ConnectionState) {}
+
+    /// Llegó un evento del servidor. Los de tarea ya pusieron al día «Mi
+    /// trabajo» y la tarea abierta; llegan aquí igualmente, con todos los
+    /// demás, para lo que es de cada plataforma (un aviso, un sonido).
+    fn server_event(&self, _event: ServerEvent) {}
 }
 
 /// Para quien no necesita enterarse (el MCP, una prueba).

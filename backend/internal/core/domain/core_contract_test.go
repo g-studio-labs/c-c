@@ -101,6 +101,10 @@ func TestTheCoreReadsWhatTheServerWrites(t *testing.T) {
 			Lists:  []ListSummary{{ID: "l0", Name: "sueltas", OpenCount: 1, ProjectID: "p3", TaskCount: 2}},
 			People: []SpacePerson{{UserID: "u1", Username: "ana", Name: "Ana Pérez"}},
 		},
+		"doc_mark.json": DocMark{
+			Written: true, PinnedLine: "Desplegar: backend antes que app", Stale: true,
+			MaintainerID: "u1", MaintainerName: "Ana Pérez", ReviewedAt: &day, Pages: 3,
+		},
 		"task_detail.json":    fullTaskDetail(day),
 		"state_machines.json": stateMachines(),
 	}

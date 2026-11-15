@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use cac_core::{Config, Core, Listener, OrgsState, Session, Storage, TreeState};
+use cac_core::{doc_key, Config, Core, Listener, NodeKind, OrgsState, Session, Storage, TreeState};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -256,4 +256,82 @@ async fn reloading_the_same_organization_keeps_the_tree_meanwhile() {
     let seen = rig.recorder.trees.lock().unwrap();
     assert!(seen[2].loading);
     assert_eq!(seen[2].spaces.len(), 1);
+}
+
+async fn mount_tree(server: &MockServer, org: &str, spaces: Vec<serde_json::Value>) {
+    Mock::given(method("GET"))
+        .and(path("/api/v1/task-spaces/"))
+        .and(query_param("orgId", org))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": spaces })))
+        .mount(server)
+        .await;
+}
+
+async fn mount_doc_marks(server: &MockServer, org: &str, marks: serde_json::Value) {
+    Mock::given(method("GET"))
+        .and(path("/api/v1/docs/"))
+        .and(query_param("orgId", org))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": marks })))
+        .mount(server)
+        .await;
+}
+
+/// El árbol sabe qué nodos tienen documentación escrita, cada uno por su clase.
+///
+/// Roturas que atrapa: marcar la lista con la marca de un espacio del mismo
+/// id (la clave lleva la clase); dar por escrito un documento que el servidor
+/// dice que no lo está.
+#[tokio::test]
+async fn the_tree_knows_which_nodes_have_docs() {
+    let rig = rig().await;
+    mount_tree(&rig.server, "o1", vec![space("s1", None)]).await;
+    mount_doc_marks(
+        &rig.server,
+        "o1",
+        serde_json::json!({ "list:n1": { "written": true, "pages": 2 }, "space:n2": { "written": false } }),
+    )
+    .await;
+    rig.core.tree().load("o1").await;
+
+    rig.core.tree().load_doc_marks("o1").await;
+
+    let state = rig.core.tree().state();
+    assert_eq!(doc_key(NodeKind::Folder, "x"), "folder:x");
+    assert_eq!(state.written_doc(NodeKind::List, "n1").and_then(|mark| mark.pages), Some(2));
+    assert!(state.written_doc(NodeKind::Space, "n1").is_none(), "la marca es de la lista, no del espacio");
+    assert!(state.written_doc(NodeKind::Space, "n2").is_none(), "está, pero sin nada escrito");
+}
+
+/// Las marcas son de una organización: al cambiar se quitan, las de una que
+/// ya no se mira no se ponen, y si la petición falla se queda lo que había.
+///
+/// Roturas que atrapa: enseñar las marcas de la organización anterior sobre
+/// el árbol de la nueva; que una respuesta tardía de la anterior pise a la
+/// nueva; perder las marcas por un fallo pasajero de red.
+#[tokio::test]
+async fn doc_marks_belong_to_the_organization_on_screen() {
+    let rig = rig().await;
+    mount_tree(&rig.server, "o1", vec![space("s1", None)]).await;
+    mount_tree(&rig.server, "o2", vec![space("s2", None)]).await;
+    let marks = serde_json::json!({ "list:n1": { "written": true } });
+    // Contesta una vez; la segunda petición ya no encuentra a nadie (404).
+    Mock::given(method("GET"))
+        .and(path("/api/v1/docs/"))
+        .and(query_param("orgId", "o1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": marks })))
+        .up_to_n_times(1)
+        .mount(&rig.server)
+        .await;
+    rig.core.tree().load("o1").await;
+    rig.core.tree().load_doc_marks("o1").await;
+
+    rig.core.tree().load_doc_marks("o1").await;
+    assert_eq!(rig.core.tree().state().doc_marks.len(), 1, "un fallo deja lo que había");
+
+    rig.core.tree().load("o2").await;
+    assert!(rig.core.tree().state().doc_marks.is_empty(), "al cambiar de organización");
+
+    mount_doc_marks(&rig.server, "o1", marks).await;
+    rig.core.tree().load_doc_marks("o1").await;
+    assert!(rig.core.tree().state().doc_marks.is_empty(), "la respuesta de la anterior no se pone");
 }

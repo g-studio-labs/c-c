@@ -3,8 +3,11 @@
 //! Vino de `fetchTree` en `app/src/store/tasks.store.ts` y de los tipos de
 //! `app/src/types/task.ts`.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
+use crate::nav::NodeKind;
 use crate::Core;
 
 /// Una lista de tareas, con sus cuentas. Espejo de `domain.ListSummary`.
@@ -82,6 +85,42 @@ impl SpaceTree {
     }
 }
 
+/// Lo que se sabe del documento de un nodo sin cargarlo. Espejo de
+/// `domain.DocMark`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct DocMark {
+    /// Si hay algo escrito. Una portada vacía con páginas debajo **está**
+    /// escrita: lo decide el servidor.
+    #[serde(default)]
+    pub written: bool,
+    /// La línea que el documento fija sobre el tablero de su lista.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_line: Option<String>,
+    /// Lleva demasiado sin que nadie lo confirme.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintainer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintainer_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages: Option<i64>,
+}
+
+/// Con qué clave nombra el servidor el documento de un nodo: `list:<id>`.
+pub fn doc_key(kind: NodeKind, id: &str) -> String {
+    let kind = match kind {
+        NodeKind::Space => "space",
+        NodeKind::Folder => "folder",
+        NodeKind::List => "list",
+    };
+    format!("{kind}:{id}")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
@@ -92,6 +131,16 @@ pub struct TreeState {
     pub org_id: Option<String>,
     pub loading: bool,
     pub error: Option<String>,
+    /// Qué nodos tienen documento, por su clave (`doc_key`).
+    #[serde(default)]
+    pub doc_marks: HashMap<String, DocMark>,
+}
+
+impl TreeState {
+    /// La marca del documento de un nodo, si tiene algo escrito.
+    pub fn written_doc(&self, kind: NodeKind, id: &str) -> Option<&DocMark> {
+        self.doc_marks.get(&doc_key(kind, id)).filter(|mark| mark.written)
+    }
 }
 
 /// El árbol de este core.
@@ -126,6 +175,7 @@ impl Tree {
             // un clic en una acotaría «Mi trabajo» a algo de otra organización.
             if state.org_id.as_deref() != Some(org_id) {
                 state.spaces = Vec::new();
+                state.doc_marks = HashMap::new();
             }
             state.org_id = Some(org_id.to_string());
             state.loading = true;
@@ -142,5 +192,21 @@ impl Tree {
                 state.loading = false;
             }),
         }
+    }
+
+    /// Trae qué nodos tienen documento.
+    ///
+    /// La marca es un adorno: si falla, el árbol sigue como estaba y sin
+    /// error a la vista. Y la respuesta de una organización que ya no es la
+    /// que se mira no se pone.
+    pub async fn load_doc_marks(&self, org_id: &str) {
+        let path = format!("/api/v1/docs/?orgId={org_id}");
+        let Ok(marks) = self.core.get::<HashMap<String, DocMark>>(&path).await else {
+            return;
+        };
+        if self.state().org_id.as_deref() != Some(org_id) {
+            return;
+        }
+        self.update(|state| state.doc_marks = marks);
     }
 }

@@ -16,6 +16,7 @@ pub mod nav;
 pub mod orgs;
 pub mod session;
 pub mod storage;
+pub mod stream;
 pub mod task;
 pub mod transport;
 pub mod tree;
@@ -30,8 +31,9 @@ pub use mywork::{MyWork, MyWorkState, OpenTask, ScopeKind, TaskFilter, WorkLens,
 pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClick};
 pub use orgs::{Organization, Orgs, OrgsState};
 pub use session::Session;
-pub use tree::{FolderTree, ListSummary, SpacePerson, SpaceTree, Tree, TreeState};
+pub use tree::{doc_key, DocMark, FolderTree, ListSummary, SpacePerson, SpaceTree, Tree, TreeState};
 pub use storage::{FileStorage, Storage};
+pub use stream::{backoff, parse_frame, Connection, ConnectionState, FrameBuffer, ServerEvent, Stream};
 pub use task::{
     can_transition, canonical_priority, canonical_status, due_instant, flow_for, new_task_body, patch_body,
     CommentAuthor, DecisionRef, DueChange, Flow, GitSummary, NewTask, ReleaseRef, StatusOption, Task,
@@ -50,6 +52,12 @@ pub struct Config {
     pub client: Option<String>,
     /// El plazo de cada petición.
     pub request_timeout: Duration,
+    /// Cuánto silencio aguanta el stream de eventos antes de darlo por
+    /// muerto. El servidor manda un ping cada 25 s: dos sin llegar.
+    pub stream_silence: Duration,
+    /// La primera espera antes de reintentar el stream; crece hasta treinta
+    /// veces esto.
+    pub stream_backoff: Duration,
 }
 
 impl Config {
@@ -58,6 +66,8 @@ impl Config {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             client: None,
             request_timeout: Duration::from_secs(12),
+            stream_silence: Duration::from_secs(60),
+            stream_backoff: Duration::from_secs(1),
         }
     }
 }
@@ -81,6 +91,9 @@ pub(crate) struct Inner {
     pub(crate) orgs: Mutex<OrgsState>,
     pub(crate) tree: Mutex<TreeState>,
     pub(crate) task: Mutex<TaskState>,
+    pub(crate) connection: Mutex<ConnectionState>,
+    /// Qué stream de eventos es el vigente: ver `Stream::current`.
+    pub(crate) stream_turn: std::sync::atomic::AtomicU64,
     /// Cuántas recargas de «Mi trabajo» se han pedido: la que espera su
     /// respiro sólo carga si sigue siendo la última.
     pub(crate) my_work_reloads: std::sync::atomic::AtomicU64,
@@ -105,6 +118,8 @@ impl Core {
                 orgs: Mutex::new(OrgsState::default()),
                 tree: Mutex::new(TreeState::default()),
                 task: Mutex::new(TaskState::default()),
+                connection: Mutex::new(ConnectionState::default()),
+                stream_turn: std::sync::atomic::AtomicU64::new(0),
                 my_work_reloads: std::sync::atomic::AtomicU64::new(0),
             }),
         };

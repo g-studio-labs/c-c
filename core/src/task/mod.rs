@@ -304,6 +304,13 @@ impl Tasks {
         }
     }
 
+    /// Esa tarea se borró. Si es la abierta, se cierra: no hay nada que leer.
+    pub fn task_deleted(&self, task_id: &str) {
+        if self.is_open(task_id) {
+            self.close();
+        }
+    }
+
     /// Avisa a «Mi trabajo» de que esta tarea cambió, para que su fila no se
     /// quede con lo de antes.
     fn tell_my_work(&self, task_id: &str, new: bool) {

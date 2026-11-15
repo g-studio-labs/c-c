@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 
 use cac_core::{
-    can_transition, canonical_priority, flow_for, Flow, OpenTask, Organization, Session, SpaceTree, TaskDetail,
+    can_transition, canonical_priority, flow_for, DocMark, Flow, OpenTask, Organization, Session, SpaceTree, TaskDetail,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -241,4 +241,15 @@ fn a_priority_has_the_name_the_api_speaks() {
         assert_eq!(canonical_priority(&name.stored), name.wire);
         assert_eq!(canonical_priority(&name.wire), name.wire);
     }
+}
+
+/// La marca de un documento se lee entera.
+///
+/// Rotura que atrapa: un campo que el servidor manda y el core no lee (la
+/// línea fijada sobre el tablero, cuántas páginas tiene).
+#[test]
+fn a_doc_mark_is_read_whole() {
+    let mark: DocMark = reads_every_field(&fixture("doc_mark.json"));
+    assert!(mark.written);
+    assert_eq!(mark.pages, Some(3));
 }
