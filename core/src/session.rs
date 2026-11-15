@@ -102,13 +102,23 @@ fn unwrap_data<T: for<'de> Deserialize<'de>>(reply: &Reply) -> Result<T, ApiErro
             return Ok(data);
         }
     }
-    // Un cuerpo de error puede no encajar en `T`: se vuelve a leer sin tipo.
+    Err(server_error(reply))
+}
+
+/// El error que cuenta una respuesta, con su etiqueta y su frase.
+pub(crate) fn server_error(reply: &Reply) -> ApiError {
+    // Un cuerpo de error puede no encajar en ningún tipo: se lee sin él.
     let loose = serde_json::from_str::<Envelope<serde_json::Value>>(&reply.body).ok();
     let code = loose.as_ref().and_then(|e| e.error.clone()).unwrap_or_default();
     let message = loose
         .and_then(|e| e.message)
         .unwrap_or_else(|| if code.is_empty() { "Request failed".into() } else { code.clone() });
-    Err(ApiError::Server { status: reply.status, code, message })
+    ApiError::Server { status: reply.status, code, message }
+}
+
+/// El `data` de una respuesta buena que puede no traerlo.
+pub(crate) fn data_or_default<T: for<'de> Deserialize<'de> + Default>(reply: &Reply) -> T {
+    serde_json::from_str::<Envelope<T>>(&reply.body).ok().and_then(|envelope| envelope.data).unwrap_or_default()
 }
 
 impl Core {
@@ -343,10 +353,23 @@ impl Core {
         body: Option<String>,
         bearer: Option<&str>,
     ) -> Result<Reply, ApiError> {
+        self.send_with(method, path, body, bearer, &[]).await
+    }
+
+    /// Lo mismo, con cabeceras de más (el idioma de un correo).
+    pub(crate) async fn send_with(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<String>,
+        bearer: Option<&str>,
+        extra: &[(&str, &str)],
+    ) -> Result<Reply, ApiError> {
         let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
         if let Some(token) = bearer {
             headers.push(("Authorization".to_string(), format!("Bearer {token}")));
         }
+        headers.extend(extra.iter().map(|(name, value)| (name.to_string(), value.to_string())));
         let request = Request {
             method: method.to_string(),
             url: format!("{}{}", self.inner.config.base_url, path),

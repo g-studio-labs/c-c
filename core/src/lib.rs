@@ -8,6 +8,7 @@
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();
 
+pub mod account;
 pub mod dates;
 pub mod error;
 pub mod events;
@@ -18,12 +19,14 @@ pub mod session;
 pub mod storage;
 pub mod stream;
 pub mod task;
+pub mod texts;
 pub mod transport;
 pub mod tree;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+pub use account::{check_new_password, check_sign_in, FormCheck, MIN_PASSWORD};
 pub use dates::{due_day, due_state, today_in, DueState};
 pub use error::ApiError;
 pub use events::{Listener, NoListener};
@@ -40,6 +43,7 @@ pub use task::{
     TaskAttachment, TaskBlocker, TaskCard, TaskComment, TaskDetail, TaskGitLink, TaskGitLinks, TaskPatch,
     TaskState, TaskStatus, TaskTag, Tasks, UserSummary,
 };
+pub use texts::{error_phrase, pick_locale, text, text_with, Locale};
 pub use transport::Reply;
 
 /// Con qué servidor habla el core y cómo se presenta.
