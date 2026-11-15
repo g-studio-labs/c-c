@@ -13,6 +13,22 @@ tablero: **App** `ca0bfd49-0909-43eb-8135-bc8ecd0f282c` y **Backend**
 
 ## 🟢 Al día
 
+**15-nov, cac de escritorio nativo en GPUI** (command-and-control-373), en la
+misma rama del core. Desde el 14-nov todo el trabajo va a esta app y la de
+Tauri queda congelada: lo que se le vea se anota como requisito, no se arregla.
+Vive en `desktop/` (`cac-desktop`, GPUI Kit 0.9.1 fijado) y no decide nada:
+toda regla va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
+- **Hecho, en la rama:** la viabilidad (374: pinta en bspwm, acentos, lista
+  virtual, compila en los tres sistemas); el core con organizaciones, árbol,
+  detalle de tarea, stream de eventos y textos (375); y la carcasa (376):
+  entrar, «olvidé mi contraseña», cambio obligado, y dentro el riel, la
+  organización, el árbol que acota «Mi trabajo», el aviso de corte y salir.
+- **Falta:** de la carcasa, el menú de cuenta (tema e idioma), las fuentes y
+  el filtro del panel; después la lista (377), el detalle (378), tablero y
+  calendario (379) y los instaladores (380). La vista central es un marcador.
+- **Cómo se mira:** `cd desktop && cargo run --release`. Su sesión va aparte
+  de la de Tauri (`~/.local/share/cac-desktop`): se entra una vez en cada una.
+
 **14-nov, empieza el core en Rust compartido** (command-and-control-366), en
 la rama `command-and-control-366-rust-core`, que no se fusiona hasta tener la
 base, la sesión y «Mi trabajo». La lógica del cliente se muda por rebanadas a
