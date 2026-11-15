@@ -341,7 +341,9 @@ impl Tasks {
         let task_id = self.open_id()?;
         let option = self.state().statuses.into_iter().find(|option| option.status.id == status_id);
         if matches!(option, Some(StatusOption { allowed: false, .. })) {
-            return Err(refused("transition-not-allowed", "This status change is not allowed"));
+            // Con el código con que lo diría el servidor: es el mismo
+            // rechazo, y así quien lo lee encuentra la misma frase.
+            return Err(refused("bad-transition", "This status change is not allowed"));
         }
         self.move_to(&task_id, status_id).await?;
         self.refresh().await;

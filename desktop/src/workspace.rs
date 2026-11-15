@@ -30,7 +30,7 @@ const INDENT: f32 = 14.;
 pub struct Workspace {
     pub(crate) my_work: Entity<MyWorkView>,
     docs: Entity<DocsView>,
-    task: Entity<TaskView>,
+    pub(crate) task: Entity<TaskView>,
 }
 
 impl Workspace {

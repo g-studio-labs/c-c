@@ -5,16 +5,17 @@
 //! Aquí está qué pestaña del hilo se mira, que es lo único propio, y la
 //! pintura. Editar llega después.
 
-use cac_core::{DueState, SheetComment, SheetSubtask, TaskSheet};
+use cac_core::{DueState, SheetComment, SheetSubtask, StatusOption, TaskSheet};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
-use crate::lang::{locale, tr};
+use crate::lang::{error_text, locale, tr};
 
 /// El ancho del panel: el del cajón de la app de siempre.
 pub const TASK_PANEL_WIDTH: f32 = 520.;
@@ -31,11 +32,14 @@ pub struct TaskView {
     /// De qué tarea es la pestaña elegida: al abrir otra se vuelve a la
     /// conversación, que es donde se le habla a quien la abre.
     thread_of: Option<String>,
+    /// Lo último que no se pudo guardar, dicho, y de qué tarea: no hay otro
+    /// sitio donde enseñarlo, y callarlo deja un botón que parece no hacer nada.
+    problem: Option<(String, String)>,
 }
 
 impl TaskView {
     pub fn new() -> Self {
-        Self { thread: Thread::Talk, thread_of: None }
+        Self { thread: Thread::Talk, thread_of: None, problem: None }
     }
 
     fn show_thread(&mut self, thread: Thread, task_id: String, cx: &mut Context<Self>) {
@@ -44,12 +48,32 @@ impl TaskView {
         cx.notify();
     }
 
+    /// Mueve la tarea abierta a otra columna. Si se puede lo decide el core
+    /// (y el servidor); aquí sólo se enseña lo que conteste.
+    pub(crate) fn move_to(&mut self, status_id: String, cx: &mut Context<Self>) {
+        let Some(task_id) = Backend::snapshot(cx).read(cx).task.task_id.clone() else { return };
+        self.problem = None;
+        cx.notify();
+        let answer = Backend::ask(cx, move |core| async move { core.tasks().set_status(&status_id).await });
+        cx.spawn(async move |this, cx| {
+            let Ok(Err(error)) = answer.await else { return };
+            this.update(cx, |this, cx| {
+                this.problem = Some((task_id, error_text(cx, &error, "work:task.errMoveList")));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn section(&self, title: String, cx: &mut Context<Self>) -> Div {
         let muted = cx.theme().muted_foreground;
         div().text_xs().font_weight(FontWeight::MEDIUM).text_color(muted).child(title.to_uppercase())
     }
 
-    fn render_chips(&self, sheet: &TaskSheet, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_chips(&self, sheet: &TaskSheet, statuses: Vec<StatusOption>, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity().downgrade();
+        let current = sheet.status_name.clone();
         let theme = cx.theme();
         let (muted, danger, warning, info, accent) = (theme.muted_foreground, theme.danger, theme.warning, theme.info, theme.accent);
         let chip = |tone: Hsla, label: String| div().flex_none().px_2().rounded_md().bg(tone.opacity(0.15)).text_xs().text_color(tone).child(label);
@@ -79,18 +103,37 @@ impl TaskView {
             .gap_2()
             .child(
                 div()
-                    .id("task-status")
-                    .test_support()
                     .flex()
                     .flex_none()
                     .items_center()
                     .gap_1()
-                    .px_2()
+                    .pl_2()
                     .rounded_md()
                     .bg(accent)
-                    .text_xs()
                     .child(div().size(px(8.)).rounded_full().bg(status_tone))
-                    .child(sheet.status_name.clone()),
+                    // Las columnas de su lista; la que su máquina no deja
+                    // sale apagada en vez de ser un botón que contesta 409.
+                    .child(
+                        Button::new("task-status")
+                            .ghost()
+                            .xsmall()
+                            .label(sheet.status_name.clone())
+                            .dropdown_caret(!statuses.is_empty())
+                            .dropdown_menu(move |mut menu, _, _| {
+                                for option in statuses.clone() {
+                                    let (view, id) = (view.clone(), option.status.id.clone());
+                                    menu = menu.item(
+                                        PopupMenuItem::new(option.status.name.clone())
+                                            .checked(option.status.name == current)
+                                            .disabled(!option.allowed)
+                                            .on_click(move |_, _, cx| {
+                                                let _ = view.update(cx, |this, cx| this.move_to(id.clone(), cx));
+                                            }),
+                                    );
+                                }
+                                menu
+                            }),
+                    ),
             )
             .children(priority)
             .children(due)
@@ -175,8 +218,10 @@ impl TaskView {
             .into_any_element()
     }
 
-    fn render_sheet(&mut self, sheet: TaskSheet, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sheet(&mut self, sheet: TaskSheet, statuses: Vec<StatusOption>, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let danger = theme.danger;
+        let problem = self.problem.as_ref().filter(|(task_id, _)| *task_id == sheet.id).map(|(_, phrase)| phrase.clone());
         let (muted, border, primary, foreground, card, radius) =
             (theme.muted_foreground, theme.border, theme.primary, theme.foreground, theme.group_box, theme.radius);
         // La pestaña elegida era de otra tarea: en ésta se empieza por la conversación.
@@ -204,7 +249,8 @@ impl TaskView {
                     .child(div().text_xs().text_color(muted).child(sheet.place.clone()))
                     .children(sheet.parent.clone().map(|parent| div().text_xs().text_color(muted).child(format!("› {parent}")))),
             )
-            .child(self.render_chips(&sheet, cx))
+            .child(self.render_chips(&sheet, statuses, cx))
+            .children(problem.map(|phrase| div().id("task-problem").test_support().text_sm().text_color(danger).child(phrase)))
             .children(sheet.handoff.clone().map(|handoff| {
                 let by = sheet.handoff_by.clone().map(|by| format!(" · {by}")).unwrap_or_default();
                 div()
@@ -335,7 +381,7 @@ impl Render for TaskView {
                     .overflow_y_scroll()
                     .p_4()
                     .children(waiting.map(|phrase| div().id("task-waiting").test_support().text_sm().text_color(muted).child(phrase)))
-                    .children(sheet.map(|sheet| self.render_sheet(sheet, cx))),
+                    .children(sheet.map(|sheet| self.render_sheet(sheet, state.statuses.clone(), cx))),
             )
     }
 }
@@ -343,11 +389,12 @@ impl Render for TaskView {
 #[cfg(test)]
 mod tests {
     // Sin `use super::*`: ver la nota en `shell.rs`.
+    use super::TaskView;
     use crate::backend::Backend;
     use crate::testing::{contract_task, ok, server_with_tasks, sign_in, wait_until, FakeServer};
     use crate::workspace::Workspace;
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{px, size, AnyWindowHandle, AppContext, Bounds, Point, TestAppContext, WindowBounds, WindowOptions};
+    use gpui_kit::{px, size, AnyWindowHandle, AppContext, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowOptions};
     use serde_json::json;
     use wiremock::matchers::{method, path, path_regex};
     use wiremock::Mock;
@@ -389,6 +436,10 @@ mod tests {
     }
 
     fn open(server: &FakeServer, cx: &mut TestAppContext) -> AnyWindowHandle {
+        open_with_view(server, cx).0
+    }
+
+    fn open_with_view(server: &FakeServer, cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<TaskView>) {
         server.install(cx);
         sign_in(cx);
         cx.update(|cx| {
@@ -401,7 +452,9 @@ mod tests {
                 })),
                 ..WindowOptions::default()
             };
-            gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx))).expect("open test window").0
+            let (window, workspace) =
+                gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx))).expect("open test window");
+            (window, workspace.read(cx).task.clone())
         })
     }
 
@@ -412,6 +465,24 @@ mod tests {
             window.try_find(id).is_some()
         })
         .unwrap()
+    }
+
+    /// Abre la primera tarea y espera a que estén su detalle y sus columnas.
+    fn open_first_task(window: AnyWindowHandle, cx: &mut TestAppContext) {
+        wait_until(cx, "las tareas llegan", |cx| on_screen(window, "work-row-t1", cx));
+        click(window, "work-row-t1", cx);
+        wait_until(cx, "llegan el detalle y sus columnas", |cx| {
+            cx.update(|cx| !Backend::snapshot(cx).read(cx).task.statuses.is_empty()) && on_screen(window, "task-title", cx)
+        });
+    }
+
+    fn moves(server: &FakeServer) -> Vec<String> {
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.url.path() == "/api/v1/tasks/t1/move")
+            .map(|request| String::from_utf8_lossy(&request.body).to_string())
+            .collect()
     }
 
     fn click(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) {
@@ -451,6 +522,81 @@ mod tests {
 
         click(window, "task-close", cx);
         wait_until(cx, "se cierra", |cx| !on_screen(window, "task-panel", cx));
+        stop(cx);
+    }
+
+    /// Elegir una columna le pide al servidor mover la tarea a ésa.
+    ///
+    /// Roturas que atrapa: un desplegable que no manda nada; mandar otra
+    /// columna; decir que falló cuando salió bien.
+    #[gpui_kit::test]
+    fn choosing_a_column_asks_the_server_to_move_the_task(cx: &mut TestAppContext) {
+        let server = server();
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/tasks/t1/move")).respond_with(ok(json!(null))));
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        assert!(moves(&server).is_empty());
+
+        cx.update(|cx| view.update(cx, |view, cx| view.move_to("s1".into(), cx)));
+        wait_until(cx, "llega la petición de mover", |_| !moves(&server).is_empty());
+
+        assert!(moves(&server)[0].contains("\"statusId\":\"s1\""), "mandó {:?}", moves(&server));
+        cx.run_until_parked();
+        assert!(!on_screen(window, "task-problem", cx));
+        stop(cx);
+    }
+
+    /// Un cambio de estado que el servidor rechaza se dice en el cajón, con
+    /// su frase.
+    ///
+    /// Rotura que atrapa: un desplegable que parece no hacer nada cuando el
+    /// cambio no se guardó.
+    #[gpui_kit::test]
+    fn a_move_that_fails_is_said_in_the_drawer(cx: &mut TestAppContext) {
+        let server = server();
+        // La primera vez lo rechaza; la segunda lo acepta.
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path("/api/v1/tasks/t1/move"))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(409)
+                        .set_body_json(json!({ "success": false, "message": "no", "error": "bad-transition" })),
+                )
+                .up_to_n_times(1),
+        );
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/tasks/t1/move")).respond_with(ok(json!(null))));
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        assert!(!on_screen(window, "task-problem", cx));
+
+        cx.update(|cx| view.update(cx, |view, cx| view.move_to("s1".into(), cx)));
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+
+        // Al volver a intentarlo y salir bien, el aviso de antes se quita.
+        cx.update(|cx| view.update(cx, |view, cx| view.move_to("s1".into(), cx)));
+        wait_until(cx, "el segundo intento sale bien", |cx| moves(&server).len() == 2 && !on_screen(window, "task-problem", cx));
+        stop(cx);
+    }
+
+    /// Lo que no se pudo guardar en una tarea no se dice sobre otra.
+    ///
+    /// Rotura que atrapa: abrir una tarea y leer el fallo de la anterior.
+    #[gpui_kit::test]
+    fn a_failure_is_not_said_over_another_task(cx: &mut TestAppContext) {
+        let server = server();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t2")).respond_with(ok(detail("t2"))));
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        // Sin ruta de mover montada: el servidor contesta 404.
+        cx.update(|cx| view.update(cx, |view, cx| view.move_to("s1".into(), cx)));
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+
+        click(window, "work-row-t2", cx);
+        wait_until(cx, "llega la otra", |cx| {
+            cx.update(|cx| Backend::snapshot(cx).read(cx).task.detail.as_ref().is_some_and(|detail| detail.task.id == "t2"))
+        });
+
+        assert!(!on_screen(window, "task-problem", cx));
         stop(cx);
     }
 

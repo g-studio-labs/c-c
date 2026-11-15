@@ -185,7 +185,9 @@ async fn a_move_the_machine_forbids_is_never_sent() {
 
     let answer = rig.core.tasks().set_status("s-resolved").await;
 
-    assert!(answer.is_err());
+    // Dicho como lo diría el servidor, para que se lea la misma frase.
+    let phrase = cac_core::error_phrase(cac_core::Locale::Es, &answer.unwrap_err(), None);
+    assert_eq!(phrase, "Ese estado no puede ir detrás de éste.");
     assert!(requests_to(&rig.server, "POST", "/move").await.is_empty());
 }
 
