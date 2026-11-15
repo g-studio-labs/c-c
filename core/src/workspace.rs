@@ -1,0 +1,45 @@
+//! Entrar a trabajar: lo que hay que traer cuando alguien está dentro, y al
+//! cambiar de organización.
+//!
+//! Estaba repartido por los `useEffect` de la app de Tauri (`AppLayout.tsx`,
+//! `useNavData.ts`, cada store). Aquí es un solo sitio, para que una app
+//! nueva no tenga que redescubrir el orden.
+
+use crate::Core;
+
+impl Core {
+    /// Al entrar, o al arrancar con sesión: abre el stream de eventos, trae
+    /// las organizaciones y lo de la que se mira.
+    pub async fn open_workspace(&self) {
+        // El stream primero: lo que cambie mientras llega lo demás ya se oye.
+        self.stream().start();
+        self.orgs().load().await;
+        self.load_current_org().await;
+    }
+
+    /// Cambia de organización y trae lo suyo. Una que no es de esta persona
+    /// no se acepta, y entonces no se pide nada.
+    pub async fn switch_org(&self, org_id: &str) -> bool {
+        if !self.orgs().set_current(org_id) {
+            return false;
+        }
+        self.load_current_org().await;
+        true
+    }
+
+    /// El árbol, sus marcas de documentación y «Mi trabajo» de la
+    /// organización que se mira, a la vez.
+    async fn load_current_org(&self) {
+        let Some(org_id) = self.orgs().state().current_org_id else { return };
+        // «Mi trabajo» en su propia tarea, para que no espere al árbol.
+        let my_work = {
+            let (core, org_id) = (self.clone(), org_id.clone());
+            tokio::spawn(async move { core.my_work().load(Some(org_id)).await })
+        };
+        // Las marcas después del árbol: son de él, y `load` las vacía al
+        // cambiar de organización.
+        self.tree().load(&org_id).await;
+        self.tree().load_doc_marks(&org_id).await;
+        let _ = my_work.await;
+    }
+}

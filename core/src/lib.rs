@@ -22,6 +22,8 @@ pub mod task;
 pub mod texts;
 pub mod transport;
 pub mod tree;
+pub mod tree_rows;
+pub mod workspace;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -35,6 +37,7 @@ pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClic
 pub use orgs::{Organization, Orgs, OrgsState};
 pub use session::Session;
 pub use tree::{doc_key, DocMark, FolderTree, ListSummary, SpacePerson, SpaceTree, Tree, TreeState};
+pub use tree_rows::{tree_rows, TreeRow};
 pub use storage::{FileStorage, Storage};
 pub use stream::{backoff, parse_frame, Connection, ConnectionState, FrameBuffer, ServerEvent, Stream};
 pub use task::{

@@ -4,7 +4,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use cac_core::{doc_key, Config, Core, Listener, NodeKind, OrgsState, Session, Storage, TreeState};
+use cac_core::{
+    doc_key, Config, Connection, Core, Listener, Looking, NodeKind, OrgsState, ScopeKind, Session, Storage, TreeClick, TreeRow,
+    TreeState,
+};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -334,4 +337,290 @@ async fn doc_marks_belong_to_the_organization_on_screen() {
     mount_doc_marks(&rig.server, "o1", marks).await;
     rig.core.tree().load_doc_marks("o1").await;
     assert!(rig.core.tree().state().doc_marks.is_empty(), "la respuesta de la anterior no se pone");
+}
+
+// ── El árbol tal como se pinta ──────────────────────────────────────────
+
+/// Un espacio con una carpeta dentro (que tiene una lista y otra carpeta con
+/// su lista) y una lista suelta que es el canal de un cliente.
+fn nested_space(id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id, "orgId": "o1", "name": format!("Espacio {id}"), "color": "#20D9E8",
+        "folders": [{
+            "id": format!("f-{id}"), "name": "Carpeta",
+            "folders": [{
+                "id": format!("ff-{id}"), "name": "Dentro", "folders": [],
+                "lists": [{ "id": format!("deep-{id}"), "name": "Honda", "openCount": 4, "taskCount": 4 }],
+            }],
+            "lists": [{ "id": format!("in-{id}"), "name": "En carpeta", "openCount": 2, "taskCount": 5 }],
+        }],
+        "lists": [{ "id": format!("l-{id}"), "name": "Suelta", "openCount": 1, "taskCount": 2, "projectId": "p1" }],
+        "people": [],
+    })
+}
+
+fn shape(rows: &[TreeRow]) -> Vec<(String, u32, bool)> {
+    rows.iter().map(|row| (row.id.clone(), row.depth, row.open)).collect()
+}
+
+fn at(id: &str, depth: u32, open: bool) -> (String, u32, bool) {
+    (id.to_string(), depth, open)
+}
+
+async fn loaded_tree(spaces: Vec<serde_json::Value>) -> Rig {
+    let rig = rig().await;
+    mount_tree(&rig.server, "o1", spaces).await;
+    rig.core.tree().load("o1").await;
+    rig
+}
+
+/// Sin nada elegido, los espacios van abiertos y las carpetas cerradas, con
+/// las carpetas antes que las listas.
+///
+/// Roturas que atrapa: desplegarlo todo (lo que se busca queda tres pantallas
+/// abajo); no enseñar ni las listas de un espacio; pintar una lista a la
+/// altura de su espacio; contar como abiertas sólo las tareas de las listas
+/// sueltas.
+#[tokio::test]
+async fn with_nothing_chosen_spaces_are_open_and_folders_closed() {
+    let rig = loaded_tree(vec![nested_space("a")]).await;
+
+    let rows = rig.core.tree().rows();
+
+    assert_eq!(shape(&rows), [at("a", 0, true), at("f-a", 1, false), at("l-a", 1, false)]);
+    assert_eq!(rows[0].open_count, 7, "las de todo lo que cuelga del espacio");
+    assert_eq!(rows[1].open_count, 6, "las de todo lo que cuelga de la carpeta");
+    assert!(rows[0].expandable && rows[1].expandable && !rows[2].expandable);
+    assert!(rows[2].client && !rows[0].client, "la lista es el canal de un cliente");
+    assert_eq!(rows[2].color, "#20D9E8");
+}
+
+/// Con «Mi trabajo» acotado a un nodo, va abierta su rama y sólo ésa.
+///
+/// Roturas que atrapa: dejar plegado el camino hasta lo que se está mirando
+/// (no se ve dónde se está); abrir además los demás espacios; no marcar cuál
+/// es el nodo activo, o marcar un espacio que comparte id con una lista.
+#[tokio::test]
+async fn the_branch_of_what_is_being_looked_at_is_the_open_one() {
+    let rig = loaded_tree(vec![nested_space("a"), nested_space("b")]).await;
+
+    rig.core.tree().click("deep-b", Looking::Tasks).unwrap();
+    let rows = rig.core.tree().rows();
+
+    assert_eq!(
+        shape(&rows),
+        [
+            at("a", 0, false),
+            at("b", 0, true),
+            at("f-b", 1, true),
+            at("ff-b", 2, true),
+            at("deep-b", 3, false),
+            at("in-b", 2, false),
+            at("l-b", 1, false),
+        ]
+    );
+    let active: Vec<&str> = rows.iter().filter(|row| row.active).map(|row| row.id.as_str()).collect();
+    assert_eq!(active, ["deep-b"]);
+
+    rig.core.tree().click("a", Looking::Tasks).unwrap();
+    let rows = rig.core.tree().rows();
+    assert_eq!(shape(&rows)[..3], [at("a", 0, true), at("f-a", 1, false), at("l-a", 1, false)]);
+    assert!(rows[0].active);
+    assert!(!rows.iter().any(|row| row.id == "b" && row.open));
+
+    // Y al revés: acotado al segundo espacio, el primero se pliega.
+    rig.core.tree().click("b", Looking::Tasks).unwrap();
+    let open: Vec<String> = rig.core.tree().rows().into_iter().filter(|row| row.open).map(|row| row.id).collect();
+    assert_eq!(open, ["b"]);
+}
+
+/// La rama abierta es sólo el camino hasta lo que se mira: ni las carpetas
+/// de al lado, ni los otros espacios cuando lo acotado es una lista suelta.
+///
+/// Roturas que atrapa: abrir las carpetas hermanas por las que se pasó al
+/// buscar; no reconocer como activa la rama de una lista que cuelga directa
+/// del espacio (y dejar entonces todos los espacios abiertos); dar por activo
+/// un espacio que comparte id con la lista acotada.
+#[tokio::test]
+async fn only_the_path_to_what_is_looked_at_opens() {
+    let mut space = nested_space("a");
+    space["folders"].as_array_mut().unwrap().insert(
+        0,
+        serde_json::json!({
+            "id": "side", "name": "De al lado", "folders": [],
+            "lists": [{ "id": "side-list", "name": "Otra", "openCount": 0, "taskCount": 0 }],
+        }),
+    );
+    // Una lista con el mismo id que su espacio: los ids son de tablas
+    // distintas y nada impide que coincidan.
+    let mut twin = nested_space("b");
+    twin["lists"][0]["id"] = serde_json::json!("b");
+    let rig = loaded_tree(vec![space, twin]).await;
+    let tree = rig.core.tree();
+
+    tree.click("deep-a", Looking::Tasks).unwrap();
+    let open: Vec<String> = tree.rows().into_iter().filter(|row| row.open).map(|row| row.id).collect();
+    assert_eq!(open, ["a", "f-a", "ff-a"]);
+
+    // Una lista suelta del segundo espacio, la que comparte id con él.
+    rig.core.my_work().set_scope(Some(cac_core::WorkScope {
+        kind: ScopeKind::List,
+        id: "b".into(),
+        name: "Suelta".into(),
+        org_id: Some("o1".into()),
+    }));
+    let rows = tree.rows();
+    let open: Vec<&str> = rows.iter().filter(|row| row.open).map(|row| row.id.as_str()).collect();
+    assert_eq!(open, ["b"]);
+    let active: Vec<NodeKind> = rows.iter().filter(|row| row.active).map(|row| row.kind).collect();
+    assert_eq!(active, [NodeKind::List]);
+}
+
+/// Lo que se abre o se cierra a mano manda sobre la regla, y se recuerda por
+/// organización.
+///
+/// Roturas que atrapa: un chevrón que no hace nada; que la rama activa se
+/// vuelva a abrir sola después de plegarla; olvidarlo al reiniciar; que
+/// plegar un espacio en una organización pliegue el del mismo id en otra.
+#[tokio::test]
+async fn what_is_opened_or_closed_by_hand_wins_and_is_remembered() {
+    let rig = loaded_tree(vec![nested_space("a")]).await;
+    let tree = rig.core.tree();
+
+    tree.toggle("f-a");
+    assert_eq!(shape(&tree.rows())[1], at("f-a", 1, true));
+    tree.toggle("a");
+    assert_eq!(shape(&tree.rows()), [at("a", 0, false)]);
+    // Acotar a algo de dentro no lo vuelve a abrir: se cerró a mano.
+    tree.click("l-a", Looking::Tasks).unwrap();
+    assert_eq!(shape(&tree.rows()), [at("a", 0, false)]);
+    tree.toggle("no-existe");
+    assert_eq!(rig.core.tree().state().decided.len(), 2);
+    // Una lista no se abre ni se cierra, aunque esté a la vista.
+    tree.toggle("a");
+    assert!(tree.rows().iter().any(|row| row.id == "l-a"));
+    tree.toggle("l-a");
+    assert!(!tree.state().decided.contains_key("l-a"));
+    tree.toggle("a");
+
+    // Otra organización con un espacio del mismo id: no hereda lo plegado.
+    mount_tree(&rig.server, "o2", vec![nested_space("a")]).await;
+    tree.load("o2").await;
+    assert!(tree.rows()[0].open);
+
+    // Y al volver —o al reiniciar la app— sigue como se dejó.
+    let again = Core::new(Config::new(rig.server.uri()), rig.storage.clone(), rig.recorder.clone()).unwrap();
+    again.tree().load("o1").await;
+    assert_eq!(shape(&again.tree().rows()), [at("a", 0, false)]);
+}
+
+/// Un clic acota «Mi trabajo» a ese nodo, con su nombre y su organización, y
+/// el árbol avisa para que se pinte cuál está activo.
+///
+/// Roturas que atrapa: acotar sin sello de organización (el ámbito no se
+/// tiraría al cambiar de organización); acotar a una carpeta; no encontrar un
+/// nodo que está bajo una rama plegada; que quien pinta el árbol no se entere
+/// de que cambió el nodo activo.
+#[tokio::test]
+async fn a_click_scopes_my_work_to_that_node() {
+    let rig = loaded_tree(vec![nested_space("a")]).await;
+    let tree = rig.core.tree();
+    let notices = rig.recorder.trees.lock().unwrap().len();
+
+    // Bajo una carpeta que está cerrada.
+    assert_eq!(tree.click("deep-a", Looking::Tasks), Some(TreeClick::ScopeTasks { kind: ScopeKind::List }));
+    let scope = rig.core.my_work().state().scope.unwrap();
+    assert_eq!((scope.kind, scope.id.as_str(), scope.name.as_str()), (ScopeKind::List, "deep-a", "Honda"));
+    assert_eq!(scope.org_id.as_deref(), Some("o1"));
+    assert!(rig.recorder.trees.lock().unwrap().len() > notices, "el árbol no avisó");
+
+    assert_eq!(tree.click("f-a", Looking::Tasks), Some(TreeClick::OpenDocs));
+    assert_eq!(rig.core.my_work().state().scope.unwrap().id, "deep-a", "una carpeta no acota");
+    assert_eq!(tree.click("a", Looking::Docs), Some(TreeClick::OpenDocs));
+    assert_eq!(tree.click("no-existe", Looking::Tasks), None);
+}
+
+/// Un nodo con documento escrito lo dice en su fila.
+///
+/// Rotura que atrapa: marcar una carpeta con la marca de una lista.
+#[tokio::test]
+async fn a_row_says_whether_its_node_has_docs() {
+    let rig = loaded_tree(vec![nested_space("a")]).await;
+    mount_doc_marks(
+        &rig.server,
+        "o1",
+        serde_json::json!({ "list:l-a": { "written": true }, "folder:x": { "written": true } }),
+    )
+    .await;
+    rig.core.tree().load_doc_marks("o1").await;
+
+    let with_docs: Vec<String> = rig.core.tree().rows().into_iter().filter(|row| row.has_doc).map(|row| row.id).collect();
+    assert_eq!(with_docs, ["l-a"]);
+}
+
+// ── Entrar a trabajar ───────────────────────────────────────────────────
+
+async fn mount_tasks(server: &MockServer, org: &str, expect: u64) {
+    Mock::given(method("GET"))
+        .and(path("/api/v1/tasks/"))
+        .and(query_param("orgId", org))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": [] })))
+        .expect(expect)
+        .mount(server)
+        .await;
+}
+
+/// Entrar trae las organizaciones y, de la que se mira, el árbol, sus marcas
+/// y «Mi trabajo».
+///
+/// Roturas que atrapa: una app que abre vacía hasta que alguien pulsa algo;
+/// pedir el árbol de una organización que no es la que se mira; quedarse sin
+/// las marcas de documentación.
+#[tokio::test]
+async fn entering_brings_the_organizations_and_what_belongs_to_the_current_one() {
+    let rig = rig().await;
+    mount_orgs(&rig.server, vec![org("o1", ""), org("o2", "")]).await;
+    mount_tree(&rig.server, "o1", vec![space("a", None)]).await;
+    mount_doc_marks(&rig.server, "o1", serde_json::json!({ "space:a": { "written": true } })).await;
+    mount_tasks(&rig.server, "o1", 1).await;
+
+    rig.core.open_workspace().await;
+
+    assert_eq!(rig.core.orgs().state().current_org_id.as_deref(), Some("o1"));
+    let tree = rig.core.tree().state();
+    assert_eq!(tree.org_id.as_deref(), Some("o1"));
+    assert_eq!(tree.spaces.len(), 1);
+    assert!(tree.written_doc(NodeKind::Space, "a").is_some());
+    assert_eq!(rig.core.my_work().state().org_id.as_deref(), Some("o1"));
+    // Y deja el stream de eventos en marcha: sin él nada se pone al día solo.
+    assert_ne!(rig.core.stream().state().status, Connection::Idle);
+    rig.core.stream().stop();
+}
+
+/// Cambiar de organización trae lo de la nueva; una que no es suya no cambia
+/// nada ni pide nada.
+///
+/// Roturas que atrapa: cambiar el nombre de arriba y seguir enseñando el
+/// árbol y las tareas de la anterior; pedir datos de una organización ajena.
+#[tokio::test]
+async fn switching_organization_brings_what_belongs_to_the_new_one() {
+    let rig = rig().await;
+    mount_orgs(&rig.server, vec![org("o1", ""), org("o2", "")]).await;
+    mount_tree(&rig.server, "o1", vec![space("a", None)]).await;
+    mount_tree(&rig.server, "o2", vec![space("b", None), space("c", None)]).await;
+    mount_tasks(&rig.server, "o1", 1).await;
+    mount_tasks(&rig.server, "o2", 1).await;
+    rig.core.open_workspace().await;
+    rig.core.stream().stop();
+
+    assert!(rig.core.switch_org("o2").await);
+
+    assert_eq!(rig.core.orgs().state().current_org_id.as_deref(), Some("o2"));
+    assert_eq!(rig.core.tree().state().spaces.len(), 2);
+    assert_eq!(rig.core.my_work().state().org_id.as_deref(), Some("o2"));
+
+    assert!(!rig.core.switch_org("o9").await);
+    assert_eq!(rig.core.tree().state().org_id.as_deref(), Some("o2"));
+    let asked_o9 = rig.server.received_requests().await.unwrap().iter().any(|request| request.url.query().unwrap_or("").contains("o9"));
+    assert!(!asked_o9, "se pidió algo de una organización ajena");
 }

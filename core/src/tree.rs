@@ -134,6 +134,10 @@ pub struct TreeState {
     /// Qué nodos tienen documento, por su clave (`doc_key`).
     #[serde(default)]
     pub doc_marks: HashMap<String, DocMark>,
+    /// Lo que alguien abrió (`true`) o cerró (`false`) a mano en esta
+    /// organización, por id de nodo. Lo demás sigue la regla de `tree_rows`.
+    #[serde(default)]
+    pub decided: HashMap<String, bool>,
 }
 
 impl TreeState {
@@ -145,7 +149,7 @@ impl TreeState {
 
 /// El árbol de este core.
 pub struct Tree {
-    core: Core,
+    pub(crate) core: Core,
 }
 
 impl Core {
@@ -159,7 +163,7 @@ impl Tree {
         self.core.inner.tree.lock().expect("tree lock").clone()
     }
 
-    fn update(&self, change: impl FnOnce(&mut TreeState)) {
+    pub(crate) fn update(&self, change: impl FnOnce(&mut TreeState)) {
         let state = {
             let mut state = self.core.inner.tree.lock().expect("tree lock");
             change(&mut state);
@@ -169,7 +173,9 @@ impl Tree {
     }
 
     pub async fn load(&self, org_id: &str) {
+        let decided = self.decided_for(org_id);
         self.update(|state| {
+            state.decided = decided;
             // Al cambiar de organización, el árbol de la anterior no se
             // enseña mientras llega el nuevo: sus listas no existen aquí, y
             // un clic en una acotaría «Mi trabajo» a algo de otra organización.
