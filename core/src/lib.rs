@@ -65,6 +65,9 @@ pub struct Config {
     /// La primera espera antes de reintentar el stream; crece hasta treinta
     /// veces esto.
     pub stream_backoff: Duration,
+    /// Cuánto puede faltar el stream antes de avisar a quien mira. Menos que
+    /// esto es una reconexión de las normales.
+    pub stream_grace: Duration,
 }
 
 impl Config {
@@ -75,6 +78,7 @@ impl Config {
             request_timeout: Duration::from_secs(12),
             stream_silence: Duration::from_secs(60),
             stream_backoff: Duration::from_secs(1),
+            stream_grace: Duration::from_secs(45),
         }
     }
 }

@@ -8,7 +8,7 @@
 //! abierta antes de salir hacia la plataforma.
 
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +36,11 @@ pub struct ConnectionState {
     pub status: Connection,
     /// Por qué se cayó, para un log: no es texto para enseñar.
     pub detail: Option<String>,
+    /// El corte dura: es cuando se avisa. Reconectar es normal y rápido, y
+    /// un aviso en cada vuelta sería ruido; lo que hay que decir es que la
+    /// pantalla lleva un rato sin ponerse al día sola (`Config::stream_grace`).
+    #[serde(default)]
+    pub lasting: bool,
 }
 
 /// Un evento del servidor, tal como llegó.
@@ -143,7 +148,14 @@ impl Stream {
     }
 
     fn set(&self, status: Connection, detail: Option<String>) {
-        let state = ConnectionState { status, detail };
+        self.set_since(status, detail, None);
+    }
+
+    /// Lo mismo, sabiendo desde cuándo falta el stream.
+    fn set_since(&self, status: Connection, detail: Option<String>, down_since: Option<Instant>) {
+        let grace = self.core.inner.config.stream_grace;
+        let lasting = down_since.is_some_and(|since| since.elapsed() >= grace);
+        let state = ConnectionState { status, detail, lasting };
         *self.core.inner.connection.lock().expect("connection lock") = state.clone();
         self.core.inner.listener.connection_changed(state);
     }
@@ -173,13 +185,15 @@ impl Stream {
         let base = self.core.inner.config.stream_backoff;
         let mut attempt: u32 = 0;
         let mut was_down = false;
+        // Desde cuándo no hay stream, para saber si el corte ya dura.
+        let mut down_since: Option<Instant> = None;
 
         while self.current(turn) {
             let Some(token) = self.core.access_token() else {
                 self.set(Connection::Idle, None);
                 return;
             };
-            self.set(Connection::Connecting, None);
+            self.set_since(Connection::Connecting, None, down_since);
 
             let answer = self
                 .core
@@ -204,11 +218,13 @@ impl Stream {
                     let Some(why) = self.read(response, turn).await else {
                         return; // otro stream tomó el relevo
                     };
-                    self.set(Connection::Down, Some(why));
+                    down_since = Some(Instant::now());
+                    self.set_since(Connection::Down, Some(why), down_since);
                 }
                 Ok(response) => {
                     let status = response.status().as_u16();
-                    self.set(Connection::Down, Some(format!("server returned {status}")));
+                    let since = *down_since.get_or_insert_with(Instant::now);
+                    self.set_since(Connection::Down, Some(format!("server returned {status}")), Some(since));
                     if status == 401 {
                         // Si la renovación da la sesión por terminada, el core
                         // la olvida y con ello para este stream: la vuelta
@@ -223,7 +239,10 @@ impl Stream {
                         }
                     }
                 }
-                Err(error) => self.set(Connection::Down, Some(error.to_string())),
+                Err(error) => {
+                    let since = *down_since.get_or_insert_with(Instant::now);
+                    self.set_since(Connection::Down, Some(error.to_string()), Some(since));
+                }
             }
 
             was_down = true;

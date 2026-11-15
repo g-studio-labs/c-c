@@ -273,6 +273,61 @@ async fn a_stream_refused_with_a_fresh_token_waits_before_trying_again() {
     assert!((2..=6).contains(&renewals), "{renewals} renovaciones en 300 ms");
 }
 
+/// Un corte sólo se avisa cuando dura; al volver, el aviso se quita.
+///
+/// Roturas que atrapa: avisar de «sin conexión» en cada reconexión de las
+/// normales (un aviso que parpadea y al que nadie hace caso); no avisar
+/// nunca; dejar el aviso puesto con el stream ya abierto; contar el corte
+/// desde el último intento y no desde que empezó (no llegaría nunca a durar).
+#[tokio::test]
+async fn an_outage_is_only_announced_once_it_lasts() {
+    let server = MockServer::start().await;
+    let recorder = Arc::new(Recorder::default());
+    let mut config = Config::new(server.uri());
+    config.stream_backoff = Duration::from_millis(30);
+    config.stream_grace = Duration::from_millis(200);
+    let core = Core::new(config, Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
+    let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana" })).unwrap();
+    core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/events"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+
+    core.stream().start();
+    until("el corte dura", || recorder.connection.lock().unwrap().iter().any(|state| state.lasting)).await;
+    {
+        let seen = recorder.connection.lock().unwrap();
+        let first_down = seen.iter().find(|state| state.status == Connection::Down).unwrap();
+        assert!(!first_down.lasting, "se avisó en la primera caída");
+        let quiet = seen.iter().take_while(|state| !state.lasting).filter(|state| state.status == Connection::Down).count();
+        assert!(quiet >= 2, "avisó antes de tiempo: {quiet} caídas calladas");
+    }
+    // Y una vez puesto no parpadea: cada reintento sigue diciendo que dura.
+    until("hay otro reintento que mirar", || {
+        let seen = recorder.connection.lock().unwrap();
+        seen.len() > seen.iter().position(|state| state.lasting).unwrap() + 2
+    })
+    .await;
+    {
+        let seen = recorder.connection.lock().unwrap();
+        let since = seen.iter().position(|state| state.lasting).unwrap();
+        assert!(seen[since..].iter().all(|state| state.lasting), "el aviso se quitó a medio corte");
+    }
+
+    // El servidor vuelve.
+    server.reset().await;
+    Mock::given(method("GET")).and(path("/api/v1/events")).respond_with(stream_of("")).mount(&server).await;
+    until("vuelve a abrirse", || recorder.opened() >= 1).await;
+    let seen = recorder.connection.lock().unwrap();
+    let opened = seen.iter().find(|state| state.status == Connection::Open).unwrap();
+    assert!(!opened.lasting, "el aviso sigue puesto con el stream abierto");
+    drop(seen);
+    core.stream().stop();
+    assert!(!core.stream().state().lasting);
+}
+
 /// Parar el stream lo para: no vuelve a conectarse.
 ///
 /// Rotura que atrapa: un stream que sigue reconectando tras salir de la
