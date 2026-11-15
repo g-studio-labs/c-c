@@ -32,7 +32,7 @@ toda regla va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
 - **En curso (378):** el detalle de una tarea. Pulsar una fila la abre en un
   cajón para leerla (estado, prioridad, vencimiento, «dónde quedó»,
   descripción, subtareas, adjuntos por nombre, y el hilo con las notas de
-  agentes en su pestaña). Todavía no se edita nada.
+  agentes en su pestaña). De editar, sólo el estado; lo demás no todavía.
 - **Falta:** de la carcasa, las fuentes incrustadas y el filtro del panel;
   del detalle, editar; después tablero y calendario (379) y los instaladores
   (380).
