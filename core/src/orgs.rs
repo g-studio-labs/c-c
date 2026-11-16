@@ -51,6 +51,31 @@ pub struct OrgsState {
     pub error: Option<String>,
 }
 
+/// Lo que se dice de una organización debajo de su nombre: el papel de quien
+/// mira, cuánta gente tiene y cuántos espacios. Lo que no se sabe (cero) no
+/// se dice.
+///
+/// Vino de `app/src/components/OrgSwitcher.tsx`. El plural lo pone el
+/// catálogo: «1 espacio» y «2 espacios» no se diferencian en una ese en todos
+/// los idiomas.
+pub fn org_hint(org: &Organization, spaces: usize, locale: crate::texts::Locale) -> String {
+    let mut role = org.role.clone();
+    if let Some(first) = role.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    let members = (org.member_count > 0).then(|| crate::texts::text_count(locale, "common:count.members", org.member_count));
+    let spaces = (spaces > 0).then(|| crate::texts::text_count(locale, "common:count.spaces", spaces as i64));
+    [Some(role).filter(|role| !role.is_empty()), members, spaces].into_iter().flatten().collect::<Vec<_>>().join(" · ")
+}
+
+/// Las iniciales para un avatar: las dos primeras letras de cómo se le llama
+/// (su nombre, o su usuario si no lo ha puesto). Como `inicialesDe` en
+/// `app/src/lib/nombres.ts`.
+pub fn initials(name: Option<&str>, username: &str) -> String {
+    let shown = name.map(str::trim).filter(|name| !name.is_empty()).unwrap_or(username);
+    shown.chars().take(2).flat_map(char::to_uppercase).collect()
+}
+
 impl OrgsState {
     pub fn current(&self) -> Option<&Organization> {
         let id = self.current_org_id.as_deref()?;
@@ -151,5 +176,45 @@ impl Orgs {
         self.update(|state| state.current_org_id = Some(org_id.to_string()));
         self.remember();
         true
+    }
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::{initials, org_hint, Organization};
+    use crate::texts::Locale;
+
+    fn org(role: &str, members: i64) -> Organization {
+        serde_json::from_value(serde_json::json!({
+            "id": "o1", "name": "Dwit México", "slug": "dwit", "role": role, "memberCount": members,
+            "createdAt": "2026-06-09T12:00:00Z",
+        }))
+        .unwrap()
+    }
+
+    /// Debajo del nombre va el papel, la gente y los espacios, con su plural,
+    /// y lo que no se sabe no se dice.
+    ///
+    /// Roturas que atrapa: «1 miembros»; «0 espacios» mientras el árbol
+    /// carga; el papel en minúscula, como lo manda el servidor; separadores
+    /// sueltos cuando falta una parte.
+    #[test]
+    fn an_organization_says_who_you_are_and_how_big_it_is() {
+        assert_eq!(org_hint(&org("admin", 5), 12, Locale::Es), "Admin · 5 miembros · 12 espacios");
+        assert_eq!(org_hint(&org("member", 1), 1, Locale::Es), "Member · 1 miembro · 1 espacio");
+        assert_eq!(org_hint(&org("viewer", 0), 0, Locale::Es), "Viewer");
+        assert_eq!(org_hint(&org("", 2), 0, Locale::En), "2 members");
+    }
+
+    /// Roturas que atrapa: las iniciales del usuario cuando hay nombre; un
+    /// avatar vacío para quien no ha puesto nombre; partir una letra con
+    /// acento.
+    #[test]
+    fn initials_come_from_how_someone_is_called() {
+        assert_eq!(initials(Some("Jose Guzman"), "romanshk"), "JO");
+        assert_eq!(initials(Some("  "), "romanshk"), "RO");
+        assert_eq!(initials(None, "ana"), "AN");
+        assert_eq!(initials(Some("Ángel"), "x"), "ÁN");
+        assert_eq!(initials(None, ""), "");
     }
 }

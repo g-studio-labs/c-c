@@ -40,7 +40,7 @@ pub use mywork::{
     ScopeKind, TaskFilter, WorkGroup, WorkLens, WorkRow, WorkScope, NOBODY, PRIORITIES,
 };
 pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClick};
-pub use orgs::{Organization, Orgs, OrgsState};
+pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
 pub use prefs::{is_dark, ThemePreference};
 pub use session::Session;
 pub use tree::{doc_key, DocMark, FolderTree, ListSummary, SpacePerson, SpaceTree, Tree, TreeState};
