@@ -19,11 +19,18 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
-use crate::transport::{self, Reply, Request};
+use std::time::Duration;
+
+use crate::transport::{self, RawReply, RawRequest, Reply, Request};
 use crate::Core;
 
 /// La clave bajo la que se guarda la sesión en el `Storage`.
 const STORAGE_KEY: &str = "session";
+
+/// El plazo de un fichero. El de una llamada normal está pensado para JSON
+/// pequeño y cortaría treinta megas a medio subir; éste es la ventana que el
+/// servidor da a una subida (`attachmentReadWindow`).
+const FILE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// Quién está dentro. Espejo de `domain.Session` del backend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -381,5 +388,78 @@ impl Core {
             Err(ApiError::Network(_)) => transport::send(&self.inner.http, request).await,
             other => other,
         }
+    }
+
+    /// Un viaje de bytes con la sesión puesta. Sin reintento si no llegó: un
+    /// fichero que sí llegó y cuya respuesta se perdió quedaría subido dos
+    /// veces.
+    async fn send_file(
+        &self,
+        method: &str,
+        path: &str,
+        content_type: Option<&str>,
+        body: Option<Vec<u8>>,
+        bearer: Option<&str>,
+    ) -> Result<RawReply, ApiError> {
+        let mut headers = Vec::new();
+        if let Some(content_type) = content_type {
+            headers.push(("Content-Type".to_string(), content_type.to_string()));
+        }
+        if let Some(token) = bearer {
+            headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+        }
+        let request = RawRequest {
+            method: method.to_string(),
+            url: format!("{}{}", self.inner.config.base_url, path),
+            headers,
+            body,
+            timeout: FILE_TIMEOUT,
+        };
+        transport::send_raw(&self.inner.http, request).await
+    }
+
+    fn file_error(reply: &RawReply) -> ApiError {
+        server_error(&Reply { status: reply.status, body: String::from_utf8_lossy(&reply.body).into_owned() })
+    }
+
+    /// Baja un fichero de este servidor, con la sesión en la cabecera.
+    ///
+    /// La ruta que sirve los bytes de un adjunto contesta **404** a un token
+    /// caducado, no «caducó»: a quien no puede verlo no le dice ni que
+    /// existe. Así que un 404 (o un 401) renueva la sesión una vez y vuelve a
+    /// pedir; si sigue sin estar, es que no está.
+    pub(crate) async fn download(&self, path: &str) -> Result<Vec<u8>, ApiError> {
+        let token = self.access_token();
+        let mut reply = self.send_file("GET", path, None, None, token.as_deref()).await?;
+        if matches!(reply.status, 401 | 404) {
+            // Si no se pudo renovar, se queda el «no está» que se recibió: la
+            // red caída un momento no es una sesión caducada.
+            if let Some(fresh) = self.refresh(token).await {
+                reply = self.send_file("GET", path, None, None, Some(&fresh)).await?;
+            }
+        }
+        if reply.status >= 400 {
+            return Err(Self::file_error(&reply));
+        }
+        Ok(reply.body)
+    }
+
+    /// Sube un cuerpo ya montado (un `multipart`) con la sesión puesta.
+    pub(crate) async fn upload(&self, path: &str, content_type: &str, body: Vec<u8>) -> Result<(), ApiError> {
+        let token = self.access_token();
+        let reply = self.send_file("POST", path, Some(content_type), Some(body.clone()), token.as_deref()).await?;
+        let expired = reply.status >= 400 && error_code(&String::from_utf8_lossy(&reply.body)) == "expired-token";
+        let reply = if expired {
+            let Some(fresh) = self.refresh(token).await else {
+                return Err(ApiError::SessionExpired);
+            };
+            self.send_file("POST", path, Some(content_type), Some(body), Some(&fresh)).await?
+        } else {
+            reply
+        };
+        if reply.status >= 400 {
+            return Err(Self::file_error(&reply));
+        }
+        Ok(())
     }
 }

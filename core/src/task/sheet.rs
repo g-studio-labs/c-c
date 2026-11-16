@@ -6,6 +6,7 @@
 
 use chrono::{NaiveDate, Timelike, Utc};
 
+use super::files::{is_image, size_label};
 use super::{shown_name, StatusOption, TaskComment, TaskDetail, Tasks};
 use crate::dates::{due_day, today_in};
 use crate::mywork::{day_and_month, due_label, DueLabel};
@@ -52,6 +53,21 @@ pub struct SheetTag {
     pub color: String,
 }
 
+/// Un fichero de la tarea, dicho.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct SheetFile {
+    pub id: String,
+    pub name: String,
+    /// «12 KB»; falta si el servidor no dijo cuánto pesa.
+    pub size: Option<String>,
+    /// Si se puede enseñar como imagen.
+    pub image: bool,
+    /// Si la descripción lo cita: quitarlo lo quita también del texto, y
+    /// entre dos capturas iguales es lo que dice cuál es la que se ve.
+    pub cited: bool,
+}
+
 /// Lo que pinta el detalle de una tarea.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -87,8 +103,8 @@ pub struct TaskSheet {
     pub talk: Vec<SheetComment>,
     /// Las notas de agentes, aparte.
     pub notes: Vec<SheetComment>,
-    /// Los ficheros de la tarea, por su nombre. Los de un comentario van con él.
-    pub attachments: Vec<String>,
+    /// Los ficheros de la tarea. Los de un comentario van con él.
+    pub attachments: Vec<SheetFile>,
     /// Si un cliente lee esta tarea: entonces lo que se comente lo lee él,
     /// salvo que se diga que es interno, y la pantalla tiene que decirlo.
     pub client_reads: bool,
@@ -155,7 +171,13 @@ pub fn task_sheet(detail: &TaskDetail, statuses: &[StatusOption], locale: Locale
             .attachments
             .iter()
             .filter(|file| file.comment_id.is_none())
-            .map(|file| file.file_name.clone())
+            .map(|file| SheetFile {
+                id: file.id.clone(),
+                name: file.file_name.clone(),
+                size: file.bytes.map(size_label),
+                image: is_image(file),
+                cited: task.description.contains(&file.id),
+            })
             .collect(),
         client_reads,
     }
@@ -350,18 +372,36 @@ mod tests {
     /// Los ficheros de la tarea se listan; los de un comentario van con su
     /// comentario, no repetidos arriba.
     ///
-    /// Rotura que atrapa: la captura de un comentario listada otra vez como
-    /// adjunto de la tarea.
+    /// Roturas que atrapa: la captura de un comentario listada otra vez como
+    /// adjunto de la tarea; un fichero sin su peso, o con un peso inventado
+    /// cuando el servidor no lo dijo; no saber cuál de dos capturas iguales
+    /// es la que cita la descripción.
     #[test]
     fn only_the_tasks_own_files_are_listed() {
         let mut detail = contract();
         let of_comment = detail["attachments"][0].clone();
-        let mut of_task = of_comment.clone();
-        of_task["commentId"] = Value::Null;
-        of_task["fileName"] = json!("plan.pdf");
-        detail["attachments"] = json!([of_comment, of_task]);
+        let mut plan = of_comment.clone();
+        plan["id"] = json!("a-plan");
+        plan["commentId"] = Value::Null;
+        plan["fileName"] = json!("plan.pdf");
+        plan["contentType"] = json!("application/pdf");
+        plan["bytes"] = json!(12 * 1024);
+        let mut shot = plan.clone();
+        shot["id"] = json!("a-shot");
+        shot["fileName"] = json!("captura.PNG");
+        shot["contentType"] = Value::Null;
+        shot["bytes"] = Value::Null;
+        detail["task"]["description"] = json!("Mira: ![](/api/v1/tasks/t1/attachments/a-shot/raw)");
+        detail["attachments"] = json!([of_comment, plan, shot]);
 
-        assert_eq!(sheet_of(detail, json!([])).attachments, ["plan.pdf"]);
+        let files = sheet_of(detail, json!([])).attachments;
+        assert_eq!(
+            files,
+            [
+                SheetFile { id: "a-plan".into(), name: "plan.pdf".into(), size: Some("12 KB".into()), image: false, cited: false },
+                SheetFile { id: "a-shot".into(), name: "captura.PNG".into(), size: None, image: true, cited: true },
+            ]
+        );
     }
 
     /// Roturas que atrapa: un panel en blanco mientras llega o cuando falla;

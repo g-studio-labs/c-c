@@ -86,3 +86,40 @@ pub async fn send(client: &reqwest::Client, request: Request) -> Result<Reply, A
         .map_err(|e| ApiError::Network(format!("response body: {e}")))?;
     Ok(Reply { status, body })
 }
+
+/// Una petición cuyo cuerpo son bytes: un fichero que se sube o se baja.
+#[derive(Debug, Clone)]
+pub struct RawRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
+    pub timeout: Duration,
+}
+
+/// Lo que contestó el servidor, sin leerlo como texto.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawReply {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
+/// Lo mismo que [`send`], para bytes. Un fichero no es texto: leerlo como
+/// tal lo estropea.
+pub async fn send_raw(client: &reqwest::Client, request: RawRequest) -> Result<RawReply, ApiError> {
+    let method = reqwest::Method::from_bytes(request.method.to_uppercase().as_bytes())
+        .map_err(|_| ApiError::Network(format!("unsupported method {}", request.method)))?;
+    let mut builder = client.request(method, &request.url).timeout(request.timeout);
+    for (name, value) in &request.headers {
+        builder = builder.header(name, value);
+    }
+    if let Some(body) = request.body {
+        builder = builder.body(body);
+    }
+    let response = builder.send().await.map_err(|e| {
+        ApiError::Network(if e.is_timeout() { "timed out".to_string() } else if e.is_connect() { "could not connect".to_string() } else { e.to_string() })
+    })?;
+    let status = response.status().as_u16();
+    let body = response.bytes().await.map_err(|e| ApiError::Network(format!("response body: {e}")))?;
+    Ok(RawReply { status, body: body.to_vec() })
+}
