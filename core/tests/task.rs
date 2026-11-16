@@ -711,7 +711,39 @@ async fn nothing_is_changed_without_an_open_task() {
     let tasks = rig.core.tasks();
 
     assert!(tasks.set_priority("high").await.is_err() && tasks.set_due(None).await.is_err());
+    assert!(tasks.set_title("x").await.is_err() && tasks.set_description("x").await.is_err());
     assert!(tasks.toggle_tag("x").await.is_err() && tasks.toggle_assignee("x").await.is_err());
     assert!(tasks.tag_choices().is_empty() && tasks.assignee_choices().is_empty());
     assert!(rig.server.received_requests().await.unwrap().is_empty());
+}
+
+/// El título y la descripción se mandan limpios, y sólo si cambian; un
+/// título en blanco no se manda nunca.
+///
+/// Roturas que atrapa: dejar una tarea sin título; guardar lo que ya decía;
+/// no poder quitar la descripción; mandar el título como descripción.
+#[tokio::test]
+async fn title_and_description_are_sent_clean_and_only_when_they_change() {
+    let rig = rig().await;
+    let mut task = detail("t1", "Tarea", "pending", "", "");
+    task["task"]["description"] = json!("Lo que hay.\n");
+    mount_task(&rig.server, "t1", task.clone()).await;
+    mount_columns(&rig.server).await;
+    Mock::given(method("PATCH")).and(path("/api/v1/tasks/t1")).respond_with(ok(task)).mount(&rig.server).await;
+    let tasks = rig.core.tasks();
+    tasks.open("t1").await;
+
+    assert!(tasks.set_title("   ").await.is_err());
+    tasks.set_title(" Tarea ").await.expect("es el que tiene");
+    tasks.set_description("Lo que hay.").await.expect("es la que tiene");
+    assert!(requests_to(&rig.server, "PATCH", "/tasks/t1").await.is_empty());
+
+    tasks.set_title("  Otra  ").await.expect("se guardó");
+    tasks.set_description(" Nueva\n").await.expect("se guardó");
+    tasks.set_description("  ").await.expect("se quitó");
+
+    assert_eq!(
+        requests_to(&rig.server, "PATCH", "/tasks/t1").await,
+        [json!({ "title": "Otra" }), json!({ "description": "Nueva" }), json!({ "description": "" })]
+    );
 }

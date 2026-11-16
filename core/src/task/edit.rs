@@ -113,6 +113,29 @@ impl Tasks {
         state.detail.as_ref().map(|detail| assignee_choices(detail, &state.team)).unwrap_or_default()
     }
 
+    /// Le cambia el título. Uno en blanco no se manda: una tarea sin título
+    /// no se encuentra en ninguna lista. Si es el que tiene, no se pide nada.
+    pub async fn set_title(&self, title: &str) -> Result<(), ApiError> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(super::refused("empty-title", "A task needs a title"));
+        }
+        if self.open_detail()?.task.title == title {
+            return Ok(());
+        }
+        self.update(TaskPatch { title: Some(title.to_string()), ..TaskPatch::default() }).await
+    }
+
+    /// Le cambia la descripción (markdown); vacía se la quita. Si es la que
+    /// tiene, no se pide nada.
+    pub async fn set_description(&self, description: &str) -> Result<(), ApiError> {
+        let description = description.trim();
+        if self.open_detail()?.task.description.trim() == description {
+            return Ok(());
+        }
+        self.update(TaskPatch { description: Some(description.to_string()), ..TaskPatch::default() }).await
+    }
+
     /// Le pone esa prioridad. Si ya la tiene, no se pide nada.
     pub async fn set_priority(&self, priority: &str) -> Result<(), ApiError> {
         let priority = super::canonical_priority(priority);
