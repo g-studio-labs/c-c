@@ -144,6 +144,11 @@ impl Workspace {
         });
     }
 
+    /// La documentación de un nodo, se esté mirando lo que se esté mirando.
+    pub(crate) fn open_docs(id: String, cx: &App) {
+        Backend::run(cx, move |core| async move { core.docs().open(&id).await });
+    }
+
     fn render_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let danger = cx.theme().danger;
         div()
@@ -322,6 +327,37 @@ impl Workspace {
                 this.child(div().id(SharedString::from(format!("tree-doc-{}", row.id))).test_support().flex_none().child(Icon::new(Lucide::FileText).xsmall().text_color(muted)))
             })
             .children(count.map(|count| div().flex_none().text_xs().text_color(muted).child(count)))
+            // Pulsar un espacio acota sus tareas, así que su documentación
+            // se abre desde aquí (command-and-control-372).
+            .when(space, |this| {
+                let id = row.id.clone();
+                let label = tr(cx, "work:tree.openDocs");
+                this.child(
+                    div()
+                        .id(SharedString::from(format!("tree-menu-{}", row.id)))
+                        .test_support()
+                        .flex_none()
+                        // Abrir el menú no es un clic en la fila: el
+                        // desplegable del kit ya se queda con él (medido en
+                        // `popover.rs`). Si deja de hacerlo, lo dice la
+                        // prueba del menú.
+                        .child(
+                            Button::new(SharedString::from(format!("tree-more-{}", row.id)))
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::Ellipsis))
+                                .tooltip(tr(cx, "work:tree.spaceMenu"))
+                                .dropdown_menu(move |menu, _, _| {
+                                    let id = id.clone();
+                                    menu.item(
+                                        PopupMenuItem::new(label.clone())
+                                            .icon(Icon::new(Lucide::FileText))
+                                            .on_click(move |_, _, cx| Self::open_docs(id.clone(), cx)),
+                                    )
+                                }),
+                        ),
+                )
+            })
     }
 
     fn render_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -531,6 +567,14 @@ mod tests {
             window.click(id, cx);
         })
         .unwrap();
+    }
+
+    /// Deja correr lo que un clic haya puesto en marcha.
+    fn settle_frames(window: AnyWindowHandle, cx: &mut TestAppContext) {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(150));
+        cx.run_until_parked();
+        on_screen(window, "open", cx);
     }
 
     fn scope(cx: &mut TestAppContext) -> Option<(ScopeKind, String)> {
@@ -842,6 +886,32 @@ mod tests {
 
         assert!(on_screen(window, "tree-filter", cx));
         assert!(!on_screen(window, "tree-no-matches", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// El «···» de un espacio abre su documentación, y abrir el menú no
+    /// acota las tareas a ese espacio.
+    ///
+    /// Roturas que atrapa: un espacio sin camino a su documentación desde el
+    /// árbol (su clic acota); que pulsar el menú cuente como pulsar la fila;
+    /// ofrecer el menú en carpetas y listas, donde aún no tiene nada.
+    #[gpui_kit::test]
+    fn a_spaces_menu_opens_its_docs_without_scoping(cx: &mut TestAppContext) {
+        let server = server_with_docs();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-l-a", cx));
+        assert!(on_screen(window, "tree-menu-a", cx));
+        assert!(!on_screen(window, "tree-menu-f-a", cx) && !on_screen(window, "tree-menu-l-a", cx));
+
+        click(window, "tree-menu-a", cx);
+        settle_frames(window, cx);
+        assert_eq!(scope(cx), None, "abrir el menú acotó las tareas al espacio");
+
+        cx.update(|cx| Workspace::open_docs("a".into(), cx));
+        wait_until(cx, "llega la documentación del espacio", |cx| on_screen(window, "doc-body", cx));
+        assert_eq!(doc_open(cx).as_deref(), Some("a"));
+        assert_eq!(scope(cx), None);
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
