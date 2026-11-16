@@ -44,7 +44,7 @@ pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
 pub use prefs::{is_dark, ThemePreference};
 pub use session::Session;
 pub use tree::{doc_key, DocMark, FolderTree, ListSummary, SpacePerson, SpaceTree, Tree, TreeState};
-pub use tree_rows::{tree_rows, TreeRow};
+pub use tree_rows::{filter_tree, tree_rows, tree_rows_matching, TreeRow};
 pub use storage::{FileStorage, Storage};
 pub use stream::{backoff, parse_frame, Connection, ConnectionState, FrameBuffer, ServerEvent, Stream};
 pub use task::{

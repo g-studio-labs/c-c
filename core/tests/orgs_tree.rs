@@ -870,3 +870,76 @@ async fn showing_all_work_or_switching_organization_closes_the_docs() {
     assert!(rig.core.docs().state().target.is_none(), "el documento de la otra organización sigue abierto");
     assert!(rig.core.tasks().state().task_id.is_none(), "la tarea de la otra organización sigue abierta");
 }
+
+// ── El filtro por título del panel ──────────────────────────────────────
+
+fn ids(rows: &[TreeRow]) -> Vec<&str> {
+    rows.iter().map(|row| row.id.as_str()).collect()
+}
+
+/// Escribir parte del nombre de una lista honda la enseña con su camino
+/// entero abierto, y nada de lo demás.
+///
+/// Roturas que atrapa: enseñar la lista sin las carpetas de las que cuelga
+/// (no se sabe de qué espacio es); dejar su carpeta plegada, con lo que casa
+/// dentro y sin verse; seguir pintando las listas que no casan; ofrecer un
+/// chevrón que filtrando no pliega nada; distinguir mayúsculas; casar
+/// sólo por el principio del nombre.
+#[tokio::test]
+async fn a_title_filter_shows_what_matches_with_its_path_open() {
+    let rig = loaded_tree(vec![nested_space("a"), nested_space("b")]).await;
+    let tree = rig.core.tree();
+    // Plegado a mano: filtrando no manda.
+    tree.toggle("a");
+
+    let rows = tree.rows_matching(" HOND ");
+
+    assert_eq!(
+        shape(&rows),
+        [
+            at("a", 0, true),
+            at("f-a", 1, true),
+            at("ff-a", 2, true),
+            at("deep-a", 3, false),
+            at("b", 0, true),
+            at("f-b", 1, true),
+            at("ff-b", 2, true),
+            at("deep-b", 3, false),
+        ]
+    );
+    assert!(rows.iter().all(|row| !row.expandable), "ofrece plegar lo que filtrando va siempre abierto");
+    // A mitad del nombre también: se escribe lo que se recuerda de él.
+    assert_eq!(ids(&tree.rows_matching("uelt")), ["a", "l-a", "b", "l-b"]);
+    assert!(tree.rows_matching("no existe").is_empty());
+}
+
+/// Lo que casa enseña también lo que tiene dentro: un espacio, todo lo suyo;
+/// una carpeta, sus listas y sus carpetas, bajo el espacio del que cuelga.
+///
+/// Roturas que atrapa: buscar un espacio por su nombre y verlo vacío; que
+/// case una carpeta y no salgan sus listas, o salga sin su espacio; colar
+/// las listas sueltas del espacio cuando lo que casó fue una carpeta.
+#[tokio::test]
+async fn what_matches_shows_what_it_holds() {
+    let rig = loaded_tree(vec![nested_space("a"), nested_space("b")]).await;
+    let tree = rig.core.tree();
+
+    assert_eq!(ids(&tree.rows_matching("espacio b")), ["b", "f-b", "ff-b", "deep-b", "in-b", "l-b"]);
+    assert_eq!(ids(&tree.rows_matching("dentro")), ["a", "f-a", "ff-a", "deep-a", "b", "f-b", "ff-b", "deep-b"]);
+    // «Carpeta» casa la carpeta y la lista «En carpeta»: una vez cada una.
+    assert_eq!(ids(&tree.rows_matching("carpeta"))[..5], ["a", "f-a", "ff-a", "deep-a", "in-a"]);
+}
+
+/// Con el filtro en blanco, el árbol de siempre: con lo plegado a mano.
+///
+/// Rotura que atrapa: que borrar lo escrito deje el árbol entero desplegado.
+#[tokio::test]
+async fn a_blank_filter_is_the_usual_tree() {
+    let rig = loaded_tree(vec![nested_space("a")]).await;
+    let tree = rig.core.tree();
+    tree.toggle("a");
+
+    assert_eq!(tree.rows_matching("   "), tree.rows());
+    assert_eq!(shape(&tree.rows_matching("")), [at("a", 0, false)]);
+    assert!(tree.rows()[0].expandable);
+}

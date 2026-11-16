@@ -8,7 +8,10 @@
 //! - si no decidió nada, va abierta la rama de lo que se está mirando (el
 //!   camino hasta el nodo al que «Mi trabajo» está acotado), y sólo esa: con
 //!   veinte espacios desplegados lo que se busca queda tres pantallas abajo;
-//! - sin nada acotado, los espacios abiertos y las carpetas cerradas.
+//! - sin nada acotado, los espacios abiertos y las carpetas cerradas;
+//! - con un filtro por título puesto no manda nada de eso: se enseña lo que
+//!   casa, con su camino abierto (vino de `filterTree`, en
+//!   `app/src/lib/tree-path.ts`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -80,15 +83,85 @@ fn folder_open_count(folder: &FolderTree) -> i64 {
         + folder.folders.iter().map(folder_open_count).sum::<i64>()
 }
 
+/// Qué nodos se enseñan con ese filtro por título: los que casan, sus
+/// antecesores (para que se vea de dónde cuelgan) y lo que tienen dentro
+/// (buscar un espacio por su nombre enseña sus listas). `None` sin filtro:
+/// todo.
+///
+/// Sin distinguir mayúsculas, y nada más fino: filtra lo que ya está en
+/// pantalla, no es el buscador.
+pub fn filter_tree(spaces: &[SpaceTree], query: &str) -> Option<HashSet<String>> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return None;
+    }
+    let matches = |name: &str| name.to_lowercase().contains(&query);
+    let mut visible = HashSet::new();
+
+    fn everything_in(folder: &FolderTree, visible: &mut HashSet<String>) {
+        visible.insert(folder.id.clone());
+        visible.extend(folder.lists.iter().map(|list| list.id.clone()));
+        for inner in &folder.folders {
+            everything_in(inner, visible);
+        }
+    }
+    /// `above` es el camino hasta la carpeta, sin ella.
+    fn walk(folder: &FolderTree, above: &mut Vec<String>, matches: &dyn Fn(&str) -> bool, visible: &mut HashSet<String>) {
+        if matches(&folder.name) {
+            visible.extend(above.iter().cloned());
+            everything_in(folder, visible);
+        }
+        above.push(folder.id.clone());
+        for list in folder.lists.iter().filter(|list| matches(&list.name)) {
+            visible.extend(above.iter().cloned());
+            visible.insert(list.id.clone());
+        }
+        for inner in &folder.folders {
+            walk(inner, above, matches, visible);
+        }
+        above.pop();
+    }
+
+    for space in spaces {
+        if matches(&space.name) {
+            visible.insert(space.id.clone());
+            visible.extend(space.lists.iter().map(|list| list.id.clone()));
+            for folder in &space.folders {
+                everything_in(folder, &mut visible);
+            }
+        }
+        let mut above = vec![space.id.clone()];
+        for list in space.lists.iter().filter(|list| matches(&list.name)) {
+            visible.insert(space.id.clone());
+            visible.insert(list.id.clone());
+        }
+        for folder in &space.folders {
+            walk(folder, &mut above, &matches, &mut visible);
+        }
+    }
+    Some(visible)
+}
+
 struct Walk<'a> {
     state: &'a TreeState,
     scope: Option<&'a WorkScope>,
     path: Option<HashSet<String>>,
+    /// Con un filtro puesto, lo que se enseña.
+    visible: Option<HashSet<String>>,
     rows: Vec<TreeRow>,
 }
 
 impl Walk<'_> {
+    fn shows(&self, id: &str) -> bool {
+        self.visible.as_ref().is_none_or(|visible| visible.contains(id))
+    }
+
     fn is_open(&self, id: &str, kind: NodeKind) -> bool {
+        // Filtrando va todo abierto: lo que casa está dentro, y plegado no
+        // se vería.
+        if self.visible.is_some() {
+            return true;
+        }
         if let Some(decided) = self.state.decided.get(id) {
             return *decided;
         }
@@ -98,18 +171,27 @@ impl Walk<'_> {
         }
     }
 
+    /// Filtrando no se pliega nada, así que no se ofrece: un chevrón que no
+    /// hace nada no dice por qué.
+    fn can_fold(&self) -> bool {
+        self.visible.is_none()
+    }
+
     fn is_active(&self, id: &str, kind: ScopeKind) -> bool {
         self.scope.is_some_and(|scope| scope.kind == kind && scope.id == id)
     }
 
     fn folder(&mut self, folder: &FolderTree, depth: u32, color: &str) {
+        if !self.shows(&folder.id) {
+            return;
+        }
         let open = self.is_open(&folder.id, NodeKind::Folder);
         self.rows.push(TreeRow {
             kind: NodeKind::Folder,
             id: folder.id.clone(),
             name: folder.name.clone(),
             depth,
-            expandable: !folder.folders.is_empty() || !folder.lists.is_empty(),
+            expandable: self.can_fold() && (!folder.folders.is_empty() || !folder.lists.is_empty()),
             open,
             active: false,
             has_doc: self.state.written_doc(NodeKind::Folder, &folder.id).is_some(),
@@ -128,6 +210,9 @@ impl Walk<'_> {
             self.folder(folder, depth, color);
         }
         for list in lists {
+            if !self.shows(&list.id) {
+                continue;
+            }
             self.rows.push(TreeRow {
                 kind: NodeKind::List,
                 id: list.id.clone(),
@@ -147,15 +232,31 @@ impl Walk<'_> {
 
 /// El árbol aplanado, con lo que está abierto.
 pub fn tree_rows(state: &TreeState, scope: Option<&WorkScope>) -> Vec<TreeRow> {
-    let mut walk = Walk { state, scope, path: active_path(&state.spaces, scope), rows: Vec::new() };
+    tree_rows_matching(state, scope, "")
+}
+
+/// El árbol aplanado con un filtro por título: sólo lo que casa, su camino
+/// y lo que tiene dentro, todo abierto. Con el filtro en blanco, el árbol de
+/// siempre.
+pub fn tree_rows_matching(state: &TreeState, scope: Option<&WorkScope>, query: &str) -> Vec<TreeRow> {
+    let mut walk = Walk {
+        state,
+        scope,
+        path: active_path(&state.spaces, scope),
+        visible: filter_tree(&state.spaces, query),
+        rows: Vec::new(),
+    };
     for space in &state.spaces {
+        if !walk.shows(&space.id) {
+            continue;
+        }
         let open = walk.is_open(&space.id, NodeKind::Space);
         walk.rows.push(TreeRow {
             kind: NodeKind::Space,
             id: space.id.clone(),
             name: space.name.clone(),
             depth: 0,
-            expandable: !space.folders.is_empty() || !space.lists.is_empty(),
+            expandable: walk.can_fold() && (!space.folders.is_empty() || !space.lists.is_empty()),
             open,
             active: walk.is_active(&space.id, ScopeKind::Space),
             has_doc: state.written_doc(NodeKind::Space, &space.id).is_some(),
@@ -182,6 +283,11 @@ impl Tree {
     /// Las filas que se pintan ahora.
     pub fn rows(&self) -> Vec<TreeRow> {
         tree_rows(&self.state(), self.scope().as_ref())
+    }
+
+    /// Las filas que se pintan con ese filtro por título puesto.
+    pub fn rows_matching(&self, query: &str) -> Vec<TreeRow> {
+        tree_rows_matching(&self.state(), self.scope().as_ref(), query)
     }
 
     /// Lo que se decidió a mano en una organización, de lo guardado.
