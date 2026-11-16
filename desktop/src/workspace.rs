@@ -397,6 +397,111 @@ impl Workspace {
         Self::rail_button(id, icon, label, false, cx).test_support()
     }
 
+    /// Una fila del panel que la app de siempre tiene y ésta todavía no.
+    fn pending_panel_row(id: &'static str, icon: Lucide, label_key: &str, cx: &App) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, hover, foreground) = (theme.muted_foreground, theme.sidebar_accent.opacity(0.5), theme.sidebar_foreground);
+        let not_yet = tr(cx, "common:misc.notInThisApp");
+        div()
+            .id(id)
+            .h(px(ROW_HEIGHT))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .mx_1()
+            .rounded_md()
+            .text_sm()
+            .text_color(muted)
+            .hover(move |style| style.bg(hover).text_color(foreground))
+            .child(Icon::new(icon).small())
+            .child(tr(cx, label_key))
+            .tooltip(move |window, cx| Tooltip::new(not_yet.clone()).build(window, cx))
+            .test_support()
+    }
+
+    /// Un botón pequeño de cabecera que todavía no hace nada aquí: dice qué
+    /// es y que aún no está.
+    fn pending_tool(id: &'static str, icon: Lucide, label_key: &str, cx: &App) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, hover, foreground) = (theme.muted_foreground, theme.sidebar_accent, theme.foreground);
+        let label = format!("{} · {}", tr(cx, label_key), tr(cx, "common:misc.notInThisApp"));
+        div()
+            .id(id)
+            .size(px(24.))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .text_color(muted)
+            .hover(move |style| style.bg(hover).text_color(foreground))
+            .child(Icon::new(icon).size_3p5())
+            .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+            .test_support()
+    }
+
+    /// La barra de arriba de la app de siempre: el buscador en el centro y
+    /// la campana a la derecha (`AppLayout.tsx`). Ninguno de los dos tiene
+    /// todavía nada detrás en esta app, y lo dicen al pasar el ratón.
+    fn render_top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (border, muted, surface, hover, foreground) = (theme.border, theme.muted_foreground, theme.muted, theme.accent, theme.foreground);
+        let mono = theme.mono_font_family.clone();
+        let not_yet = tr(cx, "common:misc.notInThisApp");
+        let bell_hint = format!("{} · {}", tr(cx, "common:last.notifications"), not_yet);
+        div()
+            .id("top-bar")
+            .h(px(48.))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .px_4()
+            .border_b_1()
+            .border_color(border)
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("global-search")
+                    .w_full()
+                    .max_w(px(448.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_1p5()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border)
+                    .bg(surface.opacity(0.3))
+                    .text_xs()
+                    .text_color(muted)
+                    .hover(move |style| style.bg(surface.opacity(0.6)))
+                    .child(Icon::new(IconName::Search).size_3p5().flex_none())
+                    .child(div().flex_1().min_w_0().truncate().child(tr(cx, "common:palette.searchPlaceholder")))
+                    .child(div().font_family(mono).text_size(px(10.)).opacity(0.7).child("⌘K"))
+                    .tooltip(move |window, cx| Tooltip::new(not_yet.clone()).build(window, cx))
+                    .test_support(),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("notifications-bell")
+                    .ml_2()
+                    .p_1p5()
+                    .flex_none()
+                    .rounded_md()
+                    .text_color(muted)
+                    .hover(move |style| style.bg(hover).text_color(foreground))
+                    .child(Icon::new(Lucide::Bell).small())
+                    .tooltip(move |window, cx| Tooltip::new(bell_hint.clone()).build(window, cx))
+                    .test_support(),
+            )
+            .test_support()
+    }
+
     fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (sidebar, border) = (theme.sidebar, theme.sidebar_border);
@@ -664,7 +769,6 @@ impl Workspace {
                     .gap_2()
                     .px_2()
                     .mx_1()
-                    .mb_1()
                     .rounded_md()
                     .text_sm()
                     .when(on_my_work, |this| this.bg(hover).font_weight(FontWeight::MEDIUM))
@@ -674,6 +778,8 @@ impl Workspace {
                     .child(Icon::new(IconName::Inbox).small())
                     .child(tr(cx, "nav:item.myWork")),
             )
+            .child(Self::pending_panel_row("panel-overview", Lucide::LayoutDashboard, "nav:item.overview", cx))
+            .child(Self::pending_panel_row("panel-notes", Lucide::NotebookPen, "nav:item.notes", cx))
             // Filtra lo que ya está en el panel; no es el buscador.
             .child(
                 div().px_2().py_1().child(
@@ -690,12 +796,17 @@ impl Workspace {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .px_4()
+                    .pl_4()
+                    .pr_1()
                     .mt_2()
                     .text_xs()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(foreground.opacity(0.7))
-                    .child(tr(cx, "nav:panel.spaces")),
+                    .child(div().flex_1().child(tr(cx, "nav:panel.spaces")))
+                    // Reordenar y crear un espacio: están donde en la app de
+                    // siempre, y todavía no hacen nada aquí.
+                    .child(Self::pending_tool("spaces-rearrange", Lucide::Lock, "work:tree.rearrange", cx))
+                    .child(Self::pending_tool("spaces-new", Lucide::Plus, "work:tree.newSpace", cx)),
             )
             .when(nothing, |this| {
                 this.child(div().id("tree-no-matches").test_support().px_3().py_3().text_xs().text_color(muted).child(tr(cx, "nav:panel.noMatches")))
@@ -748,7 +859,17 @@ impl Render for Workspace {
                             .child(self.render_rail(cx)),
                     )
                     .when(pinned, |this| this.child(self.render_panel(cx)))
-                    .child(div().flex_1().h_full().overflow_hidden().child(main))
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .overflow_hidden()
+                            .child(self.render_top_bar(cx))
+                            .child(div().flex_1().min_h_0().overflow_hidden().child(main)),
+                    )
                     // Suelto y con el ratón en el riel o en él: asomado por
                     // encima de la vista, sin empujarla.
                     .when(peeking, |this| {
@@ -904,6 +1025,9 @@ mod tests {
         assert!(on_screen(window, "rail-brand", cx), "el riel no lleva la marca");
         for module in ["rail-work", "rail-docs", "rail-comms", "rail-platform", "rail-organization"] {
             assert!(on_screen(window, module, cx), "falta {module} en el riel");
+        }
+        for piece in ["panel-overview", "panel-notes", "spaces-rearrange", "spaces-new", "global-search", "notifications-bell"] {
+            assert!(on_screen(window, piece, cx), "falta {piece}");
         }
         assert_eq!(cx.update(|cx| Backend::snapshot(cx).read(cx).orgs.current().map(|org| org.name.clone())).as_deref(), Some("G Studio"));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
