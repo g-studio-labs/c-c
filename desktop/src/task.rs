@@ -9,7 +9,7 @@ use cac_core::{Choice, DueState, SheetComment, SheetSubtask, StatusOption, TaskS
 use chrono::NaiveDate;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::calendar::Date;
@@ -43,6 +43,11 @@ pub struct TaskView {
     comment: Entity<TextareaState>,
     /// Que el cliente no lo lea. Sólo cuenta donde un cliente podría leerlo.
     internal: bool,
+    /// De qué tarea se están editando el título y la descripción. Al abrir
+    /// otra no se sigue editando: lo escrito era de aquélla.
+    editing: Option<String>,
+    title_input: Entity<InputState>,
+    body_input: Entity<TextareaState>,
     /// El selector del vencimiento.
     due: Entity<DatePickerState>,
     /// De qué tarea y qué día es lo que el selector enseña: se le pone el de
@@ -79,10 +84,45 @@ impl TaskView {
             problem: None,
             comment: cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 8).placeholder(placeholder)),
             internal: false,
+            editing: None,
+            title_input: cx.new(|cx| InputState::new(window, cx)),
+            body_input: cx.new(|cx| TextareaState::new(window, cx).auto_grow(6, 24)),
             due,
             due_shown: None,
             _due_changed: due_changed,
         }
+    }
+
+    /// Pasa a editar el título y la descripción, con lo que la tarea dice.
+    pub(crate) fn start_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sheet) = Backend::core(cx).tasks().sheet(locale(cx)) else { return };
+        self.title_input.update(cx, |input, cx| input.set_value(sheet.title, window, cx));
+        self.body_input.update(cx, |input, cx| input.set_value(sheet.description, window, cx));
+        self.editing = Some(sheet.id);
+        cx.notify();
+    }
+
+    /// Deja de editar sin guardar: lo escrito se tira.
+    pub(crate) fn cancel_editing(&mut self, cx: &mut Context<Self>) {
+        self.editing = None;
+        cx.notify();
+    }
+
+    /// Guarda el título y la descripción escritos y, si se guardaron, deja de
+    /// editar. Si no, se sigue editando con lo escrito.
+    pub(crate) fn save_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let title = self.title_input.read(cx).value().to_string();
+        let body = self.body_input.read(cx).value().to_string();
+        self.save(
+            "common:misc.errSave",
+            move |core| async move {
+                core.tasks().set_title(&title).await?;
+                core.tasks().set_description(&body).await
+            },
+            |this, _, _| this.editing = None,
+            window,
+            cx,
+        );
     }
 
     /// Le pone al selector el día de la tarea, cuando es otra tarea u otro
@@ -466,6 +506,7 @@ impl TaskView {
             (theme.muted_foreground, theme.border, theme.primary, theme.foreground, theme.group_box, theme.radius);
         // La pestaña elegida era de otra tarea: en ésta se empieza por la conversación.
         let thread = if self.thread_of.as_deref() == Some(sheet.id.as_str()) { self.thread } else { Thread::Talk };
+        let editing = self.editing.as_deref() == Some(sheet.id.as_str());
         let done = sheet.subtasks.iter().filter(|subtask| subtask.done).count();
         let comments = match thread {
             Thread::Talk => &sheet.talk,
@@ -485,7 +526,11 @@ impl TaskView {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().id("task-title").test_support().text_lg().font_weight(FontWeight::SEMIBOLD).child(sheet.title.clone()))
+                    .child(if editing {
+                        div().id("task-title-input").test_support().child(Input::new(&self.title_input)).into_any_element()
+                    } else {
+                        div().id("task-title").test_support().text_lg().font_weight(FontWeight::SEMIBOLD).child(sheet.title.clone()).into_any_element()
+                    })
                     .child(div().text_xs().text_color(muted).child(sheet.place.clone()))
                     .children(sheet.parent.clone().map(|parent| div().text_xs().text_color(muted).child(format!("› {parent}")))),
             )
@@ -510,7 +555,35 @@ impl TaskView {
             }))
             .child(
                 div().flex().flex_col().gap_1().child(self.section(tr(cx, "work:task.description"), cx)).child(
-                    if sheet.description.is_empty() {
+                    if editing {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(div().id("task-description-input").test_support().child(Textarea::new(&self.body_input)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().flex_1())
+                                    .child(
+                                        Button::new("task-cancel")
+                                            .ghost()
+                                            .small()
+                                            .label(tr(cx, "work:task.cancel"))
+                                            .on_click(cx.listener(|this, _, _, cx| this.cancel_editing(cx))),
+                                    )
+                                    .child(
+                                        Button::new("task-save")
+                                            .primary()
+                                            .small()
+                                            .label(tr(cx, "work:task.save"))
+                                            .on_click(cx.listener(|this, _, window, cx| this.save_edit(window, cx))),
+                                    ),
+                            )
+                            .into_any_element()
+                    } else if sheet.description.is_empty() {
                         div().id("task-no-description").test_support().text_sm().text_color(muted).child(tr(cx, "work:task.noDescription")).into_any_element()
                     } else {
                         div()
@@ -580,6 +653,15 @@ impl Render for TaskView {
         let theme = cx.theme();
         let (background, foreground, muted, border) = (theme.background, theme.foreground, theme.muted_foreground, theme.border);
         let waiting = state.waiting_reason().map(|key| tr(cx, key));
+        // Editar se ofrece con la tarea a la vista y mientras no se edita ya.
+        let can_edit = sheet.as_ref().is_some_and(|sheet| self.editing.as_deref() != Some(sheet.id.as_str()));
+        let edit = can_edit.then(|| {
+            Button::new("task-edit")
+                .ghost()
+                .small()
+                .label(tr(cx, "work:task.edit"))
+                .on_click(cx.listener(|this, _, window, cx| this.start_editing(window, cx)))
+        });
         let name = sheet
             .as_ref()
             .map(|sheet| match &sheet.reference {
@@ -611,6 +693,7 @@ impl Render for TaskView {
                     .border_b_1()
                     .border_color(border)
                     .child(div().flex_1().text_xs().text_color(muted).child(name))
+                    .children(edit)
                     .child(
                         Button::new("task-close")
                             .ghost()
@@ -1041,6 +1124,116 @@ mod tests {
         wait_until(cx, "dice que no se pudo y vuelve al día guardado", |cx| {
             on_screen(window, "task-problem", cx) && picked(&view, cx) == day(2026, 9, 30)
         });
+        stop(cx);
+    }
+
+    fn written(view: &Entity<TaskView>, cx: &mut TestAppContext) -> (String, String) {
+        cx.update(|cx| {
+            let view = view.read(cx);
+            (view.title_input.read(cx).value().to_string(), view.body_input.read(cx).value().to_string())
+        })
+    }
+
+    fn rewrite(window: AnyWindowHandle, view: &Entity<TaskView>, title: &str, body: &str, cx: &mut TestAppContext) {
+        let (title, body) = (title.to_string(), body.to_string());
+        with_view(window, view, cx, |view, window, cx| {
+            view.title_input.update(cx, |input, cx| input.set_value(title, window, cx));
+            view.body_input.update(cx, |input, cx| input.set_value(body, window, cx));
+        });
+    }
+
+    /// «Editar» pone el título y la descripción en sus cajas con lo que la
+    /// tarea dice, y «Guardar» manda lo escrito y vuelve a la lectura.
+    ///
+    /// Roturas que atrapa: unas cajas vacías sobre una tarea con texto (y
+    /// guardar la borra); un «Guardar» que no manda, o que manda sólo el
+    /// título; quedarse editando después de guardar.
+    #[gpui_kit::test]
+    fn editing_starts_from_what_the_task_says_and_saves_what_was_written(cx: &mut TestAppContext) {
+        let server = server_with_choices();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        assert!(!on_screen(window, "task-title-input", cx) && !on_screen(window, "task-save", cx));
+
+        click(window, "task-edit", cx);
+        assert!(on_screen(window, "task-title-input", cx) && on_screen(window, "task-description-input", cx));
+        assert!(!on_screen(window, "task-title", cx) && !on_screen(window, "task-edit", cx));
+        assert_eq!(written(&view, cx), ("Subir el backend".to_string(), "Con **markdown**.".to_string()));
+
+        rewrite(window, &view, "Otro título", "Otra descripción", cx);
+        click(window, "task-save", cx);
+        wait_until(cx, "se guardan los dos y vuelve a la lectura", |cx| {
+            patches(&server).len() == 2 && on_screen(window, "task-title", cx)
+        });
+
+        assert_eq!(patches(&server), [json!({ "title": "Otro título" }), json!({ "description": "Otra descripción" })]);
+        assert!(!on_screen(window, "task-title-input", cx) && !on_screen(window, "task-problem", cx));
+        stop(cx);
+    }
+
+    /// «Cancelar» tira lo escrito: no se manda, y al volver a editar las
+    /// cajas dicen otra vez lo que dice la tarea.
+    ///
+    /// Roturas que atrapa: un «Cancelar» que guarda; volver a editar y
+    /// encontrarse lo que se había descartado.
+    #[gpui_kit::test]
+    fn cancelling_throws_away_what_was_written(cx: &mut TestAppContext) {
+        let server = server_with_choices();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        click(window, "task-edit", cx);
+        rewrite(window, &view, "No", "Tampoco", cx);
+
+        click(window, "task-cancel", cx);
+        cx.run_until_parked();
+        assert!(on_screen(window, "task-title", cx) && !on_screen(window, "task-title-input", cx));
+        assert!(patches(&server).is_empty(), "cancelar guardó {:?}", patches(&server));
+
+        click(window, "task-edit", cx);
+        assert_eq!(written(&view, cx).0, "Subir el backend");
+        stop(cx);
+    }
+
+    /// Si no se pudo guardar, se dice y se sigue editando con lo escrito.
+    ///
+    /// Rotura que atrapa: perder una descripción entera por un fallo de red.
+    #[gpui_kit::test]
+    fn an_edit_that_fails_keeps_what_was_written(cx: &mut TestAppContext) {
+        // Sin `PATCH` montado: el servidor contesta 404.
+        let server = server();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        click(window, "task-edit", cx);
+        rewrite(window, &view, "Otro título", "Mucho texto", cx);
+
+        click(window, "task-save", cx);
+
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+        assert!(on_screen(window, "task-title-input", cx));
+        assert_eq!(written(&view, cx), ("Otro título".to_string(), "Mucho texto".to_string()));
+        stop(cx);
+    }
+
+    /// Al abrir otra tarea no se sigue editando: lo escrito era de la anterior.
+    ///
+    /// Rotura que atrapa: guardar en una tarea el título que se escribía
+    /// para otra.
+    #[gpui_kit::test]
+    fn another_task_is_not_opened_in_edit_mode(cx: &mut TestAppContext) {
+        let server = server();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t2")).respond_with(ok(detail("t2"))));
+        let (window, _view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        click(window, "task-edit", cx);
+        assert!(on_screen(window, "task-title-input", cx));
+
+        click(window, "work-row-t2", cx);
+        wait_until(cx, "llega la otra", |cx| {
+            cx.update(|cx| Backend::snapshot(cx).read(cx).task.detail.as_ref().is_some_and(|detail| detail.task.id == "t2"))
+        });
+
+        assert!(on_screen(window, "task-title", cx) && !on_screen(window, "task-title-input", cx));
+        assert!(on_screen(window, "task-edit", cx));
         stop(cx);
     }
 
