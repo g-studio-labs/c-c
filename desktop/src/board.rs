@@ -32,7 +32,7 @@ impl Render for LiftedCard {
 }
 
 /// El color de un estado: los `--status-*` del tema puesto.
-fn status_tone(status: BoardStatus, cx: &App) -> Hsla {
+pub(crate) fn status_tone(status: BoardStatus, cx: &App) -> Hsla {
     let token = match status {
         BoardStatus::Open => "status-open",
         BoardStatus::InProgress => "status-progress",

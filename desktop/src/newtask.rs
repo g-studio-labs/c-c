@@ -99,6 +99,12 @@ impl NewTaskRow {
         cx.notify();
     }
 
+    /// Le pone ese día de vencimiento: la fila que se abre desde un día del
+    /// calendario nace con él.
+    pub(crate) fn set_due_day(&mut self, day: chrono::NaiveDate, window: &mut Window, cx: &mut Context<Self>) {
+        self.due.update(cx, |due, cx| due.set_date(Date::Single(Some(day)), window, cx));
+    }
+
     pub(crate) fn close(&mut self, cx: &mut Context<Self>) {
         cx.emit(NewTaskClosed);
     }

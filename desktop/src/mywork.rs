@@ -72,6 +72,8 @@ pub struct MyWorkView {
     pub(crate) lifted: Option<String>,
     /// Lo que el servidor contestó al rechazar un movimiento del tablero.
     pub(crate) board_error: Option<String>,
+    /// Lo que el calendario recuerda mientras está abierto (`calendar.rs`).
+    pub(crate) calendar: crate::calendar::CalendarState,
 }
 
 impl MyWorkView {
@@ -85,6 +87,7 @@ impl MyWorkView {
             _new_task_closed: None,
             lifted: None,
             board_error: None,
+            calendar: crate::calendar::CalendarState::new(cx),
         }
     }
 
@@ -423,8 +426,8 @@ impl Render for MyWorkView {
         let header = self.render_header(shown, &filter, cx);
         let body = match layout {
             WorkLayout::Board => self.render_board(&filter, cx).into_any_element(),
-            // El calendario llega después: hasta entonces, la lista.
-            WorkLayout::List | WorkLayout::Calendar => div()
+            WorkLayout::Calendar => self.render_calendar(&filter, cx).into_any_element(),
+            WorkLayout::List => div()
                 .id("work-list")
                 .flex_1()
                 .overflow_y_scroll()

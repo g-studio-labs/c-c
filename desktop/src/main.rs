@@ -11,6 +11,7 @@ mod auth;
 mod backend;
 mod board;
 mod brand;
+mod calendar;
 mod docs;
 mod files;
 mod lang;
