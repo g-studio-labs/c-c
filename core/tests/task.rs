@@ -747,3 +747,50 @@ async fn title_and_description_are_sent_clean_and_only_when_they_change() {
         [json!({ "title": "Otra" }), json!({ "description": "Nueva" }), json!({ "description": "" })]
     );
 }
+
+/// Editar un comentario manda lo escrito, limpio, y vuelve a pedir la tarea;
+/// en blanco o igual que estaba no se pide nada. Borrarlo lo pide por su id.
+///
+/// Roturas que atrapa: dejar un comentario en blanco en vez de borrarlo;
+/// marcar «editado» un comentario que no cambió; editar o borrar otro
+/// comentario; que el hilo siga enseñando lo de antes; callar una edición
+/// porque **otro** comentario ya decía eso; no ofrecer editar a nadie por no
+/// mirar quién está dentro.
+#[tokio::test]
+async fn a_comment_is_edited_clean_and_only_when_it_changes() {
+    let rig = rig().await;
+    let mut task = detail("t1", "Tarea", "pending", "", "");
+    // Dos comentarios, y el primero no es el que se edita: lo que se compara
+    // es lo que dice **ése**. El de Ana es `u1`, quien está dentro.
+    task["comments"] = json!([
+        { "id": "c0", "body": "hola a todos", "createdAt": "2026-11-15T09:00:00Z", "authorUserId": "u7" },
+        { "id": "c1", "body": "hola ", "createdAt": "2026-11-15T10:00:00Z", "authorUserId": "u1" },
+    ]);
+    mount_task(&rig.server, "t1", task).await;
+    mount_columns(&rig.server).await;
+    for verb in ["PATCH", "DELETE"] {
+        Mock::given(method(verb))
+            .and(path("/api/v1/tasks/t1/comments/c1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true, "message": "ok" })))
+            .mount(&rig.server)
+            .await;
+    }
+    rig.core.tasks().open("t1").await;
+    let fetched = |requests: Vec<Value>| requests.len();
+    // Quién puede cambiarlo sale de quien está dentro.
+    let mine: Vec<bool> = rig.core.tasks().sheet(cac_core::Locale::Es).unwrap().talk.iter().map(|comment| comment.mine).collect();
+    assert_eq!(mine, [false, true]);
+
+    let blank = rig.core.tasks().edit_comment("c1", "   ").await.unwrap_err();
+    assert!(matches!(blank, cac_core::ApiError::Server { ref code, .. } if code == "empty-comment"), "{blank:?}");
+    rig.core.tasks().edit_comment("c1", " hola").await.unwrap();
+    assert!(requests_to(&rig.server, "PATCH", "/comments/c1").await.is_empty(), "pidió sin nada que cambiar");
+
+    rig.core.tasks().edit_comment("c1", "  hola a todos \n").await.unwrap();
+    assert_eq!(requests_to(&rig.server, "PATCH", "/comments/c1").await, [json!({ "body": "hola a todos" })]);
+    assert_eq!(fetched(requests_to(&rig.server, "GET", "/tasks/t1").await), 2, "no volvió a pedir la tarea");
+
+    rig.core.tasks().delete_comment("c1").await.unwrap();
+    assert_eq!(requests_to(&rig.server, "DELETE", "/comments/c1").await.len(), 1);
+    assert_eq!(fetched(requests_to(&rig.server, "GET", "/tasks/t1").await), 3, "no volvió a pedir la tarea");
+}

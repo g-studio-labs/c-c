@@ -56,7 +56,7 @@ pub use task::{
 pub use task::{attachment_fits, attachment_path, is_image, multipart, safe_file_name, size_label, MAX_ATTACHMENT_BYTES};
 pub use task::{destinations, drafted, Destination, Destinations, TaskDraft};
 pub use task::{assignee_choices, shown_name, tag_choices, Choice};
-pub use task::{is_agent_note, task_sheet, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};
+pub use task::{can_change_comment, is_agent_note, task_sheet, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};
 pub use texts::{error_phrase, pick_locale, text, text_count, text_with, Locale};
 pub use transport::Reply;
 

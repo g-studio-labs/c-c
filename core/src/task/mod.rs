@@ -20,7 +20,7 @@ pub use edit::{assignee_choices, shown_name, tag_choices, Choice};
 pub use new::{destinations, drafted, Destination, Destinations, TaskDraft};
 pub use files::{attachment_fits, attachment_path, is_image, multipart, safe_file_name, size_label, MAX_ATTACHMENT_BYTES};
 pub use flow::{can_transition, canonical_priority, canonical_status, flow_for, Flow};
-pub use sheet::{client_reads, is_agent_note, task_sheet, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};
+pub use sheet::{client_reads, can_change_comment, is_agent_note, task_sheet, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};
 pub use types::{
     CommentAuthor, DecisionRef, GitSummary, ReleaseRef, Task, TaskAttachment, TaskBlocker, TaskCard,
     TaskComment, TaskDetail, TaskGitLink, TaskGitLinks, TaskStatus, TaskTag, UserSummary,
@@ -381,8 +381,18 @@ impl Tasks {
         Ok(())
     }
 
+    /// Cambia lo que dice un comentario de la tarea abierta. En blanco no se
+    /// manda (para eso está borrarlo), y si dice lo mismo no se pide nada.
     pub async fn edit_comment(&self, comment_id: &str, body: &str) -> Result<(), ApiError> {
         let task_id = self.open_id()?;
+        let body = body.trim();
+        if body.is_empty() {
+            return Err(refused("empty-comment", "A comment needs some text"));
+        }
+        let says = self.state().detail.and_then(|detail| detail.comments.into_iter().find(|comment| comment.id == comment_id));
+        if says.is_some_and(|comment| comment.body.trim() == body) {
+            return Ok(());
+        }
         let path = format!("/api/v1/tasks/{task_id}/comments/{comment_id}");
         self.core.call_ok("PATCH", &path, Some(json!({ "body": body }))).await?;
         self.refresh().await;

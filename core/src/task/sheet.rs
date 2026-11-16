@@ -10,6 +10,7 @@ use super::files::{is_image, size_label};
 use super::{shown_name, StatusOption, TaskComment, TaskDetail, Tasks};
 use crate::dates::{due_day, today_in};
 use crate::mywork::{day_and_month, due_label, DueLabel};
+use crate::session::Session;
 use crate::texts::{text_with, Locale};
 
 /// Una nota de agente: lo que un agente anotó con el token de alguien. Va
@@ -35,6 +36,30 @@ pub struct SheetComment {
     pub audience: Option<String>,
     /// Una línea que escribió el servidor («status: x → y»).
     pub system: bool,
+    /// Si quien mira puede editarlo o borrarlo.
+    pub mine: bool,
+    /// Si se editó después de escribirse.
+    pub edited: bool,
+}
+
+/// Si esa persona puede editar o borrar ese comentario: quien lo escribió, o
+/// un superadmin. Una línea del servidor no es de nadie.
+///
+/// Es la regla del servidor (`commentScope`), repetida aquí para no ofrecer
+/// lo que va a rechazar.
+pub fn can_change_comment(comment: &TaskComment, viewer: Option<&Session>) -> bool {
+    comment.kind != "system"
+        && viewer.is_some_and(|viewer| viewer.superadmin || (!viewer.id.is_empty() && viewer.id == comment.author_user_id))
+}
+
+/// Si el comentario cambió después de escribirse. Con un segundo de margen:
+/// el servidor pone las dos fechas al crearlo y no siempre coinciden.
+fn was_edited(comment: &TaskComment) -> bool {
+    let at = |instant: &str| chrono::DateTime::parse_from_rfc3339(instant).ok();
+    match (at(&comment.created_at), at(&comment.updated_at)) {
+        (Some(created), Some(updated)) => (updated - created).num_milliseconds() > 1000,
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,7 +148,13 @@ fn said_at(locale: Locale, instant: &str) -> String {
 
 /// El detalle, dicho. `statuses` son las columnas de su lista (de ellas sale
 /// qué subtarea está hecha) y `today` el día de la organización.
-pub fn task_sheet(detail: &TaskDetail, statuses: &[StatusOption], locale: Locale, today: NaiveDate) -> TaskSheet {
+pub fn task_sheet(
+    detail: &TaskDetail,
+    statuses: &[StatusOption],
+    locale: Locale,
+    today: NaiveDate,
+    viewer: Option<&Session>,
+) -> TaskSheet {
     let task = &detail.task;
     let client_reads = client_reads(detail);
     let comment = |comment: &TaskComment| SheetComment {
@@ -139,6 +170,8 @@ pub fn task_sheet(detail: &TaskDetail, statuses: &[StatusOption], locale: Locale
             if comment.visibility == "public" { "work:task.clientSees" } else { "work:task.internal" }.to_string()
         }),
         system: comment.kind == "system",
+        mine: can_change_comment(comment, viewer),
+        edited: was_edited(comment),
     };
     let (notes, talk): (Vec<&TaskComment>, Vec<&TaskComment>) = detail.comments.iter().partition(|c| is_agent_note(c));
     let done = |status_id: &str| statuses.iter().any(|option| option.status.id == status_id && option.status.kind == "done");
@@ -220,7 +253,7 @@ impl Tasks {
         let state = self.state();
         let detail = state.detail.as_ref()?;
         let today = today_in(self.core.orgs().state().current_zone(), Utc::now(), &chrono::Local);
-        Some(task_sheet(detail, &state.statuses, locale, today))
+        Some(task_sheet(detail, &state.statuses, locale, today, self.core.session().as_ref()))
     }
 }
 
@@ -239,7 +272,7 @@ mod tests {
     fn sheet_of(detail: Value, statuses: Value) -> TaskSheet {
         let detail: TaskDetail = serde_json::from_value(detail).unwrap();
         let statuses: Vec<StatusOption> = serde_json::from_value(statuses).unwrap();
-        task_sheet(&detail, &statuses, Locale::Es, NaiveDate::from_ymd_opt(2026, 9, 30).unwrap())
+        task_sheet(&detail, &statuses, Locale::Es, NaiveDate::from_ymd_opt(2026, 9, 30).unwrap(), None)
     }
 
     fn column(id: &str, kind: &str) -> Value {
@@ -426,4 +459,44 @@ mod tests {
         assert_eq!(said_at(Locale::Es, "2026-11-14T12:05:00Z"), expected);
         assert_eq!(said_at(Locale::Es, "nunca"), "");
     }
+    fn viewer(id: &str, superadmin: bool) -> Session {
+        serde_json::from_value(json!({ "id": id, "username": id, "superadmin": superadmin })).unwrap()
+    }
+
+    /// Un comentario lo cambia quien lo escribió o un superadmin, y se dice
+    /// si se editó.
+    ///
+    /// Roturas que atrapa: ofrecer editar el comentario de otro (el servidor
+    /// contesta 403 `not-the-author`: sería un botón que no hace nada); que un superadmin no
+    /// pueda; ofrecer editar una línea del servidor; dar por editado todo
+    /// comentario porque sus dos fechas no son idénticas; sin sesión, o con
+    /// un autor en blanco, dar a cualquiera por autor.
+    #[test]
+    fn a_comment_is_changed_by_whoever_wrote_it() {
+        let mut detail = contract();
+        detail["comments"] = json!([
+            comment("mio", |c| { c["authorUserId"] = json!("u1"); c["updatedAt"] = json!("2026-11-14T12:00:00.400Z") }),
+            comment("ajeno", |c| { c["authorUserId"] = json!("u2"); c["updatedAt"] = json!("2026-11-14T12:05:00Z") }),
+            comment("del-servidor", |c| { c["authorUserId"] = json!("u1"); c["kind"] = json!("system") }),
+            comment("sin-autor", |c| c["authorUserId"] = json!("")),
+        ]);
+        let detail: TaskDetail = serde_json::from_value(detail).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 9, 30).unwrap();
+        let seen_by = |viewer: Option<&Session>| -> Vec<(String, bool, bool)> {
+            task_sheet(&detail, &[], Locale::Es, today, viewer).talk.into_iter().map(|c| (c.id, c.mine, c.edited)).collect()
+        };
+        let said = |mine: [bool; 4]| -> Vec<(String, bool, bool)> {
+            ["mio", "ajeno", "del-servidor", "sin-autor"]
+                .iter()
+                .zip(mine)
+                .map(|(id, mine)| (id.to_string(), mine, *id == "ajeno"))
+                .collect()
+        };
+
+        assert_eq!(seen_by(Some(&viewer("u1", false))), said([true, false, false, false]));
+        assert_eq!(seen_by(Some(&viewer("u9", true))), said([true, true, false, true]));
+        assert_eq!(seen_by(Some(&viewer("", false))), said([false, false, false, false]));
+        assert_eq!(seen_by(None), said([false, false, false, false]));
+    }
+
 }
