@@ -356,8 +356,7 @@ impl Workspace {
         // o una lista.
         let mark = match row.kind {
             NodeKind::Space => {
-                let color = u32::from_str_radix(row.color.trim_start_matches('#'), 16).unwrap_or(0x888888);
-                div().size(px(10.)).flex_none().rounded_full().bg(gpui_kit::rgb(color)).into_any_element()
+                div().size(px(10.)).flex_none().rounded_full().bg(crate::theme::space_color(&row.color, row.hue, cx)).into_any_element()
             }
             NodeKind::Folder => Icon::new(Lucide::Folder).xsmall().text_color(muted).into_any_element(),
             NodeKind::List => Icon::new(Lucide::ListChecks).xsmall().text_color(muted).into_any_element(),

@@ -15,7 +15,7 @@ const CSS: &str = include_str!("../../app/src/index.css");
 /// Los colores que esta app usa del CSS. Los dos temas tienen que traerlos
 /// todos. Guardián: `tests::both_themes_bring_every_colour`, que es quien la lee.
 #[cfg(test)]
-const TOKENS: [&str; 26] = [
+const TOKENS: [&str; 34] = [
     "background",
     "foreground",
     "card",
@@ -42,6 +42,14 @@ const TOKENS: [&str; 26] = [
     "sidebar-border",
     "success",
     "warning",
+    "hue-1",
+    "hue-2",
+    "hue-3",
+    "hue-4",
+    "hue-5",
+    "hue-6",
+    "hue-7",
+    "hue-8",
 ];
 
 /// Los colores de un bloque del CSS (`:root` o `.dark`): `--nombre: #RRGGBB;`.
@@ -69,6 +77,25 @@ fn selector(mode: ThemeMode) -> &'static str {
     } else {
         ":root"
     }
+}
+
+/// El color de un espacio: el que alguien le puso (`#RRGGBB`) y, si no
+/// tiene —lo normal—, el tono que le toca por su id, de los ocho `--hue-*`
+/// del tema puesto. Hasta el 16-nov-2026 los que no tenían color propio
+/// salían todos grises (jose, probando con sus espacios de verdad: el
+/// servidor de mentira les ponía color a todos).
+pub fn space_color(color: &str, hue: u32, cx: &App) -> Hsla {
+    let own = color.strip_prefix('#').filter(|hex| hex.len() == 6).and_then(|hex| u32::from_str_radix(hex, 16).ok());
+    use gpui_kit::component::ActiveTheme as _;
+    let value = own.or_else(|| hue_value(cx.theme().mode.is_dark(), hue)).unwrap_or(0x888888);
+    Hsla::from(rgb(value))
+}
+
+/// El `--hue-N` de ese tema. Las paletas se leen del CSS una vez.
+fn hue_value(dark: bool, hue: u32) -> Option<u32> {
+    static PALETTES: std::sync::OnceLock<[HashMap<String, u32>; 2]> = std::sync::OnceLock::new();
+    let palettes = PALETTES.get_or_init(|| [palette(CSS, selector(ThemeMode::Light)), palette(CSS, selector(ThemeMode::Dark))]);
+    palettes[usize::from(dark)].get(&format!("hue-{}", hue % cac_core::HUES + 1)).copied()
 }
 
 /// Pone el tema que eligió quien mira (el core lo recuerda y sabe qué hacer
@@ -200,6 +227,28 @@ mod tests {
     fn a_mention_is_not_a_place_to_go() {
         assert!(super::leads_somewhere("https://cac.guz-studio.dev/docs"));
         assert!(!super::leads_somewhere("cac:user/11111111-1111-4111-8111-111111111111"));
+    }
+
+    /// Un espacio con color propio sale con él; sin él, con el tono de su
+    /// id, que cambia con el tema; nunca gris.
+    ///
+    /// Roturas que atrapa: todos los espacios sin color pintados del mismo
+    /// gris; ignorar el color que alguien eligió; el tono del tema claro en
+    /// el oscuro (no contrasta).
+    #[gpui_kit::test]
+    fn a_space_without_a_colour_gets_its_hue(cx: &mut TestAppContext) {
+        let (light, dark) = (palette(CSS, selector(ThemeMode::Light)), palette(CSS, selector(ThemeMode::Dark)));
+        cx.update(|cx| {
+            gpui_kit::component::init(cx);
+            apply(ThemeMode::Dark, cx);
+            assert_eq!(super::space_color("#20D9E8", 3, cx), Hsla::from(rgb(0x20D9E8)));
+            assert_eq!(super::space_color("", 0, cx), Hsla::from(rgb(dark["hue-1"])));
+            assert_eq!(super::space_color("", 7, cx), Hsla::from(rgb(dark["hue-8"])));
+            assert_eq!(super::space_color("no es un color", 3, cx), Hsla::from(rgb(dark["hue-4"])));
+            apply(ThemeMode::Light, cx);
+            assert_eq!(super::space_color("", 0, cx), Hsla::from(rgb(light["hue-1"])));
+            assert_ne!(light["hue-1"], dark["hue-1"]);
+        });
     }
 
     /// Los dos temas traen todos los colores que la app usa, y son los del CSS.
