@@ -12,6 +12,7 @@ mod backend;
 mod docs;
 mod lang;
 mod mywork;
+mod newtask;
 mod platform;
 mod shell;
 mod spike;

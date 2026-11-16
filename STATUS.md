@@ -35,9 +35,12 @@ toda regla va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
   agentes en su pestaña). Se editan el estado, la prioridad, el vencimiento,
   las etiquetas, los responsables, el título y la descripción (markdown en
   una caja de texto), se marcan subtareas y se comenta (diciendo si lo lee
-  el cliente).
+  el cliente). «Tarea nueva» en la cabecera de «Mi trabajo» abre una fila
+  que se queda abierta: va a la lista que se mira (o a la que se elija), con
+  prioridad, fecha y responsable, y en la lista de un cliente pregunta si la
+  ve.
 - **Falta:** de la carcasa, las fuentes incrustadas y el filtro del panel;
-  del detalle, los adjuntos, «tarea nueva», crear una etiqueta y buscar entre más de 50 personas; después
+  del detalle, los adjuntos, crear una etiqueta y buscar entre más de 50 personas; después
   tablero y calendario (379) y los instaladores (380).
 - **Cómo se mira:** `cd desktop && cargo run --release`. Su sesión va aparte
   de la de Tauri (`~/.local/share/cac-desktop`): se entra una vez en cada una.

@@ -16,6 +16,7 @@ use gpui_kit::*;
 
 use crate::backend::Backend;
 use crate::lang::{locale, tr};
+use crate::newtask::{NewTaskClosed, NewTaskRow};
 
 /// Las lentes, en el orden de la app de siempre, con su nombre en el catálogo.
 const LENSES: [(WorkLens, &str); 5] = [
@@ -31,6 +32,9 @@ pub struct MyWorkView {
     /// Lo elegido en los desplegables; vacío es «cualquiera».
     assignee: String,
     priority: String,
+    /// La fila de «tarea nueva», mientras está abierta.
+    pub(crate) new_task: Option<Entity<NewTaskRow>>,
+    _new_task_closed: Option<Subscription>,
 }
 
 impl MyWorkView {
@@ -40,7 +44,25 @@ impl MyWorkView {
             search: cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)),
             assignee: String::new(),
             priority: String::new(),
+            new_task: None,
+            _new_task_closed: None,
         }
+    }
+
+    /// Abre la fila de «tarea nueva», o la cierra si ya estaba.
+    pub(crate) fn toggle_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.new_task.take().is_some() {
+            self._new_task_closed = None;
+        } else {
+            let row = cx.new(|cx| NewTaskRow::new(window, cx));
+            self._new_task_closed = Some(cx.subscribe(&row, |this, _, _: &NewTaskClosed, cx| {
+                this.new_task = None;
+                this._new_task_closed = None;
+                cx.notify();
+            }));
+            self.new_task = Some(row);
+        }
+        cx.notify();
     }
 
     fn filter(&self, cx: &App) -> TaskFilter {
@@ -206,6 +228,13 @@ impl MyWorkView {
                     })
                     .child(div().w(px(240.)).child(Input::new(&self.search).id("work-search").small().cleanable(true)))
                     .child(
+                        Button::new("new-task")
+                            .primary()
+                            .small()
+                            .label(tr(cx, "work:myWork.newTask"))
+                            .on_click(cx.listener(|this, _, window, cx| this.toggle_new_task(window, cx))),
+                    )
+                    .child(
                         Button::new("toggle-closed")
                             .ghost()
                             .small()
@@ -359,6 +388,7 @@ impl Render for MyWorkView {
                     .flex_col()
                     .gap_5()
                     .p_4()
+                    .children(self.new_task.clone())
                     .children(empty.map(|phrase| div().id("work-empty").test_support().text_sm().text_color(muted).child(phrase)))
                     .children(groups.into_iter().map(|group| self.render_group(group, cx))),
             )
