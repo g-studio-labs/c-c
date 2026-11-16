@@ -56,7 +56,7 @@ pub use task::{
 pub use task::{attachment_fits, attachment_path, is_image, multipart, safe_file_name, size_label, MAX_ATTACHMENT_BYTES};
 pub use task::{destinations, drafted, Destination, Destinations, TaskDraft};
 pub use task::{
-    comment_placeholder, mention_link, mention_matches, mention_query, mentions_allowed, offered_mentions, with_mention,
+    comment_placeholder, mention_link, mention_matches, mention_query, mentioned_user, mentions_allowed, offered_mentions, with_mention,
     MentionEdit, MentionPerson, MentionQuery,
 };
 pub use task::{assignee_choices, shown_name, tag_choices, Choice};

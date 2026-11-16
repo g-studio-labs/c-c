@@ -19,7 +19,7 @@ use serde_json::{json, Map, Value};
 
 pub use edit::{assignee_choices, shown_name, tag_choices, Choice};
 pub use mention::{
-    comment_placeholder, mention_link, mention_matches, mention_query, mentions_allowed, offered_mentions, with_mention,
+    comment_placeholder, mention_link, mention_matches, mention_query, mentioned_user, mentions_allowed, offered_mentions, with_mention,
     MentionEdit, MentionPerson, MentionQuery,
 };
 pub use new::{destinations, drafted, Destination, Destinations, TaskDraft};

@@ -123,6 +123,14 @@ pub fn mention_link(person: &MentionPerson) -> String {
     format!("[@{}](cac:user/{})", person.username, person.id)
 }
 
+/// A quién nombra ese enlace, si es una mención. Con la misma forma que
+/// busca el servidor: el prefijo exacto y un uuid, no «lo que venga detrás».
+/// Quien pinta lo usa para no tratar una mención como un sitio al que ir.
+pub fn mentioned_user(href: &str) -> Option<&str> {
+    let id = href.strip_prefix("cac:user/")?;
+    (id.len() == 36 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')).then_some(id)
+}
+
 /// Cambia el `@algo` que se escribía por la mención de esa persona, con un
 /// espacio detrás para seguir escribiendo. `None` si en el cursor ya no hay
 /// un `@algo` (se movió entre que se ofreció y se eligió).

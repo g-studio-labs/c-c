@@ -1,7 +1,7 @@
 //! Nombrar a alguien con `@`: dónde se ofrece, a quién, y qué se escribe.
 
 use cac_core::{
-    comment_placeholder, mention_link, mention_matches, mention_query, mentions_allowed, offered_mentions, with_mention,
+    comment_placeholder, mention_link, mention_matches, mention_query, mentioned_user, mentions_allowed, offered_mentions, with_mention,
     MentionPerson, MentionQuery, UserSummary,
 };
 
@@ -124,4 +124,23 @@ fn choosing_someone_writes_the_mention_the_server_reads() {
     assert_eq!(&id[36..37], ")");
 
     assert_eq!(with_mention("hola", 4, &ana), None, "sin @ que cambiar");
+}
+
+/// Una mención se reconoce por su enlace, con la forma exacta que escribe.
+///
+/// Roturas que atrapa: tratar una mención como un enlace al que ir; tomar
+/// por mención cualquier cosa que empiece igual, o un enlace que la contiene.
+#[test]
+fn a_mention_is_told_from_any_other_link() {
+    let ana = mention_matches(&team(), "ana").remove(0);
+    let href = format!("cac:user/{ANA}");
+    assert!(mention_link(&ana).contains(&href));
+    assert_eq!(mentioned_user(&href), Some(ANA));
+
+    assert_eq!(mentioned_user("https://cac.guz-studio.dev"), None);
+    assert_eq!(mentioned_user("cac:user/"), None);
+    assert_eq!(mentioned_user("cac:user/no-es-un-uuid"), None);
+    assert_eq!(mentioned_user(&format!("{href}/más")), None);
+    assert_eq!(mentioned_user(&format!("https://x/?a={href}")), None);
+    assert_eq!(mentioned_user(&format!("cac:user/{}", "z".repeat(36))), None);
 }
