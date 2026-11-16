@@ -7,6 +7,7 @@
 //! `Listener::my_work_changed`.
 
 pub mod board;
+pub mod calendar;
 pub mod filter;
 pub mod list;
 mod types;
@@ -22,6 +23,11 @@ use crate::Core;
 
 pub use board::{
     can_drop, work_board, BoardAssignee, BoardCard, BoardColumn, BoardStatus, DropVerdict, BAD_TRANSITION, COLUMN_MISSING,
+};
+pub use calendar::{
+    calendar_chips, calendar_tone, day_title, lane_open_by_default, month_start, month_title, month_view, tone_is_high, unscheduled,
+    week_start, week_title, week_view, weekday_name, CalendarChip, CalendarCursor, CalendarDay, CalendarView, CalendarWeek, MonthView,
+    ToneCount, WeekSummary, WeekView, CALENDAR_TONES,
 };
 pub use filter::{filter_options, matches_filter, FilterOptions, TaskFilter, NOBODY, PRIORITIES};
 pub use list::{day_and_month, due_label, empty_reason, work_groups, DueLabel, WorkGroup, WorkRow};

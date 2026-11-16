@@ -41,6 +41,11 @@ pub use mywork::{
     day_and_month, due_label, empty_reason, filter_options, work_groups, DueLabel, FilterOptions, MyWork, MyWorkState, OpenTask,
     ScopeKind, TaskFilter, WorkGroup, WorkLens, WorkRow, WorkScope, NOBODY, PRIORITIES,
 };
+pub use mywork::{
+    calendar_chips, calendar_tone, day_title, lane_open_by_default, month_start, month_title, month_view, tone_is_high, unscheduled,
+    week_start, week_title, week_view, weekday_name, CalendarChip, CalendarCursor, CalendarDay, CalendarView, CalendarWeek, MonthView,
+    ToneCount, WeekSummary, WeekView, CALENDAR_TONES,
+};
 pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClick};
 pub use hue::{hue_index, HUES};
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
