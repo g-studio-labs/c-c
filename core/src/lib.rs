@@ -37,6 +37,7 @@ pub use docs::{DocDecision, DocTab, DocTarget, Docs, DocsState, DOC_TABS};
 pub use error::ApiError;
 pub use events::{Listener, NoListener};
 pub use mywork::{
+    can_drop, work_board, BoardAssignee, BoardCard, BoardColumn, BoardStatus, DropVerdict, BAD_TRANSITION, COLUMN_MISSING,
     day_and_month, due_label, empty_reason, filter_options, work_groups, DueLabel, FilterOptions, MyWork, MyWorkState, OpenTask,
     ScopeKind, TaskFilter, WorkGroup, WorkLens, WorkRow, WorkScope, NOBODY, PRIORITIES,
 };

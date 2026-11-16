@@ -6,6 +6,7 @@
 //! (`set_lens`, `set_watching`…) y pinta el estado que le llega por
 //! `Listener::my_work_changed`.
 
+pub mod board;
 pub mod filter;
 pub mod list;
 mod types;
@@ -19,6 +20,9 @@ use crate::dates::due_day;
 use crate::error::ApiError;
 use crate::Core;
 
+pub use board::{
+    can_drop, work_board, BoardAssignee, BoardCard, BoardColumn, BoardStatus, DropVerdict, BAD_TRANSITION, COLUMN_MISSING,
+};
 pub use filter::{filter_options, matches_filter, FilterOptions, TaskFilter, NOBODY, PRIORITIES};
 pub use list::{day_and_month, due_label, empty_reason, work_groups, DueLabel, WorkGroup, WorkRow};
 pub use types::{MyWorkState, OpenTask, ScopeKind, WorkLens, WorkScope};

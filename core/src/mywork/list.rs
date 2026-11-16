@@ -72,14 +72,19 @@ pub fn due_label(locale: Locale, due_at: Option<&str>, today: NaiveDate) -> Opti
     Some(DueLabel { text, state })
 }
 
+/// De qué tarea es subtarea, como se lee en una fila o en una tarjeta:
+/// «› #289 Título».
+pub(crate) fn parent_crumb(task: &OpenTask) -> Option<String> {
+    task.parent_seq
+        .map(|seq| format!("› #{seq} {}", task.parent_title.as_deref().unwrap_or("")).trim_end().to_string())
+}
+
 fn row(task: &OpenTask, locale: Locale, today: NaiveDate) -> WorkRow {
     WorkRow {
         id: task.id.clone(),
         seq: task.seq,
         title: task.title.clone(),
-        parent: task
-            .parent_seq
-            .map(|seq| format!("› #{seq} {}", task.parent_title.as_deref().unwrap_or("")).trim_end().to_string()),
+        parent: parent_crumb(task),
         priority: canonical_priority(&task.priority).to_string(),
         due: due_label(locale, task.due_at.as_deref(), today),
     }
