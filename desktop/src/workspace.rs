@@ -9,7 +9,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
+use gpui_kit::component::{ActiveTheme, Icon, IconName, Side, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
@@ -22,9 +22,10 @@ use crate::task::TaskView;
 /// Las medidas de la app de siempre: el riel y el panel.
 const RAIL_WIDTH: f32 = 48.;
 const PANEL_WIDTH: f32 = 256.;
-const ROW_HEIGHT: f32 = 30.;
-/// Lo que entra una fila por cada nivel que cuelga.
-const INDENT: f32 = 14.;
+const ROW_HEIGHT: f32 = 28.;
+/// Lo que entra una fila por cada nivel que cuelga: lo de dentro empieza
+/// bajo la marca de su padre (el hueco del chevrón más la separación).
+const INDENT: f32 = 22.;
 
 /// Casi sin estado propio: lo que pinta lo lee del core al pintarse, y GPUI
 /// repinta una vista cuando cambia algo que leyó. No hace falta suscribirse.
@@ -77,11 +78,55 @@ impl Workspace {
         Backend::run(cx, |core| async move { core.logout().await });
     }
 
-    /// El avatar de quien está dentro, al pie del riel, con su menú: tema,
-    /// idioma y salir.
-    fn render_account(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Una fila de opciones del menú de la cuenta: su nombre y, debajo, las
+    /// tres a la vez. Con un botón que rota no se distingue «auto, ahora en
+    /// oscuro» de «oscuro», y son respuestas distintas.
+    fn options_row(
+        id: &'static str,
+        icon: Lucide,
+        label: String,
+        options: Vec<(String, bool, Box<dyn Fn(&mut App)>)>,
+        cx: &App,
+    ) -> impl IntoElement {
         let theme = cx.theme();
-        let (primary, on_primary) = (theme.primary, theme.primary_foreground);
+        let (muted, primary, on_primary, hover) = (theme.muted_foreground, theme.primary, theme.primary_foreground, theme.accent);
+        div()
+            .id(id)
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_2()
+            .py_1p5()
+            .child(div().flex().items_center().gap_2().text_xs().text_color(muted).child(Icon::new(icon).xsmall()).child(label))
+            .child(div().flex().gap_1().children(options.into_iter().enumerate().map(|(at, (label, active, choose))| {
+                div()
+                    .id(SharedString::from(format!("{id}-{at}")))
+                    .test_support()
+                    .flex_1()
+                    .h(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(active, |this| this.bg(primary).text_color(on_primary).font_weight(FontWeight::MEDIUM))
+                    .when(!active, |this| this.hover(move |style| style.bg(hover)))
+                    .on_click(move |_, _, cx| {
+                        // Elegir una opción no es elegir la fila: el menú
+                        // sigue abierto, para probar otra sin reabrirlo.
+                        cx.stop_propagation();
+                        choose(cx);
+                    })
+                    .child(label)
+            })))
+    }
+
+    /// El avatar de quien está dentro, al pie del riel, con su menú: quién
+    /// es, tema, idioma y salir.
+    fn render_account(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let primary = cx.theme().primary;
         let session = Backend::snapshot(cx).read(cx).session.clone();
         let (name, initials) = session
             .map(|session| {
@@ -89,49 +134,85 @@ impl Workspace {
                 (session.name.filter(|name| !name.trim().is_empty()).unwrap_or(session.username), initials)
             })
             .unwrap_or_default();
-        let avatar = div()
-            .size(px(28.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_full()
-            .bg(primary.opacity(0.2))
-            .text_xs()
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(primary)
-            .child(initials);
-        let _ = on_primary;
-        Button::new("account-menu").ghost().tooltip(tr(cx, "nav:rail.account")).child(avatar).dropdown_menu(move |menu, _, cx| {
-            let core = Backend::core(cx);
-            let (theme, language) = (core.theme(), core.locale_preference());
-            let here = locale(cx);
-            let phrase = |key: &str| cac_core::text(here, key);
-
-            let mut menu = menu.label(name.clone()).separator().label(phrase("nav:account.theme"));
-            for (preference, key) in [
-                (ThemePreference::System, "nav:account.themeAuto"),
-                (ThemePreference::Light, "nav:account.themeLight"),
-                (ThemePreference::Dark, "nav:account.themeDark"),
-            ] {
-                menu = menu.item(
-                    PopupMenuItem::new(phrase(key))
-                        .checked(theme == preference)
-                        .on_click(move |_, _, cx| Self::choose_theme(preference, cx)),
-                );
-            }
-            menu = menu.separator().label(phrase("nav:account.language"));
-            for (preference, key) in [
-                (None, "common:language.system"),
-                (Some(Locale::En), "common:language.en"),
-                (Some(Locale::Es), "common:language.es"),
-            ] {
-                menu = menu.item(
-                    PopupMenuItem::new(phrase(key))
-                        .checked(language == preference)
-                        .on_click(move |_, _, cx| Self::choose_language(preference, cx)),
-                );
-            }
-            menu.separator().item(PopupMenuItem::new(phrase("nav:account.logOut")).icon(Icon::new(Lucide::LogOut)).on_click(|_, _, cx| Self::log_out(cx)))
+        let face = move |size: f32| {
+            div()
+                .size(px(size))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(primary.opacity(0.2))
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(primary)
+                .child(initials.clone())
+        };
+        let in_menu = face.clone();
+        Button::new("account-menu").ghost().tooltip(tr(cx, "nav:rail.account")).child(face(28.)).dropdown_menu(move |menu, _, _| {
+            let (name, in_menu) = (name.clone(), in_menu.clone());
+            menu.min_w(px(240.))
+                .item(PopupMenuItem::element(move |_, _| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1p5()
+                        .child(in_menu(28.))
+                        .child(div().min_w_0().truncate().text_xs().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
+                }))
+                .separator()
+                // Se pintan al abrirse y cada vez que algo cambia: lo elegido
+                // se lee del core en ese momento, no al construir el menú.
+                .item(PopupMenuItem::element(|_, cx| {
+                    let here = locale(cx);
+                    let chosen = Backend::core(cx).theme();
+                    let options = [
+                        (ThemePreference::System, "nav:account.themeAuto"),
+                        (ThemePreference::Light, "nav:account.themeLight"),
+                        (ThemePreference::Dark, "nav:account.themeDark"),
+                    ]
+                    .into_iter()
+                    .map(|(preference, key)| {
+                        let choose: Box<dyn Fn(&mut App)> = Box::new(move |cx| Self::choose_theme(preference, cx));
+                        (cac_core::text(here, key), chosen == preference, choose)
+                    })
+                    .collect();
+                    Self::options_row("account-theme", Lucide::Moon, cac_core::text(here, "nav:account.theme"), options, cx)
+                }))
+                .item(PopupMenuItem::element(|_, cx| {
+                    let here = locale(cx);
+                    let chosen = Backend::core(cx).locale_preference();
+                    let options = [
+                        (None, "nav:account.languageAuto"),
+                        (Some(Locale::En), "common:language.en"),
+                        (Some(Locale::Es), "common:language.es"),
+                    ]
+                    .into_iter()
+                    .map(|(preference, key)| {
+                        let choose: Box<dyn Fn(&mut App)> = Box::new(move |cx| Self::choose_language(preference, cx));
+                        (cac_core::text(here, key), chosen == preference, choose)
+                    })
+                    .collect();
+                    Self::options_row("account-language", Lucide::Languages, cac_core::text(here, "nav:account.language"), options, cx)
+                }))
+                .separator()
+                .item(
+                    PopupMenuItem::element(|_, cx| {
+                        let danger = cx.theme().danger;
+                        div()
+                            .id("account-log-out")
+                            .test_support()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_color(danger)
+                            .child(Icon::new(Lucide::LogOut).xsmall().text_color(danger))
+                            .child(tr(cx, "nav:account.logOut"))
+                    })
+                    .on_click(|_, _, cx| Self::log_out(cx)),
+                )
         })
     }
 
@@ -247,11 +328,14 @@ impl Workspace {
                     .children(hint.map(|hint| div().id("org-hint").test_support().w_full().truncate().text_xs().text_color(muted).child(hint))),
             )
             .when(several, |this| this.child(Icon::new(Lucide::ChevronsUpDown).xsmall().text_color(muted)));
-        Button::new("org-switch").ghost().w_full().h(px(44.)).child(face).dropdown_menu(move |mut menu, _, _| {
+        let label = tr(cx, "common:misc.organizations");
+        Button::new("org-switch").ghost().w_full().h(px(44.)).child(face).dropdown_menu(move |menu, _, _| {
+            let mut menu = menu.min_w(px(224.)).check_side(Side::Right).label(label.clone());
             for org in &orgs.orgs {
                 let id = org.id.clone();
                 menu = menu.item(
                     PopupMenuItem::new(org.name.clone())
+                        .icon(Icon::new(Lucide::Building2))
                         .checked(current.as_deref() == Some(org.id.as_str()))
                         .on_click(move |_, _, cx| Self::switch_org(id.clone(), cx)),
                 );
@@ -263,7 +347,7 @@ impl Workspace {
     fn render_row(&self, row: TreeRow, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (hover, active_bg, muted, foreground, primary) =
-            (theme.sidebar_accent, theme.sidebar_accent, theme.muted_foreground, theme.sidebar_foreground, theme.primary);
+            (theme.sidebar_accent.opacity(0.5), theme.sidebar_accent, theme.muted_foreground, theme.sidebar_foreground, theme.primary);
         let chevron = if row.open { IconName::ChevronDown } else { IconName::ChevronRight };
         let toggle_id = row.id.clone();
         let clicked = row.clone();
@@ -273,12 +357,21 @@ impl Workspace {
         let mark = match row.kind {
             NodeKind::Space => {
                 let color = u32::from_str_radix(row.color.trim_start_matches('#'), 16).unwrap_or(0x888888);
-                div().size(px(10.)).flex_none().rounded_sm().bg(gpui_kit::rgb(color)).into_any_element()
+                div().size(px(10.)).flex_none().rounded_full().bg(gpui_kit::rgb(color)).into_any_element()
             }
             NodeKind::Folder => Icon::new(Lucide::Folder).xsmall().text_color(muted).into_any_element(),
             NodeKind::List => Icon::new(Lucide::ListChecks).xsmall().text_color(muted).into_any_element(),
         };
-        let space = row.kind == NodeKind::Space;
+        let (space, list) = (row.kind == NodeKind::Space, row.kind == NodeKind::List);
+        let menu_label = tr(
+            cx,
+            match row.kind {
+                NodeKind::Space => "work:tree.spaceMenu",
+                NodeKind::Folder => "work:tree.folderMenu",
+                NodeKind::List => "work:tree.listMenu",
+            },
+        );
+        let (menu_id, docs_label) = (row.id.clone(), tr(cx, "work:tree.openDocs"));
 
         div()
             .id(SharedString::from(format!("tree-{}", row.id)))
@@ -288,34 +381,41 @@ impl Workspace {
             .flex_none()
             .items_center()
             .gap_1p5()
-            .pl(px(6. + INDENT * row.depth as f32))
-            .pr_2()
-            .mx_1()
-            .rounded_md()
+            // Una lista lleva margen para su fondo redondeado: se le
+            // descuenta, o su icono y su «···» no caen en la columna de los demás.
+            .pl(px(8. + INDENT * row.depth as f32 - if list { 4. } else { 0. }))
+            .when(!list, |this| this.pr_1())
             .text_sm()
-            .text_color(if space || row.active { foreground } else { muted })
-            .when(space || row.active, |this| this.font_weight(FontWeight::MEDIUM))
-            .when(row.active, |this| this.bg(active_bg))
+            .text_color(foreground)
+            .when(space, |this| this.font_weight(FontWeight::MEDIUM))
+            // El espacio al que se acota se dice con su nombre en el color de
+            // la marca; la lista, con la fila entera.
+            .when(space && row.active, |this| this.text_color(primary))
+            .when(list, |this| this.mx_1().rounded_md())
+            .when(list && row.active, |this| this.bg(active_bg).font_weight(FontWeight::MEDIUM))
             .hover(move |style| style.bg(hover))
             .cursor_pointer()
             .on_click(move |_, _, cx| Self::click_row(&clicked, cx))
-            .child(
-                div()
-                    .id(SharedString::from(format!("tree-toggle-{}", row.id)))
-                    .test_support()
-                    .size(px(16.))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .when(row.expandable, |this| {
-                        this.child(Icon::new(chevron).xsmall().text_color(muted)).on_click(move |_, _, cx| {
-                            // El chevrón abre y cierra; no es un clic en la fila.
-                            cx.stop_propagation();
-                            Backend::core(cx).tree().toggle(&toggle_id);
-                        })
-                    }),
-            )
+            // Una lista no se abre: su icono va donde el chevrón de las demás.
+            .when(!list, |this| {
+                this.child(
+                    div()
+                        .id(SharedString::from(format!("tree-toggle-{}", row.id)))
+                        .test_support()
+                        .size(px(16.))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .when(row.expandable, |this| {
+                            this.child(Icon::new(chevron).xsmall().text_color(muted)).on_click(move |_, _, cx| {
+                                // El chevrón abre y cierra; no es un clic en la fila.
+                                cx.stop_propagation();
+                                Backend::core(cx).tree().toggle(&toggle_id);
+                            })
+                        }),
+                )
+            })
             .child(mark)
             .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(row.name))
             // Lo ve un cliente: es su canal.
@@ -326,38 +426,29 @@ impl Workspace {
             .when(row.has_doc, |this| {
                 this.child(div().id(SharedString::from(format!("tree-doc-{}", row.id))).test_support().flex_none().child(Icon::new(Lucide::FileText).xsmall().text_color(muted)))
             })
-            .children(count.map(|count| div().flex_none().text_xs().text_color(muted).child(count)))
-            // Pulsar un espacio acota sus tareas, así que su documentación
-            // se abre desde aquí (command-and-control-372).
-            .when(space, |this| {
-                let id = row.id.clone();
-                let label = tr(cx, "work:tree.openDocs");
-                this.child(
-                    div()
-                        .id(SharedString::from(format!("tree-menu-{}", row.id)))
-                        .test_support()
-                        .flex_none()
-                        // Abrir el menú no es un clic en la fila: el
-                        // desplegable del kit ya se queda con él (medido en
-                        // `popover.rs`). Si deja de hacerlo, lo dice la
-                        // prueba del menú.
-                        .child(
-                            Button::new(SharedString::from(format!("tree-more-{}", row.id)))
-                                .ghost()
-                                .xsmall()
-                                .icon(Icon::new(IconName::Ellipsis))
-                                .tooltip(tr(cx, "work:tree.spaceMenu"))
-                                .dropdown_menu(move |menu, _, _| {
-                                    let id = id.clone();
-                                    menu.item(
-                                        PopupMenuItem::new(label.clone())
-                                            .icon(Icon::new(Lucide::FileText))
-                                            .on_click(move |_, _, cx| Self::open_docs(id.clone(), cx)),
-                                    )
-                                }),
-                        ),
-                )
-            })
+            .children(count.map(|count| div().flex_none().text_xs().font_weight(FontWeight::NORMAL).text_color(muted).child(count)))
+            // El menú de la fila. Pulsar un espacio o una lista acota sus
+            // tareas, así que su documentación se abre desde aquí
+            // (command-and-control-372). Abrirlo no es un clic en la fila: el
+            // desplegable del kit ya se queda con él (medido en
+            // `popover.rs`); si deja de hacerlo, lo dice la prueba del menú.
+            .child(
+                div().id(SharedString::from(format!("tree-menu-{}", row.id))).test_support().flex_none().child(
+                    Button::new(SharedString::from(format!("tree-more-{}", row.id)))
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::new(IconName::Ellipsis).text_color(muted))
+                        .tooltip(menu_label)
+                        .dropdown_menu(move |menu, _, _| {
+                            let id = menu_id.clone();
+                            menu.item(
+                                PopupMenuItem::new(docs_label.clone())
+                                    .icon(Icon::new(Lucide::FileText))
+                                    .on_click(move |_, _, cx| Self::open_docs(id.clone(), cx)),
+                            )
+                        }),
+                ),
+            )
     }
 
     fn render_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -365,7 +456,9 @@ impl Workspace {
         let (sidebar, border, muted, hover, foreground) =
             (theme.sidebar, theme.sidebar_border, theme.muted_foreground, theme.sidebar_accent, theme.sidebar_foreground);
         let snapshot = Backend::snapshot(cx).read(cx);
-        let everything = snapshot.my_work.scope.is_none() && snapshot.docs.target.is_none();
+        // «Mi trabajo» es la pantalla, esté acotada o no: a qué, lo dice el
+        // árbol. Leyendo documentación ya no se está en ella.
+        let on_my_work = snapshot.docs.target.is_none();
         let query = self.tree_filter.read(cx).value().to_string();
         let rows = Backend::core(cx).tree().rows_matching(&query);
         // Filtrando y sin nada que enseñar se dice: un árbol en blanco se lee
@@ -385,8 +478,11 @@ impl Workspace {
             .child(div().p_2().border_b_1().border_color(border).child(self.render_org(cx)))
             .child(
                 div()
-                    .px_3()
-                    .pt_3()
+                    .h(px(32.))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .pl_3()
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(muted)
@@ -403,10 +499,10 @@ impl Workspace {
                     .gap_2()
                     .px_2()
                     .mx_1()
-                    .mt_2()
+                    .mb_1()
                     .rounded_md()
                     .text_sm()
-                    .when(everything, |this| this.bg(hover).font_weight(FontWeight::MEDIUM))
+                    .when(on_my_work, |this| this.bg(hover).font_weight(FontWeight::MEDIUM))
                     .hover(move |style| style.bg(hover))
                     .cursor_pointer()
                     .on_click(|_, _, cx| Backend::core(cx).show_all_work())
@@ -415,7 +511,7 @@ impl Workspace {
             )
             // Filtra lo que ya está en el panel; no es el buscador.
             .child(
-                div().px_2().pt_2().child(
+                div().px_2().py_1().child(
                     Input::new(&self.tree_filter)
                         .id("tree-filter")
                         .small()
@@ -423,7 +519,19 @@ impl Workspace {
                         .prefix(Icon::new(IconName::Search).xsmall().text_color(muted)),
                 ),
             )
-            .child(div().px_3().pt_3().pb_1().text_xs().text_color(muted).child(tr(cx, "nav:panel.spaces")))
+            .child(
+                div()
+                    .h(px(32.))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .px_4()
+                    .mt_2()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(foreground.opacity(0.7))
+                    .child(tr(cx, "nav:panel.spaces")),
+            )
             .when(nothing, |this| {
                 this.child(div().id("tree-no-matches").test_support().px_3().py_3().text_xs().text_color(muted).child(tr(cx, "nav:panel.noMatches")))
             })
@@ -889,20 +997,21 @@ mod tests {
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
-    /// El «···» de un espacio abre su documentación, y abrir el menú no
-    /// acota las tareas a ese espacio.
+    /// El «···» de una fila abre su documentación, y abrir el menú no acota
+    /// las tareas a ese nodo.
     ///
-    /// Roturas que atrapa: un espacio sin camino a su documentación desde el
-    /// árbol (su clic acota); que pulsar el menú cuente como pulsar la fila;
-    /// ofrecer el menú en carpetas y listas, donde aún no tiene nada.
+    /// Roturas que atrapa: un espacio o una lista sin camino a su
+    /// documentación desde el árbol (su clic acota); que pulsar el menú
+    /// cuente como pulsar la fila; un chevrón en una lista, que no se abre.
     #[gpui_kit::test]
     fn a_spaces_menu_opens_its_docs_without_scoping(cx: &mut TestAppContext) {
         let server = server_with_docs();
         server.install(cx);
         let window = open(cx);
         wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-l-a", cx));
-        assert!(on_screen(window, "tree-menu-a", cx));
-        assert!(!on_screen(window, "tree-menu-f-a", cx) && !on_screen(window, "tree-menu-l-a", cx));
+        assert!(on_screen(window, "tree-menu-a", cx) && on_screen(window, "tree-menu-f-a", cx) && on_screen(window, "tree-menu-l-a", cx));
+        // Una lista no se abre: no lleva chevrón.
+        assert!(on_screen(window, "tree-toggle-f-a", cx) && !on_screen(window, "tree-toggle-l-a", cx));
 
         click(window, "tree-menu-a", cx);
         settle_frames(window, cx);
@@ -912,6 +1021,35 @@ mod tests {
         wait_until(cx, "llega la documentación del espacio", |cx| on_screen(window, "doc-body", cx));
         assert_eq!(doc_open(cx).as_deref(), Some("a"));
         assert_eq!(scope(cx), None);
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// El menú de la cuenta ofrece los tres temas y los tres idiomas a la
+    /// vez, y elegir uno lo cambia sin cerrar el menú; «Salir» saca.
+    ///
+    /// Roturas que atrapa: opciones pintadas que no hacen nada al pulsarlas;
+    /// que elegir el tema cierre el menú (para probar otro hay que volver a
+    /// abrirlo); un «Salir» que no cierra la sesión.
+    #[gpui_kit::test]
+    fn the_account_menu_changes_theme_and_language_in_place(cx: &mut TestAppContext) {
+        use cac_core::{Locale, ThemePreference};
+        let server = server();
+        server.mount(Mock::given(method("PATCH")).and(path("/api/v1/auth/locale")).respond_with(ok(json!(null))));
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+
+        click(window, "account-menu", cx);
+        wait_until(cx, "el menú se abre", |cx| on_screen(window, "account-theme-1", cx));
+        click(window, "account-theme-1", cx);
+        assert_eq!(cx.update(|cx| Backend::core(cx).theme()), ThemePreference::Light);
+        assert!(on_screen(window, "account-language-1", cx), "elegir el tema cerró el menú");
+
+        click(window, "account-language-1", cx);
+        wait_until(cx, "pasa a inglés", |cx| cx.update(|cx| Backend::core(cx).locale_preference()) == Some(Locale::En));
+
+        click(window, "account-log-out", cx);
+        wait_until(cx, "sale", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).session.is_none()));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 

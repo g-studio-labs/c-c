@@ -14,11 +14,11 @@ use gpui_kit::{AssetSource, Result, SharedString};
 
 // Los de Lucide que la app nombra y los componentes no traen. Al usar uno
 // nuevo, se añade aquí y a `USED`. Guardián: `tests::every_icon_can_be_loaded`.
-gpui_kit::assets::icon_assets!(Extra, [WifiOff, RefreshCw, LogOut, X, Paperclip, Image, Download, Trash, Pencil, Folder, ListChecks, FileText, ChevronsUpDown, BriefcaseBusiness]);
+gpui_kit::assets::icon_assets!(Extra, [WifiOff, RefreshCw, LogOut, X, Paperclip, Image, Download, Trash, Pencil, Folder, ListChecks, FileText, ChevronsUpDown, BriefcaseBusiness, Building2, Moon, Languages]);
 
 /// Los mismos, para la prueba que comprueba que se cargan.
 #[cfg(test)]
-const USED: [Lucide; 14] = [
+const USED: [Lucide; 17] = [
     Lucide::WifiOff,
     Lucide::RefreshCw,
     Lucide::LogOut,
@@ -33,6 +33,9 @@ const USED: [Lucide; 14] = [
     Lucide::FileText,
     Lucide::ChevronsUpDown,
     Lucide::BriefcaseBusiness,
+    Lucide::Building2,
+    Lucide::Moon,
+    Lucide::Languages,
 ];
 
 pub struct Assets;
