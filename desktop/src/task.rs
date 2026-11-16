@@ -1,4 +1,11 @@
-//! El detalle de una tarea, para leerlo: un cajón sobre la derecha de la vista.
+//! El detalle de una tarea: una página a pantalla completa, con la columna
+//! de lectura y, al lado, un riel con sus propiedades.
+//!
+//! Página y no cajón, como en la app de siempre: una tarea es donde el
+//! trabajo se describe, se discute y se decide, y para eso necesita sitio.
+//! Las propiedades van en su riel para que la columna de lectura siga siendo
+//! de lectura; en una ventana estrecha el riel baja debajo en vez de
+//! apretarse al lado, donde ninguna de las dos mitades se leería.
 //!
 //! Qué se lee (cada frase, qué comentario es de un agente, qué subtarea está
 //! hecha, por qué no hay nada todavía) lo dice el core en su `TaskSheet`.
@@ -11,7 +18,6 @@ use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_kit::component::text::TextView;
 use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
@@ -22,8 +28,11 @@ use crate::backend::Backend;
 use crate::files;
 use crate::lang::{error_text, locale, tr};
 
-/// El ancho del panel: el del cajón de la app de siempre.
-pub const TASK_PANEL_WIDTH: f32 = 520.;
+/// El ancho del riel de propiedades: el de la app de siempre (`lg:w-72`).
+const RAIL_WIDTH: f32 = 288.;
+/// Por debajo de este ancho de ventana el riel va debajo de la lectura (el
+/// `lg` de la app de siempre).
+pub(crate) const STACK_BELOW: f32 = 1024.;
 
 /// Las dos pestañas del hilo.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -604,13 +613,15 @@ impl TaskView {
         let view = cx.entity().downgrade();
         let tasks = Backend::core(cx).tasks();
         let current = sheet.priority.clone();
+        // Apiladas, no en dos columnas: en un riel de 288 px una etiqueta al
+        // lado deja al control sin sitio.
         let row = |name: String, control: AnyElement| {
             div()
                 .flex()
-                .items_center()
-                .gap_2()
-                .child(div().flex_none().w(px(96.)).text_xs().text_color(muted).child(name))
-                .child(div().flex_1().min_w_0().flex().child(control))
+                .flex_col()
+                .gap_1()
+                .child(div().text_xs().text_color(muted).child(name))
+                .child(div().min_w_0().flex().child(control))
         };
         let priority = Button::new("task-priority")
             .ghost()
@@ -640,7 +651,7 @@ impl TaskView {
         div()
             .flex()
             .flex_col()
-            .gap_1()
+            .gap_3()
             .child(row(tr(cx, "work:board.priority"), priority.into_any_element()))
             .child(row(tr(cx, "work:task.tags"), tags.into_any_element()))
             .child(row(tr(cx, "work:task.assignees"), assignees.into_any_element()))
@@ -783,12 +794,24 @@ impl TaskView {
                     )
                     .into_any_element()
             } else {
-                TextView::markdown(SharedString::from(format!("comment-body-{}", comment.id)), comment.body.clone()).into_any_element()
+                crate::theme::prose(SharedString::from(format!("comment-body-{}", comment.id)), comment.body.clone()).into_any_element()
             })
             .into_any_element()
     }
 
-    fn render_sheet(&mut self, sheet: TaskSheet, statuses: Vec<StatusOption>, cx: &mut Context<Self>) -> impl IntoElement {
+    /// El riel: el estado y lo que se le cambia a la tarea de un toque.
+    fn render_properties(&self, sheet: &TaskSheet, statuses: Vec<StatusOption>, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("task-properties")
+            .test_support()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(self.render_chips(sheet, statuses, cx))
+            .child(self.render_fields(sheet, cx))
+    }
+
+    fn render_sheet(&mut self, sheet: TaskSheet, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let danger = theme.danger;
         let problem = self.problem.as_ref().filter(|(task_id, _)| *task_id == sheet.id).map(|(_, phrase)| phrase.clone());
@@ -819,13 +842,11 @@ impl TaskView {
                     .child(if editing {
                         div().id("task-title-input").test_support().child(Input::new(&self.title_input)).into_any_element()
                     } else {
-                        div().id("task-title").test_support().text_lg().font_weight(FontWeight::SEMIBOLD).child(sheet.title.clone()).into_any_element()
+                        div().id("task-title").test_support().text_size(px(crate::theme::TITLE_SIZE)).font_weight(FontWeight::SEMIBOLD).child(sheet.title.clone()).into_any_element()
                     })
                     .child(div().text_xs().text_color(muted).child(sheet.place.clone()))
                     .children(sheet.parent.clone().map(|parent| div().text_xs().text_color(muted).child(format!("› {parent}")))),
             )
-            .child(self.render_chips(&sheet, statuses, cx))
-            .child(self.render_fields(&sheet, cx))
             .children(problem.map(|phrase| div().id("task-problem").test_support().text_sm().text_color(danger).child(phrase)))
             .children(sheet.handoff.clone().map(|handoff| {
                 let by = sheet.handoff_by.clone().map(|by| format!(" · {by}")).unwrap_or_default();
@@ -841,7 +862,7 @@ impl TaskView {
                     .border_color(border)
                     .bg(card)
                     .child(self.section(format!("{}{by}", tr(cx, "work:task.handoff")), cx))
-                    .child(TextView::markdown(SharedString::from(format!("handoff-{}", sheet.id)), handoff))
+                    .child(crate::theme::prose(SharedString::from(format!("handoff-{}", sheet.id)), handoff))
             }))
             .child(
                 div().flex().flex_col().gap_1().child(self.section(tr(cx, "work:task.description"), cx)).child(
@@ -879,7 +900,7 @@ impl TaskView {
                         div()
                             .id("task-description")
                             .test_support()
-                            .child(TextView::markdown(SharedString::from(format!("description-{}", sheet.id)), sheet.description.clone()))
+                            .child(crate::theme::prose(SharedString::from(format!("description-{}", sheet.id)), sheet.description.clone()))
                             .into_any_element()
                     },
                 ),
@@ -969,26 +990,65 @@ impl Render for TaskView {
             })
             .unwrap_or_default();
 
-        div()
-            .id("task-panel")
-            .test_support()
-            .w(px(TASK_PANEL_WIDTH))
-            .h_full()
+        // Ancha, el riel al lado; estrecha, debajo de la lectura.
+        let wide = window.viewport_size().width >= px(STACK_BELOW);
+        let statuses = state.statuses.clone();
+        let properties = sheet.as_ref().map(|sheet| self.render_properties(sheet, statuses, cx).into_any_element());
+        let reading = div()
             .flex()
-            .flex_none()
+            .flex_col()
+            .gap_4()
+            .children(waiting.map(|phrase| div().id("task-waiting").test_support().text_sm().text_color(muted).child(phrase)))
+            .children(sheet.map(|sheet| self.render_sheet(sheet, cx)));
+        let body = if wide {
+            div()
+                .id("task-wide")
+                .test_support()
+                .flex_1()
+                .flex()
+                .overflow_hidden()
+                .child(div().id("task-scroll").flex_1().min_w_0().h_full().overflow_y_scroll().px_8().py_4().child(reading))
+                .children(properties.map(|properties| {
+                    div()
+                        .id("task-rail")
+                        .w(px(RAIL_WIDTH))
+                        .h_full()
+                        .flex_none()
+                        .overflow_y_scroll()
+                        .p_4()
+                        .border_l_1()
+                        .border_color(border)
+                        .child(properties)
+                }))
+                .into_any_element()
+        } else {
+            div()
+                .id("task-scroll")
+                .flex_1()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .child(div().p_4().child(reading))
+                .children(properties.map(|properties| div().p_4().border_t_1().border_color(border).child(properties)))
+                .into_any_element()
+        };
+
+        div()
+            .id("task-page")
+            .test_support()
+            .size_full()
+            .flex()
             .flex_col()
             .bg(background)
             .text_color(foreground)
-            .border_l_1()
-            .border_color(border)
             .child(
                 div()
                     .flex()
                     .flex_none()
                     .items_center()
                     .gap_2()
+                    .h(px(48.))
                     .px_4()
-                    .py_2()
                     .border_b_1()
                     .border_color(border)
                     .child(div().flex_1().text_xs().text_color(muted).child(name))
@@ -1002,15 +1062,7 @@ impl Render for TaskView {
                             .on_click(|_, _, cx| Backend::core(cx).tasks().close()),
                     ),
             )
-            .child(
-                div()
-                    .id("task-scroll")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .p_4()
-                    .children(waiting.map(|phrase| div().id("task-waiting").test_support().text_sm().text_color(muted).child(phrase)))
-                    .children(sheet.map(|sheet| self.render_sheet(sheet, state.statuses.clone(), cx))),
-            )
+            .child(body)
     }
 }
 
@@ -1070,15 +1122,17 @@ mod tests {
     }
 
     fn open_with_view(server: &FakeServer, cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<TaskView>) {
+        open_sized(server, 1700., cx)
+    }
+
+    fn open_sized(server: &FakeServer, width: f32, cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<TaskView>) {
         server.install(cx);
         sign_in(cx);
         cx.update(|cx| {
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: Point::default(),
-                    // Ancha, para que el cajón no tape el centro de las filas
-                    // que estas pruebas pulsan.
-                    size: size(px(1700.), px(900.)),
+                    size: size(px(width), px(900.)),
                 })),
                 ..WindowOptions::default()
             };
@@ -1104,6 +1158,12 @@ mod tests {
         wait_until(cx, "llegan el detalle y sus columnas", |cx| {
             cx.update(|cx| !Backend::snapshot(cx).read(cx).task.statuses.is_empty()) && on_screen(window, "task-title", cx)
         });
+    }
+
+    /// Abre la segunda tarea con la primera aún abierta, como hace un
+    /// enlace o un aviso: su fila queda debajo de la página y no se pulsa.
+    fn open_other_task(cx: &mut TestAppContext) {
+        cx.update(|cx| Backend::run(cx, |core| async move { core.tasks().open("t2").await }));
     }
 
     fn move_to(window: AnyWindowHandle, view: &Entity<TaskView>, status: &str, cx: &mut TestAppContext) {
@@ -1136,15 +1196,15 @@ mod tests {
     /// Pulsar una tarea abre su detalle sobre la lista, con lo suyo, y la ×
     /// lo cierra.
     ///
-    /// Roturas que atrapa: una fila que no abre nada; un detalle que
-    /// sustituye a la lista en vez de abrirse encima; una subtarea hecha
-    /// pintada sin hacer; no tener cómo cerrarlo.
+    /// Roturas que atrapa: una fila que no abre nada; un detalle a un lado
+    /// que deja pulsar la lista de debajo (es una página: lo tapa todo); una
+    /// subtarea hecha pintada sin hacer; no tener cómo cerrarlo.
     #[gpui_kit::test]
     fn clicking_a_task_opens_its_detail_over_the_list(cx: &mut TestAppContext) {
         let server = server();
         let window = open(&server, cx);
         wait_until(cx, "las tareas llegan", |cx| on_screen(window, "work-row-t1", cx));
-        assert!(!on_screen(window, "task-panel", cx), "el panel sale sin ninguna tarea abierta");
+        assert!(!on_screen(window, "task-page", cx), "el panel sale sin ninguna tarea abierta");
 
         click(window, "work-row-t1", cx);
         wait_until(cx, "llega el detalle", |cx| on_screen(window, "task-title", cx));
@@ -1152,11 +1212,14 @@ mod tests {
         assert!(!on_screen(window, "task-waiting", cx));
         assert!(on_screen(window, "task-description", cx) && on_screen(window, "task-handoff", cx));
         assert!(on_screen(window, "task-status", cx) && on_screen(window, "subtask-t2", cx));
-        assert!(on_screen(window, "work-row-t2", cx), "el detalle quitó la lista de la vista");
         wait_until(cx, "llegan las columnas y la subtarea sale hecha", |cx| on_screen(window, "subtask-done-t2", cx));
+        // La página tapa la lista: pulsar donde está otra fila no abre otra.
+        click(window, "work-row-t2", cx);
+        settle(cx);
+        assert_eq!(cx.update(|cx| Backend::snapshot(cx).read(cx).task.task_id.clone()).as_deref(), Some("t1"), "se pulsó la lista a través de la página");
 
         click(window, "task-close", cx);
-        wait_until(cx, "se cierra", |cx| !on_screen(window, "task-panel", cx));
+        wait_until(cx, "se cierra", |cx| !on_screen(window, "task-page", cx));
         stop(cx);
     }
 
@@ -1226,7 +1289,7 @@ mod tests {
         move_to(window, &view, "s1", cx);
         wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
 
-        click(window, "work-row-t2", cx);
+        open_other_task(cx);
         wait_until(cx, "llega la otra", |cx| {
             cx.update(|cx| Backend::snapshot(cx).read(cx).task.detail.as_ref().is_some_and(|detail| detail.task.id == "t2"))
         });
@@ -1373,7 +1436,7 @@ mod tests {
         assert_eq!(picked(&view, cx), day(2026, 10, 2), "se pisó lo que se acababa de elegir");
 
         // La otra tarea vence el 30: el selector no se queda con lo de ésta.
-        click(window, "work-row-t2", cx);
+        open_other_task(cx);
         wait_until(cx, "llega la otra, con su día", |cx| {
             on_screen(window, "task-title", cx) && picked(&view, cx) == day(2026, 9, 30)
         });
@@ -1526,7 +1589,7 @@ mod tests {
         click(window, "task-edit", cx);
         assert!(on_screen(window, "task-title-input", cx));
 
-        click(window, "work-row-t2", cx);
+        open_other_task(cx);
         wait_until(cx, "llega la otra", |cx| {
             cx.update(|cx| Backend::snapshot(cx).read(cx).task.detail.as_ref().is_some_and(|detail| detail.task.id == "t2"))
         });
@@ -1699,7 +1762,7 @@ mod tests {
         click(window, "thread-notes", cx);
         assert!(on_screen(window, "comment-noted", cx));
 
-        click(window, "work-row-t2", cx);
+        open_other_task(cx);
         wait_until(cx, "llega la otra", |cx| {
             cx.update(|cx| Backend::snapshot(cx).read(cx).task.detail.as_ref().is_some_and(|detail| detail.task.id == "t2"))
         });
@@ -1720,7 +1783,7 @@ mod tests {
         click(window, "work-row-t1", cx);
         wait_until(cx, "llega el detalle", |cx| on_screen(window, "task-title", cx));
 
-        click(window, "work-row-t2", cx);
+        open_other_task(cx);
         wait_until(cx, "falla y lo dice", |cx| {
             cx.update(|cx| Backend::snapshot(cx).read(cx).task.error.is_some()) && on_screen(window, "task-waiting", cx)
         });
@@ -2050,6 +2113,25 @@ mod tests {
         cx.simulate_prompt_answer("Borrar");
         wait_until(cx, "se pide borrarlo", |_| deletions(&server) == 1);
         stop(cx);
+    }
+
+    /// En una ventana ancha las propiedades van en su riel, al lado de la
+    /// lectura; en una estrecha, debajo. En las dos están.
+    ///
+    /// Roturas que atrapa: un riel apretado al lado en una ventana estrecha,
+    /// donde ninguna mitad se lee; perder las propiedades al estrechar.
+    #[gpui_kit::test]
+    fn the_properties_sit_beside_the_reading_only_when_there_is_room(cx: &mut TestAppContext) {
+        for (width, beside) in [(super::STACK_BELOW, true), (super::STACK_BELOW - 1., false)] {
+            let server = server();
+            let (window, _) = open_sized(&server, width, cx);
+            open_first_task(window, cx);
+
+            assert_eq!(on_screen(window, "task-wide", cx), beside, "a {width} px");
+            assert!(on_screen(window, "task-properties", cx) && on_screen(window, "task-priority", cx), "a {width} px");
+            stop(cx);
+            cx.update_window(window, |_, window, _| window.remove_window()).unwrap();
+        }
     }
 
 }

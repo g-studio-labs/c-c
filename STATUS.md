@@ -29,8 +29,9 @@ toda regla va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
   cualquier ámbito (372), en sólo lectura: cuatro pestañas y las decisiones
   vigentes. Una carpeta abre la suya. Sin hacer: subpáginas del documento,
   cambio a tablero y calendario (379) y lista virtual.
-- **En curso (378):** el detalle de una tarea. Pulsar una fila la abre en un
-  cajón para leerla (estado, prioridad, vencimiento, «dónde quedó»,
+- **En curso (378):** el detalle de una tarea. Pulsar una fila la abre a
+  pantalla completa, como en la app de siempre (lectura a la izquierda y un
+  riel de propiedades a la derecha; en ventana estrecha, debajo), para leerla (estado, prioridad, vencimiento, «dónde quedó»,
   descripción, subtareas, adjuntos por nombre, y el hilo con las notas de
   agentes en su pestaña). Se editan el estado, la prioridad, el vencimiento,
   las etiquetas, los responsables, el título y la descripción (markdown en
@@ -42,6 +43,8 @@ toda regla va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
   abre con el programa del sistema, y al lado guardar una copia, quitar
   (preguntando) y «Adjuntar un fichero» (tope de 30 MB dicho antes de subir).
   Un comentario propio se edita y se borra (preguntando) desde el hilo.
+  Los textos siguen la escala de macOS (13 de cuerpo, 11 de secundario, 17
+  y 22 de títulos), puesta en un solo sitio (`desktop/src/theme.rs`).
   El login y el riel llevan la marca (los tres racks con la línea roja), y
   la frase del login ya no dice «Plano de control del VPS».
 - **Falta:** de la carcasa, las fuentes incrustadas y el filtro del panel;

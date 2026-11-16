@@ -325,24 +325,16 @@ impl Render for Workspace {
             .child(
                 div()
                     .flex_1()
+                    .relative()
                     .flex()
                     .overflow_hidden()
                     .child(self.render_rail(cx))
                     .child(self.render_panel(cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .h_full()
-                            .relative()
-                            .overflow_hidden()
-                            .child(main)
-                            // Un cajón sobre la vista, no al lado: en una ventana
-                            // estrecha, al lado dejaba la lista en nada. Lo que
-                            // tapa no recibe el ratón.
-                            .children(task.map(|task| {
-                                div().absolute().top_0().right_0().bottom_0().max_w_full().occlude().shadow_lg().child(task)
-                            })),
-                    ),
+                    .child(div().flex_1().h_full().overflow_hidden().child(main))
+                    // La tarea abierta es una página sobre todo lo demás, no
+                    // un cajón al lado: lo que tapa no recibe el ratón. El
+                    // aviso de conexión sigue a la vista, encima.
+                    .children(task.map(|task| div().id("task-over").absolute().inset_0().occlude().child(task))),
             )
     }
 }

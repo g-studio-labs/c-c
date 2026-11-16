@@ -194,7 +194,7 @@ impl MyWorkView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().id("view-title").test_support().text_lg().font_weight(FontWeight::SEMIBOLD).child(title))
+                    .child(div().id("view-title").test_support().text_size(px(crate::theme::TITLE_SIZE)).font_weight(FontWeight::SEMIBOLD).child(title))
                     .child(div().id("view-count").test_support().text_xs().text_color(muted).child(count))
                     // A qué está acotado, y cómo dejar de estarlo.
                     .children(scope_kind.map(|kind| {

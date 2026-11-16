@@ -139,11 +139,39 @@ pub fn apply(mode: ThemeMode, cx: &mut App) {
         colors.sidebar_accent_foreground = color("sidebar-accent-foreground", colors.sidebar_accent_foreground);
         colors.sidebar_border = color("sidebar-border", colors.sidebar_border);
 
-        // La base de cac son 14px, no los 16 de GPUI Kit.
-        theme.font_size = px(14.);
+        // GPUI Kit le pone este tamaño al `rem` de la ventana (`Root`), y de
+        // él salen todos los textos, también los de sus componentes. Ver
+        // `BASE_FONT_SIZE`.
+        theme.font_size = px(BASE_FONT_SIZE);
         theme.radius = px(8.);
     });
 }
+
+/// Markdown para leer, al tamaño del cuerpo. Suelto, `TextView` hereda el
+/// `rem` entero y sale más grande que el texto de alrededor.
+pub fn prose(id: impl Into<gpui_kit::SharedString>, text: impl Into<gpui_kit::SharedString>) -> gpui_kit::Div {
+    use gpui_kit::{ParentElement, Styled};
+    gpui_kit::div().text_sm().child(gpui_kit::component::text::TextView::markdown(id.into(), text.into()))
+}
+
+/// El cuerpo de texto de macOS, que es la escala que sigue la app (jose,
+/// 16-nov-2026): 13 de cuerpo, 11 de secundario, 17 de título de sección y
+/// 22 de título de pantalla.
+pub const BODY_SIZE: f32 = 13.;
+
+/// El título de una pantalla («Mi trabajo», el de una tarea): el Title 1 de
+/// macOS.
+pub const TITLE_SIZE: f32 = 22.;
+
+/// El `rem` con el que el texto normal (`text_sm`, 0.875rem) sale al cuerpo
+/// de macOS. De él salen solos los demás: `text_xs` (0.75rem) a 11 y
+/// `text_lg` (1.125rem) a 17, que son su secundario y su título de sección; y
+/// los botones, campos y menús de GPUI Kit, que se miden en `rem`, quedan a
+/// la misma escala sin tocarlos uno por uno.
+///
+/// No es 14 «porque la base de cac son 14»: así estuvo, y el texto normal
+/// salía a 12 px.
+pub const BASE_FONT_SIZE: f32 = BODY_SIZE / 0.875;
 
 #[cfg(test)]
 mod tests {
@@ -212,4 +240,22 @@ mod tests {
             assert_eq!(theme.muted_foreground, Hsla::from(rgb(0x676767)));
         });
     }
+    /// Los textos siguen la escala de macOS: 13 de cuerpo, 11 de secundario
+    /// y 17 de título de sección.
+    ///
+    /// GPUI Kit le pone al `rem` de la ventana el tamaño del tema. Roturas
+    /// que atrapa: dejar el `rem` del kit (16: cuerpo a 14); bajarlo a 14
+    /// «porque la base de cac son 14», con lo que el cuerpo sale a 12.
+    #[gpui_kit::test]
+    fn normal_text_is_as_big_as_in_the_other_app(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::component::ActiveTheme;
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            super::apply(gpui_kit::component::ThemeMode::Dark, cx);
+            let rem = f32::from(cx.theme().font_size);
+            let sizes = [0.875, 0.75, 1.125].map(|rems: f32| (rem * rems).round());
+            assert_eq!(sizes, [13., 11., 17.]);
+        });
+    }
+
 }

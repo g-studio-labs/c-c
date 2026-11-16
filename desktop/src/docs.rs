@@ -6,7 +6,6 @@
 
 use cac_core::{DocDecision, DOC_TABS};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -31,7 +30,7 @@ impl DocsView {
             .collect::<Vec<_>>()
             .join(" · ");
         let body = (!decision.body.trim().is_empty())
-            .then(|| TextView::markdown(SharedString::from(format!("decision-body-{}", decision.id)), decision.body.clone()));
+            .then(|| crate::theme::prose(SharedString::from(format!("decision-body-{}", decision.id)), decision.body.clone()));
 
         div()
             .id(SharedString::from(format!("doc-decision-{}", decision.id)))
@@ -125,7 +124,7 @@ impl Render for DocsView {
                             // Un id por nodo y pestaña: el del texto anterior no
                             // debe prestarle su estado a éste.
                             let id = SharedString::from(format!("doc-text-{node}-{}", docs.tab));
-                            this.child(div().id("doc-body").test_support().child(TextView::markdown(id, body.clone())))
+                            this.child(div().id("doc-body").test_support().child(crate::theme::prose(id, body.clone())))
                         })
                         .children(decisions.into_iter().map(|decision| self.render_decision(decision, cx))),
                 ),
