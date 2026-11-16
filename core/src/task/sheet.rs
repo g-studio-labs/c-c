@@ -6,8 +6,8 @@
 
 use chrono::{NaiveDate, Timelike, Utc};
 
-use super::{StatusOption, TaskComment, TaskDetail, Tasks};
-use crate::dates::today_in;
+use super::{shown_name, StatusOption, TaskComment, TaskDetail, Tasks};
+use crate::dates::{due_day, today_in};
 use crate::mywork::{day_and_month, due_label, DueLabel};
 use crate::texts::{text_with, Locale};
 
@@ -70,6 +70,10 @@ pub struct TaskSheet {
     /// Con su nombre de la API (`normal`, no `medium`). `none` es sin prioridad.
     pub priority: String,
     pub due: Option<DueLabel>,
+    /// El día en que vence, `YYYY-MM-DD`: lo que se le pone a un selector de
+    /// fecha. Sale del instante guardado con `due_day`, no de sus diez
+    /// primeras letras leídas en la hora de la máquina.
+    pub due_day: Option<String>,
     /// Por el nombre con que se les llama, no por su usuario.
     pub assignees: Vec<String>,
     pub tags: Vec<SheetTag>,
@@ -134,7 +138,8 @@ pub fn task_sheet(detail: &TaskDetail, statuses: &[StatusOption], locale: Locale
         status_color: detail.status.color.clone(),
         priority: task.priority.clone(),
         due: due_label(locale, task.due_at.as_deref(), today),
-        assignees: detail.assignees.iter().map(|person| person.name.clone().unwrap_or_else(|| person.username.clone())).collect(),
+        due_day: due_day(task.due_at.as_deref()).map(|day| day.to_string()),
+        assignees: detail.assignees.iter().map(shown_name).collect(),
         tags: detail.tags.iter().map(|tag| SheetTag { name: tag.name.clone(), color: tag.color.clone() }).collect(),
         description: task.description.trim().to_string(),
         handoff: task.handoff.clone().filter(|handoff| !handoff.trim().is_empty()),
@@ -244,6 +249,7 @@ mod tests {
         assert_eq!(sheet.assignees, ["Ana Pérez"]);
         assert_eq!(sheet.tags, [SheetTag { name: "urgente".into(), color: "#f00".into() }]);
         assert_eq!(sheet.due.as_ref().map(|due| due.state), Some(DueState::Today));
+        assert_eq!(sheet.due_day.as_deref(), Some("2026-09-30"));
         assert_eq!(sheet.description, "Con **markdown**.");
         assert_eq!((sheet.handoff.as_deref(), sheet.handoff_by.as_deref()), (Some("Dónde quedó."), Some("Ana Pérez")));
         let parent = sheet.parent.unwrap();

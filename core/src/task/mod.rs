@@ -5,6 +5,7 @@
 //! abierta a la vez (la del panel de detalle); el tablero, que mueve tarjetas
 //! sin abrirlas, llega en su fase.
 
+mod edit;
 mod flow;
 mod sheet;
 mod types;
@@ -13,6 +14,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+pub use edit::{assignee_choices, shown_name, tag_choices, Choice};
 pub use flow::{can_transition, canonical_priority, canonical_status, flow_for, Flow};
 pub use sheet::{client_reads, is_agent_note, task_sheet, SheetComment, SheetSubtask, SheetTag, TaskSheet};
 pub use types::{
@@ -43,6 +45,10 @@ pub struct TaskState {
     pub detail: Option<TaskDetail>,
     /// Las columnas de su lista, en su orden.
     pub statuses: Vec<StatusOption>,
+    /// Las etiquetas de su organización: las que se le pueden poner.
+    pub tags: Vec<TaskTag>,
+    /// El equipo de su organización: a quién se le puede dar.
+    pub team: Vec<UserSummary>,
     pub loading: bool,
     pub error: Option<String>,
 }
@@ -242,10 +248,11 @@ impl Tasks {
 
     async fn fetch(&self, task_id: &str) -> Result<(), ApiError> {
         let detail: TaskDetail = self.core.get(&format!("/api/v1/tasks/{task_id}")).await?;
-        let list_id = detail.task.list_id.clone();
+        let (list_id, org_id) = (detail.task.list_id.clone(), detail.task.org_id.clone());
         self.install(task_id, detail);
 
         self.ensure_columns(task_id, &list_id).await;
+        self.ensure_choices(task_id, &org_id).await;
         Ok(())
     }
 

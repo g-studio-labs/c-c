@@ -9,7 +9,7 @@ use cac_core::{
     new_task_body, patch_body, Config, Core, DueChange, Listener, NewTask, Session, Storage, TaskPatch, TaskState,
 };
 use serde_json::{json, Value};
-use wiremock::matchers::{body_json, method, path};
+use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[derive(Default)]
@@ -522,4 +522,196 @@ async fn a_task_moved_to_another_list_gets_that_lists_columns() {
     let names: Vec<String> =
         rig.core.tasks().state().statuses.into_iter().map(|option| option.status.name).collect();
     assert_eq!(names, ["Por hacer"]);
+}
+
+/// Una tarea de la organización `o1`, con una etiqueta y un responsable ya
+/// puestos, y lo que su organización ofrece: otra etiqueta y otra persona.
+async fn rig_with_choices() -> Rig {
+    let rig = rig().await;
+    let mut task = detail("t1", "Tarea", "pending", "", "");
+    task["task"]["orgId"] = json!("o1");
+    task["tags"] = json!([{ "id": "tag-old", "orgId": "o9", "name": "Vieja", "color": "#f00" }]);
+    task["assignees"] = json!([{ "id": "u1", "username": "ana", "name": "Ana Pérez" }]);
+    mount_task(&rig.server, "t1", task).await;
+    mount_columns(&rig.server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/task-tags/"))
+        .and(query_param("orgId", "o1"))
+        .respond_with(ok(json!([{ "id": "tag-new", "orgId": "o1", "name": "backend", "color": "#0f0" }])))
+        .mount(&rig.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/users/search"))
+        .and(query_param("orgId", "o1"))
+        // Sin el tope, el servidor contesta sólo diez.
+        .and(query_param("limit", "50"))
+        .respond_with(ok(json!([
+            { "id": "u1", "username": "ana", "name": "Ana Pérez" },
+            { "id": "u2", "username": "luis" },
+            { "id": "u3", "username": "zoe", "name": "  " },
+        ])))
+        .mount(&rig.server)
+        .await;
+    rig.core.tasks().open("t1").await;
+    rig
+}
+
+fn said(choices: Vec<cac_core::Choice>) -> Vec<(String, String, bool)> {
+    choices.into_iter().map(|choice| (choice.id, choice.name, choice.chosen)).collect()
+}
+
+/// Abrir una tarea trae lo que se le puede poner: las etiquetas de su
+/// organización y su equipo, con lo que ya tiene marcado.
+///
+/// Roturas que atrapa: pedir las etiquetas o el equipo de otra organización
+/// (o de todas); ofrecer dos veces a quien ya la lleva; dejar fuera lo que
+/// tiene y nadie ofrece, que entonces no habría cómo quitarlo; marcar lo que
+/// no tiene; llamar a alguien por su usuario teniendo nombre.
+#[tokio::test]
+async fn opening_a_task_brings_what_can_be_put_on_it() {
+    let rig = rig_with_choices().await;
+    let tasks = rig.core.tasks();
+
+    assert_eq!(
+        said(tasks.tag_choices()),
+        [("tag-new".into(), "backend".into(), false), ("tag-old".into(), "Vieja".into(), true)]
+    );
+    assert_eq!(
+        said(tasks.assignee_choices()),
+        [
+            ("u1".into(), "Ana Pérez".into(), true),
+            ("u2".into(), "luis".into(), false),
+            // Un nombre en blanco no es un nombre.
+            ("u3".into(), "zoe".into(), false),
+        ]
+    );
+}
+
+/// Una tarea que no dice de qué organización es no pide etiquetas ni equipo.
+///
+/// Rotura que atrapa: preguntar con la organización vacía, que el servidor
+/// lee como «las de todas las mías» y ofrecería etiquetas de otro cliente.
+#[tokio::test]
+async fn a_task_without_an_organization_asks_for_no_choices() {
+    let rig = rig().await;
+    mount_task(&rig.server, "t1", detail("t1", "Tarea", "pending", "", "")).await;
+    mount_columns(&rig.server).await;
+
+    rig.core.tasks().open("t1").await;
+
+    let asked: Vec<String> =
+        rig.server.received_requests().await.unwrap().iter().map(|request| request.url.path().to_string()).collect();
+    assert_eq!(asked, ["/api/v1/tasks/t1", "/api/v1/task-lists/l1/statuses"]);
+}
+
+/// Las etiquetas de una tarea que ya no es la abierta no se le ofrecen a la
+/// que sí.
+///
+/// Rotura que atrapa: abrir una tarea de un cliente, saltar a otra, y que al
+/// llegar tarde las etiquetas del primero se ofrezcan en la del segundo.
+#[tokio::test]
+async fn late_choices_are_not_offered_on_another_task() {
+    let rig = rig().await;
+    let mut first = detail("t1", "Primera", "pending", "", "");
+    first["task"]["orgId"] = json!("o1");
+    mount_task(&rig.server, "t1", first).await;
+    mount_task(&rig.server, "t2", detail("t2", "Segunda", "pending", "", "")).await;
+    mount_columns(&rig.server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/task-tags/"))
+        .respond_with(
+            ok(json!([{ "id": "tag1", "orgId": "o1", "name": "del otro", "color": "#0f0" }]))
+                .set_delay(Duration::from_millis(250)),
+        )
+        .mount(&rig.server)
+        .await;
+
+    let slow = rig.core.clone();
+    let opening = tokio::spawn(async move { slow.tasks().open("t1").await });
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    rig.core.tasks().open("t2").await;
+    opening.await.unwrap();
+
+    let state = rig.core.tasks().state();
+    assert_eq!(state.task_id.as_deref(), Some("t2"));
+    assert!(state.tags.is_empty(), "ofrece {:?}", state.tags);
+}
+
+/// Poner o quitar una etiqueta o un responsable manda la lista entera, que
+/// es lo que el servidor espera.
+///
+/// Roturas que atrapa: mandar sólo lo nuevo (el servidor quitaría lo que
+/// había); no quitar al pulsar lo que ya estaba; cruzar etiquetas con
+/// responsables.
+#[tokio::test]
+async fn a_touch_sends_the_whole_list() {
+    let rig = rig_with_choices().await;
+    let answer = rig.core.tasks().state().detail.unwrap();
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/tasks/t1"))
+        .respond_with(ok(serde_json::to_value(&answer).unwrap()))
+        .mount(&rig.server)
+        .await;
+    let tasks = rig.core.tasks();
+
+    tasks.toggle_tag("tag-new").await.expect("se puso");
+    tasks.toggle_tag("tag-old").await.expect("se quitó");
+    tasks.toggle_assignee("u2").await.expect("se le dio");
+    tasks.toggle_assignee("u1").await.expect("se le quitó");
+
+    assert_eq!(
+        requests_to(&rig.server, "PATCH", "/tasks/t1").await,
+        [
+            json!({ "tagIds": ["tag-old", "tag-new"] }),
+            json!({ "tagIds": [] }),
+            json!({ "assigneeIds": ["u1", "u2"] }),
+            json!({ "assigneeIds": [] }),
+        ]
+    );
+}
+
+/// La prioridad y el vencimiento se mandan cuando cambian, y sólo entonces.
+///
+/// Roturas que atrapa: guardar otra vez lo que ya tenía (un selector de
+/// fecha que avisa al recibir su propio valor guardaría en bucle); tomar
+/// `medium` y `normal` por prioridades distintas; quitar la fecha con un
+/// `dueAt` vacío en vez de `clearDueAt`.
+#[tokio::test]
+async fn priority_and_due_are_sent_only_when_they_change() {
+    let rig = rig_with_choices().await;
+    let answer = rig.core.tasks().state().detail.unwrap();
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/tasks/t1"))
+        .respond_with(ok(serde_json::to_value(&answer).unwrap()))
+        .mount(&rig.server)
+        .await;
+    let tasks = rig.core.tasks();
+
+    tasks.set_priority("normal").await.expect("ya la tenía");
+    tasks.set_priority("medium").await.expect("ya la tenía, con su otro nombre");
+    tasks.set_due(Some("2026-09-30")).await.expect("ya vencía ese día");
+    assert!(requests_to(&rig.server, "PATCH", "/tasks/t1").await.is_empty());
+
+    tasks.set_priority("high").await.expect("se guardó");
+    tasks.set_due(Some("2026-10-02")).await.expect("se guardó");
+    tasks.set_due(None).await.expect("se quitó");
+
+    assert_eq!(
+        requests_to(&rig.server, "PATCH", "/tasks/t1").await,
+        [json!({ "priority": "high" }), json!({ "dueAt": "2026-10-02T00:00:00Z" }), json!({ "clearDueAt": true })]
+    );
+}
+
+/// Sin tarea abierta no hay nada que cambiar ni que ofrecer.
+///
+/// Rotura que atrapa: mandar un cambio a ninguna tarea.
+#[tokio::test]
+async fn nothing_is_changed_without_an_open_task() {
+    let rig = rig().await;
+    let tasks = rig.core.tasks();
+
+    assert!(tasks.set_priority("high").await.is_err() && tasks.set_due(None).await.is_err());
+    assert!(tasks.toggle_tag("x").await.is_err() && tasks.toggle_assignee("x").await.is_err());
+    assert!(tasks.tag_choices().is_empty() && tasks.assignee_choices().is_empty());
+    assert!(rig.server.received_requests().await.unwrap().is_empty());
 }
