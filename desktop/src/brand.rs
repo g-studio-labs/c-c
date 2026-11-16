@@ -44,8 +44,13 @@ fn shapes() -> Vec<(Part, [f32; 4], f32)> {
 /// La marca sola, de ese alto. `surface` es el color de lo que tiene detrás:
 /// con él se pintan las rejillas, que son huecos.
 pub fn brand_mark(height: f32, surface: Hsla, cx: &App) -> Div {
+    brand_mark_in(height, cx.theme().foreground, surface)
+}
+
+/// La marca con los racks de ese color, para ponerla sobre un fondo que no
+/// es el de la app (el cuadro de color de la organización).
+pub fn brand_mark_in(height: f32, ink: Hsla, surface: Hsla) -> Div {
     let scale = height / BOX.1;
-    let ink = cx.theme().foreground;
     // Por debajo de este alto una rejilla mide menos de un píxel y sólo
     // ensucia: los racks van lisos, como en el icono a 32 px.
     let with_vents = 28. * scale >= 1.5;

@@ -45,6 +45,10 @@ toda regla va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
   Un comentario propio se edita y se borra (preguntando) desde el hilo.
   Los textos siguen la escala de macOS (13 de cuerpo, 11 de secundario, 17
   y 22 de títulos), puesta en un solo sitio (`desktop/src/theme.rs`).
+  El sidebar va como el de la app de siempre: la organización con la marca y
+  «papel · miembros · espacios», la sección «Trabajo», el árbol con el color
+  de cada espacio, carpeta, lista, marca de documento y de cliente, y la
+  cuenta (tema, idioma, salir) en un avatar al pie del riel.
   El login y el riel llevan la marca (los tres racks con la línea roja), y
   la frase del login ya no dice «Plano de control del VPS».
 - **Falta:** de la carcasa, las fuentes incrustadas y el filtro del panel;

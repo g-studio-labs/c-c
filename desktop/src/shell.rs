@@ -224,7 +224,9 @@ mod tests {
         type_and_send(window, cx);
         wait_until(cx, "la app se abre", |cx| on_screen(window, "open", cx));
 
-        cx.update_window(window, |_, window, cx| window.click("log-out", cx)).unwrap();
+        // «Salir» vive en el menú de la cuenta, cuyas opciones no se pueden
+        // pulsar desde una prueba: se llama a lo que hace.
+        cx.update(|cx| crate::workspace::Workspace::log_out(cx));
 
         wait_until(cx, "vuelve a la pantalla de entrar", |cx| on_screen(window, "sign-in-submit", cx));
         assert_eq!(server.hits("/api/v1/auth/logout"), 1);

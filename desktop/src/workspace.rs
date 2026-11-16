@@ -21,7 +21,7 @@ use crate::task::TaskView;
 /// Las medidas de la app de siempre: el riel y el panel.
 const RAIL_WIDTH: f32 = 48.;
 const PANEL_WIDTH: f32 = 256.;
-const ROW_HEIGHT: f32 = 28.;
+const ROW_HEIGHT: f32 = 30.;
 /// Lo que entra una fila por cada nivel que cuelga.
 const INDENT: f32 = 14.;
 
@@ -63,14 +63,41 @@ impl Workspace {
         });
     }
 
-    fn render_account(&self, name: String) -> impl IntoElement {
-        Button::new("account-menu").ghost().small().label(name).dropdown_caret(true).dropdown_menu(|menu, _, cx| {
+    pub(crate) fn log_out(cx: &App) {
+        Backend::run(cx, |core| async move { core.logout().await });
+    }
+
+    /// El avatar de quien está dentro, al pie del riel, con su menú: tema,
+    /// idioma y salir.
+    fn render_account(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (primary, on_primary) = (theme.primary, theme.primary_foreground);
+        let session = Backend::snapshot(cx).read(cx).session.clone();
+        let (name, initials) = session
+            .map(|session| {
+                let initials = cac_core::initials(session.name.as_deref(), &session.username);
+                (session.name.filter(|name| !name.trim().is_empty()).unwrap_or(session.username), initials)
+            })
+            .unwrap_or_default();
+        let avatar = div()
+            .size(px(28.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(primary.opacity(0.2))
+            .text_xs()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(primary)
+            .child(initials);
+        let _ = on_primary;
+        Button::new("account-menu").ghost().tooltip(tr(cx, "nav:rail.account")).child(avatar).dropdown_menu(move |menu, _, cx| {
             let core = Backend::core(cx);
             let (theme, language) = (core.theme(), core.locale_preference());
             let here = locale(cx);
             let phrase = |key: &str| cac_core::text(here, key);
 
-            let mut menu = menu.label(phrase("nav:account.theme"));
+            let mut menu = menu.label(name.clone()).separator().label(phrase("nav:account.theme"));
             for (preference, key) in [
                 (ThemePreference::System, "nav:account.themeAuto"),
                 (ThemePreference::Light, "nav:account.themeLight"),
@@ -94,7 +121,7 @@ impl Workspace {
                         .on_click(move |_, _, cx| Self::choose_language(preference, cx)),
                 );
             }
-            menu
+            menu.separator().item(PopupMenuItem::new(phrase("nav:account.logOut")).icon(Icon::new(Lucide::LogOut)).on_click(|_, _, cx| Self::log_out(cx)))
         })
     }
 
@@ -137,6 +164,7 @@ impl Workspace {
 
     fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let (sidebar, border, accent, primary) = (theme.sidebar, theme.sidebar_border, theme.sidebar_accent, theme.primary);
         div()
             .w(px(RAIL_WIDTH))
             .h_full()
@@ -144,55 +172,98 @@ impl Workspace {
             .flex_none()
             .flex_col()
             .items_center()
-            .gap_2()
+            .gap_3()
             .py_3()
-            .bg(theme.sidebar)
+            .bg(sidebar)
             .border_r_1()
-            .border_color(theme.sidebar_border)
-            .child(div().id("rail-brand").test_support().child(crate::brand::brand_mark(24., theme.sidebar, cx)))
+            .border_color(border)
+            .child(div().id("rail-brand").test_support().child(crate::brand::brand_mark(22., sidebar, cx)))
             // El único módulo de la primera entrega.
+            .child(
+                div()
+                    .size(px(36.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_lg()
+                    .bg(accent)
+                    .child(Icon::new(Lucide::BriefcaseBusiness).text_color(primary)),
+            )
+            .child(div().flex_1())
+            .child(self.render_account(cx))
+    }
+
+    /// La organización que se mira: la marca, su nombre y, debajo, quién
+    /// eres en ella y cómo es de grande. Pulsarla ofrece las demás.
+    fn render_org(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (primary, on_primary, muted) = (theme.primary, theme.primary_foreground, theme.muted_foreground);
+        let snapshot = Backend::snapshot(cx).read(cx);
+        let orgs = snapshot.orgs.clone();
+        let spaces = snapshot.tree.spaces.len();
+        let name = orgs.current().map(|org| org.name.clone()).unwrap_or_else(|| tr(cx, "nav:rail.organization"));
+        let hint = orgs.current().map(|org| cac_core::org_hint(org, spaces, locale(cx))).filter(|hint| !hint.is_empty());
+        let current = orgs.current_org_id.clone();
+        let several = orgs.orgs.len() > 1;
+        let face = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
             .child(
                 div()
                     .size(px(32.))
                     .flex()
+                    .flex_none()
                     .items_center()
                     .justify_center()
-                    .rounded_md()
-                    .bg(theme.sidebar_accent)
-                    .child(Icon::new(IconName::Inbox).text_color(theme.primary)),
+                    .rounded_lg()
+                    .bg(primary)
+                    .child(crate::brand::brand_mark_in(16., on_primary, primary)),
             )
-    }
-
-    fn render_org(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let orgs = Backend::snapshot(cx).read(cx).orgs.clone();
-        let name = orgs.current().map(|org| org.name.clone()).unwrap_or_else(|| tr(cx, "nav:rail.organization"));
-        let current = orgs.current_org_id.clone();
-        Button::new("org-switch")
-            .ghost()
-            .w_full()
-            .label(name)
-            .dropdown_caret(orgs.orgs.len() > 1)
-            .dropdown_menu(move |mut menu, _, _| {
-                for org in &orgs.orgs {
-                    let id = org.id.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(org.name.clone())
-                            .checked(current.as_deref() == Some(org.id.as_str()))
-                            .on_click(move |_, _, cx| Self::switch_org(id.clone(), cx)),
-                    );
-                }
-                menu
-            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .child(div().id("org-name").test_support().w_full().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).child(name))
+                    .children(hint.map(|hint| div().id("org-hint").test_support().w_full().truncate().text_xs().text_color(muted).child(hint))),
+            )
+            .when(several, |this| this.child(Icon::new(Lucide::ChevronsUpDown).xsmall().text_color(muted)));
+        Button::new("org-switch").ghost().w_full().h(px(44.)).child(face).dropdown_menu(move |mut menu, _, _| {
+            for org in &orgs.orgs {
+                let id = org.id.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(org.name.clone())
+                        .checked(current.as_deref() == Some(org.id.as_str()))
+                        .on_click(move |_, _, cx| Self::switch_org(id.clone(), cx)),
+                );
+            }
+            menu
+        })
     }
 
     fn render_row(&self, row: TreeRow, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (hover, active_bg, muted, foreground) =
-            (theme.sidebar_accent, theme.sidebar_accent, theme.muted_foreground, theme.sidebar_foreground);
+        let (hover, active_bg, muted, foreground, primary) =
+            (theme.sidebar_accent, theme.sidebar_accent, theme.muted_foreground, theme.sidebar_foreground, theme.primary);
         let chevron = if row.open { IconName::ChevronDown } else { IconName::ChevronRight };
         let toggle_id = row.id.clone();
         let clicked = row.clone();
         let count = (row.kind == NodeKind::List && row.open_count > 0).then(|| row.open_count.to_string());
+        // Qué es cada fila, a la vista: el color de su espacio, una carpeta
+        // o una lista.
+        let mark = match row.kind {
+            NodeKind::Space => {
+                let color = u32::from_str_radix(row.color.trim_start_matches('#'), 16).unwrap_or(0x888888);
+                div().size(px(10.)).flex_none().rounded_sm().bg(gpui_kit::rgb(color)).into_any_element()
+            }
+            NodeKind::Folder => Icon::new(Lucide::Folder).xsmall().text_color(muted).into_any_element(),
+            NodeKind::List => Icon::new(Lucide::ListChecks).xsmall().text_color(muted).into_any_element(),
+        };
+        let space = row.kind == NodeKind::Space;
 
         div()
             .id(SharedString::from(format!("tree-{}", row.id)))
@@ -201,14 +272,15 @@ impl Workspace {
             .flex()
             .flex_none()
             .items_center()
-            .gap_1()
-            .pl(px(8. + INDENT * row.depth as f32))
+            .gap_1p5()
+            .pl(px(6. + INDENT * row.depth as f32))
             .pr_2()
             .mx_1()
             .rounded_md()
             .text_sm()
-            .text_color(if row.kind == NodeKind::List && !row.active { muted } else { foreground })
-            .when(row.active, |this| this.bg(active_bg).font_weight(FontWeight::MEDIUM))
+            .text_color(if space || row.active { foreground } else { muted })
+            .when(space || row.active, |this| this.font_weight(FontWeight::MEDIUM))
+            .when(row.active, |this| this.bg(active_bg))
             .hover(move |style| style.bg(hover))
             .cursor_pointer()
             .on_click(move |_, _, cx| Self::click_row(&clicked, cx))
@@ -229,7 +301,16 @@ impl Workspace {
                         })
                     }),
             )
+            .child(mark)
             .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(row.name))
+            // Lo ve un cliente: es su canal.
+            .when(row.client, |this| {
+                this.child(div().id(SharedString::from(format!("tree-client-{}", row.id))).test_support().flex_none().child(Icon::new(IconName::Eye).xsmall().text_color(primary)))
+            })
+            // Tiene documentación escrita.
+            .when(row.has_doc, |this| {
+                this.child(div().id(SharedString::from(format!("tree-doc-{}", row.id))).test_support().flex_none().child(Icon::new(Lucide::FileText).xsmall().text_color(muted)))
+            })
             .children(count.map(|count| div().flex_none().text_xs().text_color(muted).child(count)))
     }
 
@@ -239,9 +320,7 @@ impl Workspace {
             (theme.sidebar, theme.sidebar_border, theme.muted_foreground, theme.sidebar_accent, theme.sidebar_foreground);
         let snapshot = Backend::snapshot(cx).read(cx);
         let everything = snapshot.my_work.scope.is_none() && snapshot.docs.target.is_none();
-        let session = snapshot.session.clone();
         let rows = Backend::core(cx).tree().rows();
-        let name = session.as_ref().map(|s| s.name.clone().unwrap_or_else(|| s.username.clone())).unwrap_or_default();
 
         div()
             .w(px(PANEL_WIDTH))
@@ -254,6 +333,15 @@ impl Workspace {
             .border_r_1()
             .border_color(border)
             .child(div().p_2().border_b_1().border_color(border).child(self.render_org(cx)))
+            .child(
+                div()
+                    .px_3()
+                    .pt_3()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(muted)
+                    .child(tr(cx, "nav:module.work").to_uppercase()),
+            )
             .child(
                 div()
                     .id("tree-everything")
@@ -284,25 +372,6 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .children(rows.into_iter().map(|row| self.render_row(row, cx))),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_2()
-                    .p_2()
-                    .border_t_1()
-                    .border_color(border)
-                    .child(div().flex_1().overflow_hidden().child(self.render_account(name)))
-                    .child(
-                        Button::new("log-out")
-                            .ghost()
-                            .small()
-                            .icon(Icon::new(Lucide::LogOut))
-                            .tooltip(tr(cx, "nav:account.logOut"))
-                            .on_click(|_, _, cx| Backend::run(cx, |core| async move { core.logout().await })),
-                    ),
             )
     }
 }
@@ -684,4 +753,34 @@ mod tests {
         wait_until(cx, "vuelve a pedirlo todo", |_| server.hits("/api/v1/organizations/") > asked);
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
+    /// El sidebar dice de qué organización es y marca lo que cada fila es:
+    /// lo que tiene documentación escrita y lo que ve un cliente.
+    ///
+    /// Roturas que atrapa: una organización sin su «quién eres y cuánta
+    /// gente»; marcar con documento lo que no lo tiene, o no marcar lo que
+    /// sí; no avisar de que una lista la ve un cliente; un riel sin la
+    /// cuenta de quien está dentro.
+    #[gpui_kit::test]
+    fn the_sidebar_says_what_each_thing_is(cx: &mut TestAppContext) {
+        let server = FakeServer::start();
+        let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+        let mut seen = space("a", "Producto");
+        seen["lists"][0]["projectId"] = json!("p1");
+        server.mount(get("/api/v1/organizations/").respond_with(ok(json!([org("o1", "G Studio")]))));
+        server.mount(get("/api/v1/task-spaces/").respond_with(ok(json!([seen]))));
+        server.mount(get("/api/v1/docs/").respond_with(ok(json!({ "space:a": { "written": true }, "list:l-a": { "written": false } }))));
+        server.mount(get("/api/v1/tasks/").respond_with(ok(json!([]))));
+        server.install(cx);
+        let window = open(cx);
+
+        wait_until(cx, "llegan el árbol y sus marcas", |cx| on_screen(window, "tree-l-a", cx) && on_screen(window, "tree-doc-a", cx));
+
+        assert!(on_screen(window, "org-name", cx) && on_screen(window, "org-hint", cx));
+        assert!(!on_screen(window, "tree-doc-l-a", cx), "marca con documento una lista que no lo tiene escrito");
+        assert!(on_screen(window, "tree-client-l-a", cx), "no avisa de que la lista la ve un cliente");
+        assert!(!on_screen(window, "tree-client-a", cx) && !on_screen(window, "tree-client-f-a", cx));
+        assert!(on_screen(window, "account-menu", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
 }
