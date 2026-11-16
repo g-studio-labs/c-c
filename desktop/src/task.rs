@@ -15,7 +15,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use cac_core::{ApiError, Choice, DueState, MentionMark, MentionMenu, MentionPerson, SheetComment, SheetFile, SheetSubtask, StatusOption, TaskSheet, PRIORITIES};
+use cac_core::{
+    ApiError, Choice, DueState, MentionMark, MentionMenu, MentionPerson, SheetComment, SheetFile, SheetSubtask, StatusOption, TaskAttachment, TaskSheet,
+    PRIORITIES,
+};
 use chrono::NaiveDate;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -104,10 +107,41 @@ pub struct TaskView {
     mention_mark: Option<MentionMark>,
     /// Para que el marcado no se salga de la vista al bajar por la lista.
     mention_scroll: ScrollHandle,
+    /// Hay ficheros subiendo para citarlos en el comentario.
+    citing: bool,
     /// Las imágenes de la tarea abierta, por el id de su adjunto. Se bajan
     /// una vez, al verla, y se tiran al abrir otra.
     thumbs: HashMap<String, Thumb>,
     _task_closed: Subscription,
+}
+
+/// Sube esos ficheros a la tarea abierta, uno tras otro, y al primero que no
+/// se pueda se para. Dice cuáles quedaron subidos y, si lo hubo, cuál no y
+/// por qué (sin porqué si no se pudo ni leer del disco).
+async fn upload_all(core: cac_core::Core, paths: Vec<std::path::PathBuf>) -> (Vec<TaskAttachment>, Option<(String, Option<ApiError>)>) {
+    let (mut attached, mut failed) = (Vec::new(), None);
+    for path in paths {
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        // El tamaño se mira antes de leer: un fichero enorme no se carga en
+        // memoria para que digan que no. (Sin esto el core lo rechaza igual,
+        // ya leído: no hay prueba que lo distinga sin medir memoria.)
+        let read = std::fs::metadata(&path)
+            .map_err(|_| None)
+            .and_then(|file| cac_core::attachment_fits(file.len()).map_err(Some))
+            .and_then(|()| std::fs::read(&path).map_err(|_| None));
+        let uploaded = match read {
+            Ok(bytes) => core.tasks().attach(&name, bytes).await.map_err(Some),
+            Err(error) => Err(error),
+        };
+        match uploaded {
+            Ok(file) => attached.push(file),
+            Err(error) => {
+                failed = Some((name, error));
+                break;
+            }
+        }
+    }
+    (attached, failed)
 }
 
 /// La línea y la letra (no el byte) de esa posición del texto, que es como
@@ -160,6 +194,7 @@ impl TaskView {
             focused_for: None,
             mention_mark: None,
             mention_scroll: ScrollHandle::new(),
+            citing: false,
             thumbs: HashMap::new(),
             // Cerrada la página ya no se pinta, así que no es al pintar
             // donde se tiran sus imágenes: una captura decodificada pesa.
@@ -238,6 +273,15 @@ impl TaskView {
         .detach();
     }
 
+    /// Dice que un fichero no se pudo adjuntar, y por qué si se sabe.
+    fn say_not_attached(&mut self, task_id: String, name: &str, error: Option<ApiError>, cx: &mut Context<Self>) {
+        let mut text = cac_core::text_with(locale(cx), "common:editor.errAttach", &[("name", name)]);
+        if let Some(error) = error {
+            text = format!("{text}. {}", error_text(cx, &error, "common:editor.errAttachBody"));
+        }
+        self.say_problem(task_id, text, cx);
+    }
+
     /// Pregunta qué ficheros y los sube a la tarea abierta, uno tras otro. Al
     /// primero que no se pueda se para y se dice cuál.
     pub(crate) fn attach_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -250,38 +294,89 @@ impl TaskView {
             let Ok(answer) = this.update(cx, |this, cx| {
                 this.attaching = true;
                 cx.notify();
-                Backend::ask(cx, move |core| async move {
-                    for path in paths {
-                        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-                        // El tamaño se mira antes de leer: un fichero enorme
-                        // no se carga en memoria para que digan que no.
-                        // (Sin esto el core lo rechaza igual, ya leído: no
-                        // hay prueba que lo distinga sin medir memoria.)
-                        let size = std::fs::metadata(&path).map(|file| file.len()).map_err(|_| (name.clone(), None))?;
-                        cac_core::attachment_fits(size).map_err(|error| (name.clone(), Some(error)))?;
-                        let bytes = std::fs::read(&path).map_err(|_| (name.clone(), None))?;
-                        core.tasks().attach(&name, bytes).await.map_err(|error| (name.clone(), Some(error)))?;
-                    }
-                    Ok::<(), (String, Option<ApiError>)>(())
-                })
+                Backend::ask(cx, move |core| upload_all(core, paths))
             }) else {
                 return;
             };
             let result = answer.await;
             this.update(cx, |this, cx| {
                 this.attaching = false;
-                if let Ok(Err((name, error))) = result {
-                    let mut text = cac_core::text_with(locale(cx), "common:editor.errAttach", &[("name", &name)]);
-                    if let Some(error) = error {
-                        text = format!("{text}. {}", error_text(cx, &error, "common:editor.errAttachBody"));
-                    }
-                    this.say_problem(task_id, text, cx);
+                if let Ok((_, Some((name, error)))) = result {
+                    this.say_not_attached(task_id, &name, error, cx);
                 }
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Pregunta qué ficheros, los sube a la tarea y los cita en el
+    /// comentario que se escribe, donde está el cursor. Como en la app de
+    /// siempre: un fichero que se adjunta al comentar es de la tarea, y el
+    /// comentario lo nombra. Cómo se cita y dónde lo dice el core.
+    pub(crate) fn attach_to_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task_id) = Self::open_task_id(cx) else { return };
+        self.problem = None;
+        cx.notify();
+        let chosen = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: None });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else { return };
+            let Ok(answer) = this.update(cx, |this, cx| {
+                this.citing = true;
+                cx.notify();
+                Backend::ask(cx, move |core| upload_all(core, paths))
+            }) else {
+                return;
+            };
+            let result = answer.await;
+            this.update_in(cx, |this, window, cx| {
+                this.citing = false;
+                cx.notify();
+                let Ok((files, failed)) = result else { return };
+                // Lo escrito es para la tarea en la que se adjuntó: si ya
+                // se mira otra, los ficheros quedan en la suya y no se
+                // citan en un comentario de ésta.
+                if Self::open_task_id(cx).as_deref() == Some(task_id.as_str()) {
+                    for file in &files {
+                        // Con lo que la caja dice ahora, no con lo que
+                        // decía al elegir: subir tarda, y se sigue escribiendo.
+                        let (text, cursor) = this.comment_cursor(cx);
+                        let Some(cited) = cac_core::with_citation(&text, cursor, file) else { continue };
+                        let position = position_at(&cited.text, cited.cursor as usize);
+                        this.comment.update(cx, |comment, cx| {
+                            comment.set_value(cited.text, window, cx);
+                            comment.set_cursor_position(position, window, cx);
+                        });
+                    }
+                }
+                if let Some((name, error)) = failed {
+                    this.say_not_attached(task_id, &name, error, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Sigue un enlace de lo que se lee en la tarea. El de un fichero suyo
+    /// se baja y se abre como al pulsarlo en sus adjuntos: su dirección pide
+    /// sesión, y el navegador no la tiene. Una mención no va a ningún sitio.
+    pub(crate) fn follow_link(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(file) = Backend::core(cx).tasks().linked_attachment(url) {
+            self.open_file(file.id, file.file_name, window, cx);
+        } else if crate::theme::leads_somewhere(url) {
+            cx.open_url(url);
+        }
+    }
+
+    /// Markdown de la tarea para leer, con sus enlaces seguidos por
+    /// [`Self::follow_link`].
+    fn prose(&self, id: String, text: String, cx: &mut Context<Self>) -> Div {
+        let view = cx.entity().downgrade();
+        crate::theme::prose_with_links(id, text, move |url, window, cx| {
+            let _ = view.update(cx, |this, cx| this.follow_link(url, window, cx));
+        })
     }
 
     /// Pasa a editar un comentario, con lo que dice.
@@ -826,7 +921,22 @@ impl TaskView {
             )
             .children(self.render_mentions(cx))
             .child(
-                div().flex().items_center().gap_2().child(div().flex_1()).children(audience).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("comment-attach")
+                            .ghost()
+                            .small()
+                            .icon(Icon::new(Lucide::Paperclip))
+                            .tooltip(tr(cx, "common:editor.attachFile"))
+                            .loading(self.citing)
+                            .on_click(cx.listener(|this, _, window, cx| this.attach_to_comment(window, cx))),
+                    )
+                    .child(div().flex_1())
+                    .children(audience)
+                    .child(
                     Button::new("comment-send")
                         .primary()
                         .small()
@@ -1128,7 +1238,7 @@ impl TaskView {
                     )
                     .into_any_element()
             } else {
-                crate::theme::prose(SharedString::from(format!("comment-body-{}", comment.id)), comment.body.clone()).into_any_element()
+                self.prose(format!("comment-body-{}", comment.id), comment.body.clone(), cx).into_any_element()
             })
             .into_any_element()
     }
@@ -1196,7 +1306,7 @@ impl TaskView {
                     .border_color(border)
                     .bg(card)
                     .child(self.section(format!("{}{by}", tr(cx, "work:task.handoff")), cx))
-                    .child(crate::theme::prose(SharedString::from(format!("handoff-{}", sheet.id)), handoff))
+                    .child(self.prose(format!("handoff-{}", sheet.id), handoff, cx))
             }))
             .child(
                 div().flex().flex_col().gap_1().child(self.section(tr(cx, "work:task.description"), cx)).child(
@@ -1234,7 +1344,7 @@ impl TaskView {
                         div()
                             .id("task-description")
                             .test_support()
-                            .child(crate::theme::prose(SharedString::from(format!("description-{}", sheet.id)), sheet.description.clone()))
+                            .child(self.prose(format!("description-{}", sheet.id), sheet.description.clone(), cx))
                             .into_any_element()
                     },
                 ),
@@ -2614,6 +2724,115 @@ mod tests {
         assert_eq!(removals(&server), 0, "quitó el fichero sin esperar la respuesta");
         cx.simulate_prompt_answer("Quitar");
         wait_until(cx, "se pide quitarlo", |_| removals(&server) == 1);
+        stop(cx);
+    }
+
+    /// Contesta a una subida, una vez, con el adjunto que quedó.
+    fn storing(server: &FakeServer, id: &str, name: &str) {
+        let stored = json!({ "id": id, "itemId": "t1", "url": format!("/api/v1/tasks/t1/attachments/{id}/raw"), "fileName": name });
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path("/api/v1/tasks/t1/attachments"))
+                .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": stored })))
+                .up_to_n_times(1),
+        );
+    }
+
+    /// Adjuntar al comentar sube los ficheros a la tarea y los cita donde
+    /// está el cursor, cada uno como lo que es; se sigue escribiendo detrás.
+    ///
+    /// Roturas que atrapa: un botón que no pregunta; subir y no citar (el
+    /// comentario sale sin su fichero); citar sólo el primero; la cita al
+    /// final aunque se escribía en medio, o el cursor perdido tras ella;
+    /// subir aunque se cancele; callar el que no se pudo subir, tirar lo
+    /// escrito por él, o seguir subiendo los de detrás.
+    #[gpui_kit::test]
+    fn a_file_attached_while_commenting_is_cited_in_the_comment(cx: &mut TestAppContext) {
+        let server = server_with_a_file();
+        storing(&server, "a2", "notas.txt");
+        storing(&server, "a3", "captura.png");
+        // Por si se sube lo que no se debe: que no sea un 404 lo que lo tape.
+        storing(&server, "a4", "notas.txt");
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        let dir = scratch("cite");
+        let (notes, shot, huge) = (dir.join("notas.txt"), dir.join("captura.png"), dir.join("enorme.bin"));
+        std::fs::write(&notes, b"hola").unwrap();
+        std::fs::write(&shot, b"\x89PNG\x00\xff").unwrap();
+        std::fs::File::create(&huge).unwrap().set_len(cac_core::MAX_ATTACHMENT_BYTES as u64 + 1).unwrap();
+        let uploads = |server: &FakeServer| asked(server, "POST", "/api/v1/tasks/t1/attachments");
+        // «mira esto», con el cursor detrás de «mira».
+        with_view(window, &view, cx, |view, window, cx| {
+            view.comment.update(cx, |comment, cx| {
+                comment.set_value("mira esto", window, cx);
+                comment.set_cursor_position(gpui_kit::component::input::Position::new(0, 4), window, cx);
+            });
+        });
+
+        click(window, "comment-attach", cx);
+        assert!(cx.did_prompt_for_paths(), "no preguntó qué adjuntar");
+        cx.simulate_path_prompt_response(|_| None);
+        settle(cx);
+        assert!(uploads(&server).is_empty(), "subió algo aunque se canceló");
+        assert_eq!(typed(&view, cx), "mira esto");
+
+        click(window, "comment-attach", cx);
+        let chosen = vec![notes.clone(), shot.clone()];
+        cx.simulate_path_prompt_response(move |_| Some(chosen));
+        let cited = "mira [notas.txt](/api/v1/tasks/t1/attachments/a2/raw) \n![captura.png](/api/v1/tasks/t1/attachments/a3/raw)\n";
+        wait_until(cx, "suben los dos y quedan citados", |cx| typed(&view, cx) == format!("{cited} esto"));
+        assert_eq!(uploads(&server)[0].body, cac_core::multipart("notas.txt", b"hola").1);
+        assert_eq!(uploads(&server)[1].body, cac_core::multipart("captura.png", b"\x89PNG\x00\xff").1);
+        assert!(!on_screen(window, "task-problem", cx));
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.input("X", cx);
+        })
+        .unwrap();
+        assert_eq!(typed(&view, cx), format!("{cited}X esto"));
+
+        // Uno que no cabe, y otro detrás: se para en el primero.
+        click(window, "comment-attach", cx);
+        cx.simulate_path_prompt_response(move |_| Some(vec![huge, notes]));
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+        settle(cx);
+        assert_eq!(uploads(&server).len(), 2, "mandó el que pasa del tope, o siguió con el de detrás");
+        assert_eq!(typed(&view, cx), format!("{cited}X esto"));
+        let _ = std::fs::remove_dir_all(&dir);
+        stop(cx);
+    }
+
+    /// Un enlace a un fichero de la tarea lo baja y lo abre como desde sus
+    /// adjuntos; uno de fuera va al navegador, y una mención a ningún sitio.
+    ///
+    /// Roturas que atrapa: darle al navegador una dirección que pide sesión
+    /// (el fichero citado en un comentario no abre nada); dejar de abrir los
+    /// enlaces de verdad; pedirle al sistema que abra `cac:user/…`.
+    #[gpui_kit::test]
+    fn a_link_to_a_file_of_the_task_opens_the_file(cx: &mut TestAppContext) {
+        let server = server_with_a_file();
+        serving_the_file(&server);
+        let (window, view) = open_with_view(&server, cx);
+        let opened = record_opened(cx);
+        open_first_task(window, cx);
+        let follow = |url: &'static str, cx: &mut TestAppContext| with_view(window, &view, cx, move |view, window, cx| view.follow_link(url, window, cx));
+
+        follow("cac:user/11111111-1111-4111-8111-111111111111", cx);
+        settle(cx);
+        assert_eq!(cx.opened_url(), None, "le pidió al sistema abrir una mención");
+        assert!(opened.lock().unwrap().is_empty());
+
+        follow(RAW, cx);
+        wait_until(cx, "se le da al sistema", |_| !opened.lock().unwrap().is_empty());
+        let path = opened.lock().unwrap()[0].clone();
+        assert_eq!(path.file_name().unwrap(), "plan.pdf");
+        assert_eq!(std::fs::read(&path).unwrap(), b"%PDF-1.7");
+        assert_eq!(cx.opened_url(), None, "le dio al navegador una dirección que pide sesión");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        follow("https://example.com/docs", cx);
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/docs"));
+        assert_eq!(opened.lock().unwrap().len(), 1);
         stop(cx);
     }
 

@@ -113,6 +113,59 @@ pub struct Picture {
     pub bytes: Vec<u8>,
 }
 
+/// Un texto con algo puesto dentro, y dónde queda el cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct Cited {
+    pub text: String,
+    pub cursor: u32,
+}
+
+/// Cómo se cita un fichero de la tarea en un comentario o en la descripción:
+/// una imagen como imagen y lo demás como enlace, con su nombre.
+///
+/// Vino de `insertUpload` en `app/src/components/markdown/MarkdownEditor.tsx`.
+/// Se cita por la ruta del servidor, sin dominio ni credencial (la forma
+/// canónica de `attachmentPath` en `app/src/lib/media.ts`): lo escrito contra
+/// un servidor se lee en otro, y un token no acaba guardado en un texto.
+/// `None` si el fichero no vive en este servidor: no hay con qué citarlo.
+pub fn file_citation(file: &TaskAttachment) -> Option<String> {
+    let path = attachment_path(&file.url)?;
+    // El nombre lo puso quien subió el fichero: un corchete suyo no cierra
+    // el enlace, ni un salto de línea lo parte.
+    let name: String = file
+        .file_name
+        .chars()
+        .flat_map(|c| match c {
+            '[' | ']' | '\\' => vec!['\\', c],
+            '\n' | '\r' => vec![' '],
+            c => vec![c],
+        })
+        .collect();
+    Some(if is_image(file) { format!("![{name}]({path})") } else { format!("[{name}]({path})") })
+}
+
+/// El texto con ese fichero citado donde está el cursor, y el cursor detrás
+/// para seguir escribiendo.
+///
+/// Una imagen es un bloque y va en su línea; un enlace va en la frase, con
+/// un espacio a cada lado si no lo hay. Un cursor que no es de este texto
+/// (cambió mientras subía el fichero) lo deja al final.
+pub fn with_citation(text: &str, cursor: usize, file: &TaskAttachment) -> Option<Cited> {
+    let citation = file_citation(file)?;
+    // (`is_char_boundary` ya dice que no a un cursor de más allá del final.)
+    let cursor = if text.is_char_boundary(cursor) { cursor } else { text.len() };
+    let (before, after) = text.split_at(cursor);
+    let put = if is_image(file) {
+        let lead = if before.is_empty() || before.ends_with('\n') { "" } else { "\n" };
+        format!("{lead}{citation}\n")
+    } else {
+        let lead = if before.chars().next_back().is_none_or(char::is_whitespace) { "" } else { " " };
+        format!("{lead}{citation} ")
+    };
+    Some(Cited { text: format!("{before}{put}{after}"), cursor: (before.len() + put.len()) as u32 })
+}
+
 /// Cuánto pesa, para leer: «12 KB», «1.4 MB».
 pub fn size_label(bytes: i64) -> String {
     if bytes < 1024 * 1024 {
@@ -191,14 +244,32 @@ impl Tasks {
 
     /// Sube un fichero a la tarea abierta y la vuelve a pedir: la sección de
     /// adjuntos lee el detalle, y sin eso el fichero no aparece y subirlo
-    /// parece haber fallado.
-    pub async fn attach(&self, file_name: &str, bytes: Vec<u8>) -> Result<(), ApiError> {
+    /// parece haber fallado. Devuelve el adjunto que quedó, para citarlo.
+    ///
+    /// Un fichero que se adjunta al comentar también es de la tarea, como en
+    /// la app de siempre: se sube igual, y el comentario lo cita.
+    pub async fn attach(&self, file_name: &str, bytes: Vec<u8>) -> Result<TaskAttachment, ApiError> {
         let task_id = self.open_id()?;
         attachment_fits(bytes.len() as u64)?;
         let (content_type, body) = multipart(file_name, &bytes);
-        self.core.upload(&format!("/api/v1/tasks/{task_id}/attachments"), &content_type, body).await?;
+        let file: TaskAttachment = self.core.upload(&format!("/api/v1/tasks/{task_id}/attachments"), &content_type, body).await?;
         self.refresh().await;
-        Ok(())
+        Ok(file)
+    }
+
+    /// El fichero de la tarea abierta al que lleva ese enlace, si lleva a
+    /// uno: por su ruta, o por su dirección entera en este servidor (así la
+    /// escribe la app de siempre). Su dirección pide sesión, así que quien
+    /// pinta no se lo da al navegador: lo baja por su id.
+    pub fn linked_attachment(&self, href: &str) -> Option<TaskAttachment> {
+        let path = href.strip_prefix(self.core.inner.config.base_url.as_str()).unwrap_or(href);
+        let path = attachment_path(path)?;
+        let detail = self.state().detail?;
+        detail
+            .attachments
+            .into_iter()
+            .chain(detail.comments.into_iter().flat_map(|comment| comment.attachments))
+            .find(|file| file.url == path)
     }
 
     /// Quita un adjunto de la tarea abierta. El fichero se queda guardado en

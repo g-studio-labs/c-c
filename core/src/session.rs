@@ -445,7 +445,10 @@ impl Core {
     }
 
     /// Sube un cuerpo ya montado (un `multipart`) con la sesión puesta.
-    pub(crate) async fn upload(&self, path: &str, content_type: &str, body: Vec<u8>) -> Result<(), ApiError> {
+    ///
+    /// Devuelve lo que el servidor dice que guardó: quien sube un fichero
+    /// para citarlo necesita saber con qué dirección quedó.
+    pub(crate) async fn upload<T: for<'de> Deserialize<'de>>(&self, path: &str, content_type: &str, body: Vec<u8>) -> Result<T, ApiError> {
         let token = self.access_token();
         let reply = self.send_file("POST", path, Some(content_type), Some(body.clone()), token.as_deref()).await?;
         let expired = reply.status >= 400 && error_code(&String::from_utf8_lossy(&reply.body)) == "expired-token";
@@ -460,6 +463,6 @@ impl Core {
         if reply.status >= 400 {
             return Err(Self::file_error(&reply));
         }
-        Ok(())
+        unwrap_data(&Reply { status: reply.status, body: String::from_utf8_lossy(&reply.body).into_owned() })
     }
 }

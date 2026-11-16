@@ -190,13 +190,24 @@ pub fn apply(mode: ThemeMode, cx: &mut App) {
 /// Markdown para leer, al tamaño del cuerpo. Suelto, `TextView` hereda el
 /// `rem` entero y sale más grande que el texto de alrededor.
 pub fn prose(id: impl Into<gpui_kit::SharedString>, text: impl Into<gpui_kit::SharedString>) -> gpui_kit::Div {
+    prose_with_links(id, text, |url, _, cx| {
+        if leads_somewhere(url) {
+            cx.open_url(url);
+        }
+    })
+}
+
+/// Lo mismo, para quien sabe mejor adónde llevan sus enlaces: los de una
+/// tarea pueden ser a un fichero suyo, que pide sesión y no se le da al
+/// navegador.
+pub fn prose_with_links(
+    id: impl Into<gpui_kit::SharedString>,
+    text: impl Into<gpui_kit::SharedString>,
+    follow: impl Fn(&str, &mut gpui_kit::Window, &mut gpui_kit::App) + Send + Sync + 'static,
+) -> gpui_kit::Div {
     use gpui_kit::{ParentElement, Styled};
     gpui_kit::div().text_sm().child(
-        gpui_kit::component::text::TextView::markdown(id.into(), text.into()).on_link_click(|url, _, _, cx| {
-            if leads_somewhere(url) {
-                cx.open_url(url);
-            }
-        }),
+        gpui_kit::component::text::TextView::markdown(id.into(), text.into()).on_link_click(move |url, _, window, cx| follow(url, window, cx)),
     )
 }
 

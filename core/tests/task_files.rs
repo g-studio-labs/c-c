@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use cac_core::{
-    image_type, thumbnail_size, Picture,
+    file_citation, image_type, thumbnail_size, with_citation, Cited, Picture,
     attachment_path, is_image, multipart, safe_file_name, size_label, ApiError, Config, Core, NoListener, Storage,
     TaskAttachment, MAX_ATTACHMENT_BYTES,
 };
@@ -272,7 +272,10 @@ async fn attaching_sends_the_file_and_brings_the_task_again() {
     Mock::given(method("POST"))
         .and(path("/api/v1/tasks/t1/attachments"))
         .and(header("Authorization", "Bearer access"))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": { "id": "a2" } })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "success": true,
+            "data": { "id": "a2", "itemId": "t1", "url": "/api/v1/tasks/t1/attachments/a2/raw", "fileName": "plan.pdf" },
+        })))
         .up_to_n_times(1)
         .mount(&server)
         .await;
@@ -281,7 +284,10 @@ async fn attaching_sends_the_file_and_brings_the_task_again() {
     assert_eq!(code(core.tasks().attach("enorme.bin", huge).await.unwrap_err()), "too-large");
     assert!(asked(&server, "POST", "/api/v1/tasks/t1/attachments").await.is_empty(), "mandó un fichero que pasa del tope");
 
-    core.tasks().attach("plan.pdf", b"%PDF-1.7".to_vec()).await.unwrap();
+    let attached = core.tasks().attach("plan.pdf", b"%PDF-1.7".to_vec()).await.unwrap();
+    // Lo que quedó guardado, tal como lo dice el servidor: con eso se cita.
+    assert_eq!((attached.id.as_str(), attached.url.as_str()), ("a2", "/api/v1/tasks/t1/attachments/a2/raw"));
+    assert_eq!(file_citation(&attached).as_deref(), Some("[plan.pdf](/api/v1/tasks/t1/attachments/a2/raw)"));
 
     let sent = asked(&server, "POST", "/api/v1/tasks/t1/attachments").await;
     assert_eq!(sent.len(), 1);
@@ -393,4 +399,82 @@ async fn a_picture_comes_through_the_same_door_as_any_file() {
     assert_eq!(code(core.tasks().picture("a-old").await.unwrap_err()), "not-an-attachment");
     assert_eq!(code(core.tasks().picture("a-otra-tarea").await.unwrap_err()), "attachment-not-found");
     assert_eq!(server.received_requests().await.unwrap().len(), before, "pidió algo");
+}
+
+fn stored(name: &str, url: &str) -> TaskAttachment {
+    serde_json::from_value(json!({ "id": "a9", "itemId": "t1", "url": url, "fileName": name })).unwrap()
+}
+
+/// Un fichero se cita como lo que es, por su ruta en este servidor.
+///
+/// Roturas que atrapa: una captura citada como un enlace que hay que abrir,
+/// o un PDF como una imagen rota; un nombre con corchetes que corta el
+/// enlace; guardar en el texto la dirección entera del servidor (no se lee
+/// desde otro) o la de un bucket.
+#[test]
+fn a_file_is_cited_as_what_it_is() {
+    let raw = "/api/v1/tasks/t1/attachments/a9/raw";
+    assert_eq!(file_citation(&stored("captura.png", raw)).unwrap(), format!("![captura.png]({raw})"));
+    assert_eq!(file_citation(&stored("plan.pdf", raw)).unwrap(), format!("[plan.pdf]({raw})"));
+    assert_eq!(file_citation(&stored("acta [v2]\\final\n.pdf", raw)).unwrap(), format!("[acta \\[v2\\]\\\\final .pdf]({raw})"));
+
+    assert_eq!(file_citation(&stored("x.png", "https://bucket.s3.us-east-1.amazonaws.com/tasks/t1/x.png")), None);
+    assert_eq!(file_citation(&stored("x.png", "")), None);
+}
+
+/// La cita va donde está el cursor, y el cursor queda detrás.
+///
+/// Roturas que atrapa: mandar la cita al final aunque se escribía en medio;
+/// pegarla a la palabra de antes; una imagen metida a mitad de una frase;
+/// comerse lo que había después; dejar el cursor delante de la cita (el
+/// segundo fichero cae antes que el primero); reventar con un cursor que ya
+/// no es de este texto.
+#[test]
+fn a_citation_goes_where_the_cursor_is() {
+    let raw = "/api/v1/tasks/t1/attachments/a9/raw";
+    let (pdf, shot) = (stored("plan.pdf", raw), stored("captura.png", raw));
+    let link = format!("[plan.pdf]({raw})");
+    let image = format!("![captura.png]({raw})");
+    let cited = |text: &str, cursor: usize, file: &TaskAttachment| {
+        let Cited { text, cursor } = with_citation(text, cursor, file).unwrap();
+        (text.clone(), text[..cursor as usize].to_string())
+    };
+
+    assert_eq!(cited("", 0, &pdf), (format!("{link} "), format!("{link} ")));
+    assert_eq!(cited("mira esto", 4, &pdf), (format!("mira {link}  esto"), format!("mira {link} ")));
+    assert_eq!(cited("mira", 4, &pdf), (format!("mira {link} "), format!("mira {link} ")));
+    assert_eq!(cited("año", 4, &pdf).0, format!("año {link} "));
+
+    assert_eq!(cited("", 0, &shot), (format!("{image}\n"), format!("{image}\n")));
+    assert_eq!(cited("mira esto", 4, &shot), (format!("mira\n{image}\n esto"), format!("mira\n{image}\n")));
+    assert_eq!(cited("uno\n", 4, &shot).0, format!("uno\n{image}\n"));
+
+    // El cursor cambió mientras subía: al final, sin romper una letra.
+    assert_eq!(cited("año", 2, &pdf).0, format!("año {link} "));
+    assert_eq!(cited("mira", 99, &pdf).0, format!("mira {link} "));
+    assert_eq!(with_citation("x", 1, &stored("x.png", "https://bucket.example/x.png")), None);
+}
+
+/// Un enlace a un fichero de la tarea abierta se reconoce, escrito por su
+/// ruta o con la dirección entera de este servidor; cualquier otro, no.
+///
+/// Roturas que atrapa: darle al navegador una dirección que pide sesión (no
+/// abre nada); tomar por fichero de la tarea el de otra, o un enlace de
+/// fuera que acaba igual; no reconocer lo que escribió la app de siempre.
+#[tokio::test]
+async fn a_link_to_a_file_of_this_task_is_known() {
+    let (server, core) = rig().await;
+    let linked = |href: &str| core.tasks().linked_attachment(href).map(|file| file.id);
+
+    assert_eq!(linked(RAW).as_deref(), Some("a1"));
+    assert_eq!(linked(&format!("{}{RAW}", server.uri())).as_deref(), Some("a1"));
+    assert_eq!(linked("/api/v1/tasks/t1/attachments/a-comment/raw").as_deref(), Some("a-comment"));
+
+    assert_eq!(linked("/api/v1/tasks/t9/attachments/a1/raw"), None);
+    assert_eq!(linked(&format!("https://evil.example{RAW}")), None);
+    assert_eq!(linked(&format!("{}.evil.example{RAW}", server.uri())), None);
+    assert_eq!(linked("https://bucket.s3.us-east-1.amazonaws.com/tasks/t1/old.png"), None, "la fila vieja no vive aquí");
+    assert_eq!(linked("https://cac.guz-studio.dev/docs"), None);
+    core.tasks().close();
+    assert_eq!(linked(RAW), None);
 }
