@@ -294,7 +294,8 @@ impl Render for SignIn {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child("cac"))
+                        .gap_3()
+                        .child(crate::brand::brand(cx.theme().group_box, cx))
                         .child(div().text_sm().text_color(muted).child(tr(cx, "common:misc.signInLead"))),
                 )
                 .child(form),
@@ -499,6 +500,23 @@ mod tests {
                 assert!(field.read(cx).presentation().is_masked());
             }
         });
+    }
+
+    /// La pantalla de entrada lleva la marca.
+    ///
+    /// Rotura que atrapa: una pantalla de entrada sin nada que diga de qué
+    /// app es.
+    #[gpui_kit::test]
+    fn the_sign_in_screen_carries_the_brand(cx: &mut TestAppContext) {
+        let server = FakeServer::start();
+        server.install(cx);
+        let (window, _) = open(cx, SignIn::new);
+
+        let shown = cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find("brand").is_some()
+        });
+        assert!(shown.unwrap());
     }
 
     /// Un login que el servidor rechaza dice por qué, en el idioma de quien

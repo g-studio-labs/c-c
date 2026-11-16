@@ -42,6 +42,8 @@ toda regla va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
   abre con el programa del sistema, y al lado guardar una copia, quitar
   (preguntando) y «Adjuntar un fichero» (tope de 30 MB dicho antes de subir).
   Un comentario propio se edita y se borra (preguntando) desde el hilo.
+  El login y el riel llevan la marca (los tres racks con la línea roja), y
+  la frase del login ya no dice «Plano de control del VPS».
 - **Falta:** de la carcasa, las fuentes incrustadas y el filtro del panel;
   del detalle, ver las imágenes dentro del cajón, los adjuntos de un comentario, las menciones, crear una etiqueta y buscar entre más de 50 personas; después
   tablero y calendario (379) y los instaladores (380).

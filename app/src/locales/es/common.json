@@ -461,7 +461,7 @@
   "misc": {
     "usernameRequired": "El usuario es obligatorio",
     "authFailed": "Falló la autenticación",
-    "signInLead": "Plano de control del VPS — Entra para continuar",
+    "signInLead": "Las tareas, la documentación y los servidores de tu equipo — Entra para continuar",
     "username": "Usuario",
     "password": "Contraseña",
     "signingIn": "Entrando…",

@@ -149,7 +149,7 @@ impl Workspace {
             .bg(theme.sidebar)
             .border_r_1()
             .border_color(theme.sidebar_border)
-            .child(div().text_sm().font_weight(FontWeight::BOLD).text_color(theme.primary).child("cac"))
+            .child(div().id("rail-brand").test_support().child(crate::brand::brand_mark(24., theme.sidebar, cx)))
             // El único módulo de la primera entrega.
             .child(
                 div()
@@ -463,6 +463,7 @@ mod tests {
 
         assert!(on_screen(window, "tree-a", cx) && on_screen(window, "tree-f-a", cx));
         assert!(!on_screen(window, "tree-in-a", cx), "se pinta lo de dentro de una carpeta cerrada");
+        assert!(on_screen(window, "rail-brand", cx), "el riel no lleva la marca");
         assert_eq!(cx.update(|cx| Backend::snapshot(cx).read(cx).orgs.current().map(|org| org.name.clone())).as_deref(), Some("G Studio"));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }

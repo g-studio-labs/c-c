@@ -461,7 +461,7 @@
   "misc": {
     "usernameRequired": "Username is required",
     "authFailed": "Authentication failed",
-    "signInLead": "VPS Control Plane — Sign in to continue",
+    "signInLead": "Your team's tasks, docs and servers — Sign in to continue",
     "username": "Username",
     "password": "Password",
     "signingIn": "Signing in…",

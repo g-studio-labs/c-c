@@ -9,6 +9,7 @@
 mod assets;
 mod auth;
 mod backend;
+mod brand;
 mod docs;
 mod files;
 mod lang;
