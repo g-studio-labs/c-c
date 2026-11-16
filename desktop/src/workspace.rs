@@ -36,6 +36,13 @@ pub struct Workspace {
     /// Lo escrito para filtrar el árbol por título. Es de esta pantalla: qué
     /// casa con ello lo dice el core.
     tree_filter: Entity<InputState>,
+    /// El panel fijo al lado del riel. Suelto, no ocupa sitio: se asoma por
+    /// encima de la vista al pasar el ratón por el riel, y se va al salir.
+    pub(crate) panel_pinned: bool,
+    /// Dónde está el ratón mientras el panel está suelto: en el riel o en
+    /// el panel asomado. Con cualquiera de los dos, se ve.
+    over_rail: bool,
+    over_panel: bool,
 }
 
 impl Workspace {
@@ -49,7 +56,20 @@ impl Workspace {
             docs: cx.new(|_| DocsView),
             task: cx.new(|cx| TaskView::new(window, cx)),
             tree_filter: cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)),
+            panel_pinned: true,
+            over_rail: false,
+            over_panel: false,
         }
+    }
+
+    /// Fija el panel o lo suelta. Al cambiar, el ratón no cuenta como
+    /// encima de nada: soltarlo desde su botón lo esconde aunque el puntero
+    /// siga ahí, que es lo que se acaba de pedir.
+    pub(crate) fn toggle_panel(&mut self, cx: &mut Context<Self>) {
+        self.panel_pinned = !self.panel_pinned;
+        self.over_rail = false;
+        self.over_panel = false;
+        cx.notify();
     }
 
     fn switch_org(org_id: String, cx: &App) {
@@ -274,9 +294,14 @@ impl Workspace {
             .border_r_1()
             .border_color(border)
             .child(div().id("rail-brand").test_support().child(crate::brand::brand_mark(22., sidebar, cx)))
-            // El único módulo de la primera entrega.
+            // El único módulo de la primera entrega. Pulsarlo fija el panel
+            // o lo suelta.
             .child(
                 div()
+                    .id("rail-work")
+                    .test_support()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx)))
                     .size(px(36.))
                     .flex()
                     .items_center()
@@ -458,6 +483,10 @@ impl Workspace {
         // «Mi trabajo» es la pantalla, esté acotada o no: a qué, lo dice el
         // árbol. Leyendo documentación ya no se está en ella.
         let on_my_work = snapshot.docs.target.is_none();
+        let pinned = self.panel_pinned;
+        // El texto del catálogo anuncia un atajo de teclado que esta app
+        // todavía no tiene: se dice sólo lo que el botón hace.
+        let toggle_hint = tr(cx, "nav:rail.collapsePanel").split(" (").next().unwrap_or_default().to_string();
         let query = self.tree_filter.read(cx).value().to_string();
         let rows = Backend::core(cx).tree().rows_matching(&query);
         // Filtrando y sin nada que enseñar se dice: un árbol en blanco se lee
@@ -482,10 +511,19 @@ impl Workspace {
                     .flex_none()
                     .items_center()
                     .pl_3()
+                    .pr_1()
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(muted)
-                    .child(tr(cx, "nav:module.work").to_uppercase()),
+                    .child(div().flex_1().child(tr(cx, "nav:module.work").to_uppercase()))
+                    .child(
+                        Button::new("panel-toggle")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(if pinned { Lucide::PanelLeftClose } else { Lucide::PanelLeftOpen }).text_color(muted))
+                            .tooltip(toggle_hint)
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx))),
+                    ),
             )
             .child(
                 div()
@@ -554,6 +592,8 @@ impl Render for Workspace {
         let main: AnyView = if snapshot.docs.target.is_some() { self.docs.clone().into() } else { self.my_work.clone().into() };
         // La tarea abierta, sobre lo que se estuviera mirando.
         let task = snapshot.task.task_id.is_some().then(|| self.task.clone());
+        let pinned = self.panel_pinned;
+        let peeking = !pinned && (self.over_rail || self.over_panel);
         div()
             .id("open")
             .test_support()
@@ -567,9 +607,40 @@ impl Render for Workspace {
                     .relative()
                     .flex()
                     .overflow_hidden()
-                    .child(self.render_rail(cx))
-                    .child(self.render_panel(cx))
+                    .child(
+                        div()
+                            .id("rail")
+                            .test_support()
+                            .h_full()
+                            .flex_none()
+                            .on_hover(cx.listener(|this, over: &bool, _, cx| {
+                                this.over_rail = *over;
+                                cx.notify();
+                            }))
+                            .child(self.render_rail(cx)),
+                    )
+                    .when(pinned, |this| this.child(self.render_panel(cx)))
                     .child(div().flex_1().h_full().overflow_hidden().child(main))
+                    // Suelto y con el ratón en el riel o en él: asomado por
+                    // encima de la vista, sin empujarla.
+                    .when(peeking, |this| {
+                        this.child(
+                            div()
+                                .id("panel-peek")
+                                .test_support()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left(px(RAIL_WIDTH))
+                                .occlude()
+                                .shadow_lg()
+                                .on_hover(cx.listener(|this, over: &bool, _, cx| {
+                                    this.over_panel = *over;
+                                    cx.notify();
+                                }))
+                                .child(self.render_panel(cx)),
+                        )
+                    })
                     // La tarea abierta es una página sobre todo lo demás, no
                     // un cajón al lado: lo que tapa no recibe el ratón. El
                     // aviso de conexión sigue a la vista, encima.
@@ -1049,6 +1120,54 @@ mod tests {
 
         click(window, "account-log-out", cx);
         wait_until(cx, "sale", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).session.is_none()));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// El panel se suelta con su botón y deja el sitio a la vista; suelto,
+    /// se asoma al pasar el ratón por el riel, se queda mientras el ratón
+    /// está en él y se va al salir; y su botón lo vuelve a fijar.
+    ///
+    /// Roturas que atrapa: un botón de plegar que no pliega; un panel
+    /// plegado sin forma de volver; que se asome sin acercar el ratón; que
+    /// desaparezca al ir del riel al panel, antes de poder pulsar nada; que
+    /// se quede asomado para siempre.
+    #[gpui_kit::test]
+    fn the_panel_folds_and_peeks_when_the_pointer_is_on_the_rail(cx: &mut TestAppContext) {
+        let server = server();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        let hover = |id: &'static str, cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.hover(id, cx);
+            })
+            .unwrap();
+        };
+
+        // «Tarea nueva» queda a la derecha, fuera de donde se asoma el panel.
+        click(window, "panel-toggle", cx);
+        assert!(!on_screen(window, "tree-a", cx), "el botón no plegó el panel");
+        assert!(!on_screen(window, "panel-peek", cx), "se asoma sin acercar el ratón");
+
+        hover("rail", cx);
+        assert!(on_screen(window, "panel-peek", cx) && on_screen(window, "tree-a", cx), "no se asoma con el ratón en el riel");
+        hover("tree-a", cx);
+        assert!(on_screen(window, "tree-a", cx), "se fue al pasar del riel al panel");
+        hover("new-task", cx);
+        assert!(!on_screen(window, "panel-peek", cx), "se queda asomado con el ratón fuera");
+
+        hover("rail", cx);
+        click(window, "panel-toggle", cx);
+        hover("new-task", cx);
+        assert!(on_screen(window, "tree-a", cx) && !on_screen(window, "panel-peek", cx), "su botón no lo volvió a fijar");
+
+        // Y el módulo del riel hace lo mismo que el botón.
+        click(window, "rail-work", cx);
+        hover("new-task", cx);
+        assert!(!on_screen(window, "tree-a", cx));
+        click(window, "rail-work", cx);
+        assert!(on_screen(window, "tree-a", cx));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
