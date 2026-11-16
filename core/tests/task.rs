@@ -794,3 +794,128 @@ async fn a_comment_is_edited_clean_and_only_when_it_changes() {
     assert_eq!(requests_to(&rig.server, "DELETE", "/comments/c1").await.len(), 1);
     assert_eq!(fetched(requests_to(&rig.server, "GET", "/tasks/t1").await), 3, "no volvió a pedir la tarea");
 }
+
+fn refusal(result: Result<(), cac_core::ApiError>) -> String {
+    match result {
+        Err(cac_core::ApiError::Server { code, .. }) => code,
+        other => format!("{other:?}"),
+    }
+}
+
+/// `rig_with_choices`, con un servidor que crea la etiqueta que se le pida
+/// (la contesta como `tag-made`) y guarda los cambios de la tarea.
+async fn rig_that_makes_tags(made: &str) -> Rig {
+    let rig = rig_with_choices().await;
+    let answer = rig.core.tasks().state().detail.unwrap();
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/tasks/t1"))
+        .respond_with(ok(serde_json::to_value(&answer).unwrap()))
+        .mount(&rig.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/task-tags/"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "success": true,
+            "data": { "id": "tag-made", "orgId": "o1", "name": made, "color": "#06B6D4" },
+        })))
+        .mount(&rig.server)
+        .await;
+    rig
+}
+
+/// Una etiqueta que no existe se crea en la organización de la tarea, con
+/// su color, y se le pone; desde entonces se ofrece.
+///
+/// Roturas que atrapa: crearla en otra organización, o sin decir en cuál;
+/// crearla y no ponérsela; ponérsela quitando las que tenía; mandar el
+/// nombre con los espacios de alrededor; que no salga en la lista hasta
+/// volver a abrir la tarea.
+#[tokio::test]
+async fn a_tag_that_does_not_exist_is_made_in_the_tasks_organization() {
+    let rig = rig_that_makes_tags("Diseño").await;
+    let tasks = rig.core.tasks();
+
+    tasks.add_tag_named("  Diseño ").await.expect("se creó y se puso");
+
+    assert_eq!(
+        requests_to(&rig.server, "POST", "/task-tags/").await,
+        [json!({ "orgId": "o1", "name": "Diseño", "color": "#06B6D4" })]
+    );
+    assert_eq!(requests_to(&rig.server, "PATCH", "/tasks/t1").await, [json!({ "tagIds": ["tag-old", "tag-made"] })]);
+    let offered: Vec<String> = tasks.tag_choices().into_iter().map(|choice| choice.id).collect();
+    assert!(offered.contains(&"tag-made".to_string()), "no se ofrece: {offered:?}");
+}
+
+/// Con el nombre de una etiqueta que ya hay no se crea otra: se pone ésa; y
+/// si la tarea ya la tiene, no se pide nada.
+///
+/// Roturas que atrapa: dos «backend» en la lista, que no se distinguen;
+/// tomar «BACKEND» o «Diseno» por otra etiqueta; guardar otra vez la tarea
+/// por una etiqueta que ya tenía (o ponérsela dos veces).
+#[tokio::test]
+async fn a_tag_that_exists_is_put_and_not_made_again() {
+    let rig = rig_that_makes_tags("x").await;
+    let tasks = rig.core.tasks();
+
+    tasks.add_tag_named(" BÁCKEND").await.expect("se puso la que había");
+    assert_eq!(requests_to(&rig.server, "PATCH", "/tasks/t1").await, [json!({ "tagIds": ["tag-old", "tag-new"] })]);
+
+    // «Vieja» ya la tiene, aunque sea de otra organización y nadie la ofrezca.
+    tasks.add_tag_named("vieja").await.expect("ya la tenía");
+    assert_eq!(requests_to(&rig.server, "PATCH", "/tasks/t1").await.len(), 1);
+    assert!(requests_to(&rig.server, "POST", "/task-tags/").await.is_empty(), "creó una que ya existía");
+}
+
+/// Una etiqueta sin nombre, con uno que el servidor no admite, o para una
+/// tarea que no dice de qué organización es, no se pide.
+///
+/// Roturas que atrapa: crear una etiqueta en blanco; mandar un nombre de más
+/// de sesenta letras para que el servidor conteste un error que nadie
+/// entiende (o contar bytes, y rechazar uno de sesenta con acentos); crear
+/// la etiqueta con la organización vacía.
+#[tokio::test]
+async fn a_tag_needs_a_name_and_an_organization() {
+    let made = rig_that_makes_tags("x").await;
+    let tasks = made.core.tasks();
+    assert_eq!(refusal(tasks.add_tag_named("   ").await), "empty-tag");
+    assert_eq!(refusal(tasks.add_tag_named(&"ñ".repeat(61)).await), "tag-too-long");
+    assert!(requests_to(&made.server, "POST", "/task-tags/").await.is_empty());
+    tasks.add_tag_named(&"ñ".repeat(60)).await.expect("sesenta letras caben, aunque sean más bytes");
+    assert_eq!(requests_to(&made.server, "POST", "/task-tags/").await.len(), 1);
+
+    // Otra tarea, que no dice su organización.
+    let bare = rig().await;
+    mount_task(&bare.server, "t1", detail("t1", "Tarea", "pending", "", "")).await;
+    mount_columns(&bare.server).await;
+    Mock::given(method("POST")).and(path("/api/v1/task-tags/")).respond_with(ok(json!({ "id": "x", "name": "x" }))).mount(&bare.server).await;
+    bare.core.tasks().open("t1").await;
+    assert_eq!(refusal(bare.core.tasks().add_tag_named("Diseño").await), "no-organization");
+    assert!(requests_to(&bare.server, "POST", "/task-tags/").await.is_empty(), "pidió crear una etiqueta sin organización");
+
+    bare.core.tasks().close();
+    assert_eq!(refusal(bare.core.tasks().add_tag_named("Diseño").await), "no-task-open");
+}
+
+/// Una etiqueta nueva nace del color que le daría la app de siempre.
+///
+/// Roturas que atrapa: todas las etiquetas del mismo color; la misma
+/// etiqueta de otro color según desde qué app se cree (los valores son los
+/// de `paletteFor`, sacados con node); un color de fuera de la paleta;
+/// reventar con un nombre cuya cuenta desborda o sale negativa.
+#[test]
+fn a_new_tag_gets_the_colour_the_other_app_would_give_it() {
+    use cac_core::{tag_color_for, TAG_PALETTE};
+    for (name, colour) in [
+        ("backend", "#EAB308"),
+        ("Diseño", "#06B6D4"),
+        ("urgente", "#8B5CF6"),
+        ("🚀 lanzamiento", "#EC4899"),
+        ("cliente importante", "#64748B"),
+        ("bug", "#8B5CF6"),
+        ("a", "#EC4899"),
+        ("", "#3B82F6"),
+    ] {
+        assert_eq!(tag_color_for(name), colour, "{name:?}");
+        assert!(TAG_PALETTE.contains(&tag_color_for(name)));
+    }
+}

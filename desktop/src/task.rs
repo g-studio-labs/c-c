@@ -22,7 +22,7 @@ use cac_core::{
 use chrono::NaiveDate;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Enter, Escape, IndentInline, Input, InputState, MoveDown, MoveUp, Position, Textarea, TextareaState};
+use gpui_kit::component::input::{Enter, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Position, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
@@ -107,6 +107,11 @@ pub struct TaskView {
     mention_mark: Option<MentionMark>,
     /// Para que el marcado no se salga de la vista al bajar por la lista.
     mention_scroll: ScrollHandle,
+    /// En qué tarea se le está poniendo nombre a una etiqueta nueva, y el
+    /// nombre. Al abrir otra no se sigue: lo escrito era para aquélla.
+    naming_tag: Option<String>,
+    tag_name: Entity<InputState>,
+    _tag_named: Subscription,
     /// Hay ficheros subiendo para citarlos en el comentario.
     citing: bool,
     /// Las imágenes de la tarea abierta, por el id de su adjunto. Se bajan
@@ -174,6 +179,14 @@ impl TaskView {
             let DatePickerEvent::Change(value) = event;
             this.set_due(value.format("%Y-%m-%d").map(|day| day.to_string()), window, cx);
         });
+        let tag_placeholder = tr(cx, "work:task.newTagLabel");
+        let tag_name = cx.new(|cx| InputState::new(window, cx).placeholder(tag_placeholder));
+        // Enter en el nombre crea la etiqueta, como «Crear».
+        let tag_named = cx.subscribe_in(&tag_name, window, |this, _, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.create_tag(window, cx);
+            }
+        });
         Self {
             thread: Thread::Talk,
             thread_of: None,
@@ -194,6 +207,9 @@ impl TaskView {
             focused_for: None,
             mention_mark: None,
             mention_scroll: ScrollHandle::new(),
+            naming_tag: None,
+            tag_name,
+            _tag_named: tag_named,
             citing: false,
             thumbs: HashMap::new(),
             // Cerrada la página ya no se pinta, así que no es al pintar
@@ -691,6 +707,40 @@ impl TaskView {
         self.change(move |core| async move { core.tasks().toggle_tag(&tag_id).await }, window, cx);
     }
 
+    /// Pasa a pedir el nombre de una etiqueta nueva para la tarea abierta.
+    pub(crate) fn start_naming_tag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task_id) = Self::open_task_id(cx) else { return };
+        self.naming_tag = Some(task_id);
+        self.tag_name.update(cx, |name, cx| {
+            name.set_value("", window, cx);
+            name.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_naming_tag(&mut self, cx: &mut Context<Self>) {
+        self.naming_tag = None;
+        cx.notify();
+    }
+
+    /// Le pone a la tarea la etiqueta con el nombre escrito: la crea si no
+    /// la hay (eso lo sabe el core). Si no se pudo, se dice y el nombre se
+    /// queda escrito.
+    pub(crate) fn create_tag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.tag_name.read(cx).value().to_string();
+        // Como al comentar: con nada escrito no hay nada que pedir ni que avisar.
+        if name.trim().is_empty() {
+            return;
+        }
+        self.save(
+            "common:misc.errSave",
+            move |core| async move { core.tasks().add_tag_named(&name).await },
+            |this, _, _| this.naming_tag = None,
+            window,
+            cx,
+        );
+    }
+
     pub(crate) fn toggle_assignee(&mut self, user_id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.change(move |core| async move { core.tasks().toggle_assignee(&user_id).await }, window, cx);
     }
@@ -1035,20 +1085,60 @@ impl TaskView {
         empty_key: &str,
         choices: Vec<Choice>,
         toggle: fn(&mut Self, String, &mut Window, &mut Context<Self>),
+        // Lo último del desplegable, si lo hay: hacer uno nuevo (el
+        // «+ Etiqueta nueva» de la app de siempre).
+        make: Option<(String, fn(&mut Self, &mut Window, &mut Context<Self>))>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let view = cx.entity().downgrade();
         let chosen: Vec<String> = choices.iter().filter(|choice| choice.chosen).map(|choice| choice.name.clone()).collect();
         let label = if chosen.is_empty() { tr(cx, empty_key) } else { chosen.join(", ") };
-        Button::new(id).ghost().xsmall().label(label).dropdown_caret(!choices.is_empty()).dropdown_menu(move |mut menu, _, _| {
+        let opens = !choices.is_empty() || make.is_some();
+        Button::new(id).ghost().xsmall().label(label).dropdown_caret(opens).dropdown_menu(move |mut menu, _, _| {
             for choice in choices.clone() {
                 let view = view.clone();
                 menu = menu.item(PopupMenuItem::new(choice.name).checked(choice.chosen).on_click(move |_, window, cx| {
                     let _ = view.update(cx, |this, cx| toggle(this, choice.id.clone(), window, cx));
                 }));
             }
+            if let Some((label, make)) = make.clone() {
+                let view = view.clone();
+                if !choices.is_empty() {
+                    menu = menu.separator();
+                }
+                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                    let _ = view.update(cx, |this, cx| make(this, window, cx));
+                }));
+            }
             menu
         })
+    }
+
+    /// El nombre de una etiqueta nueva, debajo de las etiquetas: en la app
+    /// de siempre es un diálogo con esta misma pregunta.
+    fn render_tag_naming(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("task-new-tag")
+            .test_support()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(div().id("task-new-tag-name").test_support().flex_1().min_w_0().child(Input::new(&self.tag_name).small()))
+            .child(
+                Button::new("task-new-tag-create")
+                    .primary()
+                    .xsmall()
+                    .label(tr(cx, "work:task.create"))
+                    .on_click(cx.listener(|this, _, window, cx| this.create_tag(window, cx))),
+            )
+            .child(
+                Button::new("task-new-tag-cancel")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(Lucide::X))
+                    .tooltip(tr(cx, "work:task.cancel"))
+                    .on_click(cx.listener(|this, _, _, cx| this.cancel_naming_tag(cx))),
+            )
     }
 
     /// Lo que se le cambia a la tarea de un toque, cada cosa en su fila.
@@ -1086,8 +1176,12 @@ impl TaskView {
                     menu
                 }
             });
-        let tags = self.render_choices("task-tags", "work:task.addTags", tasks.tag_choices(), Self::toggle_tag, cx);
-        let assignees = self.render_choices("task-assignees", "work:task.assign", tasks.assignee_choices(), Self::toggle_assignee, cx);
+        let new_tag: fn(&mut Self, &mut Window, &mut Context<Self>) = Self::start_naming_tag;
+        let tags = self.render_choices("task-tags", "work:task.addTags", tasks.tag_choices(), Self::toggle_tag, Some((tr(cx, "work:task.newTag"), new_tag)), cx);
+        // El nombre se pide en la tarea donde se pidió, no en la que se abra después.
+        let naming = (self.naming_tag.as_deref() == Some(sheet.id.as_str())).then(|| self.render_tag_naming(cx).into_any_element());
+        let tags = div().flex().flex_col().gap_1().w_full().child(div().flex().child(tags)).children(naming);
+        let assignees = self.render_choices("task-assignees", "work:task.assign", tasks.assignee_choices(), Self::toggle_assignee, None, cx);
         let due = div().id("task-due").test_support().w(px(170.)).child(
             DatePicker::new(&self.due).small().cleanable(true).placeholder(tr(cx, "common:last.clearDate")),
         );
@@ -2724,6 +2818,132 @@ mod tests {
         assert_eq!(removals(&server), 0, "quitó el fichero sin esperar la respuesta");
         cx.simulate_prompt_answer("Quitar");
         wait_until(cx, "se pide quitarlo", |_| removals(&server) == 1);
+        stop(cx);
+    }
+
+    fn tag_name(view: &Entity<TaskView>, cx: &mut TestAppContext) -> String {
+        cx.update(|cx| view.read(cx).tag_name.read(cx).value().to_string())
+    }
+
+    /// Pulsa lo que se llama así: una entrada de un desplegable no tiene
+    /// un id propio con el que buscarla.
+    fn click_label(window: AnyWindowHandle, label: &str, cx: &mut TestAppContext) {
+        use gpui_kit::test::{TestEventExt, TestQueryExt};
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let at = window.find_by_label(label).bounds().center();
+            window.pointer_move(at, None, cx);
+            window.pointer_down(at, gpui_kit::MouseButton::Left, cx);
+            window.pointer_up(at, gpui_kit::MouseButton::Left, cx);
+        })
+        .unwrap();
+    }
+
+    fn start_naming(window: AnyWindowHandle, view: &Entity<TaskView>, cx: &mut TestAppContext) {
+        with_view(window, view, cx, |view, window, cx| view.start_naming_tag(window, cx));
+    }
+
+    /// `server_with_choices`, con un servidor que crea la etiqueta `tag9`.
+    fn server_that_makes_tags() -> FakeServer {
+        let server = server_with_choices();
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/task-tags/")).respond_with(
+            wiremock::ResponseTemplate::new(201)
+                .set_body_json(json!({ "success": true, "data": { "id": "tag9", "orgId": "o1", "name": "Diseño", "color": "#06B6D4" } })),
+        ));
+        server
+    }
+
+    fn made(server: &FakeServer) -> Vec<serde_json::Value> {
+        asked(server, "POST", "/api/v1/task-tags/").iter().map(|request| serde_json::from_slice(&request.body).unwrap()).collect()
+    }
+
+    /// «+ Etiqueta nueva» pide un nombre; Enter o «Crear» la crean en la
+    /// organización de la tarea y se la ponen, y con el nombre de una que ya
+    /// hay se pone ésa. Cancelar no manda nada.
+    ///
+    /// Roturas que atrapa: no tener cómo crear una etiqueta desde la tarea;
+    /// un nombre que hay que ir a pulsar antes de escribirlo; un Enter (o un
+    /// «Crear») que no hace nada; crearla y no ponérsela; quedarse pidiendo
+    /// el nombre después de crearla; un «Cancelar» que crea; reencontrarse
+    /// lo cancelado al volver a empezar; avisar de un fallo por un nombre en
+    /// blanco.
+    #[gpui_kit::test]
+    fn a_new_tag_is_named_made_and_put_on_the_task(cx: &mut TestAppContext) {
+        let server = server_that_makes_tags();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        wait_until(cx, "llega lo que se puede elegir", |cx| cx.update(|cx| !Backend::snapshot(cx).read(cx).task.tags.is_empty()));
+        assert!(!on_screen(window, "task-new-tag", cx), "pide un nombre sin que nadie lo pidiera");
+
+        // El desplegable de etiquetas acaba en «+ Etiqueta nueva».
+        click(window, "task-tags", cx);
+        click_label(window, "+ Etiqueta nueva", cx);
+        settle(cx);
+        assert!(on_screen(window, "task-new-tag-name", cx));
+        // Ya con el foco: se escribe sin pulsar antes.
+        type_more(window, "Diseño", cx);
+        assert_eq!(tag_name(&view, cx), "Diseño");
+        press(window, "enter", cx);
+        wait_until(cx, "se crea, se le pone y deja de pedir el nombre", |cx| {
+            patches(&server).len() == 1 && !on_screen(window, "task-new-tag", cx)
+        });
+        assert_eq!(made(&server), [json!({ "orgId": "o1", "name": "Diseño", "color": "#06B6D4" })]);
+        assert_eq!(patches(&server), [json!({ "tagIds": ["tag1", "tag9"] })]);
+        assert!(!on_screen(window, "task-problem", cx));
+
+        // Con el nombre de una que ya hay, se pone ésa.
+        start_naming(window, &view, cx);
+        assert_eq!(tag_name(&view, cx), "", "arranca con el nombre de la anterior");
+        type_more(window, "Backend", cx);
+        click(window, "task-new-tag-create", cx);
+        wait_until(cx, "se le pone la que había", |_| patches(&server).len() == 2);
+        assert_eq!(patches(&server)[1], json!({ "tagIds": ["tag1", "tag2"] }));
+        assert_eq!(made(&server).len(), 1, "creó otra «backend»");
+
+        start_naming(window, &view, cx);
+        type_more(window, "No", cx);
+        click(window, "task-new-tag-cancel", cx);
+        settle(cx);
+        assert!(!on_screen(window, "task-new-tag", cx), "Cancelar no dejó de pedir el nombre");
+
+        // En blanco no se pide nada, ni es un fallo que avisar.
+        start_naming(window, &view, cx);
+        assert_eq!(tag_name(&view, cx), "", "arranca con lo que se canceló");
+        type_more(window, "  ", cx);
+        press(window, "enter", cx);
+        settle(cx);
+        assert_eq!((made(&server).len(), patches(&server).len()), (1, 2), "Cancelar, o un nombre en blanco, mandó algo");
+        assert!(on_screen(window, "task-new-tag", cx) && !on_screen(window, "task-problem", cx));
+        stop(cx);
+    }
+
+    /// Una etiqueta que no se pudo crear se dice, y el nombre se queda
+    /// escrito; al abrir otra tarea no se sigue pidiendo.
+    ///
+    /// Roturas que atrapa: un «Crear» que parece no hacer nada cuando falla;
+    /// perder el nombre escrito; ponerle a otra tarea la etiqueta que se
+    /// nombraba para ésta.
+    #[gpui_kit::test]
+    fn a_tag_that_is_not_made_keeps_its_name(cx: &mut TestAppContext) {
+        // Sin la ruta de crear etiquetas montada: el servidor contesta 404.
+        let server = server_with_choices();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t2")).respond_with(ok(detail("t2"))));
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+
+        start_naming(window, &view, cx);
+        type_more(window, "Diseño", cx);
+        click(window, "task-new-tag-create", cx);
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+        assert!(on_screen(window, "task-new-tag", cx));
+        assert_eq!(tag_name(&view, cx), "Diseño");
+        assert!(patches(&server).is_empty());
+
+        open_other_task(cx);
+        wait_until(cx, "llega la otra", |cx| {
+            cx.update(|cx| Backend::snapshot(cx).read(cx).task.detail.as_ref().is_some_and(|detail| detail.task.id == "t2"))
+        });
+        assert!(on_screen(window, "task-tags", cx) && !on_screen(window, "task-new-tag", cx));
         stop(cx);
     }
 

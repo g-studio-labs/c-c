@@ -17,7 +17,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-pub use edit::{assignee_choices, shown_name, tag_choices, Choice};
+pub use edit::{assignee_choices, shown_name, tag_choices, tag_color_for, Choice, MAX_TAG_NAME, TAG_PALETTE};
 pub use mention::{
     comment_placeholder, mention_link, mention_matches, mention_query, mentioned_user, mentions_allowed, offered_mentions, with_mention,
     mention_closed, mention_highlighted, mention_mark_kept, mention_menu, mention_moved, MentionEdit, MentionMark, MentionMenu, MentionPerson, MentionQuery,

@@ -6,11 +6,34 @@
 //! que poner o quitar una es calcular la lista nueva desde la que hay: eso se
 //! hace aquí, una vez, y no en cada pantalla.
 
+use serde_json::json;
+
 use super::{DueChange, TaskDetail, TaskPatch, TaskTag, Tasks, UserSummary};
+use crate::mywork::filter::fold;
 use crate::ApiError;
 
 /// Cuánta gente del equipo se pide para ofrecerla: el tope del servidor.
 pub(super) const TEAM_LIMIT: usize = 50;
+
+/// Los colores de una etiqueta: la paleta de la app de siempre (`PALETTE` en
+/// `app/src/components/ui/color-swatches.tsx`), en su orden. Tonos medios,
+/// que se ven igual sobre el fondo claro que sobre el oscuro.
+pub const TAG_PALETTE: [&str; 10] =
+    ["#3B82F6", "#06B6D4", "#14B8A6", "#22C55E", "#EAB308", "#F97316", "#EF4444", "#EC4899", "#8B5CF6", "#64748B"];
+
+/// Lo más que puede medir el nombre de una etiqueta: el tope del servidor
+/// (`CreateTagRequest`), en letras.
+pub const MAX_TAG_NAME: usize = 60;
+
+/// El color con que nace una etiqueta: uno de la paleta, estable para su
+/// nombre. Es la cuenta de `paletteFor` en la app de siempre, letra a letra,
+/// para que la misma etiqueta nazca del mismo color desde cualquiera de las
+/// dos apps.
+pub fn tag_color_for(name: &str) -> &'static str {
+    // Como en JavaScript: sobre unidades UTF-16 y con el desborde de 32 bits.
+    let hash = name.encode_utf16().fold(0i32, |hash, unit| hash.wrapping_mul(31).wrapping_add(unit as i32));
+    TAG_PALETTE[(hash as i64).unsigned_abs() as usize % TAG_PALETTE.len()]
+}
 
 /// Algo que se puede poner o quitar en la tarea abierta.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +186,53 @@ impl Tasks {
     pub async fn toggle_tag(&self, tag_id: &str) -> Result<(), ApiError> {
         let has = self.open_detail()?.tags.into_iter().map(|tag| tag.id).collect();
         self.update(TaskPatch { tag_ids: Some(toggled(has, tag_id)), ..TaskPatch::default() }).await
+    }
+
+    /// Le pone a la tarea abierta la etiqueta que se llama así: la que ya
+    /// haya con ese nombre, o una nueva de su organización.
+    ///
+    /// Vino del «+ Etiqueta nueva» de `TaskDetailDrawer.tsx`, que crea
+    /// siempre. Aquí no se crea otra que se llame igual (sin mirar mayúsculas
+    /// ni acentos): dos «Backend» en la lista no se distinguen. Y la
+    /// organización es la de la tarea, que tiene que decirla: con ella vacía
+    /// no se pide nada.
+    pub async fn add_tag_named(&self, name: &str) -> Result<(), ApiError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(super::refused("empty-tag", "A tag needs a name"));
+        }
+        if name.chars().count() > MAX_TAG_NAME {
+            return Err(super::refused("tag-too-long", "A tag name can be 60 characters at most"));
+        }
+        let task_id = self.open_id()?;
+        let detail = self.open_detail()?;
+        let wanted = fold(name);
+        let known = detail.tags.iter().chain(self.state().tags.iter()).find(|tag| fold(tag.name.trim()) == wanted).cloned();
+        let tag = match known {
+            Some(tag) => tag,
+            None => {
+                let org_id = detail.task.org_id.as_str();
+                if org_id.is_empty() {
+                    return Err(super::refused("no-organization", "This task does not say which organization it belongs to"));
+                }
+                let body = json!({ "orgId": org_id, "name": name, "color": tag_color_for(name) });
+                let created: TaskTag = self.core.call("POST", "/api/v1/task-tags/", Some(body)).await?;
+                // Entra en lo que se ofrece: aunque ponérsela a la tarea
+                // falle después, ya existe y tiene que poder elegirse.
+                self.update_state(|state| {
+                    if state.task_id.as_deref() == Some(task_id.as_str()) {
+                        state.tags.push(created.clone());
+                    }
+                });
+                created
+            }
+        };
+        if detail.tags.iter().any(|has| has.id == tag.id) {
+            return Ok(());
+        }
+        let mut ids: Vec<String> = detail.tags.into_iter().map(|has| has.id).collect();
+        ids.push(tag.id);
+        self.update(TaskPatch { tag_ids: Some(ids), ..TaskPatch::default() }).await
     }
 
     /// Le da la tarea a esa persona, o se la quita si ya la llevaba.
