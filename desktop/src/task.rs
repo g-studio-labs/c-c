@@ -59,6 +59,9 @@ pub struct TaskView {
     /// Hay ficheros subiendo: treinta megas tardan, y un botón quieto parece
     /// no haber hecho nada.
     attaching: bool,
+    /// Qué comentario se está editando, y lo que se escribe para él.
+    editing_comment: Option<String>,
+    comment_edit: Entity<TextareaState>,
 }
 
 /// Con qué tono se pinta una prioridad.
@@ -95,6 +98,8 @@ impl TaskView {
             due_shown: None,
             _due_changed: due_changed,
             attaching: false,
+            editing_comment: None,
+            comment_edit: cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 12)),
         }
     }
 
@@ -205,6 +210,50 @@ impl TaskView {
                     this.say_problem(task_id, text, cx);
                 }
                 cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Pasa a editar un comentario, con lo que dice.
+    pub(crate) fn start_editing_comment(&mut self, comment_id: String, body: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.comment_edit.update(cx, |input, cx| input.set_value(body, window, cx));
+        self.editing_comment = Some(comment_id);
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_editing_comment(&mut self, cx: &mut Context<Self>) {
+        self.editing_comment = None;
+        cx.notify();
+    }
+
+    /// Guarda lo escrito en el comentario que se edita. Si no se guardó, se
+    /// sigue editando con lo escrito.
+    pub(crate) fn save_comment_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(comment_id) = self.editing_comment.clone() else { return };
+        let body = self.comment_edit.read(cx).value().to_string();
+        self.save(
+            "work:task.errSaveComment",
+            move |core| async move { core.tasks().edit_comment(&comment_id, &body).await },
+            |this, _, _| this.editing_comment = None,
+            window,
+            cx,
+        );
+    }
+
+    /// Borra un comentario, preguntando antes: si el cliente podía verlo,
+    /// también deja de verlo.
+    pub(crate) fn delete_comment(&mut self, comment_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let (title, detail) = (tr(cx, "work:task.deleteCommentTitle"), tr(cx, "work:task.deleteCommentBody"));
+        let (delete, cancel) = (tr(cx, "work:task.delete"), tr(cx, "work:task.cancel"));
+        let answer = window.prompt(PromptLevel::Warning, &title, Some(&detail), &[delete.as_str(), cancel.as_str()], cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            this.update_in(cx, |this, window, cx| {
+                this.change(move |core| async move { core.tasks().delete_comment(&comment_id).await }, window, cx);
             })
             .ok();
         })
@@ -657,6 +706,7 @@ impl TaskView {
                 .child(format!("{} · {}", comment.body, comment.when))
                 .into_any_element();
         }
+        let editing = self.editing_comment.as_deref() == Some(comment.id.as_str());
         let audience = comment.audience.as_ref().map(|key| {
             div().flex_none().px_1().rounded_sm().bg(accent).text_xs().text_color(muted).child(tr(cx, key))
         });
@@ -676,9 +726,65 @@ impl TaskView {
                     .gap_2()
                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(comment.author.clone()))
                     .child(div().text_xs().text_color(muted).child(comment.when.clone()))
-                    .children(audience),
+                    .children(comment.edited.then(|| div().text_xs().text_color(muted).child(tr(cx, "work:task.edited"))))
+                    .children(audience)
+                    .child(div().flex_1())
+                    // Sólo en lo que quien mira puede cambiar: el servidor
+                    // rechazaría lo demás.
+                    .children((comment.mine && !editing).then(|| {
+                        let (edit_id, body, delete_id) = (comment.id.clone(), comment.body.clone(), comment.id.clone());
+                        div()
+                            .flex()
+                            .child(
+                                Button::new(SharedString::from(format!("comment-edit-{}", comment.id)))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icon::new(Lucide::Pencil))
+                                    .tooltip(tr(cx, "work:task.editComment"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.start_editing_comment(edit_id.clone(), body.clone(), window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("comment-delete-{}", comment.id)))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icon::new(Lucide::Trash))
+                                    .tooltip(tr(cx, "work:task.deleteComment"))
+                                    .on_click(cx.listener(move |this, _, window, cx| this.delete_comment(delete_id.clone(), window, cx))),
+                            )
+                    })),
             )
-            .child(TextView::markdown(SharedString::from(format!("comment-body-{}", comment.id)), comment.body.clone()))
+            .child(if editing {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().id("comment-edit-input").test_support().child(Textarea::new(&self.comment_edit)))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(div().flex_1())
+                            .child(
+                                Button::new("comment-edit-cancel")
+                                    .ghost()
+                                    .small()
+                                    .label(tr(cx, "work:task.cancel"))
+                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_editing_comment(cx))),
+                            )
+                            .child(
+                                Button::new("comment-edit-save")
+                                    .primary()
+                                    .small()
+                                    .label(tr(cx, "work:task.save"))
+                                    .on_click(cx.listener(|this, _, window, cx| this.save_comment_edit(window, cx))),
+                            ),
+                    )
+                    .into_any_element()
+            } else {
+                TextView::markdown(SharedString::from(format!("comment-body-{}", comment.id)), comment.body.clone()).into_any_element()
+            })
             .into_any_element()
     }
 
@@ -1824,6 +1930,125 @@ mod tests {
         assert_eq!(removals(&server), 0, "quitó el fichero sin esperar la respuesta");
         cx.simulate_prompt_answer("Quitar");
         wait_until(cx, "se pide quitarlo", |_| removals(&server) == 1);
+        stop(cx);
+    }
+
+    const SAID: &str = "/api/v1/tasks/t1/comments/said";
+
+    /// La primera tarea con dos comentarios: `said`, de quien está dentro
+    /// (Ana, `u1`), y `other`, de otra persona.
+    fn server_with_two_voices() -> FakeServer {
+        let server = server_with_tasks(vec![contract_task("t1", "a", |_| {})]);
+        let mut first = detail("t1");
+        let mut other = first["comments"][0].clone();
+        other["id"] = json!("other");
+        other["authorUserId"] = json!("u2");
+        first["comments"] = json!([first["comments"][0].clone(), other]);
+        let mut column = first["status"].clone();
+        column["listId"] = first["task"]["listId"].clone();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(first)));
+        server.mount(
+            Mock::given(method("GET")).and(path_regex("^/api/v1/task-lists/[^/]+/statuses$")).respond_with(ok(json!([column]))),
+        );
+        server
+    }
+
+    fn answering(server: &FakeServer, verb: &str) {
+        server.mount(
+            Mock::given(method(verb))
+                .and(path(SAID))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({ "success": true, "message": "ok" }))),
+        );
+    }
+
+    fn edit_typed(view: &Entity<TaskView>, cx: &mut TestAppContext) -> String {
+        cx.update(|cx| view.read(cx).comment_edit.read(cx).value().to_string())
+    }
+
+    fn retype(window: AnyWindowHandle, view: &Entity<TaskView>, text: &str, cx: &mut TestAppContext) {
+        let text = text.to_string();
+        with_view(window, view, cx, |view, window, cx| view.comment_edit.update(cx, |input, cx| input.set_value(text, window, cx)));
+    }
+
+    /// Editar y borrar se ofrecen en lo que uno escribió, y editar parte de
+    /// lo que el comentario dice y guarda lo escrito.
+    ///
+    /// Roturas que atrapa: ofrecer cambiar el comentario de otro; una caja
+    /// de edición vacía; guardar otro texto o en otro comentario; seguir
+    /// editando después de guardar; un «Cancelar» que guarda.
+    #[gpui_kit::test]
+    fn my_comment_is_edited_from_what_it_says(cx: &mut TestAppContext) {
+        let server = server_with_two_voices();
+        answering(&server, "PATCH");
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        assert!(on_screen(window, "comment-edit-said", cx) && on_screen(window, "comment-delete-said", cx));
+        assert!(!on_screen(window, "comment-edit-other", cx) && !on_screen(window, "comment-delete-other", cx));
+        let says = cx.update(|cx| Backend::core(cx).tasks().sheet(cac_core::Locale::Es).unwrap().talk[0].body.clone());
+
+        click(window, "comment-edit-said", cx);
+        assert!(on_screen(window, "comment-edit-input", cx));
+        assert!(!on_screen(window, "comment-edit-said", cx), "ofrece editar lo que ya se edita");
+        assert_eq!(edit_typed(&view, cx), says);
+        retype(window, &view, "otra cosa", cx);
+        click(window, "comment-edit-cancel", cx);
+        assert!(!on_screen(window, "comment-edit-input", cx), "Cancelar no dejó de editar");
+
+        click(window, "comment-edit-said", cx);
+        assert_eq!(edit_typed(&view, cx), says, "arranca con lo que se canceló");
+        retype(window, &view, "mejor dicho", cx);
+        click(window, "comment-edit-save", cx);
+
+        wait_until(cx, "se guarda y deja de editar", |cx| !on_screen(window, "comment-edit-input", cx));
+        let sent: Vec<serde_json::Value> =
+            asked(&server, "PATCH", SAID).iter().map(|request| serde_json::from_slice(&request.body).unwrap()).collect();
+        assert_eq!(sent, [json!({ "body": "mejor dicho" })]);
+        stop(cx);
+    }
+
+    /// Si la edición no se guarda, se dice y se sigue editando con lo
+    /// escrito.
+    ///
+    /// Rotura que atrapa: perder lo reescrito por un fallo de red.
+    #[gpui_kit::test]
+    fn a_comment_edit_that_fails_keeps_what_was_written(cx: &mut TestAppContext) {
+        // Sin `PATCH` montado: el servidor contesta 404.
+        let server = server_with_two_voices();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+
+        click(window, "comment-edit-said", cx);
+        retype(window, &view, "mejor dicho", cx);
+        click(window, "comment-edit-save", cx);
+
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+        assert!(on_screen(window, "comment-edit-input", cx));
+        assert_eq!(edit_typed(&view, cx), "mejor dicho");
+        stop(cx);
+    }
+
+    /// Borrar un comentario pregunta antes; «Cancelar» no borra y «Borrar»
+    /// lo pide.
+    ///
+    /// Roturas que atrapa: un clic que borra sin preguntar; un «Cancelar»
+    /// que borra igual; un «Borrar» que no hace nada.
+    #[gpui_kit::test]
+    fn deleting_a_comment_asks_first(cx: &mut TestAppContext) {
+        let server = server_with_two_voices();
+        answering(&server, "DELETE");
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+        let deletions = |server: &FakeServer| asked(server, "DELETE", SAID).len();
+
+        click(window, "comment-delete-said", cx);
+        assert!(cx.has_pending_prompt(), "no preguntó antes de borrar");
+        cx.simulate_prompt_answer("Cancelar");
+        settle(cx);
+        assert_eq!(deletions(&server), 0, "borró aunque se canceló");
+
+        click(window, "comment-delete-said", cx);
+        cx.simulate_prompt_answer("Borrar");
+        wait_until(cx, "se pide borrarlo", |_| deletions(&server) == 1);
         stop(cx);
     }
 
