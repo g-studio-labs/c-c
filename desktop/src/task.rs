@@ -71,6 +71,12 @@ pub struct TaskView {
     /// Qué comentario se está editando, y lo que se escribe para él.
     editing_comment: Option<String>,
     comment_edit: Entity<TextareaState>,
+    /// El foco de la página cuando no se escribe en nada: es lo que deja a
+    /// Escape cerrarla.
+    page_focus: FocusHandle,
+    /// A qué tarea se le dio ya el foco al abrirse: una vez, o cada pintada
+    /// se lo quitaría a quien escribe.
+    focused_for: Option<String>,
 }
 
 /// Con qué tono se pinta una prioridad.
@@ -109,6 +115,8 @@ impl TaskView {
             attaching: false,
             editing_comment: None,
             comment_edit: cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 12)),
+            page_focus: cx.focus_handle(),
+            focused_for: None,
         }
     }
 
@@ -966,6 +974,14 @@ impl TaskView {
 impl Render for TaskView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = Backend::snapshot(cx).read(cx).task.clone();
+        // Al abrirse una tarea el foco pasa a su página: lo tenía la lista de
+        // debajo, y sin él Escape no llega aquí.
+        if self.focused_for != state.task_id {
+            self.focused_for = state.task_id.clone();
+            if state.task_id.is_some() {
+                self.page_focus.focus(window, cx);
+            }
+        }
         let sheet = Backend::core(cx).tasks().sheet(locale(cx));
         if let Some(sheet) = &sheet {
             self.show_due(sheet, window, cx);
@@ -1036,6 +1052,15 @@ impl Render for TaskView {
         div()
             .id("task-page")
             .test_support()
+            .track_focus(&self.page_focus)
+            // Escape la cierra, salvo escribiendo: ahí cancela lo que se
+            // escribe, y llevarse la pantalla entera lo perdería. Quien
+            // escribe tiene el foco en su campo, no en la página.
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && this.page_focus.is_focused(window) {
+                    Backend::core(cx).tasks().close();
+                }
+            }))
             .size_full()
             .flex()
             .flex_col()
@@ -1219,6 +1244,51 @@ mod tests {
         assert_eq!(cx.update(|cx| Backend::snapshot(cx).read(cx).task.task_id.clone()).as_deref(), Some("t1"), "se pulsó la lista a través de la página");
 
         click(window, "task-close", cx);
+        wait_until(cx, "se cierra", |cx| !on_screen(window, "task-page", cx));
+        stop(cx);
+    }
+
+    /// Escape cierra la página, pero no a quien está escribiendo.
+    ///
+    /// Roturas que atrapa: una página a pantalla completa cuya única salida
+    /// es un botón pequeño; que Escape se lleve la pantalla con un comentario
+    /// a medio escribir.
+    #[gpui_kit::test]
+    fn escape_closes_the_page_unless_someone_is_typing(cx: &mut TestAppContext) {
+        let server = server();
+        let (window, view) = open_with_view(&server, cx);
+        let press_key = |key: &'static str, cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.press(key, cx);
+            })
+            .unwrap();
+        };
+        let press = |cx: &mut TestAppContext| press_key("escape", cx);
+        let open_task = |cx: &mut TestAppContext| cx.update(|cx| Backend::snapshot(cx).read(cx).task.task_id.clone());
+
+        wait_until(cx, "las tareas llegan", |cx| on_screen(window, "work-row-t1", cx));
+        click(window, "work-row-t1", cx);
+        wait_until(cx, "llega el detalle", |cx| on_screen(window, "comment-input", cx));
+        // Recién abierta, sin pulsar nada dentro: otra tecla no la cierra, y
+        // Escape sí.
+        press_key("a", cx);
+        settle(cx);
+        assert_eq!(open_task(cx).as_deref(), Some("t1"), "cualquier tecla cierra la página");
+        press(cx);
+        wait_until(cx, "se cierra sin haber pulsado nada dentro", |cx| !on_screen(window, "task-page", cx));
+
+        click(window, "work-row-t1", cx);
+        wait_until(cx, "vuelve a abrirse", |cx| on_screen(window, "comment-input", cx));
+        write(window, "a medias", cx);
+        press(cx);
+        settle(cx);
+        assert_eq!(open_task(cx).as_deref(), Some("t1"), "Escape cerró la página a quien escribía");
+        assert_eq!(typed(&view, cx), "a medias");
+
+        // Fuera del campo: el foco vuelve a la página.
+        click(window, "task-title", cx);
+        press(cx);
         wait_until(cx, "se cierra", |cx| !on_screen(window, "task-page", cx));
         stop(cx);
     }
