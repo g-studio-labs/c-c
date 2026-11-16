@@ -913,6 +913,20 @@ async fn a_title_filter_shows_what_matches_with_its_path_open() {
     assert!(tree.rows_matching("no existe").is_empty());
 }
 
+/// Los acentos no cuentan, ni en lo escrito ni en el nombre.
+///
+/// Rotura que atrapa: que «operacion» no encuentre «Operación», o al revés.
+#[tokio::test]
+async fn a_title_filter_ignores_accents() {
+    let mut space = nested_space("a");
+    space["lists"][0]["name"] = serde_json::json!("Operación");
+    let rig = loaded_tree(vec![space]).await;
+    let tree = rig.core.tree();
+
+    assert_eq!(ids(&tree.rows_matching("operacion")), ["a", "l-a"]);
+    assert_eq!(ids(&tree.rows_matching("ESPÁCIO")), ["a", "f-a", "ff-a", "deep-a", "in-a", "l-a"]);
+}
+
 /// Lo que casa enseña también lo que tiene dentro: un espacio, todo lo suyo;
 /// una carpeta, sus listas y sus carpetas, bajo el espacio del que cuelga.
 ///

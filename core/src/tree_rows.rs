@@ -15,6 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::mywork::filter::fold;
 use crate::mywork::{ScopeKind, WorkScope};
 use crate::nav::{tree_click, Looking, NodeKind, TreeClick};
 use crate::tree::{FolderTree, SpaceTree, Tree, TreeState};
@@ -88,14 +89,15 @@ fn folder_open_count(folder: &FolderTree) -> i64 {
 /// (buscar un espacio por su nombre enseña sus listas). `None` sin filtro:
 /// todo.
 ///
-/// Sin distinguir mayúsculas, y nada más fino: filtra lo que ya está en
+/// Sin distinguir mayúsculas ni acentos, como el buscador de «Mi trabajo»
+/// (`fold`): «operacion» encuentra «Operación». Filtra lo que ya está en
 /// pantalla, no es el buscador.
 pub fn filter_tree(spaces: &[SpaceTree], query: &str) -> Option<HashSet<String>> {
-    let query = query.trim().to_lowercase();
+    let query = fold(query.trim());
     if query.is_empty() {
         return None;
     }
-    let matches = |name: &str| name.to_lowercase().contains(&query);
+    let matches = |name: &str| fold(name).contains(&query);
     let mut visible = HashSet::new();
 
     fn everything_in(folder: &FolderTree, visible: &mut HashSet<String>) {
