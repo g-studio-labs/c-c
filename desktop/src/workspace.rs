@@ -6,6 +6,7 @@
 
 use cac_core::{Locale, NodeKind, ThemePreference, TreeRow};
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
@@ -31,6 +32,9 @@ pub struct Workspace {
     pub(crate) my_work: Entity<MyWorkView>,
     docs: Entity<DocsView>,
     pub(crate) task: Entity<TaskView>,
+    /// Lo escrito para filtrar el árbol por título. Es de esta pantalla: qué
+    /// casa con ello lo dice el core.
+    tree_filter: Entity<InputState>,
 }
 
 impl Workspace {
@@ -38,7 +42,13 @@ impl Workspace {
         // Quien entra, entra a trabajar: organizaciones, árbol, tareas y el
         // stream de eventos.
         Backend::run(cx, |core| async move { core.open_workspace().await });
-        Self { my_work: cx.new(|cx| MyWorkView::new(window, cx)), docs: cx.new(|_| DocsView), task: cx.new(|cx| TaskView::new(window, cx)) }
+        let placeholder = tr(cx, "nav:panel.filter");
+        Self {
+            my_work: cx.new(|cx| MyWorkView::new(window, cx)),
+            docs: cx.new(|_| DocsView),
+            task: cx.new(|cx| TaskView::new(window, cx)),
+            tree_filter: cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)),
+        }
     }
 
     fn switch_org(org_id: String, cx: &App) {
@@ -320,7 +330,11 @@ impl Workspace {
             (theme.sidebar, theme.sidebar_border, theme.muted_foreground, theme.sidebar_accent, theme.sidebar_foreground);
         let snapshot = Backend::snapshot(cx).read(cx);
         let everything = snapshot.my_work.scope.is_none() && snapshot.docs.target.is_none();
-        let rows = Backend::core(cx).tree().rows();
+        let query = self.tree_filter.read(cx).value().to_string();
+        let rows = Backend::core(cx).tree().rows_matching(&query);
+        // Filtrando y sin nada que enseñar se dice: un árbol en blanco se lee
+        // como que la organización no tiene espacios.
+        let nothing = rows.is_empty() && !query.trim().is_empty();
 
         div()
             .w(px(PANEL_WIDTH))
@@ -363,7 +377,20 @@ impl Workspace {
                     .child(Icon::new(IconName::Inbox).small())
                     .child(tr(cx, "nav:item.myWork")),
             )
+            // Filtra lo que ya está en el panel; no es el buscador.
+            .child(
+                div().px_2().pt_2().child(
+                    Input::new(&self.tree_filter)
+                        .id("tree-filter")
+                        .small()
+                        .cleanable(true)
+                        .prefix(Icon::new(IconName::Search).xsmall().text_color(muted)),
+                ),
+            )
             .child(div().px_3().pt_3().pb_1().text_xs().text_color(muted).child(tr(cx, "nav:panel.spaces")))
+            .when(nothing, |this| {
+                this.child(div().id("tree-no-matches").test_support().px_3().py_3().text_xs().text_color(muted).child(tr(cx, "nav:panel.noMatches")))
+            })
             .child(
                 div()
                     .id("tree")
@@ -753,6 +780,71 @@ mod tests {
         wait_until(cx, "vuelve a pedirlo todo", |_| server.hits("/api/v1/organizations/") > asked);
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
+    /// Escribir en el filtro del panel deja en el árbol lo que casa, con su
+    /// carpeta abierta; y si nada casa, se dice.
+    ///
+    /// Roturas que atrapa: un filtro que no filtra; que lo que casa siga
+    /// escondido en su carpeta plegada; un árbol en blanco sin decir por qué;
+    /// decir «nada coincide» con todo a la vista; un chevrón que filtrando
+    /// pliega lo que se buscaba.
+    #[gpui_kit::test]
+    fn typing_in_the_panel_filter_narrows_the_tree(cx: &mut TestAppContext) {
+        let server = server();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-l-a", cx));
+        assert!(!on_screen(window, "tree-no-matches", cx), "dice que nada coincide sin haber filtrado");
+        let typed = |text: &str, cx: &mut TestAppContext| {
+            let text = text.to_string();
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("tree-filter", cx);
+                window.input(&text, cx);
+            })
+            .unwrap();
+        };
+
+        typed("en carp", cx);
+        assert!(on_screen(window, "tree-in-a", cx), "lo que casa sigue dentro de su carpeta plegada");
+        assert!(on_screen(window, "tree-a", cx) && on_screen(window, "tree-f-a", cx));
+        assert!(!on_screen(window, "tree-l-a", cx), "el filtro no quitó lo que no casa");
+        assert!(!on_screen(window, "tree-no-matches", cx), "dice que nada coincide con lo que casa a la vista");
+        click(window, "tree-toggle-f-a", cx);
+        assert!(on_screen(window, "tree-in-a", cx), "el chevrón plegó lo que se buscaba");
+
+        typed("zzz", cx);
+        assert!(on_screen(window, "tree-no-matches", cx), "un árbol en blanco y sin decir por qué");
+        assert!(!on_screen(window, "tree-a", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Una organización sin espacios no dice «nada coincide»: nadie filtró.
+    ///
+    /// Rotura que atrapa: leer cualquier árbol vacío como un filtro sin
+    /// resultados.
+    #[gpui_kit::test]
+    fn an_empty_tree_is_not_a_filter_without_matches(cx: &mut TestAppContext) {
+        let server = FakeServer::start();
+        let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+        server.mount(get("/api/v1/organizations/").respond_with(ok(json!([org("o1", "G Studio")]))));
+        server.mount(get("/api/v1/task-spaces/").respond_with(ok(json!([]))));
+        server.mount(get("/api/v1/docs/").respond_with(ok(json!({}))));
+        server.mount(get("/api/v1/tasks/").respond_with(ok(json!([]))));
+        server.install(cx);
+        let window = open(cx);
+
+        wait_until(cx, "el árbol llega, vacío", |cx| {
+            cx.update(|cx| {
+                let tree = &Backend::snapshot(cx).read(cx).tree;
+                tree.org_id.as_deref() == Some("o1") && !tree.loading
+            })
+        });
+
+        assert!(on_screen(window, "tree-filter", cx));
+        assert!(!on_screen(window, "tree-no-matches", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
     /// El sidebar dice de qué organización es y marca lo que cada fila es:
     /// lo que tiene documentación escrita y lo que ve un cliente.
     ///
