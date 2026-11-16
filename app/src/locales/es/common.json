@@ -497,6 +497,7 @@
     "alreadyLatest": "Ya está en la última",
     "install": "Instalar",
     "check": "Comprobar",
+    "notInThisApp": "Todavía no está en esta app",
     "receivingLive": "Recibiendo actualizaciones en directo",
     "notReceivingLive": "Sin actualizaciones en directo",
     "newSpace": "Espacio nuevo",

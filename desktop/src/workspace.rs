@@ -8,6 +8,8 @@ use cac_core::{Locale, NodeKind, ThemePreference, TreeRow};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::popover::Popover;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Side, Sizable};
 use gpui_kit::prelude::FluentBuilder;
@@ -23,6 +25,10 @@ use crate::task::TaskView;
 const RAIL_WIDTH: f32 = 48.;
 const PANEL_WIDTH: f32 = 256.;
 const ROW_HEIGHT: f32 = 28.;
+/// El lado de un botón del riel.
+const RAIL_BUTTON: f32 = 36.;
+/// El ancho del menú de la cuenta: el de la app de siempre (`w-64`).
+const ACCOUNT_MENU_WIDTH: f32 = 256.;
 /// Lo que entra una fila por cada nivel que cuelga: lo de dentro empieza
 /// bajo la marca de su padre (el hueco del chevrón más la separación).
 const INDENT: f32 = 22.;
@@ -118,42 +124,83 @@ impl Workspace {
             .gap_1()
             .px_2()
             .py_1p5()
-            .child(div().flex().items_center().gap_2().text_xs().text_color(muted).child(Icon::new(icon).xsmall()).child(label))
-            .child(div().flex().gap_1().children(options.into_iter().enumerate().map(|(at, (label, active, choose))| {
+            .child(div().flex().items_center().gap_2().text_xs().text_color(muted).child(Icon::new(icon).size_3p5()).child(label))
+            .child(div().flex().gap_0p5().children(options.into_iter().enumerate().map(|(at, (label, active, choose))| {
                 div()
                     .id(SharedString::from(format!("{id}-{at}")))
                     .test_support()
                     .flex_1()
-                    .h(px(24.))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded_md()
-                    .text_xs()
+                    .rounded(px(4.))
+                    .px_1p5()
+                    .py_1()
+                    .text_size(px(11.))
                     .cursor_pointer()
-                    .when(active, |this| this.bg(primary).text_color(on_primary).font_weight(FontWeight::MEDIUM))
+                    .when(active, |this| this.bg(primary).text_color(on_primary))
                     .when(!active, |this| this.hover(move |style| style.bg(hover)))
-                    .on_click(move |_, _, cx| {
-                        // Elegir una opción no es elegir la fila: el menú
-                        // sigue abierto, para probar otra sin reabrirlo.
-                        cx.stop_propagation();
-                        choose(cx);
-                    })
+                    .on_click(move |_, _, cx| choose(cx))
                     .child(label)
             })))
     }
 
-    /// El avatar de quien está dentro, al pie del riel, con su menú: quién
-    /// es, tema, idioma y salir.
+    /// Una entrada del menú de la cuenta: icono y nombre, apagada hasta que
+    /// el ratón pasa.
+    fn account_row(id: &'static str, icon: impl Into<Icon>, label: String, danger: bool, cx: &App) -> Stateful<Div> {
+        let theme = cx.theme();
+        // «Salir» va en rojo y se queda en rojo bajo el ratón.
+        let (muted, hover, foreground) = if danger {
+            (theme.danger, theme.accent, theme.danger)
+        } else {
+            (theme.muted_foreground, theme.accent, theme.foreground)
+        };
+        div()
+            .id(id)
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded(px(4.))
+            .px_2()
+            .py_1p5()
+            .text_xs()
+            .text_color(muted)
+            .hover(move |style| style.bg(hover).text_color(foreground))
+            .child(icon.into().size_3p5().flex_none())
+            .child(label)
+    }
+
+    /// Una entrada que la app de siempre tiene y ésta todavía no: se pinta
+    /// igual, y al pasar el ratón dice que aún no está en vez de callar.
+    fn pending_row(id: &'static str, icon: impl Into<Icon>, label: String, cx: &App) -> impl IntoElement {
+        let not_yet = tr(cx, "common:misc.notInThisApp");
+        Self::account_row(id, icon, label, false, cx).tooltip(move |window, cx| Tooltip::new(not_yet.clone()).build(window, cx)).test_support()
+    }
+
+    /// El avatar de quien está dentro, al pie del riel, con el punto del
+    /// flujo en vivo y su menú: quién es, tema, idioma, lo suyo y salir.
+    /// Las medidas son las de `AccountMenu.tsx`.
     fn render_account(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let primary = cx.theme().primary;
-        let session = Backend::snapshot(cx).read(cx).session.clone();
-        let (name, initials) = session
+        let theme = cx.theme();
+        let (sidebar, success, danger, muted, border, popover, primary) =
+            (theme.sidebar, theme.success, theme.danger, theme.muted_foreground, theme.border, theme.popover, theme.primary);
+        let mono = theme.mono_font_family.clone();
+        let snapshot = Backend::snapshot(cx).read(cx);
+        // Rojo sólo cuando se cayó: mientras conecta al arrancar no es un
+        // corte, y un punto que parpadea en rojo en cada entrada es ruido.
+        let live = snapshot.connection.status != cac_core::Connection::Down;
+        let session = snapshot.session.clone();
+        let (name, email, initials, tint) = session
             .map(|session| {
                 let initials = cac_core::initials(session.name.as_deref(), &session.username);
-                (session.name.filter(|name| !name.trim().is_empty()).unwrap_or(session.username), initials)
+                // Su color sale de su usuario, como en todas partes: el cian
+                // del acento se queda para lo que se pulsa.
+                let tint = crate::theme::space_color("", cac_core::hue_index(&session.username), cx);
+                let email = session.email.filter(|email| !email.trim().is_empty());
+                (session.name.filter(|name| !name.trim().is_empty()).unwrap_or(session.username), email, initials, tint)
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| (String::new(), None, String::new(), primary));
         let face = move |size: f32| {
             div()
                 .size(px(size))
@@ -162,76 +209,118 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .rounded_full()
-                .bg(primary.opacity(0.2))
-                .text_xs()
+                .bg(tint.opacity(0.15))
+                .text_size(px(10.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(primary)
+                .text_color(tint)
                 .child(initials.clone())
         };
         let in_menu = face.clone();
-        Button::new("account-menu").ghost().tooltip(tr(cx, "nav:rail.account")).child(face(28.)).dropdown_menu(move |menu, _, _| {
-            let (name, in_menu) = (name.clone(), in_menu.clone());
-            menu.min_w(px(240.))
-                .item(PopupMenuItem::element(move |_, _| {
+        let live_hint = tr(cx, if live { "common:misc.receivingLive" } else { "common:misc.notReceivingLive" });
+        let trigger = Button::new("account-menu").ghost().p_0().size(px(RAIL_BUTTON)).rounded_lg().tooltip(tr(cx, "nav:rail.account")).child(
+            div().relative().size(px(RAIL_BUTTON)).flex().items_center().justify_center().child(face(24.)).child(
+                // Pegado al avatar: es la señal de que la app sigue
+                // recibiendo. El borde del color del riel lo despega de él.
+                div()
+                    .id("account-live")
+                    .test_support()
+                    .absolute()
+                    .bottom(px(2.))
+                    .right(px(2.))
+                    .size(px(12.))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(sidebar)
+                    .bg(if live { success } else { danger })
+                    .tooltip(move |window, cx| Tooltip::new(live_hint.clone()).build(window, cx)),
+            ),
+        );
+        // A la derecha del avatar, que es donde hay sitio; la ventana lo
+        // sube lo que no cabe hacia abajo.
+        Popover::new("account-popover").appearance(false).anchor(Anchor::LeftCenter).offset(px(8.)).trigger(trigger).content(move |_, _, cx| {
+            let here = locale(cx);
+            let theme_chosen = Backend::core(cx).theme();
+            let themes = [
+                (ThemePreference::System, "nav:account.themeAuto"),
+                (ThemePreference::Light, "nav:account.themeLight"),
+                (ThemePreference::Dark, "nav:account.themeDark"),
+            ]
+            .into_iter()
+            .map(|(preference, key)| {
+                let choose: Box<dyn Fn(&mut App)> = Box::new(move |cx| Self::choose_theme(preference, cx));
+                (cac_core::text(here, key), theme_chosen == preference, choose)
+            })
+            .collect();
+            let language_chosen = Backend::core(cx).locale_preference();
+            let languages = [
+                (None, "nav:account.languageAuto"),
+                (Some(Locale::En), "common:language.en"),
+                (Some(Locale::Es), "common:language.es"),
+            ]
+            .into_iter()
+            .map(|(preference, key)| {
+                let choose: Box<dyn Fn(&mut App)> = Box::new(move |cx| Self::choose_language(preference, cx));
+                (cac_core::text(here, key), language_chosen == preference, choose)
+            })
+            .collect();
+            let rule = move || div().my_1().h(px(1.)).bg(border);
+            let not_yet = tr(cx, "common:misc.notInThisApp");
+            div()
+                .id("account-items")
+                .w(px(ACCOUNT_MENU_WIDTH))
+                .flex()
+                .flex_col()
+                .p_1()
+                .rounded_md()
+                .border_1()
+                .border_color(border)
+                .bg(popover)
+                .shadow_lg()
+                .child(
+                    div().flex().items_center().gap_2().px_2().py_1p5().child(in_menu(28.)).child(
+                        div()
+                            .min_w_0()
+                            .child(div().truncate().text_xs().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
+                            .children(email.clone().map(|email| div().truncate().text_size(px(11.)).text_color(muted).child(email))),
+                    ),
+                )
+                .child(rule())
+                .child(Self::options_row("account-theme", Lucide::Moon, cac_core::text(here, "nav:account.theme"), themes, cx))
+                .child(Self::options_row("account-language", Lucide::Languages, cac_core::text(here, "nav:account.language"), languages, cx))
+                .child(Self::pending_row("account-profile", Lucide::UserRound, tr(cx, "nav:profile.title"), cx))
+                .child(Self::pending_row("account-password", Lucide::KeyRound, tr(cx, "nav:account.changePassword"), cx))
+                .child(Self::pending_row("account-connect", Lucide::Bot, tr(cx, "nav:account.connectMcp"), cx))
+                .child(Self::pending_row("account-notifications", Lucide::Bell, tr(cx, "nav:account.notifications"), cx))
+                .child(rule())
+                .child(
                     div()
                         .flex()
                         .items_center()
                         .gap_2()
                         .px_2()
                         .py_1p5()
-                        .child(in_menu(28.))
-                        .child(div().min_w_0().truncate().text_xs().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
-                }))
-                .separator()
-                // Se pintan al abrirse y cada vez que algo cambia: lo elegido
-                // se lee del core en ese momento, no al construir el menú.
-                .item(PopupMenuItem::element(|_, cx| {
-                    let here = locale(cx);
-                    let chosen = Backend::core(cx).theme();
-                    let options = [
-                        (ThemePreference::System, "nav:account.themeAuto"),
-                        (ThemePreference::Light, "nav:account.themeLight"),
-                        (ThemePreference::Dark, "nav:account.themeDark"),
-                    ]
-                    .into_iter()
-                    .map(|(preference, key)| {
-                        let choose: Box<dyn Fn(&mut App)> = Box::new(move |cx| Self::choose_theme(preference, cx));
-                        (cac_core::text(here, key), chosen == preference, choose)
-                    })
-                    .collect();
-                    Self::options_row("account-theme", Lucide::Moon, cac_core::text(here, "nav:account.theme"), options, cx)
-                }))
-                .item(PopupMenuItem::element(|_, cx| {
-                    let here = locale(cx);
-                    let chosen = Backend::core(cx).locale_preference();
-                    let options = [
-                        (None, "nav:account.languageAuto"),
-                        (Some(Locale::En), "common:language.en"),
-                        (Some(Locale::Es), "common:language.es"),
-                    ]
-                    .into_iter()
-                    .map(|(preference, key)| {
-                        let choose: Box<dyn Fn(&mut App)> = Box::new(move |cx| Self::choose_language(preference, cx));
-                        (cac_core::text(here, key), chosen == preference, choose)
-                    })
-                    .collect();
-                    Self::options_row("account-language", Lucide::Languages, cac_core::text(here, "nav:account.language"), options, cx)
-                }))
-                .separator()
-                .item(
-                    PopupMenuItem::element(|_, cx| {
-                        let danger = cx.theme().danger;
-                        div()
-                            .id("account-log-out")
-                            .test_support()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_color(danger)
-                            .child(Icon::new(Lucide::LogOut).xsmall().text_color(danger))
-                            .child(tr(cx, "nav:account.logOut"))
-                    })
-                    .on_click(|_, _, cx| Self::log_out(cx)),
+                        .text_xs()
+                        .text_color(muted)
+                        .child(Icon::new(Lucide::CircleCheck).size_3p5().flex_none().text_color(success))
+                        .child(div().font_family(mono.clone()).child(concat!("v", env!("CARGO_PKG_VERSION"))))
+                        .child(div().flex_1())
+                        .child(
+                            // Esta app todavía no se actualiza sola: el
+                            // enlace está donde va a estar, y lo dice.
+                            div()
+                                .id("account-check")
+                                .test_support()
+                                .text_size(px(11.))
+                                .text_color(primary)
+                                .child(tr(cx, "common:misc.check"))
+                                .tooltip(move |window, cx| Tooltip::new(not_yet.clone()).build(window, cx)),
+                        ),
+                )
+                .child(
+                    Self::account_row("account-log-out", Lucide::LogOut, tr(cx, "nav:account.logOut"), true, cx)
+                        .cursor_pointer()
+                        .on_click(|_, _, cx| Self::log_out(cx))
+                        .test_support(),
                 )
         })
     }
@@ -349,7 +438,7 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .items_start()
-                    .child(div().id("org-name").test_support().w_full().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).child(name))
+                    .child(div().id("org-name").test_support().w_full().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
                     .children(hint.map(|hint| div().id("org-hint").test_support().w_full().truncate().text_xs().text_color(muted).child(hint))),
             )
             .when(several, |this| this.child(Icon::new(Lucide::ChevronsUpDown).xsmall().text_color(muted)));
@@ -1110,7 +1199,11 @@ mod tests {
         wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
 
         click(window, "account-menu", cx);
+        assert!(on_screen(window, "account-live", cx), "el avatar no lleva el punto del flujo en vivo");
         wait_until(cx, "el menú se abre", |cx| on_screen(window, "account-theme-1", cx));
+        for row in ["account-profile", "account-password", "account-connect", "account-notifications", "account-check"] {
+            assert!(on_screen(window, row, cx), "falta {row} en el menú de la cuenta");
+        }
         click(window, "account-theme-1", cx);
         assert_eq!(cx.update(|cx| Backend::core(cx).theme()), ThemePreference::Light);
         assert!(on_screen(window, "account-language-1", cx), "elegir el tema cerró el menú");
