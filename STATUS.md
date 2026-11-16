@@ -38,9 +38,11 @@ toda regla va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
   el cliente). «Tarea nueva» en la cabecera de «Mi trabajo» abre una fila
   que se queda abierta: va a la lista que se mira (o a la que se elija), con
   prioridad, fecha y responsable, y en la lista de un cliente pregunta si la
-  ve.
+  ve. Los adjuntos de la tarea salen en su sección: el nombre lo baja y lo
+  abre con el programa del sistema, y al lado guardar una copia, quitar
+  (preguntando) y «Adjuntar un fichero» (tope de 30 MB dicho antes de subir).
 - **Falta:** de la carcasa, las fuentes incrustadas y el filtro del panel;
-  del detalle, los adjuntos, crear una etiqueta y buscar entre más de 50 personas; después
+  del detalle, ver las imágenes dentro del cajón, los adjuntos de un comentario, editar o borrar un comentario, las menciones, crear una etiqueta y buscar entre más de 50 personas; después
   tablero y calendario (379) y los instaladores (380).
 - **Cómo se mira:** `cd desktop && cargo run --release`. Su sesión va aparte
   de la de Tauri (`~/.local/share/cac-desktop`): se entra una vez en cada una.

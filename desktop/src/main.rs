@@ -10,6 +10,7 @@ mod assets;
 mod auth;
 mod backend;
 mod docs;
+mod files;
 mod lang;
 mod mywork;
 mod newtask;

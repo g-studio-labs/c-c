@@ -134,6 +134,8 @@
     "description": "Description",
     "noDescription": "No description yet.",
     "attachments": "Attachments",
+    "errOpenFile": "Could not open the file",
+    "saveFile": "Save a copy",
     "reported": "Reported",
     "by": "By",
     "on": "On",

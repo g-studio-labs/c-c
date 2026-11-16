@@ -134,6 +134,8 @@
     "description": "Descripción",
     "noDescription": "Todavía no hay descripción.",
     "attachments": "Adjuntos",
+    "errOpenFile": "No se pudo abrir el fichero",
+    "saveFile": "Guardar una copia",
     "reported": "Reportado",
     "by": "Por",
     "on": "En",

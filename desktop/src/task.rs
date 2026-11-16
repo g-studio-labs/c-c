@@ -5,7 +5,7 @@
 //! Aquí está qué pestaña del hilo se mira, que es lo único propio, y la
 //! pintura. Cada cambio se le pide al core, que es quien sabe qué mandar.
 
-use cac_core::{Choice, DueState, SheetComment, SheetSubtask, StatusOption, TaskSheet, PRIORITIES};
+use cac_core::{ApiError, Choice, DueState, SheetComment, SheetFile, SheetSubtask, StatusOption, TaskSheet, PRIORITIES};
 use chrono::NaiveDate;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -19,6 +19,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
+use crate::files;
 use crate::lang::{error_text, locale, tr};
 
 /// El ancho del panel: el del cajón de la app de siempre.
@@ -55,6 +56,9 @@ pub struct TaskView {
     /// está eligiendo.
     due_shown: Option<(String, Option<String>)>,
     _due_changed: Subscription,
+    /// Hay ficheros subiendo: treinta megas tardan, y un botón quieto parece
+    /// no haber hecho nada.
+    attaching: bool,
 }
 
 /// Con qué tono se pinta una prioridad.
@@ -90,7 +94,187 @@ impl TaskView {
             due,
             due_shown: None,
             _due_changed: due_changed,
+            attaching: false,
         }
+    }
+
+    /// Deja dicho en el cajón algo que no se pudo hacer con esa tarea.
+    fn say_problem(&mut self, task_id: String, text: String, cx: &mut Context<Self>) {
+        self.problem = Some((task_id, text));
+        cx.notify();
+    }
+
+    fn open_task_id(cx: &App) -> Option<String> {
+        Backend::snapshot(cx).read(cx).task.task_id.clone()
+    }
+
+    /// Baja un adjunto y lo abre con el programa del sistema que lo entiende.
+    /// Su dirección pide sesión, así que no se le puede dar tal cual.
+    pub(crate) fn open_file(&mut self, file_id: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task_id) = Self::open_task_id(cx) else { return };
+        self.problem = None;
+        cx.notify();
+        let answer = Backend::ask(cx, move |core| async move {
+            let bytes = core.tasks().attachment_bytes(&file_id).await.map_err(Some)?;
+            files::write_for_opening(&std::env::temp_dir(), &name, &bytes).map_err(|_| None::<ApiError>)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(result) = answer.await else { return };
+            this.update_in(cx, |this, _, cx| match result {
+                Ok(path) => files::open_with_system(&path, cx),
+                Err(error) => {
+                    let text = match error {
+                        Some(error) => error_text(cx, &error, "work:task.errOpenFile"),
+                        None => tr(cx, "work:task.errOpenFile"),
+                    };
+                    this.say_problem(task_id, text, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Guarda una copia de un adjunto donde se elija.
+    pub(crate) fn save_file(&mut self, file_id: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task_id) = Self::open_task_id(cx) else { return };
+        self.problem = None;
+        cx.notify();
+        let home = std::env::home_dir().unwrap_or_else(std::env::temp_dir);
+        let chosen = cx.prompt_for_new_path(&home, Some(&cac_core::safe_file_name(&name)));
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(target))) = chosen.await else { return };
+            let Ok(answer) = this.update(cx, |_, cx| {
+                Backend::ask(cx, move |core| async move {
+                    let bytes = core.tasks().attachment_bytes(&file_id).await.map_err(Some)?;
+                    files::write_copy(&target, &bytes).map_err(|_| None::<ApiError>)
+                })
+            }) else {
+                return;
+            };
+            let Ok(Err(error)) = answer.await else { return };
+            this.update(cx, |this, cx| {
+                let text = match error {
+                    Some(error) => error_text(cx, &error, "common:misc.errSave"),
+                    None => tr(cx, "common:misc.errSave"),
+                };
+                this.say_problem(task_id, text, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Pregunta qué ficheros y los sube a la tarea abierta, uno tras otro. Al
+    /// primero que no se pueda se para y se dice cuál.
+    pub(crate) fn attach_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task_id) = Self::open_task_id(cx) else { return };
+        self.problem = None;
+        cx.notify();
+        let chosen = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: None });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else { return };
+            let Ok(answer) = this.update(cx, |this, cx| {
+                this.attaching = true;
+                cx.notify();
+                Backend::ask(cx, move |core| async move {
+                    for path in paths {
+                        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                        // El tamaño se mira antes de leer: un fichero enorme
+                        // no se carga en memoria para que digan que no.
+                        // (Sin esto el core lo rechaza igual, ya leído: no
+                        // hay prueba que lo distinga sin medir memoria.)
+                        let size = std::fs::metadata(&path).map(|file| file.len()).map_err(|_| (name.clone(), None))?;
+                        cac_core::attachment_fits(size).map_err(|error| (name.clone(), Some(error)))?;
+                        let bytes = std::fs::read(&path).map_err(|_| (name.clone(), None))?;
+                        core.tasks().attach(&name, bytes).await.map_err(|error| (name.clone(), Some(error)))?;
+                    }
+                    Ok::<(), (String, Option<ApiError>)>(())
+                })
+            }) else {
+                return;
+            };
+            let result = answer.await;
+            this.update(cx, |this, cx| {
+                this.attaching = false;
+                if let Ok(Err((name, error))) = result {
+                    let mut text = cac_core::text_with(locale(cx), "common:editor.errAttach", &[("name", &name)]);
+                    if let Some(error) = error {
+                        text = format!("{text}. {}", error_text(cx, &error, "common:editor.errAttachBody"));
+                    }
+                    this.say_problem(task_id, text, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Quita un adjunto, preguntando antes: si la descripción lo enseña, se
+    /// dice que también se va del texto.
+    pub(crate) fn remove_file(&mut self, file: SheetFile, window: &mut Window, cx: &mut Context<Self>) {
+        let title = cac_core::text_with(locale(cx), "work:task.removeAttachmentTitle", &[("name", &file.name)]);
+        let detail = tr(cx, if file.cited { "work:task.removeAttachmentInUse" } else { "work:task.removeAttachmentPlain" });
+        let (remove, cancel) = (tr(cx, "work:task.remove"), tr(cx, "work:task.cancel"));
+        let answer = window.prompt(PromptLevel::Warning, &title, Some(&detail), &[remove.as_str(), cancel.as_str()], cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            this.update_in(cx, |this, window, cx| {
+                this.change(move |core| async move { core.tasks().remove_attachment(&file.id).await }, window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Un fichero de la tarea: su nombre lo abre, y al lado guardar una
+    /// copia y quitarlo.
+    fn render_file(&self, file: &SheetFile, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, primary) = (theme.muted_foreground, theme.primary);
+        let icon = if file.image { Lucide::Image } else { Lucide::Paperclip };
+        let (open, save, remove) = (file.clone(), file.clone(), file.clone());
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_sm()
+            .child(Icon::new(icon).xsmall().text_color(muted))
+            .child(
+                div()
+                    .id(SharedString::from(format!("task-file-{}", file.id)))
+                    .test_support()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(primary)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_file(open.id.clone(), open.name.clone(), window, cx)))
+                    .child(file.name.clone()),
+            )
+            .children(file.size.clone().map(|size| div().flex_none().text_xs().text_color(muted).child(size)))
+            .children(file.cited.then(|| div().flex_none().text_xs().text_color(muted).child(tr(cx, "work:task.citedHere"))))
+            .child(div().flex_1())
+            .child(
+                Button::new(SharedString::from(format!("task-file-save-{}", file.id)))
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(Lucide::Download))
+                    .tooltip(tr(cx, "work:task.saveFile"))
+                    .on_click(cx.listener(move |this, _, window, cx| this.save_file(save.id.clone(), save.name.clone(), window, cx))),
+            )
+            .child(
+                Button::new(SharedString::from(format!("task-file-remove-{}", file.id)))
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(Lucide::Trash))
+                    .tooltip(tr(cx, "work:task.removeAttachment"))
+                    .on_click(cx.listener(move |this, _, window, cx| this.remove_file(remove.clone(), window, cx))),
+            )
     }
 
     /// Pasa a editar el título y la descripción, con lo que la tarea dice.
@@ -604,18 +788,27 @@ impl TaskView {
                         .children(sheet.subtasks.iter().map(|subtask| self.render_subtask(subtask, cx))),
                 )
             })
-            .when(!sheet.attachments.is_empty(), |this| {
-                this.child(
-                    div()
-                        .id("task-attachments")
-                        .test_support()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(self.section(tr(cx, "work:task.attachments"), cx))
-                        .children(sheet.attachments.iter().map(|name| div().text_sm().child(name.clone()))),
-                )
-            })
+            // Siempre a la vista, también sin ficheros: es donde se adjunta.
+            .child(
+                div()
+                    .id("task-attachments")
+                    .test_support()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div().flex().items_center().gap_2().child(self.section(tr(cx, "work:task.attachments"), cx)).child(div().flex_1()).child(
+                            Button::new("task-attach")
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(Lucide::Paperclip))
+                                .label(tr(cx, "common:editor.attachFile"))
+                                .loading(self.attaching)
+                                .on_click(cx.listener(|this, _, window, cx| this.attach_files(window, cx))),
+                        ),
+                    )
+                    .children(sheet.attachments.iter().map(|file| self.render_file(file, cx))),
+            )
             .child(div().flex().items_center().gap_4().border_b_1().border_color(border).children(tabs.map(
                 |(tab, id, key, count)| {
                     let active = thread == tab;
@@ -1429,4 +1622,209 @@ mod tests {
         assert!(!on_screen(window, "task-title", cx), "sigue a la vista la tarea anterior");
         stop(cx);
     }
+    const RAW: &str = "/api/v1/tasks/t1/attachments/a1/raw";
+
+    /// La primera tarea con un fichero suyo, `plan.pdf`.
+    fn server_with_a_file() -> FakeServer {
+        let server = server_with_tasks(vec![contract_task("t1", "a", |_| {})]);
+        let mut first = detail("t1");
+        first["attachments"] = json!([{
+            "id": "a1", "itemId": "t1", "commentId": null, "url": RAW, "fileName": "plan.pdf",
+            "contentType": "application/pdf", "bytes": 12288,
+        }]);
+        let mut column = first["status"].clone();
+        column["listId"] = first["task"]["listId"].clone();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(first)));
+        server.mount(
+            Mock::given(method("GET")).and(path_regex("^/api/v1/task-lists/[^/]+/statuses$")).respond_with(ok(json!([column]))),
+        );
+        server
+    }
+
+    fn serving_the_file(server: &FakeServer) {
+        server.mount(
+            Mock::given(method("GET")).and(path(RAW)).respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(b"%PDF-1.7".to_vec())),
+        );
+    }
+
+    /// Apunta lo que la app le pide abrir al sistema, en vez de abrirlo.
+    fn record_opened(cx: &mut TestAppContext) -> std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>> {
+        let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = opened.clone();
+        cx.update(|cx| {
+            cx.set_global(crate::files::Opener(std::sync::Arc::new(move |path| seen.lock().unwrap().push(path.to_path_buf()))))
+        });
+        opened
+    }
+
+    /// Una carpeta vacía para esta prueba.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cac-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Da tiempo a lo que **no** debería pasar: una petición sale desde otro
+    /// hilo, y mirar nada más cancelar daría por bueno lo que aún no salió.
+    fn settle(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        for _ in 0..20 {
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn asked(server: &FakeServer, verb: &str, route: &str) -> Vec<wiremock::Request> {
+        server.requests().into_iter().filter(|request| request.method.as_str() == verb && request.url.path() == route).collect()
+    }
+
+    /// Los ficheros de la tarea salen en su sección, y pulsar el nombre de
+    /// uno lo baja y se lo da al sistema para abrirlo.
+    ///
+    /// Roturas que atrapa: una sección de adjuntos vacía con ficheros; un
+    /// nombre que no abre nada; darle al sistema un fichero con otro
+    /// contenido o con otro nombre.
+    #[gpui_kit::test]
+    fn the_name_of_a_file_opens_it(cx: &mut TestAppContext) {
+        let server = server_with_a_file();
+        serving_the_file(&server);
+        let window = open(&server, cx);
+        let opened = record_opened(cx);
+        open_first_task(window, cx);
+        assert!(on_screen(window, "task-file-a1", cx));
+
+        click(window, "task-file-a1", cx);
+
+        wait_until(cx, "se le da al sistema", |_| !opened.lock().unwrap().is_empty());
+        let path = opened.lock().unwrap()[0].clone();
+        assert_eq!(path.file_name().unwrap(), "plan.pdf");
+        assert_eq!(std::fs::read(&path).unwrap(), b"%PDF-1.7");
+        assert!(!on_screen(window, "task-problem", cx));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        stop(cx);
+    }
+
+    /// Un fichero que no se pudo bajar se dice, y no se abre nada.
+    ///
+    /// Rotura que atrapa: un nombre que parece no hacer nada cuando el
+    /// fichero no llega.
+    #[gpui_kit::test]
+    fn a_file_that_does_not_arrive_says_so(cx: &mut TestAppContext) {
+        // Sin la ruta del fichero montada: el servidor contesta 404.
+        let server = server_with_a_file();
+        let window = open(&server, cx);
+        let opened = record_opened(cx);
+        open_first_task(window, cx);
+
+        click(window, "task-file-a1", cx);
+
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+        assert!(opened.lock().unwrap().is_empty());
+        stop(cx);
+    }
+
+    /// «Guardar una copia» pregunta dónde y la escribe ahí; si se cancela,
+    /// no se baja nada.
+    ///
+    /// Roturas que atrapa: un botón que no pregunta; una copia con otro
+    /// contenido; bajar el fichero aunque se cancele.
+    #[gpui_kit::test]
+    fn saving_a_copy_writes_it_where_it_was_chosen(cx: &mut TestAppContext) {
+        let server = server_with_a_file();
+        serving_the_file(&server);
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+        let dir = scratch("save");
+        let target = dir.join("copia.pdf");
+
+        click(window, "task-file-save-a1", cx);
+        assert!(cx.did_prompt_for_new_path(), "no preguntó dónde guardar");
+        cx.simulate_new_path_selection(|_| None);
+        settle(cx);
+        assert!(asked(&server, "GET", RAW).is_empty(), "bajó el fichero aunque se canceló");
+
+        click(window, "task-file-save-a1", cx);
+        let chosen = target.clone();
+        cx.simulate_new_path_selection(move |_| Some(chosen));
+        wait_until(cx, "la copia queda escrita", |_| target.exists());
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"%PDF-1.7");
+        let _ = std::fs::remove_dir_all(&dir);
+        stop(cx);
+    }
+
+    /// «Adjuntar» pregunta qué ficheros y los sube a la tarea; uno que pasa
+    /// del tope se dice y no se manda.
+    ///
+    /// Roturas que atrapa: un botón que no pregunta; subir sólo el primero;
+    /// mandar otro contenido u otro nombre; cargar y mandar un fichero que
+    /// el servidor va a rechazar por grande; callar que uno no se subió.
+    #[gpui_kit::test]
+    fn attaching_uploads_what_was_chosen(cx: &mut TestAppContext) {
+        let server = server_with_a_file();
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path("/api/v1/tasks/t1/attachments"))
+                .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": { "id": "a2" } }))),
+        );
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+        let dir = scratch("attach");
+        let (notes, shot, huge) = (dir.join("notas.txt"), dir.join("captura.png"), dir.join("enorme.bin"));
+        std::fs::write(&notes, b"hola").unwrap();
+        std::fs::write(&shot, b"\x89PNG\x00\xff").unwrap();
+        // Un byte por encima del tope, sin ocupar disco.
+        std::fs::File::create(&huge).unwrap().set_len(cac_core::MAX_ATTACHMENT_BYTES as u64 + 1).unwrap();
+
+        click(window, "task-attach", cx);
+        assert!(cx.did_prompt_for_paths(), "no preguntó qué adjuntar");
+        let chosen = vec![notes.clone(), shot.clone()];
+        cx.simulate_path_prompt_response(move |_| Some(chosen));
+        wait_until(cx, "suben los dos", |_| asked(&server, "POST", "/api/v1/tasks/t1/attachments").len() == 2);
+
+        let sent = asked(&server, "POST", "/api/v1/tasks/t1/attachments");
+        assert_eq!(sent[0].body, cac_core::multipart("notas.txt", b"hola").1);
+        assert_eq!(sent[1].body, cac_core::multipart("captura.png", b"\x89PNG\x00\xff").1);
+        assert!(!on_screen(window, "task-problem", cx));
+
+        click(window, "task-attach", cx);
+        cx.simulate_path_prompt_response(move |_| Some(vec![huge]));
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+        assert_eq!(asked(&server, "POST", "/api/v1/tasks/t1/attachments").len(), 2, "mandó el que pasa del tope");
+        let _ = std::fs::remove_dir_all(&dir);
+        stop(cx);
+    }
+
+    /// Quitar un adjunto pregunta antes, diciendo cuál; «Cancelar» no quita
+    /// nada y «Quitar» lo pide.
+    ///
+    /// Roturas que atrapa: un clic que borra sin preguntar; un «Cancelar»
+    /// que borra igual; un «Quitar» que no hace nada.
+    #[gpui_kit::test]
+    fn removing_a_file_asks_first(cx: &mut TestAppContext) {
+        let server = server_with_a_file();
+        server.mount(
+            Mock::given(method("DELETE"))
+                .and(path("/api/v1/tasks/t1/attachments/a1"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({ "success": true, "message": "Attachment deleted" }))),
+        );
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+        let removals = |server: &FakeServer| asked(server, "DELETE", "/api/v1/tasks/t1/attachments/a1").len();
+
+        click(window, "task-file-remove-a1", cx);
+        let (question, _) = cx.pending_prompt().expect("no preguntó antes de quitar");
+        assert!(question.contains("plan.pdf"), "no dice qué fichero: {question}");
+        cx.simulate_prompt_answer("Cancelar");
+        settle(cx);
+        assert_eq!(removals(&server), 0, "quitó el fichero aunque se canceló");
+
+        click(window, "task-file-remove-a1", cx);
+        assert_eq!(removals(&server), 0, "quitó el fichero sin esperar la respuesta");
+        cx.simulate_prompt_answer("Quitar");
+        wait_until(cx, "se pide quitarlo", |_| removals(&server) == 1);
+        stop(cx);
+    }
+
 }
