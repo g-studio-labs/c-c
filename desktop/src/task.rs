@@ -12,11 +12,11 @@
 //! Aquí está qué pestaña del hilo se mira, que es lo único propio, y la
 //! pintura. Cada cambio se le pide al core, que es quien sabe qué mandar.
 
-use cac_core::{ApiError, Choice, DueState, SheetComment, SheetFile, SheetSubtask, StatusOption, TaskSheet, PRIORITIES};
+use cac_core::{ApiError, Choice, DueState, MentionPerson, SheetComment, SheetFile, SheetSubtask, StatusOption, TaskSheet, PRIORITIES};
 use chrono::NaiveDate;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputState, Position, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
@@ -71,12 +71,24 @@ pub struct TaskView {
     /// Qué comentario se está editando, y lo que se escribe para él.
     editing_comment: Option<String>,
     comment_edit: Entity<TextareaState>,
+    /// Lo que la caja de comentar promete ahora mismo (la clave del texto):
+    /// cambia con quién vaya a leerlo.
+    comment_promise: &'static str,
     /// El foco de la página cuando no se escribe en nada: es lo que deja a
     /// Escape cerrarla.
     page_focus: FocusHandle,
     /// A qué tarea se le dio ya el foco al abrirse: una vez, o cada pintada
     /// se lo quitaría a quien escribe.
     focused_for: Option<String>,
+}
+
+/// La línea y la letra (no el byte) de esa posición del texto, que es como
+/// el campo de texto del kit nombra dónde va el cursor.
+fn position_at(text: &str, offset: usize) -> Position {
+    let before = &text[..offset.min(text.len())];
+    let line = before.matches('\n').count() as u32;
+    let character = before.rsplit('\n').next().unwrap_or("").chars().count() as u32;
+    Position::new(line, character)
 }
 
 /// Con qué tono se pinta una prioridad.
@@ -115,6 +127,7 @@ impl TaskView {
             attaching: false,
             editing_comment: None,
             comment_edit: cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 12)),
+            comment_promise: "work:task.writeComment",
             page_focus: cx.focus_handle(),
             focused_for: None,
         }
@@ -477,6 +490,70 @@ impl TaskView {
         );
     }
 
+    /// Lo escrito en la caja de comentar y dónde está el cursor.
+    fn comment_cursor(&self, cx: &App) -> (String, usize) {
+        let comment = self.comment.read(cx);
+        (comment.value().to_string(), comment.cursor())
+    }
+
+    /// Cambia el `@algo` que se escribía por la mención de esa persona y deja
+    /// el cursor detrás, en la caja, para seguir escribiendo.
+    pub(crate) fn pick_mention(&mut self, person: &MentionPerson, window: &mut Window, cx: &mut Context<Self>) {
+        let (text, cursor) = self.comment_cursor(cx);
+        let Some(edit) = cac_core::with_mention(&text, cursor, person) else { return };
+        let position = position_at(&edit.text, edit.cursor as usize);
+        self.comment.update(cx, |comment, cx| {
+            comment.set_value(edit.text, window, cx);
+            comment.set_cursor_position(position, window, cx);
+        });
+        cx.notify();
+    }
+
+    /// A quién se puede nombrar con lo que se está escribiendo. Quién, dónde
+    /// y cuándo lo decide el core; elegir a alguien escribe su mención.
+    fn render_mentions(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let (text, cursor) = self.comment_cursor(cx);
+        let offered = Backend::core(cx).tasks().offered_mentions(&text, cursor, self.internal);
+        if offered.is_empty() {
+            return None;
+        }
+        let theme = cx.theme();
+        let (border, popover, hover, muted, radius) = (theme.border, theme.popover, theme.accent, theme.muted_foreground, theme.radius);
+        Some(
+            div()
+                .id("mentions")
+                .test_support()
+                .flex()
+                .flex_col()
+                .p_1()
+                .max_h(px(220.))
+                .overflow_y_scroll()
+                .rounded(radius)
+                .border_1()
+                .border_color(border)
+                .bg(popover)
+                .children(offered.into_iter().map(|person| {
+                    let named = person.name != person.username;
+                    let picked = person.clone();
+                    div()
+                        .id(SharedString::from(format!("mention-{}", person.id)))
+                        .test_support()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .text_sm()
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(hover))
+                        .on_click(cx.listener(move |this, _, window, cx| this.pick_mention(&picked, window, cx)))
+                        .when(named, |this| this.child(person.name.clone()))
+                        .child(div().text_color(muted).child(format!("@{}", person.username)))
+                })),
+        )
+    }
+
     pub(crate) fn set_internal(&mut self, internal: bool, cx: &mut Context<Self>) {
         self.internal = internal;
         cx.notify();
@@ -499,6 +576,7 @@ impl TaskView {
             .flex_col()
             .gap_2()
             .child(div().id("comment-input").test_support().child(Textarea::new(&self.comment)))
+            .children(self.render_mentions(cx))
             .child(
                 div().flex().items_center().gap_2().child(div().flex_1()).children(audience).child(
                     Button::new("comment-send")
@@ -985,6 +1063,14 @@ impl Render for TaskView {
         let sheet = Backend::core(cx).tasks().sheet(locale(cx));
         if let Some(sheet) = &sheet {
             self.show_due(sheet, window, cx);
+            // La caja promete el `@` sólo donde nombra a alguien: en lo que
+            // lee un cliente dice quién lo lee.
+            let promise = cac_core::comment_placeholder(sheet.client_reads, self.internal);
+            if promise != self.comment_promise {
+                self.comment_promise = promise;
+                let text = tr(cx, promise);
+                self.comment.update(cx, |comment, cx| comment.set_placeholder(text, window, cx));
+            }
         }
         let theme = cx.theme();
         let (background, foreground, muted, border) = (theme.background, theme.foreground, theme.muted_foreground, theme.border);
@@ -1719,6 +1805,70 @@ mod tests {
         click(window, "subtask-tick-t2", cx);
 
         wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+        stop(cx);
+    }
+
+    /// Escribir `@` y unas letras ofrece al equipo, y elegir a alguien pone
+    /// su mención; donde lee un cliente no se ofrece a nadie y la caja no lo
+    /// promete.
+    ///
+    /// Roturas que atrapa: una caja que promete el `@` y no hace nada;
+    /// ofrecer nombrar a un compañero en lo que lee un cliente; elegir y que
+    /// quede un `@luis` suelto, que no avisa a nadie; ofrecer a quien no casa
+    /// con lo escrito; seguir ofreciendo tras elegir.
+    #[gpui_kit::test]
+    fn an_at_offers_the_team_and_choosing_writes_the_mention(cx: &mut TestAppContext) {
+        let server = server_with_choices();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        wait_until(cx, "llega el equipo", |cx| cx.update(|cx| !Backend::snapshot(cx).read(cx).task.team.is_empty()));
+        let promise = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).comment_promise);
+
+        // La tarea la lee un cliente y el comentario va para él.
+        write(window, "mira @lu", cx);
+        assert!(!on_screen(window, "mentions", cx), "ofrece nombrar a alguien en lo que lee un cliente");
+        assert_eq!(promise(cx), "work:task.writeCommentClient");
+
+        click(window, "comment-audience", cx);
+        assert!(on_screen(window, "mention-u2", cx), "en la nota interna no ofrece al equipo");
+        assert_eq!(promise(cx), "work:task.writeComment");
+
+        click(window, "mention-u2", cx);
+        assert_eq!(typed(&view, cx), "mira [@luis](cac:user/u2) ");
+        assert!(!on_screen(window, "mentions", cx), "sigue ofreciendo después de elegir");
+
+        // Se sigue escribiendo donde quedó el cursor, y quien no casa no sale.
+        cx.update_window(window, |_, window, cx| window.input("@zz", cx)).unwrap();
+        assert_eq!(typed(&view, cx), "mira [@luis](cac:user/u2) @zz");
+        assert!(!on_screen(window, "mentions", cx), "ofrece a quien no casa");
+        stop(cx);
+    }
+
+    /// Nombrar a alguien a mitad de un texto de varias líneas deja el cursor
+    /// justo detrás de la mención, y lo de después intacto.
+    ///
+    /// Roturas que atrapa: mandar el cursor al final del texto, o a otra
+    /// línea; contar bytes donde el campo cuenta letras (un acento antes y el
+    /// cursor cae una letra más allá).
+    #[gpui_kit::test]
+    fn naming_someone_mid_text_leaves_the_cursor_after_the_mention(cx: &mut TestAppContext) {
+        let server = server_with_choices();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        wait_until(cx, "llega el equipo", |cx| cx.update(|cx| !Backend::snapshot(cx).read(cx).task.team.is_empty()));
+        click(window, "comment-audience", cx);
+
+        with_view(window, &view, cx, |view, window, cx| {
+            view.comment.update(cx, |comment, cx| {
+                comment.set_value("uno\ncafé @lu fin", window, cx);
+                comment.set_cursor_position(gpui_kit::component::input::Position::new(1, 8), window, cx);
+            });
+        });
+        assert!(on_screen(window, "mention-u2", cx), "no ofrece con el cursor a mitad del texto");
+        click(window, "mention-u2", cx);
+        cx.update_window(window, |_, window, cx| window.input("X", cx)).unwrap();
+
+        assert_eq!(typed(&view, cx), "uno\ncafé [@luis](cac:user/u2) X fin");
         stop(cx);
     }
 

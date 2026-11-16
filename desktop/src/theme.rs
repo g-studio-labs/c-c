@@ -151,7 +151,20 @@ pub fn apply(mode: ThemeMode, cx: &mut App) {
 /// `rem` entero y sale más grande que el texto de alrededor.
 pub fn prose(id: impl Into<gpui_kit::SharedString>, text: impl Into<gpui_kit::SharedString>) -> gpui_kit::Div {
     use gpui_kit::{ParentElement, Styled};
-    gpui_kit::div().text_sm().child(gpui_kit::component::text::TextView::markdown(id.into(), text.into()))
+    gpui_kit::div().text_sm().child(
+        gpui_kit::component::text::TextView::markdown(id.into(), text.into()).on_link_click(|url, _, _, cx| {
+            if leads_somewhere(url) {
+                cx.open_url(url);
+            }
+        }),
+    )
+}
+
+/// Si pulsar ese enlace lleva a algún sitio. Una mención no: es el nombre de
+/// alguien escrito como enlace, y dárselo al sistema para que lo abra acaba
+/// en un aviso de «no sé abrir cac:».
+pub fn leads_somewhere(url: &str) -> bool {
+    cac_core::mentioned_user(url).is_none()
 }
 
 /// El cuerpo de texto de macOS, que es la escala que sigue la app (jose,
@@ -178,6 +191,16 @@ mod tests {
     use super::{apply, palette, selector, CSS, TOKENS};
     use gpui_kit::component::{ActiveTheme, ThemeMode};
     use gpui_kit::{rgb, Hsla, TestAppContext};
+
+    /// Un enlace de verdad se abre; una mención no va a ningún sitio.
+    ///
+    /// Roturas que atrapa: pulsar el nombre de alguien y que el sistema
+    /// avise de que no sabe abrir `cac:`; dejar de abrir los enlaces.
+    #[test]
+    fn a_mention_is_not_a_place_to_go() {
+        assert!(super::leads_somewhere("https://cac.guz-studio.dev/docs"));
+        assert!(!super::leads_somewhere("cac:user/11111111-1111-4111-8111-111111111111"));
+    }
 
     /// Los dos temas traen todos los colores que la app usa, y son los del CSS.
     ///
