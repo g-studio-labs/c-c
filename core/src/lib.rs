@@ -43,7 +43,7 @@ pub use mywork::{
 pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClick};
 pub use hue::{hue_index, HUES};
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
-pub use prefs::{is_dark, ThemePreference};
+pub use prefs::{is_dark, ThemePreference, WorkLayout};
 pub use session::Session;
 pub use tree::{doc_key, DocMark, FolderTree, ListSummary, SpacePerson, SpaceTree, Tree, TreeState};
 pub use tree_rows::{filter_tree, tree_rows, tree_rows_matching, TreeRow};

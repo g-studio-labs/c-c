@@ -15,6 +15,22 @@ use crate::Core;
 /// La clave bajo la que se guarda el tema.
 const THEME_KEY: &str = "theme";
 
+/// La clave bajo la que se guarda cómo se mira «Mi trabajo».
+const WORK_LAYOUT_KEY: &str = "work-layout";
+
+/// Cómo se mira «Mi trabajo»: las tres leen las mismas tareas ya traídas,
+/// ninguna vuelve a pedirlas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "lowercase")]
+pub enum WorkLayout {
+    /// En lista si nadie eligió: es la que cabe en cualquier ancho.
+    #[default]
+    List,
+    Board,
+    Calendar,
+}
+
 /// Qué tema quiere quien mira.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
@@ -53,6 +69,22 @@ impl Core {
     pub fn set_theme(&self, preference: ThemePreference) -> Result<(), ApiError> {
         let raw = serde_json::to_string(&preference).map_err(|error| ApiError::Storage(error.to_string()))?;
         self.inner.storage.set(THEME_KEY, &raw).map_err(ApiError::Storage)
+    }
+
+    /// Cómo se mira «Mi trabajo» en esta máquina. Algo guardado que ya no
+    /// se sabe pintar (una vista que se quitó) cuenta como no elegido.
+    pub fn work_layout(&self) -> WorkLayout {
+        self.inner
+            .storage
+            .get(WORK_LAYOUT_KEY)
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    /// Elige cómo se mira «Mi trabajo», y lo recuerda.
+    pub fn set_work_layout(&self, layout: WorkLayout) -> Result<(), ApiError> {
+        let raw = serde_json::to_string(&layout).map_err(|error| ApiError::Storage(error.to_string()))?;
+        self.inner.storage.set(WORK_LAYOUT_KEY, &raw).map_err(ApiError::Storage)
     }
 
     /// El idioma que eligió quien está dentro; `None` es «el del sistema».

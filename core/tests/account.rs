@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use cac_core::{
     check_new_password, check_sign_in, error_phrase, gate, is_dark, pick_locale, text, text_count, text_with, ApiError, Config, Core,
-    FormCheck, Gate, Locale, ThemePreference, NoListener, Session, Storage,
+    FormCheck, Gate, Locale, ThemePreference, WorkLayout, NoListener, Session, Storage,
 };
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -327,6 +327,28 @@ async fn a_server_that_returns_no_pair_gets_a_regular_refresh() {
 }
 
 // ── Preferencias ────────────────────────────────────────────────────────
+
+/// «Mi trabajo» se mira en lista hasta que alguien elige otra vista, y lo
+/// elegido se recuerda aparte del tema.
+///
+/// Roturas que atrapa: olvidar la vista al cerrar; arrancar en otra que no es
+/// la lista; guardar la vista donde el tema (elegir una pisaría el otro); que
+/// algo guardado que ya no se entiende deje la app sin vista.
+#[tokio::test]
+async fn my_work_opens_as_a_list_until_another_layout_is_chosen() {
+    let server = MockServer::start().await;
+    let (core, storage) = core_at(&server).await;
+    assert_eq!(core.work_layout(), WorkLayout::List);
+
+    core.set_theme(ThemePreference::Light).unwrap();
+    core.set_work_layout(WorkLayout::Calendar).unwrap();
+    let reopened = Core::new(Config::new(server.uri()), storage.clone(), Arc::new(NoListener)).unwrap();
+    assert_eq!(reopened.work_layout(), WorkLayout::Calendar);
+    assert_eq!(reopened.theme(), ThemePreference::Light);
+
+    storage.set("work-layout", "\"timeline\"").unwrap();
+    assert_eq!(reopened.work_layout(), WorkLayout::List);
+}
 
 /// El tema es oscuro hasta que alguien elige otro, y lo elegido se recuerda.
 ///
