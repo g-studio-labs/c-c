@@ -61,7 +61,9 @@ pub use task::{
     TaskAttachment, TaskBlocker, TaskCard, TaskComment, TaskDetail, TaskGitLink, TaskGitLinks, TaskPatch,
     TaskState, TaskStatus, TaskTag, Tasks, UserSummary,
 };
-pub use task::{attachment_fits, attachment_path, is_image, multipart, safe_file_name, size_label, MAX_ATTACHMENT_BYTES};
+pub use task::{attachment_fits, attachment_path, image_type, is_image, multipart, safe_file_name, size_label, thumbnail_size, Picture,
+    MAX_ATTACHMENT_BYTES, THUMBNAIL_MAX_HEIGHT, THUMBNAIL_MAX_WIDTH,
+};
 pub use task::{destinations, drafted, Destination, Destinations, TaskDraft};
 pub use task::{
     comment_placeholder, mention_link, mention_matches, mention_query, mentioned_user, mentions_allowed, offered_mentions, with_mention,

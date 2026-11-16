@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use cac_core::{
+    image_type, thumbnail_size, Picture,
     attachment_path, is_image, multipart, safe_file_name, size_label, ApiError, Config, Core, NoListener, Storage,
     TaskAttachment, MAX_ATTACHMENT_BYTES,
 };
@@ -318,4 +319,78 @@ async fn removing_asks_for_that_file_and_brings_the_task_again() {
 
     // Ya no contesta: wiremock da 404.
     assert!(core.tasks().remove_attachment("a1").await.is_err());
+}
+
+/// Qué imagen es se mira en el fichero, no en su nombre ni en su tipo.
+///
+/// Roturas que atrapa: darle a quien decodifica un HTML que se llama
+/// `foto.png`; no reconocer una captura que llegó sin tipo; tomar por WebP
+/// cualquier RIFF (un WAV); reventar con un fichero de dos bytes.
+#[test]
+fn what_image_it_is_is_read_from_the_file() {
+    assert_eq!(image_type(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"), Some("image/png"));
+    assert_eq!(image_type(b"\xff\xd8\xff\xe0\0\x10JFIF"), Some("image/jpeg"));
+    assert_eq!(image_type(b"GIF89a\x01\0"), Some("image/gif"));
+    assert_eq!(image_type(b"GIF87a\x01\0"), Some("image/gif"));
+    assert_eq!(image_type(b"RIFF\x24\0\0\0WEBPVP8 "), Some("image/webp"));
+    assert_eq!(image_type(b"\0\0\0\x1cftypavif\0\0"), Some("image/avif"));
+    assert_eq!(image_type(b"BM\x36\0\0\0"), Some("image/bmp"));
+
+    assert_eq!(image_type(b"<!doctype html><script>"), None);
+    assert_eq!(image_type(b"RIFF\x24\0\0\0WAVEfmt "), None);
+    assert_eq!(image_type(b"\x89PNG"), None, "media firma no es un PNG");
+    assert_eq!(image_type(b"GIF90a"), None);
+    assert_eq!(image_type(b"RI"), None);
+    assert_eq!(image_type(b""), None);
+}
+
+/// Una miniatura cabe entera en su hueco sin deformarse, y una imagen
+/// pequeña no se amplía.
+///
+/// Roturas que atrapa: una captura ancha aplastada o recortada; una
+/// alargada que se sale por abajo; un icono ampliado hasta ser una mancha;
+/// una miniatura de cero píxeles, que no se ve ni se pulsa.
+#[test]
+fn a_thumbnail_fits_its_slot_without_being_deformed() {
+    assert_eq!(thumbnail_size(1920, 1080), (256, 144));
+    assert_eq!(thumbnail_size(1080, 1920), (90, 160));
+    assert_eq!(thumbnail_size(512, 320), (256, 160));
+    assert_eq!(thumbnail_size(256, 160), (256, 160));
+    assert_eq!(thumbnail_size(16, 16), (16, 16));
+    assert_eq!(thumbnail_size(300, 100), (256, 85));
+    // Una tira finísima sigue teniendo dónde pulsarla.
+    assert_eq!(thumbnail_size(10_000, 2), (256, 1));
+    assert_eq!(thumbnail_size(2, 10_000), (1, 160));
+    assert_eq!(thumbnail_size(0, 100), (0, 0));
+}
+
+/// Una imagen de la tarea se baja como cualquier fichero suyo, y dice qué
+/// imagen es; lo que no lo es, o no vive en este servidor, no se enseña.
+///
+/// Roturas que atrapa: una miniatura pedida sin sesión (el servidor contesta
+/// 404); dar por imagen lo que llegó y no lo es; mandar la sesión a la
+/// dirección de un bucket por querer pintar una fila vieja.
+#[tokio::test]
+async fn a_picture_comes_through_the_same_door_as_any_file() {
+    let (server, core) = rig().await;
+    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    Mock::given(method("GET"))
+        .and(path(RAW))
+        .and(header("Authorization", "Bearer access"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(png.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/tasks/t1/attachments/a-comment/raw"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"<html>".to_vec()))
+        .mount(&server)
+        .await;
+
+    assert_eq!(core.tasks().picture("a1").await.unwrap(), Picture { mime: "image/png".into(), bytes: png });
+    assert_eq!(code(core.tasks().picture("a-comment").await.unwrap_err()), "not-an-image");
+
+    let before = server.received_requests().await.unwrap().len();
+    assert_eq!(code(core.tasks().picture("a-old").await.unwrap_err()), "not-an-attachment");
+    assert_eq!(code(core.tasks().picture("a-otra-tarea").await.unwrap_err()), "attachment-not-found");
+    assert_eq!(server.received_requests().await.unwrap().len(), before, "pidió algo");
 }

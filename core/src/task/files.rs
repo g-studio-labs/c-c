@@ -61,6 +61,58 @@ pub fn is_image(file: &TaskAttachment) -> bool {
     ["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp"].iter().any(|ext| name.ends_with(&format!(".{ext}")))
 }
 
+/// Qué imagen es, por cómo empieza el fichero; `None` si no es ninguna de
+/// las que se enseñan.
+///
+/// Se mira el fichero y no su tipo ni su nombre: el tipo falta en todo lo
+/// que entra por la integración, y un nombre lo pone quien sube el fichero
+/// —puede ser un cliente—. Lo que no empieza como una imagen no se le da a
+/// quien las decodifica.
+pub fn image_type(bytes: &[u8]) -> Option<&'static str> {
+    let starts = |magic: &[u8]| bytes.starts_with(magic);
+    let at = |from: usize, magic: &[u8]| bytes.get(from..from + magic.len()) == Some(magic);
+    if starts(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if starts(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if starts(b"GIF87a") || starts(b"GIF89a") {
+        Some("image/gif")
+    } else if starts(b"RIFF") && at(8, b"WEBP") {
+        Some("image/webp")
+    } else if at(4, b"ftypavif") {
+        Some("image/avif")
+    } else if starts(b"BM") {
+        Some("image/bmp")
+    } else {
+        None
+    }
+}
+
+/// El hueco de una miniatura: el de la app de siempre (`max-w-64 max-h-40`).
+pub const THUMBNAIL_MAX_WIDTH: u32 = 256;
+pub const THUMBNAIL_MAX_HEIGHT: u32 = 160;
+
+/// De qué tamaño se enseña una imagen de ese tamaño como miniatura: entera,
+/// sin deformarla, dentro del hueco; y nunca más grande de lo que es, que un
+/// icono de 16 px ampliado a 160 es una mancha.
+pub fn thumbnail_size(width: u32, height: u32) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (0, 0);
+    }
+    let (w, h) = (width as f64, height as f64);
+    let scale = (THUMBNAIL_MAX_WIDTH as f64 / w).min(THUMBNAIL_MAX_HEIGHT as f64 / h).min(1.);
+    (((w * scale).round() as u32).max(1), ((h * scale).round() as u32).max(1))
+}
+
+/// Una imagen de la tarea, bajada para enseñarla.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct Picture {
+    /// Qué imagen es (`image/png`…), mirado en el fichero.
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
+
 /// Cuánto pesa, para leer: «12 KB», «1.4 MB».
 pub fn size_label(bytes: i64) -> String {
     if bytes < 1024 * 1024 {
@@ -125,6 +177,16 @@ impl Tasks {
         let path = attachment_path(&file.url)
             .ok_or_else(|| super::refused("not-an-attachment", "That file does not live in this server"))?;
         self.core.download(path).await
+    }
+
+    /// Una imagen de la tarea abierta, para enseñarla. Viene por donde
+    /// vienen todos sus ficheros —por su id, de este servidor, con la
+    /// sesión en la cabecera—, y lo que llega y no es una imagen no se da
+    /// por una.
+    pub async fn picture(&self, attachment_id: &str) -> Result<Picture, ApiError> {
+        let bytes = self.attachment_bytes(attachment_id).await?;
+        let mime = image_type(&bytes).ok_or_else(|| super::refused("not-an-image", "That file is not an image"))?;
+        Ok(Picture { mime: mime.to_string(), bytes })
     }
 
     /// Sube un fichero a la tarea abierta y la vuelve a pedir: la sección de

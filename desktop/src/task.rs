@@ -12,6 +12,9 @@
 //! Aquí está qué pestaña del hilo se mira, que es lo único propio, y la
 //! pintura. Cada cambio se le pide al core, que es quien sabe qué mandar.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use cac_core::{ApiError, Choice, DueState, MentionMark, MentionMenu, MentionPerson, SheetComment, SheetFile, SheetSubtask, StatusOption, TaskSheet, PRIORITIES};
 use chrono::NaiveDate;
 use gpui_kit::assets::IconName as Lucide;
@@ -33,6 +36,22 @@ const RAIL_WIDTH: f32 = 288.;
 /// Por debajo de este ancho de ventana el riel va debajo de la lectura (el
 /// `lg` de la app de siempre).
 pub(crate) const STACK_BELOW: f32 = 1024.;
+
+/// Una imagen de la tarea, en lo que tarda en poder enseñarse.
+enum Thumb {
+    Loading,
+    Ready(Arc<RenderImage>),
+    /// No llegó, o no es algo que se pueda pintar: se queda con su nombre,
+    /// que sigue abriéndola.
+    Failed,
+}
+
+/// La imagen ya decodificada, o `None` si esta app no sabe pintarla (un
+/// AVIF) o el fichero está roto. Qué imagen es lo dijo el core.
+fn decoded(picture: cac_core::Picture, svg: SvgRenderer) -> Option<Arc<RenderImage>> {
+    let format = ImageFormat::from_mime_type(&picture.mime)?;
+    Image::from_bytes(format, picture.bytes).to_image_data(svg).ok()
+}
 
 /// Las dos pestañas del hilo.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,6 +104,10 @@ pub struct TaskView {
     mention_mark: Option<MentionMark>,
     /// Para que el marcado no se salga de la vista al bajar por la lista.
     mention_scroll: ScrollHandle,
+    /// Las imágenes de la tarea abierta, por el id de su adjunto. Se bajan
+    /// una vez, al verla, y se tiran al abrir otra.
+    thumbs: HashMap<String, Thumb>,
+    _task_closed: Subscription,
 }
 
 /// La línea y la letra (no el byte) de esa posición del texto, que es como
@@ -137,6 +160,14 @@ impl TaskView {
             focused_for: None,
             mention_mark: None,
             mention_scroll: ScrollHandle::new(),
+            thumbs: HashMap::new(),
+            // Cerrada la página ya no se pinta, así que no es al pintar
+            // donde se tiran sus imágenes: una captura decodificada pesa.
+            _task_closed: cx.observe(&Backend::snapshot(cx), |this, snapshot, cx| {
+                if snapshot.read(cx).task.task_id.is_none() {
+                    this.thumbs.clear();
+                }
+            }),
         }
     }
 
@@ -316,12 +347,148 @@ impl TaskView {
         .detach();
     }
 
-    /// Un fichero de la tarea: su nombre lo abre, y al lado guardar una
-    /// copia y quitarlo.
+    /// Pide las imágenes de la tarea que aún no se han pedido, y tira las
+    /// que ya no son suyas. Cuáles son imágenes lo dice el core, y por él
+    /// vienen: con la sesión, y sólo de este servidor.
+    fn show_thumbs(&mut self, sheet: &TaskSheet, window: &mut Window, cx: &mut Context<Self>) {
+        self.thumbs.retain(|id, _| sheet.attachments.iter().any(|file| file.image && file.id == *id));
+        for file in sheet.attachments.iter().filter(|file| file.image) {
+            if self.thumbs.contains_key(&file.id) {
+                continue;
+            }
+            // Apuntada ya como pedida: la siguiente pintada no la pide otra
+            // vez, ni tampoco si falla.
+            self.thumbs.insert(file.id.clone(), Thumb::Loading);
+            let id = file.id.clone();
+            let answer = Backend::ask(cx, {
+                let id = id.clone();
+                move |core| async move { core.tasks().picture(&id).await }
+            });
+            let svg = cx.svg_renderer();
+            cx.spawn_in(window, async move |this, cx| {
+                let image = match answer.await {
+                    // Decodificar una captura grande tarda: fuera del hilo
+                    // que pinta.
+                    Ok(Ok(picture)) => cx.background_spawn(async move { decoded(picture, svg) }).await,
+                    _ => None,
+                };
+                this.update(cx, |this, cx| {
+                    if let Some(thumb) = this.thumbs.get_mut(&id) {
+                        *thumb = image.map_or(Thumb::Failed, Thumb::Ready);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    /// Una imagen de la tarea, a la vista: en un reporte de cliente la
+    /// captura **es** el reporte. Pulsarla la abre; encima, al pasar el
+    /// ratón, guardar una copia y quitarla. Como en la app de siempre
+    /// (`max-h-40 max-w-64 object-contain`, la papelera arriba a la derecha
+    /// y «citada aquí» abajo a la izquierda).
+    fn render_picture(&self, file: &SheetFile, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, border, background) = (theme.muted_foreground, theme.border, theme.background);
+        let (open, save, remove) = (file.clone(), file.clone(), file.clone());
+        let group = SharedString::from(format!("task-image-{}", file.id));
+        let body = match self.thumbs.get(&file.id) {
+            Some(Thumb::Ready(image)) => {
+                let natural = image.size(0);
+                let (width, height) = cac_core::thumbnail_size(natural.width.0.max(0) as u32, natural.height.0.max(0) as u32);
+                div()
+                    .id(SharedString::from(format!("task-thumb-{}", file.id)))
+                    .test_support()
+                    .child(img(image.clone()).w(px(width as f32)).h(px(height as f32)).object_fit(ObjectFit::Contain))
+                    .into_any_element()
+            }
+            // Mientras llega, o si no se pudo pintar: su hueco con su
+            // nombre, que la abre igual.
+            other => {
+                let state = if matches!(other, Some(Thumb::Failed)) { "missing" } else { "wait" };
+                div()
+                    .id(SharedString::from(format!("task-thumb-{state}-{}", file.id)))
+                    .test_support()
+                    .w(px(160.))
+                    .h(px(96.))
+                    .p_2()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .child(Icon::new(Lucide::Image).text_color(muted))
+                    .child(div().w_full().overflow_hidden().text_ellipsis().whitespace_nowrap().text_xs().text_color(muted).child(file.name.clone()))
+                    .into_any_element()
+            }
+        };
+        div()
+            .group(group.clone())
+            .relative()
+            .flex_none()
+            .child(
+                div()
+                    .id(SharedString::from(format!("task-file-{}", file.id)))
+                    .test_support()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border)
+                    .overflow_hidden()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_file(open.id.clone(), open.name.clone(), window, cx)))
+                    .child(body),
+            )
+            .children(file.cited.then(|| {
+                div()
+                    .id(SharedString::from(format!("task-file-cited-{}", file.id)))
+                    .test_support()
+                    .absolute()
+                    .bottom_1()
+                    .left_1()
+                    .px_1()
+                    .rounded_sm()
+                    .bg(background.opacity(0.85))
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .child(tr(cx, "work:task.citedHere"))
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .top_1()
+                    .right_1()
+                    .flex()
+                    .rounded_sm()
+                    .bg(background.opacity(0.8))
+                    .opacity(0.)
+                    .group_hover(group, |style| style.opacity(1.))
+                    .child(
+                        Button::new(SharedString::from(format!("task-file-save-{}", file.id)))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(Lucide::Download))
+                            .tooltip(tr(cx, "work:task.saveFile"))
+                            .on_click(cx.listener(move |this, _, window, cx| this.save_file(save.id.clone(), save.name.clone(), window, cx))),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("task-file-remove-{}", file.id)))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(Lucide::Trash))
+                            .tooltip(tr(cx, "work:task.removeAttachment"))
+                            .on_click(cx.listener(move |this, _, window, cx| this.remove_file(remove.clone(), window, cx))),
+                    ),
+            )
+    }
+
+    /// Un fichero de la tarea que no es una imagen: su nombre lo abre, y al
+    /// lado guardar una copia y quitarlo.
     fn render_file(&self, file: &SheetFile, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (muted, primary) = (theme.muted_foreground, theme.primary);
-        let icon = if file.image { Lucide::Image } else { Lucide::Paperclip };
+        let icon = Lucide::Paperclip;
         let (open, save, remove) = (file.clone(), file.clone(), file.clone());
         div()
             .flex()
@@ -1101,7 +1268,17 @@ impl TaskView {
                                 .on_click(cx.listener(|this, _, window, cx| this.attach_files(window, cx))),
                         ),
                     )
-                    .children(sheet.attachments.iter().map(|file| self.render_file(file, cx))),
+                    // Las imágenes se ven, no se listan; lo demás, debajo.
+                    .when(sheet.attachments.iter().any(|file| file.image), |this| {
+                        this.child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .children(sheet.attachments.iter().filter(|file| file.image).map(|file| self.render_picture(file, cx))),
+                        )
+                    })
+                    .children(sheet.attachments.iter().filter(|file| !file.image).map(|file| self.render_file(file, cx))),
             )
             .child(div().flex().items_center().gap_4().border_b_1().border_color(border).children(tabs.map(
                 |(tab, id, key, count)| {
@@ -1144,6 +1321,7 @@ impl Render for TaskView {
         let sheet = Backend::core(cx).tasks().sheet(locale(cx));
         if let Some(sheet) = &sheet {
             self.show_due(sheet, window, cx);
+            self.show_thumbs(sheet, window, cx);
             // La caja promete el `@` sólo donde nombra a alguien: en lo que
             // lee un cliente dice quién lo lee.
             let promise = cac_core::comment_placeholder(sheet.client_reads, self.internal);
@@ -2437,6 +2615,147 @@ mod tests {
         cx.simulate_prompt_answer("Quitar");
         wait_until(cx, "se pide quitarlo", |_| removals(&server) == 1);
         stop(cx);
+    }
+
+    const SHOT: &str = "/api/v1/tasks/t1/attachments/a2/raw";
+
+    /// La tarea con `plan.pdf` y una captura, `captura.png`, que llegó sin
+    /// tipo (como todo lo que entra por la integración) y que la descripción
+    /// cita. El servidor contesta por la captura lo que se le diga.
+    fn server_with_a_picture(served: &[u8]) -> FakeServer {
+        let server = server_with_tasks(vec![contract_task("t1", "a", |_| {}), contract_task("t2", "a", |_| {})]);
+        let mut first = detail("t1");
+        first["attachments"] = json!([
+            { "id": "a1", "itemId": "t1", "commentId": null, "url": RAW, "fileName": "plan.pdf", "contentType": "application/pdf", "bytes": 12288 },
+            { "id": "a2", "itemId": "t1", "commentId": null, "url": SHOT, "fileName": "captura.png" },
+        ]);
+        first["task"]["description"] = json!(format!("Mira: ![]({SHOT})"));
+        let mut column = first["status"].clone();
+        column["listId"] = first["task"]["listId"].clone();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(first)));
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t2")).respond_with(ok(detail("t2"))));
+        server.mount(
+            Mock::given(method("GET")).and(path_regex("^/api/v1/task-lists/[^/]+/statuses$")).respond_with(ok(json!([column]))),
+        );
+        server.mount(Mock::given(method("GET")).and(path(SHOT)).respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(served.to_vec())));
+        server
+    }
+
+    /// Una imagen de verdad, de 600 × 200.
+    const PICTURE: &[u8] = include_bytes!("../../core/tests/fixtures/gray_600x200.png");
+
+    fn size_on_screen(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> (f32, f32) {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let bounds = window.try_find(id).expect("no está a la vista").bounds();
+            (f32::from(bounds.size.width), f32::from(bounds.size.height))
+        })
+        .unwrap()
+    }
+
+    /// Una imagen de la tarea se ve en su sección, a su tamaño de miniatura,
+    /// y se baja una sola vez y con la sesión; lo que no es imagen se sigue
+    /// listando. Pulsarla la abre, y al abrir otra tarea se tira.
+    ///
+    /// Roturas que atrapa: una captura que sale como una línea con un clip;
+    /// una miniatura deformada o a tamaño natural; pedir la imagen sin
+    /// sesión (el servidor contesta 404), o volver a pedirla en cada
+    /// pintada; pintar un PDF como imagen o perderlo de la lista; una
+    /// miniatura que no abre nada; perder de vista cuál cita la descripción;
+    /// guardarse en memoria las imágenes de todas las tareas abiertas.
+    #[gpui_kit::test]
+    fn a_picture_of_the_task_is_seen_and_not_listed(cx: &mut TestAppContext) {
+        let server = server_with_a_picture(PICTURE);
+        serving_the_file(&server);
+        let (window, view) = open_with_view(&server, cx);
+        let opened = record_opened(cx);
+        open_first_task(window, cx);
+
+        wait_until(cx, "la captura se ve", |cx| on_screen(window, "task-thumb-a2", cx));
+        // 600 × 200 en un hueco de 256 × 160: 256 × 85, con el margen de un
+        // píxel que se lleva el ajuste a la rejilla de la pantalla.
+        let (width, height) = size_on_screen(window, "task-thumb-a2", cx);
+        assert!((width - 256.).abs() < 1. && (height - 85.).abs() < 1., "la miniatura mide {width} × {height}");
+        assert!(on_screen(window, "task-file-cited-a2", cx), "no dice que la descripción la cita");
+        assert!(on_screen(window, "task-file-a1", cx), "el PDF ya no está en la lista");
+        assert!(!on_screen(window, "task-thumb-a1", cx) && !on_screen(window, "task-thumb-wait-a1", cx), "pinta el PDF como imagen");
+        settle(cx);
+        let asked_for = asked(&server, "GET", SHOT);
+        assert_eq!(asked_for.len(), 1, "pidió la imagen {} veces", asked_for.len());
+        assert_eq!(asked_for[0].headers.get("Authorization").and_then(|value| value.to_str().ok()), Some("Bearer access"));
+        assert!(asked(&server, "GET", RAW).is_empty(), "bajó el PDF sin que nadie lo abriera");
+
+        click(window, "task-file-a2", cx);
+        wait_until(cx, "se le da al sistema", |_| !opened.lock().unwrap().is_empty());
+        let path = opened.lock().unwrap()[0].clone();
+        assert_eq!(path.file_name().unwrap(), "captura.png");
+        assert_eq!(std::fs::read(&path).unwrap(), PICTURE);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        open_other_task(cx);
+        wait_until(cx, "llega la otra, sin imágenes guardadas", |cx| {
+            on_screen(window, "task-title", cx) && cx.update(|cx| view.read(cx).thumbs.is_empty())
+        });
+        assert!(!on_screen(window, "task-thumb-a2", cx));
+        stop(cx);
+    }
+
+    /// Un GIF de un píxel.
+    const GIF: &[u8] = &[
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x21, 0xf9, 0x04,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b,
+    ];
+
+    /// Una imagen que no es un PNG también se ve, se llame como se llame; y
+    /// al cerrar la página sus imágenes se tiran.
+    ///
+    /// Roturas que atrapa: decodificar todo como PNG, o según la extensión
+    /// del nombre (aquí `captura.png` es un GIF); quedarse con las capturas
+    /// en memoria con la página ya cerrada.
+    #[gpui_kit::test]
+    fn a_picture_is_painted_as_what_it_is(cx: &mut TestAppContext) {
+        let server = server_with_a_picture(GIF);
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+
+        wait_until(cx, "el GIF se ve", |cx| on_screen(window, "task-thumb-a2", cx));
+
+        click(window, "task-close", cx);
+        wait_until(cx, "se cierra y se tiran sus imágenes", |cx| {
+            !on_screen(window, "task-page", cx) && cx.update(|cx| view.read(cx).thumbs.is_empty())
+        });
+        stop(cx);
+    }
+
+    /// Una imagen que no se puede pintar se queda con su nombre, que la
+    /// sigue abriendo y dejando quitar; no es un fallo que avisar, ni se
+    /// vuelve a pedir sin parar.
+    ///
+    /// Roturas que atrapa: un hueco en blanco sin nombre ni forma de abrirlo;
+    /// darle a quien decodifica lo que no es una imagen; un aviso rojo por
+    /// una miniatura; pedir en bucle una imagen que no va a llegar.
+    #[gpui_kit::test]
+    fn a_picture_that_cannot_be_shown_keeps_its_name(cx: &mut TestAppContext) {
+        for served in [b"<!doctype html>".as_slice(), &PICTURE[..40]] {
+            let server = server_with_a_picture(served);
+            let window = open(&server, cx);
+            open_first_task(window, cx);
+
+            wait_until(cx, "se da por no pintable", |cx| on_screen(window, "task-thumb-missing-a2", cx));
+            assert!(!on_screen(window, "task-thumb-a2", cx));
+            assert!(on_screen(window, "task-file-a2", cx) && on_screen(window, "task-file-remove-a2", cx));
+            assert!(!on_screen(window, "task-problem", cx), "avisa de un fallo por una miniatura");
+            settle(cx);
+            assert_eq!(asked(&server, "GET", SHOT).len(), 1, "la pide en bucle");
+
+            click(window, "task-file-remove-a2", cx);
+            let (question, _) = cx.pending_prompt().expect("no preguntó antes de quitar");
+            assert!(question.contains("captura.png"), "no dice qué fichero: {question}");
+            cx.simulate_prompt_answer("Cancelar");
+            stop(cx);
+            cx.update_window(window, |_, window, _| window.remove_window()).unwrap();
+        }
     }
 
     const SAID: &str = "/api/v1/tasks/t1/comments/said";
