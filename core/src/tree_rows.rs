@@ -44,8 +44,12 @@ pub struct TreeRow {
     pub open_count: i64,
     /// Si lo ve un cliente: la lista o el espacio es su canal.
     pub client: bool,
-    /// El color del espacio del que cuelga.
+    /// El color que alguien le puso al espacio del que cuelga; vacío si
+    /// nadie le puso ninguno, que es lo normal.
     pub color: String,
+    /// El tono que le toca a ese espacio cuando no tiene color propio
+    /// (`hue_index` de su id): el mismo que en la app de siempre.
+    pub hue: u32,
 }
 
 /// Los ids del camino hasta el nodo acotado, él incluido. `None` si no hay
@@ -183,7 +187,7 @@ impl Walk<'_> {
         self.scope.is_some_and(|scope| scope.kind == kind && scope.id == id)
     }
 
-    fn folder(&mut self, folder: &FolderTree, depth: u32, color: &str) {
+    fn folder(&mut self, folder: &FolderTree, depth: u32, color: &str, hue: u32) {
         if !self.shows(&folder.id) {
             return;
         }
@@ -200,16 +204,17 @@ impl Walk<'_> {
             open_count: folder_open_count(folder),
             client: false,
             color: color.to_string(),
+                hue,
         });
         if open {
-            self.children(&folder.folders, &folder.lists, depth + 1, color);
+            self.children(&folder.folders, &folder.lists, depth + 1, color, hue);
         }
     }
 
     /// Las carpetas primero y las listas después, como las da el servidor.
-    fn children(&mut self, folders: &[FolderTree], lists: &[crate::tree::ListSummary], depth: u32, color: &str) {
+    fn children(&mut self, folders: &[FolderTree], lists: &[crate::tree::ListSummary], depth: u32, color: &str, hue: u32) {
         for folder in folders {
-            self.folder(folder, depth, color);
+            self.folder(folder, depth, color, hue);
         }
         for list in lists {
             if !self.shows(&list.id) {
@@ -227,6 +232,7 @@ impl Walk<'_> {
                 open_count: list.open_count,
                 client: list.project_id.is_some(),
                 color: color.to_string(),
+                hue,
             });
         }
     }
@@ -266,9 +272,10 @@ pub fn tree_rows_matching(state: &TreeState, scope: Option<&WorkScope>, query: &
                 + space.folders.iter().map(folder_open_count).sum::<i64>(),
             client: space.project_id.is_some(),
             color: space.color.clone(),
+            hue: crate::hue::hue_index(&space.id),
         });
         if open {
-            walk.children(&space.folders, &space.lists, 1, &space.color);
+            walk.children(&space.folders, &space.lists, 1, &space.color, crate::hue::hue_index(&space.id));
         }
     }
     walk.rows

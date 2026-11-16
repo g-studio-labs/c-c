@@ -24,6 +24,7 @@ pub mod task;
 pub mod texts;
 pub mod transport;
 pub mod tree;
+pub mod hue;
 pub mod tree_rows;
 pub mod workspace;
 
@@ -40,6 +41,7 @@ pub use mywork::{
     ScopeKind, TaskFilter, WorkGroup, WorkLens, WorkRow, WorkScope, NOBODY, PRIORITIES,
 };
 pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClick};
+pub use hue::{hue_index, HUES};
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
 pub use prefs::{is_dark, ThemePreference};
 pub use session::Session;

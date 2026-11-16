@@ -397,6 +397,8 @@ async fn with_nothing_chosen_spaces_are_open_and_folders_closed() {
     assert!(rows[0].expandable && rows[1].expandable && !rows[2].expandable);
     assert!(rows[2].client && !rows[0].client, "la lista es el canal de un cliente");
     assert_eq!(rows[2].color, "#20D9E8");
+    // Y el tono de su espacio, por si no tuviera color propio: el de «a».
+    assert!(rows.iter().all(|row| row.hue == cac_core::hue_index("a")), "cada fila con el tono de su espacio");
 }
 
 /// Con «Mi trabajo» acotado a un nodo, va abierta su rama y sólo ésa.
