@@ -18,7 +18,7 @@ use serde_json::{json, Map, Value};
 
 pub use edit::{assignee_choices, shown_name, tag_choices, Choice};
 pub use new::{destinations, drafted, Destination, Destinations, TaskDraft};
-pub use files::{attachment_path, is_image, multipart, safe_file_name, size_label, MAX_ATTACHMENT_BYTES};
+pub use files::{attachment_fits, attachment_path, is_image, multipart, safe_file_name, size_label, MAX_ATTACHMENT_BYTES};
 pub use flow::{can_transition, canonical_priority, canonical_status, flow_for, Flow};
 pub use sheet::{client_reads, is_agent_note, task_sheet, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};
 pub use types::{

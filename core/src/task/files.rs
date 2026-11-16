@@ -17,6 +17,15 @@ use crate::ApiError;
 /// treinta megas que va a rechazar.
 pub const MAX_ATTACHMENT_BYTES: usize = 30 << 20;
 
+/// Si un fichero de ese tamaño cabe. Quien lo lee del disco pregunta antes
+/// de leerlo: cinco gigas no se cargan en memoria para que digan que no.
+pub fn attachment_fits(bytes: u64) -> Result<(), ApiError> {
+    if bytes > MAX_ATTACHMENT_BYTES as u64 {
+        return Err(super::refused("too-large", "File exceeds 30 MB"));
+    }
+    Ok(())
+}
+
 /// Lo que se le pide al servidor por un adjunto, o `None` si su dirección no
 /// es una de las nuestras.
 ///
@@ -123,9 +132,7 @@ impl Tasks {
     /// parece haber fallado.
     pub async fn attach(&self, file_name: &str, bytes: Vec<u8>) -> Result<(), ApiError> {
         let task_id = self.open_id()?;
-        if bytes.len() > MAX_ATTACHMENT_BYTES {
-            return Err(super::refused("too-large", "File exceeds 30 MB"));
-        }
+        attachment_fits(bytes.len() as u64)?;
         let (content_type, body) = multipart(file_name, &bytes);
         self.core.upload(&format!("/api/v1/tasks/{task_id}/attachments"), &content_type, body).await?;
         self.refresh().await;
