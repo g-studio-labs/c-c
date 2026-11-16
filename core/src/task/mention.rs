@@ -117,6 +117,80 @@ pub fn offered_mentions(team: &[UserSummary], text: &str, cursor: usize, allowed
     mention_query(text, cursor).map(|at| mention_matches(team, &at.query)).unwrap_or_default()
 }
 
+/// La lista de a quién nombrar, abierta: quién sale y quién va marcado.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct MentionMenu {
+    /// Dónde está el `@` del que sale, en bytes: es lo que la distingue de
+    /// la lista de otro `@`.
+    pub start: u32,
+    pub people: Vec<MentionPerson>,
+    /// Cuál va marcado: el que Enter elige.
+    pub highlighted: u32,
+}
+
+/// Lo que la pantalla recuerda de la lista entre una tecla y la siguiente.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct MentionMark {
+    /// De qué `@` es lo recordado. Con otro `@` no cuenta.
+    pub start: u32,
+    pub highlighted: u32,
+    /// Se cerró con Escape: ese `@` ya no ofrece a nadie, se escriba lo que
+    /// se escriba detrás. Quien la cerró quería escribir un `@`, no nombrar.
+    pub closed: bool,
+}
+
+/// La lista que se enseña con ese texto y el cursor ahí, o `None` si no hay
+/// a quién ofrecer o se cerró para ese `@`.
+///
+/// El marcado se queda donde estaba mientras sea el mismo `@`; si al seguir
+/// escribiendo quedan menos, baja al último. Un `@` nuevo empieza por el
+/// primero: es como lo hace el menú de la app de siempre (`Popup.update`).
+pub fn mention_menu(team: &[UserSummary], text: &str, cursor: usize, allowed: bool, mark: Option<&MentionMark>) -> Option<MentionMenu> {
+    if !allowed {
+        return None;
+    }
+    let at = mention_query(text, cursor)?;
+    let mark = mark.filter(|mark| mark.start == at.start);
+    if mark.is_some_and(|mark| mark.closed) {
+        return None;
+    }
+    let people = mention_matches(team, &at.query);
+    if people.is_empty() {
+        return None;
+    }
+    let last = people.len() as u32 - 1;
+    let highlighted = mark.map_or(0, |mark| mark.highlighted.min(last));
+    Some(MentionMenu { start: at.start, people, highlighted })
+}
+
+/// Lo recordado, mientras se siga escribiendo ese `@`. En cuanto deja de
+/// escribirse (se borró, o el cursor se fue) se olvida: un `@` que se borra y
+/// se vuelve a poner en el mismo sitio es otro, y vuelve a ofrecer.
+pub fn mention_mark_kept(text: &str, cursor: usize, mark: Option<MentionMark>) -> Option<MentionMark> {
+    let at = mention_query(text, cursor)?;
+    mark.filter(|mark| mark.start == at.start)
+}
+
+/// La lista con el marcado movido tantos puestos (abajo, positivo). Da la
+/// vuelta: del último se pasa al primero y del primero al último.
+pub fn mention_moved(menu: &MentionMenu, by: i32) -> MentionMark {
+    let count = menu.people.len().max(1) as i64;
+    let highlighted = (menu.highlighted as i64 + by as i64).rem_euclid(count) as u32;
+    MentionMark { start: menu.start, highlighted, closed: false }
+}
+
+/// La lista cerrada sin elegir a nadie.
+pub fn mention_closed(menu: &MentionMenu) -> MentionMark {
+    MentionMark { start: menu.start, highlighted: menu.highlighted, closed: true }
+}
+
+/// A quién elige Enter.
+pub fn mention_highlighted(menu: &MentionMenu) -> Option<&MentionPerson> {
+    menu.people.get(menu.highlighted as usize)
+}
+
 /// La mención tal como se guarda. Se menciona por el usuario, no por el
 /// nombre: es el que identifica.
 pub fn mention_link(person: &MentionPerson) -> String {
@@ -153,5 +227,11 @@ impl Tasks {
     /// abierta: del equipo de su organización.
     pub fn offered_mentions(&self, text: &str, cursor: usize, internal: bool) -> Vec<MentionPerson> {
         offered_mentions(&self.state().team, text, cursor, self.mentions_allowed(internal))
+    }
+
+    /// La lista de a quién nombrar en el comentario que se escribe en la
+    /// tarea abierta, con lo que la pantalla recuerda de ella.
+    pub fn mention_menu(&self, text: &str, cursor: usize, internal: bool, mark: Option<&MentionMark>) -> Option<MentionMenu> {
+        mention_menu(&self.state().team, text, cursor, self.mentions_allowed(internal), mark)
     }
 }

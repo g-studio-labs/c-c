@@ -1,6 +1,7 @@
 //! Nombrar a alguien con `@`: dónde se ofrece, a quién, y qué se escribe.
 
 use cac_core::{
+    mention_closed, mention_highlighted, mention_mark_kept, mention_menu, mention_moved, MentionMark,
     comment_placeholder, mention_link, mention_matches, mention_query, mentioned_user, mentions_allowed, offered_mentions, with_mention,
     MentionPerson, MentionQuery, UserSummary,
 };
@@ -143,4 +144,99 @@ fn a_mention_is_told_from_any_other_link() {
     assert_eq!(mentioned_user(&format!("{href}/más")), None);
     assert_eq!(mentioned_user(&format!("https://x/?a={href}")), None);
     assert_eq!(mentioned_user(&format!("cac:user/{}", "z".repeat(36))), None);
+}
+
+fn six() -> Vec<UserSummary> {
+    (0..6).map(|n| UserSummary { id: format!("id-{n}"), username: format!("user{n}"), name: None }).collect()
+}
+
+/// Con la lista abierta, las flechas mueven el marcado y dan la vuelta, y
+/// Enter elige al marcado.
+///
+/// Roturas que atrapa: empezar marcando a otro que el primero; una flecha
+/// que no mueve, o que mueve al revés; quedarse clavado en el último (o en
+/// el primero) en vez de dar la vuelta; que Enter elija al primero aunque
+/// se haya bajado.
+#[test]
+fn the_arrows_move_the_highlight_and_wrap_around() {
+    let text = "hola @user";
+    let menu = mention_menu(&six(), text, text.len(), true, None).unwrap();
+    assert_eq!((menu.start, menu.people.len(), menu.highlighted), (5, 6, 0));
+    assert_eq!(mention_highlighted(&menu).unwrap().username, "user0");
+
+    let down = mention_moved(&menu, 1);
+    assert_eq!(down, MentionMark { start: 5, highlighted: 1, closed: false });
+    let menu = mention_menu(&six(), text, text.len(), true, Some(&down)).unwrap();
+    assert_eq!(mention_highlighted(&menu).unwrap().username, "user1");
+    assert_eq!(mention_moved(&menu, -1).highlighted, 0);
+
+    // Del primero hacia arriba, el último; del último hacia abajo, el primero.
+    let first = mention_menu(&six(), text, text.len(), true, None).unwrap();
+    let up = mention_moved(&first, -1);
+    assert_eq!(up.highlighted, 5);
+    let last = mention_menu(&six(), text, text.len(), true, Some(&up)).unwrap();
+    assert_eq!(mention_highlighted(&last).unwrap().username, "user5");
+    assert_eq!(mention_moved(&last, 1).highlighted, 0);
+}
+
+/// El marcado sigue al `@` que se escribe: si quedan menos, baja al último
+/// que queda, y con otro `@` se empieza por el primero.
+///
+/// Roturas que atrapa: un marcado fuera de la lista tras seguir escribiendo
+/// (Enter no elige a nadie); volver al primero con cada letra aunque el
+/// marcado siga a la vista; heredar en un `@` nuevo el marcado del anterior.
+#[test]
+fn the_highlight_follows_the_at_being_written() {
+    let team = team();
+    let both = mention_menu(&team, "@", 1, true, None).unwrap();
+    let second = mention_moved(&both, 1);
+    assert_eq!(mention_highlighted(&mention_menu(&team, "@", 1, true, Some(&second)).unwrap()).unwrap().username, "luis");
+
+    // Se sigue escribiendo y sólo queda Ana: el marcado baja a ella.
+    let narrowed = mention_menu(&team, "@an", 3, true, Some(&second)).unwrap();
+    assert_eq!((narrowed.people.len(), narrowed.highlighted), (1, 0));
+    // Y si siguen los dos, se queda donde estaba.
+    let kept = mention_menu(&six(), "@us", 3, true, Some(&MentionMark { start: 0, highlighted: 3, closed: false })).unwrap();
+    assert_eq!(kept.highlighted, 3);
+
+    // Otro `@`, más adelante: lo recordado era del primero.
+    let other = mention_menu(&team, "@ana y @", 8, true, Some(&second)).unwrap();
+    assert_eq!((other.start, other.highlighted), (7, 0));
+}
+
+/// Escape cierra la lista de ese `@` y no vuelve a salir aunque se siga
+/// escribiendo detrás; otro `@` vuelve a ofrecer.
+///
+/// Roturas que atrapa: un Escape que no cierra; una lista que reaparece con
+/// la letra siguiente a quien quería escribir un `@` y no nombrar; que
+/// cerrarla una vez deje sin ofrecer a nadie en el resto del comentario.
+#[test]
+fn escape_closes_the_list_for_that_at_only() {
+    let team = team();
+    let menu = mention_menu(&team, "@", 1, true, None).unwrap();
+    let closed = mention_closed(&menu);
+    assert!(closed.closed && closed.start == 0);
+
+    assert_eq!(mention_menu(&team, "@", 1, true, Some(&closed)), None);
+    assert_eq!(mention_menu(&team, "@lu", 3, true, Some(&closed)), None);
+    assert!(mention_menu(&team, "@lu y @", 7, true, Some(&closed)).is_some());
+
+    // Mientras se escribe ese `@` se recuerda; borrado, se olvida, y el que
+    // se ponga después en el mismo sitio vuelve a ofrecer.
+    assert_eq!(mention_mark_kept("@lu", 3, Some(closed.clone())), Some(closed.clone()));
+    assert_eq!(mention_mark_kept("", 0, Some(closed.clone())), None);
+    assert_eq!(mention_mark_kept("@lu y @", 7, Some(closed)), None);
+}
+
+/// Sin a quién ofrecer no hay lista, tampoco donde lee un cliente.
+///
+/// Roturas que atrapa: una lista vacía abierta, que se queda con las flechas
+/// y con Enter de quien escribe; ofrecer a un compañero en lo que lee un
+/// cliente por pedirlo con el teclado.
+#[test]
+fn there_is_no_list_without_someone_to_offer() {
+    assert_eq!(mention_menu(&team(), "@zzz", 4, true, None), None);
+    assert_eq!(mention_menu(&team(), "hola", 4, true, None), None);
+    assert_eq!(mention_menu(&team(), "@an", 3, false, None), None);
+    assert!(mention_menu(&team(), "@an", 3, true, None).is_some());
 }

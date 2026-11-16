@@ -65,7 +65,7 @@ pub use task::{attachment_fits, attachment_path, is_image, multipart, safe_file_
 pub use task::{destinations, drafted, Destination, Destinations, TaskDraft};
 pub use task::{
     comment_placeholder, mention_link, mention_matches, mention_query, mentioned_user, mentions_allowed, offered_mentions, with_mention,
-    MentionEdit, MentionPerson, MentionQuery,
+    mention_closed, mention_highlighted, mention_mark_kept, mention_menu, mention_moved, MentionEdit, MentionMark, MentionMenu, MentionPerson, MentionQuery,
 };
 pub use task::{assignee_choices, shown_name, tag_choices, Choice};
 pub use task::{can_change_comment, is_agent_note, task_sheet, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};

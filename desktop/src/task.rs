@@ -12,11 +12,11 @@
 //! Aquí está qué pestaña del hilo se mira, que es lo único propio, y la
 //! pintura. Cada cambio se le pide al core, que es quien sabe qué mandar.
 
-use cac_core::{ApiError, Choice, DueState, MentionPerson, SheetComment, SheetFile, SheetSubtask, StatusOption, TaskSheet, PRIORITIES};
+use cac_core::{ApiError, Choice, DueState, MentionMark, MentionMenu, MentionPerson, SheetComment, SheetFile, SheetSubtask, StatusOption, TaskSheet, PRIORITIES};
 use chrono::NaiveDate;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState, Position, Textarea, TextareaState};
+use gpui_kit::component::input::{Enter, Escape, IndentInline, Input, InputState, MoveDown, MoveUp, Position, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
@@ -80,6 +80,11 @@ pub struct TaskView {
     /// A qué tarea se le dio ya el foco al abrirse: una vez, o cada pintada
     /// se lo quitaría a quien escribe.
     focused_for: Option<String>,
+    /// Lo que se recuerda de la lista de a quién nombrar: a quién se bajó
+    /// con las flechas, o que se cerró. Qué significa lo dice el core.
+    mention_mark: Option<MentionMark>,
+    /// Para que el marcado no se salga de la vista al bajar por la lista.
+    mention_scroll: ScrollHandle,
 }
 
 /// La línea y la letra (no el byte) de esa posición del texto, que es como
@@ -130,6 +135,8 @@ impl TaskView {
             comment_promise: "work:task.writeComment",
             page_focus: cx.focus_handle(),
             focused_for: None,
+            mention_mark: None,
+            mention_scroll: ScrollHandle::new(),
         }
     }
 
@@ -509,14 +516,47 @@ impl TaskView {
         cx.notify();
     }
 
-    /// A quién se puede nombrar con lo que se está escribiendo. Quién, dónde
-    /// y cuándo lo decide el core; elegir a alguien escribe su mención.
-    fn render_mentions(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    /// La lista de a quién nombrar con lo que se está escribiendo, si hay
+    /// alguna abierta. Quién sale, quién va marcado y cuándo se cierra lo
+    /// decide el core.
+    fn mention_menu(&self, cx: &App) -> Option<MentionMenu> {
         let (text, cursor) = self.comment_cursor(cx);
-        let offered = Backend::core(cx).tasks().offered_mentions(&text, cursor, self.internal);
-        if offered.is_empty() {
-            return None;
-        }
+        Backend::core(cx).tasks().mention_menu(&text, cursor, self.internal, self.mention_mark.as_ref())
+    }
+
+    /// Mueve el marcado de la lista. `false` si no hay lista: la tecla es
+    /// entonces de la caja.
+    pub(crate) fn move_mention(&mut self, by: i32, cx: &mut Context<Self>) -> bool {
+        let Some(menu) = self.mention_menu(cx) else { return false };
+        let mark = cac_core::mention_moved(&menu, by);
+        self.mention_scroll.scroll_to_item(mark.highlighted as usize);
+        self.mention_mark = Some(mark);
+        cx.notify();
+        true
+    }
+
+    /// Nombra a quien va marcado. `false` si no hay lista.
+    pub(crate) fn pick_highlighted_mention(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(menu) = self.mention_menu(cx) else { return false };
+        let Some(person) = cac_core::mention_highlighted(&menu).cloned() else { return false };
+        self.pick_mention(&person, window, cx);
+        true
+    }
+
+    /// Cierra la lista sin nombrar a nadie. `false` si no hay lista.
+    pub(crate) fn close_mentions(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(menu) = self.mention_menu(cx) else { return false };
+        self.mention_mark = Some(cac_core::mention_closed(&menu));
+        cx.notify();
+        true
+    }
+
+    /// A quién se puede nombrar con lo que se está escribiendo; elegir a
+    /// alguien escribe su mención.
+    fn render_mentions(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let menu = self.mention_menu(cx)?;
+        let highlighted = menu.highlighted as usize;
+        let offered = menu.people;
         let theme = cx.theme();
         let (border, popover, hover, muted, radius) = (theme.border, theme.popover, theme.accent, theme.muted_foreground, theme.radius);
         Some(
@@ -528,16 +568,21 @@ impl TaskView {
                 .p_1()
                 .max_h(px(220.))
                 .overflow_y_scroll()
+                .track_scroll(&self.mention_scroll)
                 .rounded(radius)
                 .border_1()
                 .border_color(border)
                 .bg(popover)
-                .children(offered.into_iter().map(|person| {
+                .children(offered.into_iter().enumerate().map(|(at, person)| {
                     let named = person.name != person.username;
                     let picked = person.clone();
                     div()
                         .id(SharedString::from(format!("mention-{}", person.id)))
                         .test_support()
+                        // El marcado, con el fondo del que se señala con el
+                        // ratón (`bg-accent` en la app de siempre): es a
+                        // quien Enter va a nombrar.
+                        .when(at == highlighted, |this| this.bg(hover))
                         .flex()
                         .items_center()
                         .gap_2()
@@ -575,7 +620,43 @@ impl TaskView {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().id("comment-input").test_support().child(Textarea::new(&self.comment)))
+            .child(
+                div()
+                    .id("comment-input")
+                    .test_support()
+                    // Con la lista abierta, las flechas, Enter, Tab y Escape
+                    // son suyas. Se cogen antes de que lleguen a la caja, y
+                    // sólo entonces: sin lista siguen siendo de quien escribe.
+                    .when(self.mention_menu(cx).is_some(), |this| {
+                        this.capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
+                            if this.move_mention(-1, cx) {
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
+                            if this.move_mention(1, cx) {
+                                cx.stop_propagation();
+                            }
+                        }))
+                        // Mayúsculas+Enter sigue siendo un salto de línea.
+                        .capture_action(cx.listener(|this, enter: &Enter, window, cx| {
+                            if !enter.shift && !enter.secondary && this.pick_highlighted_mention(window, cx) {
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
+                            if this.pick_highlighted_mention(window, cx) {
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .capture_action(cx.listener(|this, _: &Escape, _, cx| {
+                            if this.close_mentions(cx) {
+                                cx.stop_propagation();
+                            }
+                        }))
+                    })
+                    .child(Textarea::new(&self.comment)),
+            )
             .children(self.render_mentions(cx))
             .child(
                 div().flex().items_center().gap_2().child(div().flex_1()).children(audience).child(
@@ -1070,6 +1151,12 @@ impl Render for TaskView {
                 self.comment_promise = promise;
                 let text = tr(cx, promise);
                 self.comment.update(cx, |comment, cx| comment.set_placeholder(text, window, cx));
+            }
+            // Lo recordado de la lista es de un `@`: cuando deja de
+            // escribirse, se olvida.
+            if self.mention_mark.is_some() {
+                let (text, cursor) = self.comment_cursor(cx);
+                self.mention_mark = cac_core::mention_mark_kept(&text, cursor, self.mention_mark.take());
             }
         }
         let theme = cx.theme();
@@ -1869,6 +1956,142 @@ mod tests {
         cx.update_window(window, |_, window, cx| window.input("X", cx)).unwrap();
 
         assert_eq!(typed(&view, cx), "uno\ncafé [@luis](cac:user/u2) X fin");
+        stop(cx);
+    }
+
+    /// El servidor de siempre con un equipo de tantos (`p0`, `p1`…), y la
+    /// tarea abierta en una nota interna, que es donde se nombra.
+    fn open_with_a_team(people: usize, cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle, Entity<TaskView>) {
+        let server = server();
+        let team: Vec<serde_json::Value> = (0..people).map(|n| json!({ "id": format!("p{n}"), "username": format!("persona{n}") })).collect();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/users/search")).respond_with(ok(json!(team))));
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        wait_until(cx, "llega el equipo", |cx| cx.update(|cx| !Backend::snapshot(cx).read(cx).task.team.is_empty()));
+        click(window, "comment-audience", cx);
+        (server, window, view)
+    }
+
+    fn press(window: AnyWindowHandle, key: &str, cx: &mut TestAppContext) {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press(key, cx);
+        })
+        .unwrap();
+    }
+
+    fn type_more(window: AnyWindowHandle, text: &str, cx: &mut TestAppContext) {
+        cx.update_window(window, |_, window, cx| window.input(text, cx)).unwrap();
+    }
+
+    /// Con la lista abierta, las flechas eligen a quién y Enter o Tab lo
+    /// nombran; sin lista, esas teclas siguen siendo de la caja.
+    ///
+    /// Roturas que atrapa: unas flechas que mueven el cursor del texto y no
+    /// el marcado; un Enter que parte la línea (o un Tab que sangra) en vez
+    /// de nombrar; nombrar siempre al primero; que un `@` nuevo herede el
+    /// marcado del anterior; quedarse con Enter cuando no hay lista, y no
+    /// poder partir una línea; que Mayúsculas+Enter nombre en vez de partirla.
+    #[gpui_kit::test]
+    fn the_keyboard_picks_who_to_name(cx: &mut TestAppContext) {
+        let (_server, window, view) = open_with_a_team(3, cx);
+
+        write(window, "@", cx);
+        assert!(on_screen(window, "mentions", cx));
+        press(window, "down", cx);
+        press(window, "enter", cx);
+        assert_eq!(typed(&view, cx), "[@persona1](cac:user/p1) ");
+        assert!(!on_screen(window, "mentions", cx), "sigue ofreciendo después de elegir");
+
+        // Otro `@`: empieza por el primero, y hacia arriba da la vuelta.
+        type_more(window, "@", cx);
+        press(window, "up", cx);
+        press(window, "tab", cx);
+        assert_eq!(typed(&view, cx), "[@persona1](cac:user/p1) [@persona2](cac:user/p2) ");
+
+        // Sin lista, Enter es de quien escribe.
+        press(window, "enter", cx);
+        type_more(window, "fin", cx);
+        assert_eq!(typed(&view, cx), "[@persona1](cac:user/p1) [@persona2](cac:user/p2) \nfin");
+
+        // Y con la lista abierta, Mayúsculas+Enter sigue partiendo la línea.
+        type_more(window, " @", cx);
+        assert!(on_screen(window, "mentions", cx));
+        press(window, "shift-enter", cx);
+        assert!(typed(&view, cx).ends_with("fin @\n"), "Mayúsculas+Enter nombró a alguien: {:?}", typed(&view, cx));
+        stop(cx);
+    }
+
+    /// Escape cierra la lista y deja la página y lo escrito como estaban; la
+    /// lista no vuelve con la letra siguiente, y sí con otro `@`.
+    ///
+    /// Roturas que atrapa: un Escape que no cierra la lista; que se lleve la
+    /// página entera con el comentario a medias; una lista que reaparece al
+    /// seguir escribiendo; no volver a ofrecer a nadie en ese comentario; que
+    /// un `@` borrado y vuelto a escribir siga cerrado.
+    #[gpui_kit::test]
+    fn escape_closes_the_list_and_not_the_page(cx: &mut TestAppContext) {
+        let (_server, window, view) = open_with_a_team(3, cx);
+        let open_task = |cx: &mut TestAppContext| cx.update(|cx| Backend::snapshot(cx).read(cx).task.task_id.clone());
+
+        write(window, "@per", cx);
+        assert!(on_screen(window, "mentions", cx));
+        press(window, "escape", cx);
+        settle(cx);
+        assert!(!on_screen(window, "mentions", cx), "Escape no cerró la lista");
+        assert_eq!(open_task(cx).as_deref(), Some("t1"), "Escape cerró la página con la lista abierta");
+        assert_eq!(typed(&view, cx), "@per");
+
+        type_more(window, "s", cx);
+        assert!(!on_screen(window, "mentions", cx), "la lista vuelve con la letra siguiente");
+        type_more(window, " @", cx);
+        assert!(on_screen(window, "mentions", cx), "otro @ ya no ofrece a nadie");
+        // Con las flechas de por medio también se cierra, y lo marcado no se nombra.
+        press(window, "down", cx);
+        press(window, "escape", cx);
+        assert!(!on_screen(window, "mentions", cx));
+        assert_eq!(typed(&view, cx), "@pers @");
+
+        // Borrado ese `@` y vuelto a escribir en el mismo sitio, es otro.
+        press(window, "backspace", cx);
+        assert_eq!(typed(&view, cx), "@pers ");
+        on_screen(window, "mentions", cx);
+        type_more(window, "@", cx);
+        assert!(on_screen(window, "mentions", cx), "un @ vuelto a escribir sigue cerrado");
+        stop(cx);
+    }
+
+    /// Quien va marcado se distingue, y bajando por una lista larga sigue a
+    /// la vista.
+    ///
+    /// Roturas que atrapa: bajar con las flechas a alguien que queda fuera
+    /// de la lista, y nombrar a ciegas; un marcado que no se mueve de la
+    /// primera fila.
+    #[gpui_kit::test]
+    fn the_highlighted_person_stays_in_view(cx: &mut TestAppContext) {
+        let (_server, window, view) = open_with_a_team(20, cx);
+        let inside = |cx: &mut TestAppContext, row: &str| {
+            let row = gpui_kit::SharedString::from(row.to_string());
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                let (list, row) = (window.try_find("mentions").unwrap().bounds(), window.try_find(row).unwrap().bounds());
+                row.top() >= list.top() && row.bottom() <= list.bottom()
+            })
+            .unwrap()
+        };
+        let highlighted = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).mention_menu(cx).map(|menu| menu.highlighted));
+
+        write(window, "@", cx);
+        assert!(inside(cx, "mention-p0") && !inside(cx, "mention-p19"), "la lista no es más larga que su caja: la prueba no prueba nada");
+        for _ in 0..19 {
+            press(window, "down", cx);
+        }
+        assert_eq!(highlighted(cx), Some(19));
+        assert!(inside(cx, "mention-p19"), "el marcado quedó fuera de la vista");
+
+        press(window, "down", cx);
+        assert_eq!(highlighted(cx), Some(0));
+        assert!(inside(cx, "mention-p0"), "al dar la vuelta, el primero quedó fuera de la vista");
         stop(cx);
     }
 

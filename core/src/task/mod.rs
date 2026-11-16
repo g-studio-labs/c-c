@@ -20,7 +20,7 @@ use serde_json::{json, Map, Value};
 pub use edit::{assignee_choices, shown_name, tag_choices, Choice};
 pub use mention::{
     comment_placeholder, mention_link, mention_matches, mention_query, mentioned_user, mentions_allowed, offered_mentions, with_mention,
-    MentionEdit, MentionPerson, MentionQuery,
+    mention_closed, mention_highlighted, mention_mark_kept, mention_menu, mention_moved, MentionEdit, MentionMark, MentionMenu, MentionPerson, MentionQuery,
 };
 pub use new::{destinations, drafted, Destination, Destinations, TaskDraft};
 pub use files::{attachment_fits, attachment_path, is_image, multipart, safe_file_name, size_label, MAX_ATTACHMENT_BYTES};
