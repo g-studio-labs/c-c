@@ -5,7 +5,8 @@
 //! cada lente lo decide el core. Aquí está el buscador, que es lo único que
 //! esta pantalla tiene propio, y la pintura.
 
-use cac_core::{DueState, ScopeKind, TaskFilter, WorkGroup, WorkLens, WorkRow, NOBODY};
+use cac_core::{DueState, ScopeKind, TaskFilter, WorkGroup, WorkLayout, WorkLens, WorkRow, NOBODY};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
@@ -27,6 +28,38 @@ const LENSES: [(WorkLens, &str); 5] = [
     (WorkLens::All, "all"),
 ];
 
+/// La prioridad de una tarea, en su color; sin prioridad no se pinta nada.
+pub(crate) fn priority_chip(priority: &str, cx: &App) -> Option<Div> {
+    let theme = cx.theme();
+    let tone = match priority {
+        "none" | "" => return None,
+        "urgent" => theme.danger,
+        "high" => theme.warning,
+        "normal" => theme.info,
+        _ => theme.muted_foreground,
+    };
+    Some(div().flex_none().px_2().rounded_md().bg(tone.opacity(0.15)).text_xs().text_color(tone).child(tr(cx, &format!("work:taskPriority.{priority}"))))
+}
+
+/// De qué color va un vencimiento y si pesa: rojo si ya pasó, ámbar si es
+/// hoy o mañana; hoy, además, con peso.
+pub(crate) fn due_tone(state: DueState, cx: &App) -> (Hsla, bool) {
+    let theme = cx.theme();
+    match state {
+        DueState::Overdue | DueState::Yesterday => (theme.danger, true),
+        DueState::Today => (theme.warning, true),
+        DueState::Tomorrow => (theme.warning, false),
+        DueState::Later => (theme.muted_foreground, false),
+    }
+}
+
+/// Las vistas, con el nombre de su texto y su icono.
+const LAYOUTS: [(WorkLayout, &str, Lucide); 3] = [
+    (WorkLayout::List, "list", Lucide::List),
+    (WorkLayout::Board, "board", Lucide::SquareKanban),
+    (WorkLayout::Calendar, "calendar", Lucide::CalendarDays),
+];
+
 pub struct MyWorkView {
     search: Entity<InputState>,
     /// Lo elegido en los desplegables; vacío es «cualquiera».
@@ -35,6 +68,10 @@ pub struct MyWorkView {
     /// La fila de «tarea nueva», mientras está abierta.
     pub(crate) new_task: Option<Entity<NewTaskRow>>,
     _new_task_closed: Option<Subscription>,
+    /// La tarjeta del tablero que va en el aire, por su id.
+    pub(crate) lifted: Option<String>,
+    /// Lo que el servidor contestó al rechazar un movimiento del tablero.
+    pub(crate) board_error: Option<String>,
 }
 
 impl MyWorkView {
@@ -46,6 +83,8 @@ impl MyWorkView {
             priority: String::new(),
             new_task: None,
             _new_task_closed: None,
+            lifted: None,
+            board_error: None,
         }
     }
 
@@ -257,37 +296,45 @@ impl MyWorkView {
                     .cursor_pointer()
                     .on_click(move |_, _, cx| Self::show_lens(lens, cx))
                     .child(tr(cx, &format!("work:myWork.lens.{name}")))
-            })).child(div().flex_1()).child(filters))
+            })).child(div().flex_1()).child(filters).child(Self::render_layouts(cx)))
+    }
+
+    /// Las tres maneras de mirar lo mismo, como iconos al final de la fila
+    /// de lentes (`VIEWS` en `MyWork.tsx`). Cuál está puesta lo recuerda el
+    /// core.
+    fn render_layouts(cx: &App) -> impl IntoElement {
+        let theme = cx.theme();
+        let (accent, on_accent, muted, foreground) = (theme.accent, theme.accent_foreground, theme.muted_foreground, theme.foreground);
+        let chosen = Backend::core(cx).work_layout();
+        div().flex().flex_none().items_center().gap_0p5().pb_1p5().children(LAYOUTS.map(|(layout, name, icon)| {
+            let active = chosen == layout;
+            let label = tr(cx, &format!("work:myWork.view.{name}"));
+            div()
+                .id(SharedString::from(format!("layout-{name}")))
+                .px_1p5()
+                .py_1()
+                .rounded(px(4.))
+                .cursor_pointer()
+                .when(active, |this| this.bg(accent).text_color(on_accent))
+                .when(!active, |this| this.text_color(muted).hover(move |style| style.bg(accent.opacity(0.5)).text_color(foreground)))
+                .on_click(move |_, _, cx| {
+                    // Si no se pudo guardar, la vista no cambia: lo que se
+                    // pinta es lo que el core dice que está elegido.
+                    let _ = Backend::core(cx).set_work_layout(layout);
+                    cx.refresh_windows();
+                })
+                .child(Icon::new(icon).size_3p5())
+                .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                .test_support()
+        }))
     }
 
     fn render_row(&self, row: WorkRow, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (muted, danger, warning, info, hover, border) =
-            (theme.muted_foreground, theme.danger, theme.warning, theme.info, theme.accent, theme.border);
-        let priority = (row.priority != "none").then(|| {
-            let tone = match row.priority.as_str() {
-                "urgent" => danger,
-                "high" => warning,
-                "normal" => info,
-                _ => muted,
-            };
-            div()
-                .flex_none()
-                .px_2()
-                .rounded_md()
-                .bg(tone.opacity(0.15))
-                .text_xs()
-                .text_color(tone)
-                .child(tr(cx, &format!("work:taskPriority.{}", row.priority)))
-        });
+        let (muted, hover, border) = (theme.muted_foreground, theme.accent, theme.border);
+        let priority = priority_chip(&row.priority, cx);
         let due = row.due.map(|due| {
-            // Rojo si ya pasó, ámbar si es hoy o mañana; hoy, además, con peso.
-            let (tone, strong) = match due.state {
-                DueState::Overdue | DueState::Yesterday => (danger, true),
-                DueState::Today => (warning, true),
-                DueState::Tomorrow => (warning, false),
-                DueState::Later => (muted, false),
-            };
+            let (tone, strong) = due_tone(due.state, cx);
             div()
                 .w(px(72.))
                 .flex_none()
@@ -372,26 +419,33 @@ impl Render for MyWorkView {
         // Por qué está vacía lo dice el core; aquí sólo se enseña.
         let empty = (shown == 0).then(|| tr(cx, Backend::core(cx).my_work().empty_reason()));
 
+        let layout = Backend::core(cx).work_layout();
+        let header = self.render_header(shown, &filter, cx);
+        let body = match layout {
+            WorkLayout::Board => self.render_board(&filter, cx).into_any_element(),
+            // El calendario llega después: hasta entonces, la lista.
+            WorkLayout::List | WorkLayout::Calendar => div()
+                .id("work-list")
+                .flex_1()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_5()
+                .p_4()
+                .children(empty.map(|phrase| div().id("work-empty").test_support().text_sm().text_color(muted).child(phrase)))
+                .children(groups.into_iter().map(|group| self.render_group(group, cx)))
+                .into_any_element(),
+        };
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(background)
             .text_color(foreground)
-            .child(self.render_header(shown, &filter, cx))
-            .child(
-                div()
-                    .id("work-list")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .gap_5()
-                    .p_4()
-                    .children(self.new_task.clone())
-                    .children(empty.map(|phrase| div().id("work-empty").test_support().text_sm().text_color(muted).child(phrase)))
-                    .children(groups.into_iter().map(|group| self.render_group(group, cx))),
-            )
+            .child(header)
+            // La fila de «tarea nueva» va sobre cualquiera de las vistas.
+            .children(self.new_task.clone().map(|row| div().px_4().pt_4().child(row)))
+            .child(body)
     }
 }
 

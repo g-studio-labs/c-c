@@ -91,11 +91,24 @@ pub fn space_color(color: &str, hue: u32, cx: &App) -> Hsla {
     Hsla::from(rgb(value))
 }
 
-/// El `--hue-N` de ese tema. Las paletas se leen del CSS una vez.
-fn hue_value(dark: bool, hue: u32) -> Option<u32> {
+/// Un color del CSS de la app de siempre que el tema del kit no tiene
+/// (`--status-open`, `--sunken`, `--raised`…), en el tema puesto. Uno que no
+/// exista sale gris, que se ve y no rompe.
+pub fn css_color(token: &str, cx: &App) -> Hsla {
+    use gpui_kit::component::ActiveTheme as _;
+    Hsla::from(rgb(css_value(cx.theme().mode.is_dark(), token).unwrap_or(0x888888)))
+}
+
+/// Las paletas se leen del CSS una vez.
+fn css_value(dark: bool, token: &str) -> Option<u32> {
     static PALETTES: std::sync::OnceLock<[HashMap<String, u32>; 2]> = std::sync::OnceLock::new();
     let palettes = PALETTES.get_or_init(|| [palette(CSS, selector(ThemeMode::Light)), palette(CSS, selector(ThemeMode::Dark))]);
-    palettes[usize::from(dark)].get(&format!("hue-{}", hue % cac_core::HUES + 1)).copied()
+    palettes[usize::from(dark)].get(token).copied()
+}
+
+/// El `--hue-N` de ese tema.
+fn hue_value(dark: bool, hue: u32) -> Option<u32> {
+    css_value(dark, &format!("hue-{}", hue % cac_core::HUES + 1))
 }
 
 /// Pone el tema que eligió quien mira (el core lo recuerda y sabe qué hacer
