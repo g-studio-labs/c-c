@@ -10,7 +10,7 @@ use super::{DueChange, TaskDetail, TaskPatch, TaskTag, Tasks, UserSummary};
 use crate::ApiError;
 
 /// Cuánta gente del equipo se pide para ofrecerla: el tope del servidor.
-const TEAM_LIMIT: usize = 50;
+pub(super) const TEAM_LIMIT: usize = 50;
 
 /// Algo que se puede poner o quitar en la tarea abierta.
 #[derive(Debug, Clone, PartialEq, Eq)]

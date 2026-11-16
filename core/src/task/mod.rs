@@ -7,6 +7,7 @@
 
 mod edit;
 mod flow;
+mod new;
 mod sheet;
 mod types;
 
@@ -15,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 pub use edit::{assignee_choices, shown_name, tag_choices, Choice};
+pub use new::{destinations, drafted, Destination, Destinations, TaskDraft};
 pub use flow::{can_transition, canonical_priority, canonical_status, flow_for, Flow};
 pub use sheet::{client_reads, is_agent_note, task_sheet, SheetComment, SheetSubtask, SheetTag, TaskSheet};
 pub use types::{
