@@ -367,9 +367,39 @@ impl Workspace {
             )
     }
 
+    /// Un botón del riel, con las medidas de `RailButton` en `AppRail.tsx`:
+    /// el activo lleva fondo, el color de acento y una raya a su izquierda.
+    fn rail_button(id: &'static str, icon: Lucide, label: String, active: bool, cx: &App) -> Stateful<Div> {
+        let theme = cx.theme();
+        let (accent, primary, muted, foreground) = (theme.sidebar_accent, theme.sidebar_primary, theme.muted_foreground, theme.foreground);
+        div()
+            .id(id)
+            .relative()
+            .size(px(RAIL_BUTTON))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .rounded_lg()
+            .text_color(if active { primary } else { muted })
+            .when(active, |this| {
+                this.bg(accent).child(div().absolute().left(px(-6.)).top_2().bottom_2().w(px(2.)).rounded_full().bg(primary))
+            })
+            .when(!active, |this| this.hover(move |style| style.bg(accent).text_color(foreground)))
+            .child(Icon::new(icon).size_5())
+            .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+    }
+
+    /// Un módulo que la app de siempre tiene y ésta todavía no: está en su
+    /// sitio y lo dice al pasar el ratón.
+    fn pending_module(id: &'static str, icon: Lucide, label_key: &str, cx: &App) -> impl IntoElement {
+        let label = format!("{} · {}", tr(cx, label_key), tr(cx, "common:misc.notInThisApp"));
+        Self::rail_button(id, icon, label, false, cx).test_support()
+    }
+
     fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (sidebar, border, accent, primary) = (theme.sidebar, theme.sidebar_border, theme.sidebar_accent, theme.primary);
+        let (sidebar, border) = (theme.sidebar, theme.sidebar_border);
         div()
             .w(px(RAIL_WIDTH))
             .h_full()
@@ -377,29 +407,25 @@ impl Workspace {
             .flex_none()
             .flex_col()
             .items_center()
-            .gap_3()
-            .py_3()
+            .gap_1()
+            .py_2()
             .bg(sidebar)
             .border_r_1()
             .border_color(border)
-            .child(div().id("rail-brand").test_support().child(crate::brand::brand_mark(22., sidebar, cx)))
-            // El único módulo de la primera entrega. Pulsarlo fija el panel
-            // o lo suelta.
+            .child(div().id("rail-brand").test_support().mb_2().child(crate::brand::brand_mark(20., sidebar, cx)))
+            // El único módulo con pantalla en la primera entrega. Pulsarlo
+            // fija el panel o lo suelta.
             .child(
-                div()
-                    .id("rail-work")
-                    .test_support()
+                Self::rail_button("rail-work", Lucide::Briefcase, tr(cx, "nav:module.work"), true, cx)
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx)))
-                    .size(px(36.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_lg()
-                    .bg(accent)
-                    .child(Icon::new(Lucide::BriefcaseBusiness).text_color(primary)),
+                    .test_support(),
             )
+            .child(Self::pending_module("rail-docs", Lucide::BookOpen, "nav:module.docs", cx))
+            .child(Self::pending_module("rail-comms", Lucide::MessagesSquare, "nav:module.comms", cx))
+            .child(Self::pending_module("rail-platform", Lucide::Server, "nav:module.platform", cx))
             .child(div().flex_1())
+            .child(Self::pending_module("rail-organization", Lucide::Building2, "nav:rail.organization", cx))
             .child(self.render_account(cx))
     }
 
@@ -454,7 +480,20 @@ impl Workspace {
                         .on_click(move |_, _, cx| Self::switch_org(id.clone(), cx)),
                 );
             }
-            menu
+            // Está donde en la app de siempre; aquí todavía no crea nada, y
+            // lo dice al pasar el ratón.
+            menu.separator().item(PopupMenuItem::element(|_, cx| {
+                let not_yet = tr(cx, "common:misc.notInThisApp");
+                div()
+                    .id("org-create")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(Icon::new(IconName::Plus).small())
+                    .child(tr(cx, "common:misc.createOrg"))
+                    .tooltip(move |window, cx| Tooltip::new(not_yet.clone()).build(window, cx))
+                    .test_support()
+            }))
         })
     }
 
@@ -863,6 +902,9 @@ mod tests {
         assert!(on_screen(window, "tree-a", cx) && on_screen(window, "tree-f-a", cx));
         assert!(!on_screen(window, "tree-in-a", cx), "se pinta lo de dentro de una carpeta cerrada");
         assert!(on_screen(window, "rail-brand", cx), "el riel no lleva la marca");
+        for module in ["rail-work", "rail-docs", "rail-comms", "rail-platform", "rail-organization"] {
+            assert!(on_screen(window, module, cx), "falta {module} en el riel");
+        }
         assert_eq!(cx.update(|cx| Backend::snapshot(cx).read(cx).orgs.current().map(|org| org.name.clone())).as_deref(), Some("G Studio"));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
@@ -1180,6 +1222,21 @@ mod tests {
         wait_until(cx, "llega la documentación del espacio", |cx| on_screen(window, "doc-body", cx));
         assert_eq!(doc_open(cx).as_deref(), Some("a"));
         assert_eq!(scope(cx), None);
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// El menú de la organización acaba en «Crear una organización», como en
+    /// la app de siempre.
+    ///
+    /// Rotura que atrapa: que la entrada se caiga del menú.
+    #[gpui_kit::test]
+    fn the_org_menu_ends_with_creating_one(cx: &mut TestAppContext) {
+        let server = server();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        click(window, "org-switch", cx);
+        wait_until(cx, "el menú se abre", |cx| on_screen(window, "org-create", cx));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
