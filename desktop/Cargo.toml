@@ -19,6 +19,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 # Para oír a GPUI: qué tarjeta elige, con qué pinta. Sin un `log` instalado en
 # el proceso esas líneas se tiran.
 log = "0.4"
+# Sólo para darle un día al selector de fecha de GPUI Kit, que lo pide con
+# este tipo. Qué día es lo dice el core.
+chrono = { version = "0.4", default-features = false }
 
 [dev-dependencies]
 # El arnés de pruebas de GPUI: ventanas sin pantalla, clics y teclado de verdad.

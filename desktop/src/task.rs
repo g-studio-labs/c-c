@@ -3,14 +3,17 @@
 //! Qué se lee (cada frase, qué comentario es de un agente, qué subtarea está
 //! hecha, por qué no hay nada todavía) lo dice el core en su `TaskSheet`.
 //! Aquí está qué pestaña del hilo se mira, que es lo único propio, y la
-//! pintura. Editar llega después.
+//! pintura. Cada cambio se le pide al core, que es quien sabe qué mandar.
 
-use cac_core::{DueState, SheetComment, SheetSubtask, StatusOption, TaskSheet};
+use cac_core::{Choice, DueState, SheetComment, SheetSubtask, StatusOption, TaskSheet, PRIORITIES};
+use chrono::NaiveDate;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::text::TextView;
+use gpui_kit::component::calendar::Date;
+use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -40,18 +43,84 @@ pub struct TaskView {
     comment: Entity<TextareaState>,
     /// Que el cliente no lo lea. Sólo cuenta donde un cliente podría leerlo.
     internal: bool,
+    /// El selector del vencimiento.
+    due: Entity<DatePickerState>,
+    /// De qué tarea y qué día es lo que el selector enseña: se le pone el de
+    /// la tarea cuando cambia, y no en cada pintada, que le pisaría a quien
+    /// está eligiendo.
+    due_shown: Option<(String, Option<String>)>,
+    _due_changed: Subscription,
+}
+
+/// Con qué tono se pinta una prioridad.
+fn priority_tone(priority: &str, cx: &App) -> Hsla {
+    let theme = cx.theme();
+    match priority {
+        "urgent" => theme.danger,
+        "high" => theme.warning,
+        "normal" => theme.info,
+        _ => theme.muted_foreground,
+    }
 }
 
 impl TaskView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let placeholder = tr(cx, "work:task.writeComment");
+        let due = cx.new(|cx| DatePickerState::new(window, cx).date_format("%d/%m/%Y"));
+        // El selector avisa cuando alguien elige un día o lo quita; ponerle
+        // desde aquí el de la tarea no avisa.
+        let due_changed = cx.subscribe_in(&due, window, |this, _, event: &DatePickerEvent, window, cx| {
+            let DatePickerEvent::Change(value) = event;
+            this.set_due(value.format("%Y-%m-%d").map(|day| day.to_string()), window, cx);
+        });
         Self {
             thread: Thread::Talk,
             thread_of: None,
             problem: None,
             comment: cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 8).placeholder(placeholder)),
             internal: false,
+            due,
+            due_shown: None,
+            _due_changed: due_changed,
         }
+    }
+
+    /// Le pone al selector el día de la tarea, cuando es otra tarea u otro
+    /// día que el que enseña.
+    fn show_due(&mut self, sheet: &TaskSheet, window: &mut Window, cx: &mut Context<Self>) {
+        let now = (sheet.id.clone(), sheet.due_day.clone());
+        if self.due_shown.as_ref() == Some(&now) {
+            return;
+        }
+        let day = sheet.due_day.as_deref().and_then(|day| NaiveDate::parse_from_str(day, "%Y-%m-%d").ok());
+        self.due.update(cx, |due, cx| due.set_date(Date::Single(day), window, cx));
+        self.due_shown = Some(now);
+    }
+
+    /// Un cambio de un toque en la tarea abierta.
+    fn change<F, Fut>(&mut self, work: F, window: &mut Window, cx: &mut Context<Self>)
+    where
+        F: FnOnce(cac_core::Core) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), cac_core::ApiError>> + Send + 'static,
+    {
+        self.save("common:misc.errSave", work, |_, _, _| {}, window, cx);
+    }
+
+    pub(crate) fn set_priority(&mut self, priority: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.change(move |core| async move { core.tasks().set_priority(&priority).await }, window, cx);
+    }
+
+    /// Pone el vencimiento en ese día (`YYYY-MM-DD`), o lo quita.
+    pub(crate) fn set_due(&mut self, day: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.change(move |core| async move { core.tasks().set_due(day.as_deref()).await }, window, cx);
+    }
+
+    pub(crate) fn toggle_tag(&mut self, tag_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.change(move |core| async move { core.tasks().toggle_tag(&tag_id).await }, window, cx);
+    }
+
+    pub(crate) fn toggle_assignee(&mut self, user_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.change(move |core| async move { core.tasks().toggle_assignee(&user_id).await }, window, cx);
     }
 
     /// Le pide al core algo que se guarda en la tarea abierta y, si no se
@@ -76,7 +145,12 @@ impl TaskView {
             this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(()) => done(this, window, cx),
-                    Err(error) => this.problem = Some((task_id, error_text(cx, &error, fallback_key))),
+                    Err(error) => {
+                        this.problem = Some((task_id, error_text(cx, &error, fallback_key)));
+                        // El selector de fecha se quedó con lo que se eligió
+                        // y no se guardó: que vuelva a enseñar lo que hay.
+                        this.due_shown = None;
+                    }
                 }
                 cx.notify();
             })
@@ -173,18 +247,9 @@ impl TaskView {
         let view = cx.entity().downgrade();
         let current = sheet.status_name.clone();
         let theme = cx.theme();
-        let (muted, danger, warning, info, accent) = (theme.muted_foreground, theme.danger, theme.warning, theme.info, theme.accent);
+        let (muted, danger, warning, accent) = (theme.muted_foreground, theme.danger, theme.warning, theme.accent);
         let chip = |tone: Hsla, label: String| div().flex_none().px_2().rounded_md().bg(tone.opacity(0.15)).text_xs().text_color(tone).child(label);
         let status_tone = gpui_kit::rgb(u32::from_str_radix(sheet.status_color.trim_start_matches('#'), 16).unwrap_or(0x888888));
-        let priority = (sheet.priority != "none").then(|| {
-            let tone = match sheet.priority.as_str() {
-                "urgent" => danger,
-                "high" => warning,
-                "normal" => info,
-                _ => muted,
-            };
-            chip(tone, tr(cx, &format!("work:taskPriority.{}", sheet.priority)))
-        });
         let due = sheet.due.clone().map(|due| {
             let tone = match due.state {
                 DueState::Overdue | DueState::Yesterday => danger,
@@ -233,10 +298,80 @@ impl TaskView {
                             }),
                     ),
             )
-            .children(priority)
             .children(due)
-            .children(sheet.tags.iter().map(|tag| chip(muted, tag.name.clone())))
-            .children((!sheet.assignees.is_empty()).then(|| div().text_xs().text_color(muted).child(sheet.assignees.join(", "))))
+    }
+
+    /// Un desplegable de cosas que se ponen y se quitan: lo que la tarea
+    /// tiene, marcado. Sin nada puesto, el botón dice qué se puede hacer.
+    fn render_choices(
+        &self,
+        id: &'static str,
+        empty_key: &str,
+        choices: Vec<Choice>,
+        toggle: fn(&mut Self, String, &mut Window, &mut Context<Self>),
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let view = cx.entity().downgrade();
+        let chosen: Vec<String> = choices.iter().filter(|choice| choice.chosen).map(|choice| choice.name.clone()).collect();
+        let label = if chosen.is_empty() { tr(cx, empty_key) } else { chosen.join(", ") };
+        Button::new(id).ghost().xsmall().label(label).dropdown_caret(!choices.is_empty()).dropdown_menu(move |mut menu, _, _| {
+            for choice in choices.clone() {
+                let view = view.clone();
+                menu = menu.item(PopupMenuItem::new(choice.name).checked(choice.chosen).on_click(move |_, window, cx| {
+                    let _ = view.update(cx, |this, cx| toggle(this, choice.id.clone(), window, cx));
+                }));
+            }
+            menu
+        })
+    }
+
+    /// Lo que se le cambia a la tarea de un toque, cada cosa en su fila.
+    fn render_fields(&self, sheet: &TaskSheet, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let view = cx.entity().downgrade();
+        let tasks = Backend::core(cx).tasks();
+        let current = sheet.priority.clone();
+        let row = |name: String, control: AnyElement| {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().flex_none().w(px(96.)).text_xs().text_color(muted).child(name))
+                .child(div().flex_1().min_w_0().flex().child(control))
+        };
+        let priority = Button::new("task-priority")
+            .ghost()
+            .xsmall()
+            .label(tr(cx, &format!("work:taskPriority.{current}")))
+            .text_color(priority_tone(&current, cx))
+            .dropdown_caret(true)
+            .dropdown_menu({
+                let names: Vec<(String, String)> =
+                    PRIORITIES.iter().map(|priority| (priority.to_string(), tr(cx, &format!("work:taskPriority.{priority}")))).collect();
+                move |mut menu, _, _| {
+                    for (priority, name) in names.clone() {
+                        let view = view.clone();
+                        menu = menu.item(PopupMenuItem::new(name).checked(priority == current).on_click(move |_, window, cx| {
+                            let _ = view.update(cx, |this, cx| this.set_priority(priority.clone(), window, cx));
+                        }));
+                    }
+                    menu
+                }
+            });
+        let tags = self.render_choices("task-tags", "work:task.addTags", tasks.tag_choices(), Self::toggle_tag, cx);
+        let assignees = self.render_choices("task-assignees", "work:task.assign", tasks.assignee_choices(), Self::toggle_assignee, cx);
+        let due = div().id("task-due").test_support().w(px(170.)).child(
+            DatePicker::new(&self.due).small().cleanable(true).placeholder(tr(cx, "common:last.clearDate")),
+        );
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(row(tr(cx, "work:board.priority"), priority.into_any_element()))
+            .child(row(tr(cx, "work:task.tags"), tags.into_any_element()))
+            .child(row(tr(cx, "work:task.assignees"), assignees.into_any_element()))
+            .child(row(tr(cx, "work:task.due"), due.into_any_element()))
     }
 
     fn render_subtask(&self, subtask: &SheetSubtask, cx: &mut Context<Self>) -> impl IntoElement {
@@ -355,6 +490,7 @@ impl TaskView {
                     .children(sheet.parent.clone().map(|parent| div().text_xs().text_color(muted).child(format!("› {parent}")))),
             )
             .child(self.render_chips(&sheet, statuses, cx))
+            .child(self.render_fields(&sheet, cx))
             .children(problem.map(|phrase| div().id("task-problem").test_support().text_sm().text_color(danger).child(phrase)))
             .children(sheet.handoff.clone().map(|handoff| {
                 let by = sheet.handoff_by.clone().map(|by| format!(" · {by}")).unwrap_or_default();
@@ -435,11 +571,14 @@ impl TaskView {
 }
 
 impl Render for TaskView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (background, foreground, muted, border) = (theme.background, theme.foreground, theme.muted_foreground, theme.border);
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = Backend::snapshot(cx).read(cx).task.clone();
         let sheet = Backend::core(cx).tasks().sheet(locale(cx));
+        if let Some(sheet) = &sheet {
+            self.show_due(sheet, window, cx);
+        }
+        let theme = cx.theme();
+        let (background, foreground, muted, border) = (theme.background, theme.foreground, theme.muted_foreground, theme.border);
         let waiting = state.waiting_reason().map(|key| tr(cx, key));
         let name = sheet
             .as_ref()
@@ -500,6 +639,8 @@ mod tests {
     use crate::backend::Backend;
     use crate::testing::{contract_task, ok, server_with_tasks, sign_in, wait_until, FakeServer};
     use crate::workspace::Workspace;
+    use gpui_kit::component::calendar::Date;
+    use gpui_kit::component::date_picker::DatePickerEvent;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{px, size, AnyWindowHandle, AppContext, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowOptions};
     use serde_json::json;
@@ -732,6 +873,175 @@ mod tests {
             window.input(text, cx);
         })
         .unwrap();
+    }
+
+    /// El servidor de siempre, con lo que la organización de la tarea ofrece
+    /// (otra etiqueta y otra persona) y un `PATCH` que contesta la tarea.
+    fn server_with_choices() -> FakeServer {
+        let server = server();
+        server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/task-tags/"))
+                .respond_with(ok(json!([{ "id": "tag2", "orgId": "o1", "name": "backend", "color": "#0f0" }]))),
+        );
+        server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/users/search"))
+                .respond_with(ok(json!([{ "id": "u2", "username": "luis" }]))),
+        );
+        server.mount(Mock::given(method("PATCH")).and(path("/api/v1/tasks/t1")).respond_with(ok(detail("t1"))));
+        server
+    }
+
+    fn patches(server: &FakeServer) -> Vec<serde_json::Value> {
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.method.as_str() == "PATCH" && request.url.path() == "/api/v1/tasks/t1")
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .collect()
+    }
+
+    /// Hace algo con la vista del cajón, en su ventana.
+    fn with_view(
+        window: AnyWindowHandle,
+        view: &Entity<TaskView>,
+        cx: &mut TestAppContext,
+        act: impl FnOnce(&mut TaskView, &mut gpui_kit::Window, &mut gpui_kit::Context<TaskView>),
+    ) {
+        cx.update_window(window, |_, window, cx| view.update(cx, |view, cx| act(view, window, cx))).unwrap();
+    }
+
+    fn day(year: i32, month: u32, day: u32) -> Date {
+        Date::Single(chrono::NaiveDate::from_ymd_opt(year, month, day))
+    }
+
+    fn picked(view: &Entity<TaskView>, cx: &mut TestAppContext) -> Date {
+        cx.update(|cx| view.read(cx).due.read(cx).date())
+    }
+
+    /// Elige un día en el selector, como quien lo pulsa en el calendario.
+    fn pick(window: AnyWindowHandle, view: &Entity<TaskView>, date: Date, cx: &mut TestAppContext) {
+        let due = cx.update(|cx| view.read(cx).due.clone());
+        cx.update_window(window, |_, window, cx| {
+            due.update(cx, |due, cx| {
+                due.set_date(date, window, cx);
+                cx.emit(DatePickerEvent::Change(due.date_time()));
+            })
+        })
+        .unwrap();
+    }
+
+    /// Cada selector del cajón le pide al servidor su cambio, y sólo el suyo.
+    ///
+    /// Roturas que atrapa: un selector que no manda nada; la prioridad que
+    /// manda otra; poner una etiqueta como responsable o al revés; quitar la
+    /// fecha cuando se quería poner.
+    #[gpui_kit::test]
+    fn each_field_asks_for_its_own_change(cx: &mut TestAppContext) {
+        let server = server_with_choices();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        wait_until(cx, "llega lo que se puede elegir", |cx| {
+            cx.update(|cx| !Backend::snapshot(cx).read(cx).task.team.is_empty())
+        });
+        for id in ["task-priority", "task-tags", "task-assignees", "task-due"] {
+            assert!(on_screen(window, id, cx), "falta {id}");
+        }
+        assert!(patches(&server).is_empty(), "abrir la tarea ya guardó algo: {:?}", patches(&server));
+
+        let steps: [(Box<dyn FnOnce(&mut TaskView, &mut gpui_kit::Window, &mut gpui_kit::Context<TaskView>)>, serde_json::Value); 5] = [
+            (Box::new(|view, window, cx| view.set_priority("urgent".into(), window, cx)), json!({ "priority": "urgent" })),
+            (Box::new(|view, window, cx| view.toggle_tag("tag2".into(), window, cx)), json!({ "tagIds": ["tag1", "tag2"] })),
+            (Box::new(|view, window, cx| view.toggle_assignee("u2".into(), window, cx)), json!({ "assigneeIds": ["u1", "u2"] })),
+            (Box::new(|view, window, cx| view.set_due(Some("2026-10-02".into()), window, cx)), json!({ "dueAt": "2026-10-02T00:00:00Z" })),
+            (Box::new(|view, window, cx| view.set_due(None, window, cx)), json!({ "clearDueAt": true })),
+        ];
+        for (at, (act, sent)) in steps.into_iter().enumerate() {
+            with_view(window, &view, cx, act);
+            wait_until(cx, "llega el cambio", |_| patches(&server).len() == at + 1);
+            assert_eq!(patches(&server)[at], sent);
+        }
+        cx.run_until_parked();
+        assert!(!on_screen(window, "task-problem", cx));
+        stop(cx);
+    }
+
+    /// El selector de fecha enseña el día de la tarea, y elegir otro lo guarda.
+    ///
+    /// Roturas que atrapa: un selector vacío sobre una tarea con fecha;
+    /// elegir un día y que no se guarde; pisarle lo elegido a quien elige
+    /// mientras se guarda; enseñar en otra tarea el día que se eligió en
+    /// ésta; guardar por el mero hecho de enseñarlo (un bucle de peticiones).
+    #[gpui_kit::test]
+    fn the_date_picker_shows_the_due_day_and_saves_another(cx: &mut TestAppContext) {
+        let server = server_with_choices();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t2")).respond_with(ok(detail("t2"))));
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        assert_eq!(picked(&view, cx), day(2026, 9, 30));
+
+        pick(window, &view, day(2026, 10, 2), cx);
+        wait_until(cx, "se guarda el día elegido", |_| !patches(&server).is_empty());
+        assert_eq!(patches(&server), [json!({ "dueAt": "2026-10-02T00:00:00Z" })]);
+        // El servidor de mentira contesta la tarea como estaba, así que nada
+        // nuevo hay que enseñar: lo elegido sigue en el selector.
+        cx.run_until_parked();
+        on_screen(window, "task-title", cx);
+        assert_eq!(picked(&view, cx), day(2026, 10, 2), "se pisó lo que se acababa de elegir");
+
+        // La otra tarea vence el 30: el selector no se queda con lo de ésta.
+        click(window, "work-row-t2", cx);
+        wait_until(cx, "llega la otra, con su día", |cx| {
+            on_screen(window, "task-title", cx) && picked(&view, cx) == day(2026, 9, 30)
+        });
+        cx.run_until_parked();
+        assert_eq!(patches(&server).len(), 1, "enseñar una fecha guardó: {:?}", patches(&server));
+        stop(cx);
+    }
+
+    /// Si el día de la tarea cambia, el selector lo sigue.
+    ///
+    /// Rotura que atrapa: un selector que se queda con el día de cuando se
+    /// abrió la tarea, aunque alguien se lo haya quitado.
+    #[gpui_kit::test]
+    fn the_date_picker_follows_the_task(cx: &mut TestAppContext) {
+        let server = server();
+        let mut without = detail("t1");
+        without["task"]["dueAt"] = serde_json::Value::Null;
+        server.mount(Mock::given(method("PATCH")).and(path("/api/v1/tasks/t1")).respond_with(ok(without)));
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        assert_eq!(picked(&view, cx), day(2026, 9, 30));
+
+        with_view(window, &view, cx, |view, window, cx| view.set_priority("urgent".into(), window, cx));
+
+        wait_until(cx, "llega la tarea ya sin fecha", |cx| {
+            on_screen(window, "task-title", cx) && picked(&view, cx) == Date::Single(None)
+        });
+        stop(cx);
+    }
+
+    /// Un cambio que no se pudo guardar se dice, y el selector de fecha
+    /// vuelve al día que la tarea tiene de verdad.
+    ///
+    /// Roturas que atrapa: un selector que parece no hacer nada cuando el
+    /// cambio falló; un selector que se queda enseñando el día que no se
+    /// guardó.
+    #[gpui_kit::test]
+    fn a_change_that_fails_is_said_and_the_date_goes_back(cx: &mut TestAppContext) {
+        // Sin `PATCH` montado: el servidor contesta 404.
+        let server = server();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        assert!(!on_screen(window, "task-problem", cx));
+
+        pick(window, &view, day(2026, 10, 2), cx);
+
+        wait_until(cx, "dice que no se pudo y vuelve al día guardado", |cx| {
+            on_screen(window, "task-problem", cx) && picked(&view, cx) == day(2026, 9, 30)
+        });
+        stop(cx);
     }
 
     /// Pulsar la casilla de una subtarea sin hacer la manda a la columna de

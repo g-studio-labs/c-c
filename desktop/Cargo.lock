@@ -856,6 +856,7 @@ name = "cac-desktop"
 version = "0.1.0"
 dependencies = [
  "cac-core",
+ "chrono",
  "gpui-kit",
  "log",
  "serde_json",

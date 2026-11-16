@@ -175,6 +175,8 @@
     "assignees": "Asignados",
     "removeAssignee": "Quitar a {{name}}",
     "assign": "Asignar…",
+    "tags": "Etiquetas",
+    "addTags": "Etiquetar…",
     "due": "Para el",
     "deleteTaskTitle": "¿Borrar la tarea «{{name}}»?",
     "deleteTaskBody": "La quita con sus comentarios y sus adjuntos. No se puede deshacer.",
