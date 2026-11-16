@@ -545,6 +545,37 @@ async fn the_calendars_today_is_the_organizations() {
     assert_eq!(east.my_work().today_at(now), day(2026, 11, 13));
 }
 
+/// El número y su palabra se pintan aparte en un día del mes: «5» grande y
+/// «tareas» pequeño. La palabra sale del mensaje entero, con su plural.
+///
+/// Roturas que atrapa: «5 5 tareas» (la palabra con el número dentro); un
+/// plural fijo («1 tareas»); comerse una frase que no empieza por el número.
+#[test]
+fn a_count_gives_its_word_without_the_number() {
+    use cac_core::text_count_unit;
+    assert_eq!(text_count_unit(Locale::Es, "common:count.tasks", 5), "tareas");
+    assert_eq!(text_count_unit(Locale::Es, "common:count.tasks", 1), "tarea");
+    assert_eq!(text_count_unit(Locale::En, "common:count.tasks", 12), "tasks");
+    assert_eq!(text_count_unit(Locale::Es, "common:count.restoredPages", 2), "Recuperadas 2 páginas");
+}
+
+/// «Mañana» es el día siguiente al hoy de la organización, también cuando
+/// cruza de mes: a las 03:00 UTC del 1 de diciembre, en México sigue siendo
+/// 30 de noviembre y mañana es 1 de diciembre.
+///
+/// Roturas que atrapa: un «Mañana» que pone la fecha de hoy; uno contado
+/// desde el día de la máquina en vez del de la organización.
+#[tokio::test]
+async fn tomorrow_is_the_day_after_the_organizations_today() {
+    let now = Utc.with_ymd_and_hms(2026, 12, 1, 3, 0, 0).unwrap();
+
+    let (_west_server, west) = core_in_zone("America/Mexico_City").await;
+    assert_eq!(west.my_work().tomorrow_at(now), day(2026, 12, 1));
+
+    let (_east_server, east) = core_in_zone("Pacific/Auckland").await;
+    assert_eq!(east.my_work().tomorrow_at(now), day(2026, 12, 2));
+}
+
 /// Soltar una tarjeta en un día: se ve movida antes de que conteste el
 /// servidor, y lo que viaja es el día a medianoche UTC.
 ///

@@ -69,7 +69,7 @@ pub use task::{
 };
 pub use task::{assignee_choices, shown_name, tag_choices, Choice};
 pub use task::{can_change_comment, is_agent_note, task_sheet, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};
-pub use texts::{error_phrase, pick_locale, text, text_count, text_with, Locale};
+pub use texts::{error_phrase, pick_locale, text, text_count, text_count_unit, text_with, Locale};
 pub use transport::Reply;
 
 /// Con qué servidor habla el core y cómo se presenta.

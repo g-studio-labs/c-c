@@ -476,6 +476,17 @@ impl MyWork {
         today_in(orgs.current_zone(), now, &chrono::Local)
     }
 
+    /// Mañana, contado desde ese hoy: el atajo «Mañana» de «Por programar».
+    pub fn tomorrow(&self) -> NaiveDate {
+        self.tomorrow_at(Utc::now())
+    }
+
+    /// Lo mismo, en ese instante.
+    pub fn tomorrow_at(&self, now: DateTime<Utc>) -> NaiveDate {
+        let today = self.today_at(now);
+        today.succ_opt().unwrap_or(today)
+    }
+
     /// Lo que el calendario tiene para pintar ahora: lo visible que pasa el
     /// filtro, con y sin fecha.
     pub fn calendar_chips(&self, filter: &TaskFilter) -> Vec<CalendarChip> {

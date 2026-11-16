@@ -165,6 +165,16 @@ pub fn text_count(locale: Locale, key: &str, count: i64) -> String {
     text_with(locale, &format!("{key}_{form}"), &[("count", &count.to_string())])
 }
 
+/// La misma frase sin su número, para pintarlos aparte: el «5» grande de un
+/// día del calendario y «tareas» pequeño al lado. Sale del mensaje entero
+/// para no duplicar en el catálogo el plural de cada cosa que se cuenta
+/// (`unitOf` en `components/calendar/parts.tsx`).
+pub fn text_count_unit(locale: Locale, key: &str, count: i64) -> String {
+    let phrase = text_count(locale, key, count);
+    let number = count.to_string();
+    phrase.trim_start().strip_prefix(number.as_str()).map(|unit| unit.trim_start().to_string()).unwrap_or(phrase)
+}
+
 /// La clave de «sin conexión».
 const OFFLINE_KEY: &str = "nav:panel.serverStatus.offline";
 
