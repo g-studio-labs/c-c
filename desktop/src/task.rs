@@ -150,6 +150,14 @@ pub struct TaskView {
     naming_tag: Option<String>,
     tag_name: Entity<InputState>,
     _tag_named: Subscription,
+    /// En qué tarea se le está poniendo título a una subtarea nueva, y el
+    /// título. Al abrir otra no se sigue: lo escrito era para aquélla.
+    adding_subtask: Option<String>,
+    subtask_title: Entity<InputState>,
+    _subtask_titled: Subscription,
+    /// Ya se pidió crearla y el servidor aún no contesta: un segundo Enter
+    /// no crea otra igual.
+    creating_subtask: bool,
     /// Hay ficheros subiendo para citarlos, y en cuál de las cajas: treinta
     /// megas tardan, y un clip quieto parece no haber hecho nada.
     citing: Option<Draft>,
@@ -269,6 +277,14 @@ impl TaskView {
                 this.create_tag(window, cx);
             }
         });
+        let subtask_placeholder = tr(cx, "work:task.newSubtaskTitle");
+        let subtask_title = cx.new(|cx| InputState::new(window, cx).placeholder(subtask_placeholder));
+        // Enter en el título la crea, como «Crear».
+        let subtask_titled = cx.subscribe_in(&subtask_title, window, |this, _, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.create_subtask(window, cx);
+            }
+        });
         let title_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, TITLE_ROWS));
         // Salir del campo guarda: el `onBlur={saveTitle}` de la app de
         // siempre. Enter y Escape salen de él, cada uno a su manera.
@@ -303,6 +319,10 @@ impl TaskView {
             naming_tag: None,
             tag_name,
             _tag_named: tag_named,
+            adding_subtask: None,
+            subtask_title,
+            _subtask_titled: subtask_titled,
+            creating_subtask: false,
             citing: None,
             thumbs: HashMap::new(),
             copied: None,
@@ -979,6 +999,103 @@ impl TaskView {
             .ok();
         })
         .detach();
+    }
+
+    /// Pasa a pedir el título de una subtarea nueva para la tarea abierta:
+    /// el «+ Añadir» de `TaskDetailDrawer.tsx`, que allí abre un diálogo con
+    /// esta misma pregunta («Subtarea nueva», y «Crear»). Aquí es un campo
+    /// de un renglón bajo la lista.
+    pub(crate) fn start_adding_subtask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task_id) = Self::open_task_id(cx) else { return };
+        // Si ya se estaba escribiendo una para esta tarea, no se le borra.
+        let fresh = self.adding_subtask.as_deref() != Some(task_id.as_str());
+        self.adding_subtask = Some(task_id);
+        self.subtask_title.update(cx, |title, cx| {
+            if fresh {
+                title.set_value("", window, cx);
+            }
+            title.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Deja de pedirlo sin crear nada, y el foco vuelve a la página: el
+    /// campo que lo tenía ya no está.
+    pub(crate) fn cancel_adding_subtask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.adding_subtask = None;
+        self.page_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Crea la subtarea con el título escrito y cierra el campo (como el
+    /// diálogo de la app de siempre, que pide una cada vez). Qué se manda y
+    /// qué título no vale lo dice el core. Si no se pudo, se dice y el
+    /// título se queda escrito. Mientras el servidor contesta no se pide
+    /// otra: dos Enter seguidos no son dos subtareas.
+    pub(crate) fn create_subtask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task_id) = Self::open_task_id(cx) else { return };
+        let title = self.subtask_title.read(cx).value().to_string();
+        // Como al comentar: con nada escrito no hay nada que pedir ni que avisar.
+        if title.trim().is_empty() || self.creating_subtask {
+            return;
+        }
+        self.creating_subtask = true;
+        self.problem = None;
+        cx.notify();
+        let answer = Backend::ask(cx, move |core| async move { core.tasks().add_subtask(&title).await });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = answer.await;
+            this.update_in(cx, |this, window, cx| {
+                this.creating_subtask = false;
+                match result {
+                    Ok(Ok(())) => {
+                        // Sólo si sigue siendo el campo de esa tarea.
+                        if this.adding_subtask.as_deref() == Some(task_id.as_str()) {
+                            this.cancel_adding_subtask(window, cx);
+                        }
+                    }
+                    Ok(Err(error)) => this.say_problem(task_id, error_text(cx, &error, "work:board.errCreate"), cx),
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// El título de una subtarea nueva, bajo las que hay: Enter la crea y
+    /// Escape cierra el campo (no la página).
+    fn render_subtask_naming(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let blank = self.subtask_title.read(cx).value().trim().is_empty();
+        div()
+            .id("task-new-subtask")
+            .flex()
+            .items_center()
+            .gap_1()
+            // Antes de que llegue al campo, que con Escape sólo suelta el foco.
+            .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                this.cancel_adding_subtask(window, cx);
+                cx.stop_propagation();
+            }))
+            .child(div().id("task-new-subtask-title").flex_1().min_w_0().child(Input::new(&self.subtask_title).small()).test_support())
+            .child(
+                Button::new("task-new-subtask-create")
+                    .primary()
+                    .xsmall()
+                    .label(tr(cx, "work:task.create"))
+                    .disabled(blank || self.creating_subtask)
+                    .on_click(cx.listener(|this, _, window, cx| this.create_subtask(window, cx))),
+            )
+            .child(
+                Button::new("task-new-subtask-cancel")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(Lucide::X))
+                    .tooltip(tr(cx, "work:task.cancel"))
+                    .on_click(cx.listener(|this, _, window, cx| this.cancel_adding_subtask(window, cx))),
+            )
+            .test_support()
     }
 
     /// Marca o desmarca una línea del checklist.
@@ -1723,7 +1840,9 @@ impl TaskView {
 
     /// Una subtarea, con las medidas de su fila en `TaskDetailDrawer.tsx`
     /// (`px-2 py-1.5 text-sm`, la casilla `size-4 rounded border`, en verde
-    /// al 20% cuando está hecha, y su folio en mono al final).
+    /// al 20% cuando está hecha, y su folio en mono al final). La casilla la
+    /// marca; su título la abre (`onClick={() => openTask(st.id)}`), y de
+    /// ella se vuelve por el nombre de la madre en la cabecera.
     fn render_subtask(&self, subtask: &SheetSubtask, first: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (muted, border, success, mono) = (theme.muted_foreground, theme.border, theme.success, theme.mono_font_family.clone());
@@ -1766,13 +1885,30 @@ impl TaskView {
             )
             .child(
                 div()
+                    .id(SharedString::from(format!("subtask-open-{}", subtask.id)))
                     .min_w_0()
                     .flex_1()
                     .truncate()
+                    .cursor_pointer()
                     .when(subtask.done, |this| this.text_color(muted).line_through())
-                    .child(subtask.title.clone()),
+                    .on_click({
+                        let id = subtask.id.clone();
+                        move |_, _, cx| Self::open_task(id.clone(), cx)
+                    })
+                    .child(subtask.title.clone())
+                    .test_support(),
             )
-            .child(div().flex_none().font_family(mono).leading_xs().text_color(muted).child(format!("#{}", subtask.seq)))
+            .child(
+                div()
+                    .id(SharedString::from(format!("subtask-seq-{}", subtask.id)))
+                    .aria_label(format!("#{}", subtask.seq))
+                    .flex_none()
+                    .font_family(mono)
+                    .leading_xs()
+                    .text_color(muted)
+                    .child(format!("#{}", subtask.seq))
+                    .test_support(),
+            )
     }
 
     /// Un comentario: la tarjeta de `CommentItem` (`rounded-md border
@@ -2151,6 +2287,8 @@ impl TaskView {
         // Las subtareas: el rótulo con cuántas van hechas, cómo añadir otra
         // y, sin ninguna, para qué sirven.
         let count = (!sheet.subtasks.is_empty()).then(|| format!("({done}/{})", sheet.subtasks.len()));
+        // El título se pide en la tarea donde se pidió, no en la que se abra después.
+        let adding_subtask = self.adding_subtask.as_deref() == Some(sheet.id.as_str());
         let subtasks = div()
             .id("task-subtasks")
             .flex()
@@ -2169,8 +2307,11 @@ impl TaskView {
                             .child(section_title(tr(cx, "work:task.subtasks"), cx))
                             .children(count.map(|count| div().leading_xs().font_weight(FontWeight::MEDIUM).text_color(muted).child(count))),
                     )
-                    // Añadir una desde aquí todavía no está.
-                    .child(section_action("task-add-subtask", tr(cx, "work:task.addSubtask"), cx).tooltip(not_yet(cx)).test_support()),
+                    .child(
+                        section_action("task-add-subtask", tr(cx, "work:task.addSubtask"), cx)
+                            .on_click(cx.listener(|this, _, window, cx| this.start_adding_subtask(window, cx)))
+                            .test_support(),
+                    ),
             )
             .child(if sheet.subtasks.is_empty() {
                 div().id("task-no-subtasks").test_support().leading_xs().text_color(muted).child(tr(cx, "work:task.noSubtasks")).into_any_element()
@@ -2184,6 +2325,7 @@ impl TaskView {
                     .children(sheet.subtasks.iter().enumerate().map(|(index, subtask)| self.render_subtask(subtask, index == 0, cx)))
                     .into_any_element()
             })
+            .children(adding_subtask.then(|| self.render_subtask_naming(cx).into_any_element()))
             .test_support();
 
         // El hilo: sin notas de agentes es un rótulo con cuántos van; con
@@ -3569,6 +3711,170 @@ mod tests {
             cx.update(|cx| Backend::snapshot(cx).read(cx).task.detail.as_ref().is_some_and(|detail| detail.task.id == "t2"))
         });
         assert!(on_screen(window, "task-handoff-edit", cx) && !on_screen(window, "task-handoff-input", cx));
+        stop(cx);
+    }
+
+    /// Los `POST` que crean tareas en la lista de la primera.
+    fn created(server: &FakeServer) -> Vec<serde_json::Value> {
+        asked(server, "POST", "/api/v1/task-lists/l1/tasks").iter().map(|request| serde_json::from_slice(&request.body).unwrap()).collect()
+    }
+
+    /// El servidor de siempre, que además crea la subtarea `t7` (tardando
+    /// eso) y, desde que se le pide, la cuenta entre las de la primera tarea.
+    fn server_that_makes_subtasks(delay_ms: u64) -> FakeServer {
+        let server = server();
+        let made = detail("t7")["task"].clone();
+        server.mount(
+            Mock::given(method("POST")).and(path("/api/v1/task-lists/l1/tasks")).respond_with(
+                wiremock::ResponseTemplate::new(201)
+                    .set_body_json(json!({ "success": true, "data": made }))
+                    .set_delay(std::time::Duration::from_millis(delay_ms)),
+            ),
+        );
+        server
+    }
+
+    /// Lo que dice el campo del título de la subtarea nueva.
+    fn subtask_typed(view: &Entity<TaskView>, cx: &mut TestAppContext) -> String {
+        cx.update(|cx| view.read(cx).subtask_title.read(cx).value().to_string())
+    }
+
+    /// «+ Añadir» abre un campo de un renglón; Enter crea la subtarea
+    /// colgando de la tarea abierta, el campo se cierra y la nueva sale en
+    /// la lista con su número.
+    ///
+    /// Roturas que atrapa: un «+ Añadir» que no hace nada (lo que había); un
+    /// Enter que no manda, o que la crea suelta, sin madre, o con otro
+    /// título; que la nueva no aparezca hasta reabrir la tarea; que el campo
+    /// se quede abierto con el título ya usado.
+    #[gpui_kit::test]
+    fn a_subtask_is_added_from_its_field_and_shows_with_its_number(cx: &mut TestAppContext) {
+        let server = server_that_makes_subtasks(0);
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+        assert!(!on_screen(window, "task-new-subtask", cx) && !on_screen(window, "subtask-t7", cx));
+
+        click(window, "task-add-subtask", cx);
+        assert!(on_screen(window, "task-new-subtask-title", cx));
+        type_more(window, "Probar en staging", cx);
+        // Desde ahora el servidor la cuenta entre las suyas.
+        let mut grown = detail("t1");
+        let mut card = grown["subtasks"][0].clone();
+        card["id"] = json!("t7");
+        card["seq"] = json!(9);
+        card["title"] = json!("Probar en staging");
+        grown["subtasks"].as_array_mut().unwrap().push(card);
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(grown)).with_priority(1));
+        press(window, "enter", cx);
+
+        wait_until(cx, "la subtarea nueva sale en la lista", |cx| on_screen(window, "subtask-t7", cx));
+        assert_eq!(created(&server), [json!({ "title": "Probar en staging", "parentId": "t1" })]);
+        assert_eq!(label_of(window, "subtask-seq-t7", cx), "#9");
+        wait_until(cx, "el campo se cierra", |cx| !on_screen(window, "task-new-subtask", cx));
+        assert!(!on_screen(window, "task-problem", cx));
+        stop(cx);
+    }
+
+    /// Escape cierra el campo sin crear nada (y sin llevarse la página); la
+    /// × también; y Enter con el título en blanco no manda nada.
+    ///
+    /// Roturas que atrapa: un Escape que crea lo escrito a medias, o que
+    /// cierra la tarea entera; una × que crea; una subtarea sin título.
+    #[gpui_kit::test]
+    fn escape_the_cross_or_a_blank_title_create_no_subtask(cx: &mut TestAppContext) {
+        let server = server_that_makes_subtasks(0);
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+
+        click(window, "task-add-subtask", cx);
+        type_more(window, "A medias", cx);
+        press(window, "escape", cx);
+        settle(cx);
+        assert!(!on_screen(window, "task-new-subtask", cx), "Escape no cerró el campo");
+        assert_eq!(open_task_id(cx).as_deref(), Some("t1"), "Escape cerró la página a quien escribía");
+
+        click(window, "task-add-subtask", cx);
+        assert_eq!(subtask_typed(&view, cx), "", "el campo heredó lo que se descartó");
+        type_more(window, "   ", cx);
+        press(window, "enter", cx);
+        settle(cx);
+        assert!(on_screen(window, "task-new-subtask", cx));
+        assert!(!on_screen(window, "task-problem", cx), "avisó de un fallo por un Enter en blanco");
+
+        type_more(window, "Tampoco", cx);
+        click(window, "task-new-subtask-cancel", cx);
+        settle(cx);
+        assert!(!on_screen(window, "task-new-subtask", cx));
+        assert!(created(&server).is_empty(), "se creó {:?}", created(&server));
+        stop(cx);
+    }
+
+    /// Dos Enter seguidos, con el servidor tardando, crean una sola.
+    ///
+    /// Rotura que atrapa: dos subtareas iguales por pulsar otra vez mientras
+    /// la primera no ha contestado.
+    #[gpui_kit::test]
+    fn pressing_enter_twice_creates_one_subtask(cx: &mut TestAppContext) {
+        let server = server_that_makes_subtasks(300);
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+        click(window, "task-add-subtask", cx);
+        type_more(window, "Una sola", cx);
+
+        press(window, "enter", cx);
+        press(window, "enter", cx);
+
+        wait_until(cx, "se crea y el campo se cierra", |cx| !created(&server).is_empty() && !on_screen(window, "task-new-subtask", cx));
+        settle(cx);
+        assert_eq!(created(&server).len(), 1);
+        stop(cx);
+    }
+
+    /// Si no se pudo crear, se dice y el título se queda escrito.
+    ///
+    /// Roturas que atrapa: un campo que se cierra como si se hubiera creado;
+    /// perder el título; callar el fallo.
+    #[gpui_kit::test]
+    fn a_subtask_that_cannot_be_created_keeps_its_title(cx: &mut TestAppContext) {
+        // Sin `POST` montado: el servidor contesta 404.
+        let server = server();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        click(window, "task-add-subtask", cx);
+        type_more(window, "No se crea", cx);
+
+        click(window, "task-new-subtask-create", cx);
+
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+        assert!(on_screen(window, "task-new-subtask", cx));
+        assert_eq!(subtask_typed(&view, cx), "No se crea");
+        stop(cx);
+    }
+
+    /// El título de una subtarea la abre, y de ella se vuelve por el nombre
+    /// de su madre en la cabecera; la casilla sólo la marca.
+    ///
+    /// Roturas que atrapa: un título que no lleva a ningún sitio (lo que
+    /// había); una casilla que además abre la subtarea; abrir otra tarea.
+    #[gpui_kit::test]
+    fn the_title_of_a_subtask_opens_it_and_the_tick_does_not(cx: &mut TestAppContext) {
+        let server = server();
+        let mut child = detail("t2");
+        child["parent"]["id"] = json!("t1");
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t2")).respond_with(ok(child)));
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+
+        click(window, "subtask-tick-t2", cx);
+        settle(cx);
+        assert_eq!(open_task_id(cx).as_deref(), Some("t1"), "la casilla abrió la subtarea");
+
+        click(window, "subtask-open-t2", cx);
+        wait_until(cx, "abre la subtarea", |cx| {
+            cx.update(|cx| Backend::snapshot(cx).read(cx).task.detail.as_ref().is_some_and(|detail| detail.task.id == "t2"))
+        });
+        click(window, "task-parent", cx);
+        wait_until(cx, "vuelve a la madre", |cx| open_task_id(cx).as_deref() == Some("t1"));
         stop(cx);
     }
 

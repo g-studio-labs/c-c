@@ -19,7 +19,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-pub use actions::MAX_HANDOFF;
+pub use actions::{MAX_HANDOFF, MAX_TASK_TITLE};
 pub use compose::{compose, continue_list, ComposeAction, ComposeEdit};
 pub use edit::{assignee_choices, retitled, shown_name, tag_choices, tag_color_for, title_line, Choice, MAX_TAG_NAME, TAG_PALETTE};
 pub use mention::{
@@ -436,7 +436,21 @@ impl Tasks {
     }
 
     /// Añade una línea al checklist de la tarea abierta.
+    ///
+    /// Vino del «+ Añadir» de `TaskDetailDrawer.tsx`, que manda `{ title,
+    /// parentId }` a la lista de la madre. Sin título no se pide nada (allí
+    /// el diálogo no deja crear), ni con uno que el servidor no guardaría
+    /// (`CreateTaskRequest`, 300 letras). No lleva visibilidad ni proyecto:
+    /// una subtarea es interna siempre, porque el servidor se lo quita.
     pub async fn add_subtask(&self, title: &str) -> Result<(), ApiError> {
+        let title = title_line(title);
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(refused("empty-title", "A task needs a title"));
+        }
+        if title.chars().count() > actions::MAX_TASK_TITLE {
+            return Err(refused("title-too-long", "A task title can be 300 characters at most"));
+        }
         let task_id = self.open_id()?;
         let list_id = self
             .state()

@@ -1,5 +1,6 @@
 //! Lo que se le hace a una tarea entera desde su página, más allá de sus
-//! campos de un toque. Por ahora, dejar escrito dónde quedó.
+//! campos de un toque: dejar escrito dónde quedó y los topes de lo que se
+//! le escribe.
 //!
 //! Vino de `HandoffSection` en `app/src/components/TaskDetailDrawer.tsx`.
 
@@ -9,6 +10,9 @@ use crate::ApiError;
 /// Lo más que mide un «dónde quedó», en letras: el tope del servidor
 /// (`UpdateTaskRequest.Handoff`). Es un resumen para leer de un vistazo.
 pub const MAX_HANDOFF: usize = 2000;
+
+/// Lo más que mide el título de una tarea, en letras (`CreateTaskRequest`).
+pub const MAX_TASK_TITLE: usize = 300;
 
 impl Tasks {
     fn detail_or_refuse(&self) -> Result<TaskDetail, ApiError> {

@@ -1048,3 +1048,85 @@ async fn a_handoff_the_server_refuses_leaves_the_task_as_it_was() {
     assert_eq!(refusal(rig.core.tasks().set_handoff("Otra cosa.").await), "insufficient-role");
     assert_eq!(open_task(&rig).task.handoff.as_deref(), Some("Lo de antes."));
 }
+
+/// Un servidor que crea la subtarea que se le pida en la lista `l1`.
+async fn mount_subtask_maker(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/api/v1/task-lists/l1/tasks"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": {
+            "id": "sub2", "createdAt": "2026-11-15T10:00:00Z", "updatedAt": "2026-11-15T10:00:00Z",
+            "listId": "l1", "seq": 14, "title": "Otra línea", "status": "pending", "priority": "none",
+        }})))
+        .mount(server)
+        .await;
+}
+
+/// La subtarea nueva sale en la tarea abierta, con su número, y la de un
+/// cliente no manda nada que la haga suya: va el título en un renglón y de
+/// quién cuelga, y nada más.
+///
+/// Roturas que atrapa: crearla y no volver a pedir la madre (no aparece
+/// hasta reabrir); mandarle la visibilidad o el proyecto de la madre (una
+/// subtarea es interna siempre: gastaría un folio del cliente en una línea
+/// de checklist); un título pegado con saltos de línea, o con sus blancos.
+#[tokio::test]
+async fn a_new_subtask_shows_in_the_open_task_with_its_number() {
+    let rig = rig().await;
+    let mother = detail("t1", "Del cliente", "pending", "p1", "public");
+    Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(mother.clone())).up_to_n_times(1).mount(&rig.server).await;
+    mount_columns(&rig.server).await;
+    mount_subtask_maker(&rig.server).await;
+    rig.core.tasks().open("t1").await;
+    let mut grown = mother;
+    grown["subtasks"] = json!([
+        { "id": "sub1", "seq": 13, "title": "Una línea", "priority": "medium", "statusId": "s-pending" },
+        { "id": "sub2", "seq": 14, "title": "Otra línea", "priority": "none", "statusId": "s-pending" },
+    ]);
+    mount_task(&rig.server, "t1", grown).await;
+
+    rig.core.tasks().add_subtask("  Otra\nlínea ").await.expect("se creó");
+
+    assert_eq!(requests_to(&rig.server, "POST", "/l1/tasks").await, [json!({ "title": "Otra línea", "parentId": "t1" })]);
+    let listed: Vec<(String, i64)> = open_task(&rig).subtasks.into_iter().map(|card| (card.id, card.seq)).collect();
+    assert_eq!(listed, [("sub1".to_string(), 13), ("sub2".to_string(), 14)]);
+}
+
+/// Sin título, o con uno que no cabe, no se le pide nada al servidor.
+///
+/// Roturas que atrapa: crear una subtarea sin nombre (o sólo de espacios),
+/// que en la lista es una casilla suelta; mandar un título de más de 300
+/// letras, que el servidor rechaza con un 400 sin frase.
+#[tokio::test]
+async fn a_subtask_without_a_title_or_with_one_too_long_is_not_sent() {
+    let rig = rig().await;
+    mount_task(&rig.server, "t1", detail("t1", "Madre", "pending", "", "")).await;
+    mount_columns(&rig.server).await;
+    mount_subtask_maker(&rig.server).await;
+    rig.core.tasks().open("t1").await;
+
+    assert_eq!(refusal(rig.core.tasks().add_subtask("  \n ").await), "empty-title");
+    assert_eq!(refusal(rig.core.tasks().add_subtask(&"ñ".repeat(301)).await), "title-too-long");
+    assert_eq!(requests_to(&rig.server, "POST", "/l1/tasks").await, Vec::<Value>::new());
+
+    rig.core.tasks().add_subtask(&"ñ".repeat(300)).await.expect("300 letras caben");
+    assert_eq!(requests_to(&rig.server, "POST", "/l1/tasks").await.len(), 1);
+}
+
+/// Si el servidor no la crea, se dice y la lista sigue como estaba.
+///
+/// Rotura que atrapa: dar por creada una subtarea que no existe.
+#[tokio::test]
+async fn a_subtask_the_server_refuses_is_not_listed() {
+    let rig = rig().await;
+    mount_task(&rig.server, "t1", detail("t1", "Madre", "pending", "", "")).await;
+    mount_columns(&rig.server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/task-lists/l1/tasks"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({ "success": false, "message": "Forbidden", "error": "insufficient-role" })))
+        .mount(&rig.server)
+        .await;
+    rig.core.tasks().open("t1").await;
+
+    assert_eq!(refusal(rig.core.tasks().add_subtask("Otra línea").await), "insufficient-role");
+    assert_eq!(open_task(&rig).subtasks.len(), 1);
+}
