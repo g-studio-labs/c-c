@@ -54,6 +54,9 @@ const DESCRIPTION_ROWS: usize = 8;
 /// El `<textarea>` de la app de siempre no tiene tope; el campo del kit pide
 /// uno, y con éste no lo alcanza ningún título que quepa en el servidor.
 const TITLE_ROWS: usize = 40;
+/// Lo más que mide de alto la actividad en el riel antes de deslizarse por
+/// dentro: una tarea con decenas de commits no estira el riel.
+const ACTIVITY_MAX_HEIGHT: f32 = 240.;
 
 /// Una de las cajas en las que se escribe markdown en la página.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1530,6 +1533,43 @@ impl TaskView {
             )
         });
 
+        // Lo que el servidor fue anotando («status: x → y», a quién se le
+        // dio, cada commit que la nombra), aquí y no entre los comentarios.
+        // jose (17-nov-2026), mirando la tarea de un cliente: «sale acá
+        // mismo; quizá sí se pueda mover a la derecha para tenerlos más a
+        // mano, abajo de la fecha, en un bloque con su propio scroll». Y
+        // como renglones grises, no como tarjetas. Lo último, arriba; sin
+        // ninguna línea, el bloque no sale.
+        let activity = (!sheet.activity.is_empty()).then(|| {
+            property(
+                rail_label(Lucide::Activity, tr(cx, "work:task.activity"), cx),
+                div()
+                    .id("task-activity")
+                    .flex_1()
+                    .min_w_0()
+                    .max_h(px(ACTIVITY_MAX_HEIGHT))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .pl_2()
+                    .border_l_1()
+                    .border_color(border)
+                    .text_color(muted)
+                    .children(sheet.activity.iter().rev().map(|line| {
+                        div()
+                            .id(SharedString::from(format!("activity-{}", line.id)))
+                            .flex()
+                            .flex_col()
+                            .child(div().text_size(px(11.)).line_height(px(15.)).child(line.when.clone()))
+                            .child(div().leading_xs().child(line.body.clone()))
+                            .test_support()
+                    }))
+                    .test_support()
+                    .into_any_element(),
+            )
+        });
+
         // A quien está en otra hora que la organización se le dice de quién
         // es el día: aquí sí cabe escrito.
         let zone = Backend::core(cx).my_work().zone_hint(locale(cx));
@@ -1621,6 +1661,7 @@ impl TaskView {
             .child(property(rail_label(Lucide::Users, tr(cx, "work:task.assignees"), cx), assignees.into_any_element()))
             .children(blockers)
             .child(property(rail_label(Lucide::Calendar, tr(cx, "work:task.due"), cx), due.into_any_element()))
+            .children(activity)
     }
 
     /// Una subtarea, con las medidas de su fila en `TaskDetailDrawer.tsx`
@@ -3022,6 +3063,100 @@ mod tests {
         assert_eq!(written(&view, cx).0, "La otra tarea");
         assert_eq!(patches_to_other(&server), 0, "se guardó en la otra tarea lo escrito para la primera");
         assert!(patches(&server).is_empty(), "se guardó {:?} sin salir del campo", patches(&server));
+        stop(cx);
+    }
+
+    /// El servidor de siempre, con la primera tarea llevando además tantas
+    /// líneas del servidor (`line-0` la más antigua), entre sus comentarios.
+    fn server_with_activity(lines: usize) -> FakeServer {
+        let server = server();
+        let mut first = detail("t1");
+        let said = first["comments"][0].clone();
+        let mut thread = first["comments"].as_array().unwrap().clone();
+        for n in 0..lines {
+            let mut line = said.clone();
+            line["id"] = json!(format!("line-{n}"));
+            line["kind"] = json!("system");
+            line["body"] = json!(format!("status: pending → in_progress, y un commit de nombre bien largo que la nombra ({n})"));
+            thread.push(line);
+        }
+        first["comments"] = json!(thread);
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(first)).with_priority(1));
+        server
+    }
+
+    /// De dónde a dónde va eso, de arriba abajo.
+    fn span(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> (f32, f32) {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let bounds = window.find(id).bounds();
+            (f32::from(bounds.top()), f32::from(bounds.bottom()))
+        })
+        .unwrap()
+    }
+
+    /// Lo que el servidor anotó sale en el riel, bajo el vencimiento, y no
+    /// entre los comentarios; una tarea sin nada anotado no lleva el bloque.
+    ///
+    /// Roturas que atrapa: un «status: x → y» como una tarjeta más de la
+    /// conversación (lo que jose encontró el 17-nov-2026); sacarlo de la
+    /// conversación y no enseñarlo en ningún sitio; un rótulo de «Actividad»
+    /// sobre nada.
+    #[gpui_kit::test]
+    fn what_the_server_noted_is_in_the_rail_and_not_in_the_conversation(cx: &mut TestAppContext) {
+        let server = server_with_activity(1);
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+
+        let in_rail = cx
+            .update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.within("task-activity").try_find("activity-line-0").is_some()
+            })
+            .unwrap();
+        assert!(in_rail, "la línea del servidor no está en la actividad del riel");
+        assert!(!on_screen(window, "comment-line-0", cx), "la línea del servidor sigue entre los comentarios");
+        assert!(on_screen(window, "comment-said", cx), "se fue de la conversación lo que dijo una persona");
+        // Debajo del vencimiento.
+        assert!(span(window, "task-activity", cx).0 > span(window, "task-due", cx).1);
+        stop(cx);
+
+        let plain = server_with_activity(0);
+        let window = open(&plain, cx);
+        open_first_task(window, cx);
+        assert!(!on_screen(window, "task-activity", cx), "hay bloque de actividad sin ninguna línea");
+        stop(cx);
+    }
+
+    /// Con muchas líneas la actividad no pasa de su alto y se desliza por
+    /// dentro, con lo último arriba.
+    ///
+    /// Roturas que atrapa: un riel estirado por treinta commits, con las
+    /// propiedades de debajo fuera de la vista; lo más antiguo arriba, y lo
+    /// que acaba de pasar al fondo de un deslizamiento.
+    #[gpui_kit::test]
+    fn a_long_activity_stays_within_its_height_with_the_latest_on_top(cx: &mut TestAppContext) {
+        let server = server_with_activity(30);
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+
+        let block = span(window, "task-activity", cx);
+        assert!(block.1 - block.0 <= 240. && block.1 - block.0 > 200., "la actividad mide {} de alto", block.1 - block.0);
+        let (latest, before) = (span(window, "activity-line-29", cx), span(window, "activity-line-28", cx));
+        assert!((latest.0 - block.0).abs() < 1., "lo último no está arriba: empieza en {} y el bloque en {}", latest.0, block.0);
+        assert!(before.0 >= latest.1, "la anterior no va debajo de la última");
+        // Cada línea entera, por larga que sea: sigue en el renglón de abajo.
+        assert!(latest.1 - latest.0 > 15. + 18., "una línea larga se quedó en un renglón: mide {}", latest.1 - latest.0);
+        // La más antigua está al fondo, y deslizando el bloque se llega.
+        assert!(span(window, "activity-line-0", cx).0 > block.1, "la más antigua cabe sin deslizar: la prueba no pone el caso");
+        cx.update_window(window, |_, window, cx| {
+            window.scroll("task-activity", gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-9000.))), cx);
+        })
+        .unwrap();
+        let oldest = span(window, "activity-line-0", cx);
+        assert!((oldest.1 - block.1).abs() < 1., "deslizando hasta el final la más antigua acaba en {} y el bloque en {}", oldest.1, block.1);
+        assert_eq!(span(window, "task-activity", cx), block, "al deslizar la actividad se movió el riel");
         stop(cx);
     }
 

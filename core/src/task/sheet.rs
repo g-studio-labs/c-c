@@ -34,14 +34,25 @@ pub struct SheetComment {
     /// del catálogo. `None` en una tarea interna: ahí todo es del equipo y
     /// decirlo en cada línea es ruido.
     pub audience: Option<String>,
-    /// Una línea que escribió el servidor («status: x → y»).
-    pub system: bool,
     /// Si quien mira puede editarlo o borrarlo.
     pub mine: bool,
     /// Si se editó después de escribirse.
     pub edited: bool,
     /// Si lo anotó un agente: lleva su icono delante del nombre.
     pub agent: bool,
+}
+
+/// Una línea que escribió el servidor en el hilo de la tarea: «status:
+/// pending → in_progress», «assigned to ana», lo que deja GitHub por cada
+/// commit que la nombra. No es conversación: es lo que le fue pasando.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct SheetActivity {
+    pub id: String,
+    /// Cuándo, como en los comentarios.
+    pub when: String,
+    /// Texto llano, tal como lo escribió el servidor.
+    pub body: String,
 }
 
 /// Si esa persona puede editar o borrar ese comentario: quien lo escribió, o
@@ -154,8 +165,16 @@ pub struct TaskSheet {
     /// «Actualizada el 14/11/26, 14:17:40», al pie.
     pub updated: String,
     pub subtasks: Vec<SheetSubtask>,
-    /// La conversación, en el orden en que se escribió.
+    /// La conversación, en el orden en que se escribió: lo que dijeron
+    /// personas y agentes. Cuántos son es lo que su pestaña cuenta.
     pub talk: Vec<SheetComment>,
+    /// Lo que el servidor fue anotando, aparte y en su orden. Decidido con
+    /// jose (17-nov-2026), mirando la tarea de un cliente: «sale acá mismo;
+    /// quizá sí se pueda mover a la derecha para tenerlos más a mano, abajo
+    /// de la fecha, en un bloque con su propio scroll». En la app de siempre
+    /// van entre los comentarios, como una tarjeta más, y cuentan en el
+    /// número de la conversación; aquí ni lo uno ni lo otro.
+    pub activity: Vec<SheetActivity>,
     /// Las notas de agentes, aparte.
     pub notes: Vec<SheetComment>,
     /// Los ficheros de la tarea. Los de un comentario van con él.
@@ -209,15 +228,15 @@ pub fn task_sheet(
         },
         when: said_at(locale, &comment.created_at),
         body: comment.body.trim().to_string(),
-        audience: (client_reads && comment.kind != "system").then(|| {
+        audience: client_reads.then(|| {
             if comment.visibility == "public" { "work:task.clientSees" } else { "work:task.internal" }.to_string()
         }),
-        system: comment.kind == "system",
         mine: can_change_comment(comment, viewer),
         edited: was_edited(comment),
         agent: is_agent_note(comment),
     };
-    let (notes, talk): (Vec<&TaskComment>, Vec<&TaskComment>) = detail.comments.iter().partition(|c| is_agent_note(c));
+    let (system, said): (Vec<&TaskComment>, Vec<&TaskComment>) = detail.comments.iter().partition(|c| c.kind == "system");
+    let (notes, talk): (Vec<&TaskComment>, Vec<&TaskComment>) = said.into_iter().partition(|c| is_agent_note(c));
     let handoff = task.handoff.clone().filter(|handoff| !handoff.trim().is_empty());
     let done = |status_id: &str| statuses.iter().any(|option| option.status.id == status_id && option.status.kind == "done");
 
@@ -264,6 +283,10 @@ pub fn task_sheet(
             .map(|card| SheetSubtask { id: card.id.clone(), seq: card.seq, title: card.title.clone(), done: done(&card.status_id) })
             .collect(),
         talk: talk.into_iter().map(comment).collect(),
+        activity: system
+            .into_iter()
+            .map(|line| SheetActivity { id: line.id.clone(), when: said_at(locale, &line.created_at), body: line.body.trim().to_string() })
+            .collect(),
         notes: notes.into_iter().map(comment).collect(),
         attachments: detail
             .attachments
@@ -468,15 +491,54 @@ mod tests {
         let sheet = sheet_of(detail, json!([]));
 
         let ids = |rows: &[SheetComment]| rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
-        assert_eq!(ids(&sheet.talk), ["person", "answer", "system"]);
+        assert_eq!(ids(&sheet.talk), ["person", "answer"]);
         assert_eq!(ids(&sheet.notes), ["note"]);
         assert_eq!(sheet.notes[0].author, "Agente de Ana Pérez");
         assert_eq!(sheet.talk[0].author, "Ana Pérez");
         assert_eq!(sheet.talk[0].body, "hola");
-        assert!(sheet.talk[2].system && !sheet.talk[0].system);
         // La marca de agente (su icono) va con la nota y con nada más.
         assert!(sheet.notes[0].agent, "la nota de un agente no lleva su marca");
         assert!(sheet.talk.iter().all(|comment| !comment.agent), "algo de la conversación va marcado como de agente");
+    }
+
+    /// Lo que el servidor anotó va aparte de la conversación, en su orden y
+    /// con su hora, y no cuenta en ella: lo que la pestaña dice que hay es lo
+    /// que lista.
+    ///
+    /// Roturas que atrapa: una línea de «status: x → y» entre los
+    /// comentarios (lo que jose encontró el 17-nov-2026 mirando la tarea de
+    /// un cliente); «Conversación (3)» sobre dos comentarios; perder las
+    /// líneas al sacarlas, o darlas en otro orden; que la de un agente
+    /// (GitHub las deja con su token) acabe entre las notas de agentes.
+    #[test]
+    fn what_the_server_noted_goes_apart_and_does_not_count_as_conversation() {
+        let mut detail = contract();
+        detail["comments"] = json!([
+            comment("moved", |c| {
+                c["kind"] = json!("system");
+                c["body"] = json!(" status: pending → in_progress ");
+                c["createdAt"] = json!("2026-11-14T10:00:00Z");
+            }),
+            comment("person", |_| {}),
+            comment("commit", |c| {
+                c["kind"] = json!("system");
+                c["via"] = json!("mcp");
+                c["body"] = json!("commit 1f3b447 names this task");
+            }),
+            comment("note", |c| c["via"] = json!("mcp")),
+        ]);
+        let sheet = sheet_of(detail.clone(), json!([]));
+
+        let lines: Vec<(&str, &str, &str)> = sheet.activity.iter().map(|line| (line.id.as_str(), line.body.as_str(), line.when.as_str())).collect();
+        let (early, late) = (said_at(Locale::Es, "2026-11-14T10:00:00Z"), said_at(Locale::Es, "2026-11-14T12:00:00Z"));
+        assert_eq!(lines, [("moved", "status: pending → in_progress", early.as_str()), ("commit", "commit 1f3b447 names this task", late.as_str())]);
+        assert!(!early.is_empty() && early != late);
+        assert_eq!(sheet.talk.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), ["person"]);
+        assert_eq!(sheet.notes.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), ["note"]);
+
+        // Sin líneas del servidor no hay nada que enseñar aparte.
+        detail["comments"] = json!([comment("person", |_| {})]);
+        assert!(sheet_of(detail, json!([])).activity.is_empty());
     }
 
     /// En una tarea que el cliente lee, cada comentario dice quién lo lee; en
@@ -484,30 +546,29 @@ mod tests {
     ///
     /// Roturas que atrapa: marcar como interno lo que el cliente está
     /// leyendo (o al revés); llenar de «interno» una tarea que nunca sale del
-    /// equipo; etiquetar una línea de sistema.
+    /// equipo.
     #[test]
     fn a_comment_says_who_reads_it_only_where_a_client_could() {
         let mut detail = contract();
         detail["comments"] = json!([
             comment("team", |_| {}),
             comment("client", |c| c["visibility"] = json!("public")),
-            comment("system", |c| c["kind"] = json!("system")),
         ]);
         let audiences = |detail: Value| {
             sheet_of(detail, json!([])).talk.into_iter().map(|row| row.audience).collect::<Vec<_>>()
         };
         assert_eq!(
             audiences(detail.clone()),
-            [Some("work:task.internal".to_string()), Some("work:task.clientSees".to_string()), None]
+            [Some("work:task.internal".to_string()), Some("work:task.clientSees".to_string())]
         );
 
         // Escondida al cliente, o sin proyecto: es del equipo entera.
         let mut hidden = detail.clone();
         hidden["task"]["visibility"] = json!("internal");
-        assert_eq!(audiences(hidden), [None, None, None]);
+        assert_eq!(audiences(hidden), [None, None]);
         let mut internal = detail;
         internal["task"]["projectId"] = json!("");
-        assert_eq!(audiences(internal), [None, None, None]);
+        assert_eq!(audiences(internal), [None, None]);
     }
 
     /// Una subtarea está hecha si su columna es de las de «hecho».
@@ -641,18 +702,23 @@ mod tests {
         let seen_by = |viewer: Option<&Session>| -> Vec<(String, bool, bool)> {
             task_sheet(&detail, &[], Locale::Es, today, viewer).talk.into_iter().map(|c| (c.id, c.mine, c.edited)).collect()
         };
-        let said = |mine: [bool; 4]| -> Vec<(String, bool, bool)> {
-            ["mio", "ajeno", "del-servidor", "sin-autor"]
+        let said = |mine: [bool; 3]| -> Vec<(String, bool, bool)> {
+            ["mio", "ajeno", "sin-autor"]
                 .iter()
                 .zip(mine)
                 .map(|(id, mine)| (id.to_string(), mine, *id == "ajeno"))
                 .collect()
         };
 
-        assert_eq!(seen_by(Some(&viewer("u1", false))), said([true, false, false, false]));
-        assert_eq!(seen_by(Some(&viewer("u9", true))), said([true, true, false, true]));
-        assert_eq!(seen_by(Some(&viewer("", false))), said([false, false, false, false]));
-        assert_eq!(seen_by(None), said([false, false, false, false]));
+        assert_eq!(seen_by(Some(&viewer("u1", false))), said([true, false, false]));
+        assert_eq!(seen_by(Some(&viewer("u9", true))), said([true, true, true]));
+        assert_eq!(seen_by(Some(&viewer("", false))), said([false, false, false]));
+        assert_eq!(seen_by(None), said([false, false, false]));
+        // La línea del servidor ya no está en la conversación; la regla
+        // sigue diciendo que no es de nadie, ni de quien figura como autor.
+        let noted = &detail.comments[2];
+        assert_eq!(noted.kind, "system");
+        assert!(!can_change_comment(noted, Some(&viewer("u1", false))) && !can_change_comment(noted, Some(&viewer("u9", true))));
     }
 
 }

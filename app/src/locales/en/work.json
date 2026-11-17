@@ -181,6 +181,7 @@
     "addTags": "Tag…",
     "addTagShort": "+ tag",
     "due": "Due",
+    "activity": "Activity",
     "deleteTaskTitle": "Delete task \"{{name}}\"?",
     "deleteTaskBody": "Removes it with its comments and attachments. This can't be undone.",
     "deleteTask": "Delete task",

@@ -30,7 +30,7 @@ pub use files::{attachment_fits, attachment_path, file_citation, image_type, is_
     MAX_ATTACHMENT_BYTES, THUMBNAIL_MAX_HEIGHT, THUMBNAIL_MAX_WIDTH,
 };
 pub use flow::{can_transition, canonical_priority, canonical_status, flow_for, Flow};
-pub use sheet::{client_reads, can_change_comment, is_agent_note, says_something, task_sheet, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};
+pub use sheet::{client_reads, can_change_comment, is_agent_note, says_something, task_sheet, SheetActivity, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};
 pub use types::{
     CommentAuthor, DecisionRef, GitSummary, ReleaseRef, Task, TaskAttachment, TaskBlocker, TaskCard,
     TaskComment, TaskDetail, TaskGitLink, TaskGitLinks, TaskStatus, TaskTag, UserSummary,
