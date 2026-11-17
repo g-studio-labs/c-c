@@ -3,6 +3,7 @@
 //! El core no sabe qué pinta: avisa por este trait, y cada plataforma lo
 //! convierte en lo suyo (un evento de Tauri, un `StateFlow`, un `@Published`).
 
+use crate::counters::CountersState;
 use crate::docs::DocsState;
 use crate::mywork::MyWorkState;
 use crate::orgs::OrgsState;
@@ -33,6 +34,10 @@ pub trait Listener: Send + Sync {
 
     /// La tarea abierta cambió: se abrió, llegó, se editó o se cerró.
     fn task_changed(&self, _state: TaskState) {}
+
+    /// Un contador de la campana o del riel se movió, o se cambió de
+    /// organización y hay que dejar de pintar los de la anterior.
+    fn counters_changed(&self, _state: CountersState) {}
 
     /// La conexión con el servidor cambió: para el aviso de «sin conexión».
     fn connection_changed(&self, _state: ConnectionState) {}

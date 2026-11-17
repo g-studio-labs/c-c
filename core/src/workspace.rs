@@ -45,10 +45,20 @@ impl Core {
         self.my_work().ensure_loaded(self.orgs().state().current_org_id).await;
     }
 
-    /// El árbol, sus marcas de documentación y «Mi trabajo» de la
-    /// organización que se mira, a la vez.
+    /// El árbol, sus marcas de documentación, «Mi trabajo» y los contadores
+    /// de la organización que se mira, a la vez.
     async fn load_current_org(&self) {
-        let Some(org_id) = self.orgs().state().current_org_id else { return };
+        let org_id = self.orgs().state().current_org_id;
+        // Los contadores en su propia tarea, y también sin organización: a
+        // quien todavía no es de ninguna hay que enseñarle sus invitaciones.
+        let counters = {
+            let (core, org_id) = (self.clone(), org_id.clone());
+            tokio::spawn(async move { core.counters().load(org_id).await })
+        };
+        let Some(org_id) = org_id else {
+            let _ = counters.await;
+            return;
+        };
         // «Mi trabajo» en su propia tarea, para que no espere al árbol.
         let my_work = {
             let (core, org_id) = (self.clone(), org_id.clone());
@@ -59,5 +69,6 @@ impl Core {
         self.tree().load(&org_id).await;
         self.tree().load_doc_marks(&org_id).await;
         let _ = my_work.await;
+        let _ = counters.await;
     }
 }

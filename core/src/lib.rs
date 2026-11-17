@@ -9,6 +9,7 @@
 uniffi::setup_scaffolding!();
 
 pub mod account;
+pub mod counters;
 pub mod dates;
 pub mod error;
 pub mod docs;
@@ -32,6 +33,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use account::{check_new_password, check_sign_in, gate, FormCheck, Gate, MIN_PASSWORD};
+pub use counters::{count_badge, counted_label, rings_bell, Counters, CountersState, BELL_CAP, RAIL_CAP};
 pub use dates::{date_and_time, due_day, due_state, short_date, today_in, zone_hint, DueState};
 pub use docs::{doc_blocks, doc_headings, DocBlock, DocDecision, DocHeading, DocTab, DocTarget, Docs, DocsState, DOC_TABS};
 pub use error::ApiError;
@@ -130,6 +132,10 @@ pub(crate) struct Inner {
     pub(crate) tree: Mutex<TreeState>,
     pub(crate) docs: Mutex<DocsState>,
     pub(crate) task: Mutex<TaskState>,
+    pub(crate) counters: Mutex<counters::CountersData>,
+    /// Cuántas veces se ha pedido volver a contar cada cosa: ver
+    /// `Counters::reload_soon`.
+    pub(crate) counter_reloads: [std::sync::atomic::AtomicU64; counters::SOURCES],
     pub(crate) connection: Mutex<ConnectionState>,
     /// Qué stream de eventos es el vigente: ver `Stream::current`.
     pub(crate) stream_turn: std::sync::atomic::AtomicU64,
@@ -158,6 +164,8 @@ impl Core {
                 tree: Mutex::new(TreeState::default()),
                 docs: Mutex::new(DocsState::default()),
                 task: Mutex::new(TaskState::default()),
+                counters: Mutex::new(counters::CountersData::default()),
+                counter_reloads: Default::default(),
                 connection: Mutex::new(ConnectionState::default()),
                 stream_turn: std::sync::atomic::AtomicU64::new(0),
                 my_work_reloads: std::sync::atomic::AtomicU64::new(0),

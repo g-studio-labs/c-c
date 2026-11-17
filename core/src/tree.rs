@@ -189,10 +189,15 @@ impl Tree {
         });
         let path = format!("/api/v1/task-spaces/?orgId={org_id}");
         match self.core.get::<Vec<SpaceTree>>(&path).await {
-            Ok(spaces) => self.update(|state| {
-                state.spaces = spaces.into_iter().filter(|space| !space.is_general()).collect();
-                state.loading = false;
-            }),
+            Ok(spaces) => {
+                // Antes de quitar la sala general: no se pinta en el árbol,
+                // pero es un canal y lo que tenga sin leer cuenta.
+                self.core.counters().spaces_loaded(org_id, spaces.iter().map(|space| space.id.clone()).collect());
+                self.update(|state| {
+                    state.spaces = spaces.into_iter().filter(|space| !space.is_general()).collect();
+                    state.loading = false;
+                })
+            }
             Err(error) => self.update(|state| {
                 state.error = Some(error.to_string());
                 state.loading = false;

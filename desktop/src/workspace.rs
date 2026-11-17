@@ -4,7 +4,7 @@
 //! Qué filas tiene el árbol, cuáles van abiertas, qué hace un clic y qué se
 //! trae al entrar lo dice el core. Aquí se pinta y se le pasa cada gesto.
 
-use cac_core::{Locale, NodeKind, ThemePreference, TreeRow};
+use cac_core::{count_badge, counted_label, Locale, NodeKind, ThemePreference, TreeRow, BELL_CAP, RAIL_CAP};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
@@ -32,6 +32,14 @@ const ACCOUNT_MENU_WIDTH: f32 = 256.;
 /// Lo que entra una fila por cada nivel que cuelga: lo de dentro empieza
 /// bajo la marca de su padre (el hueco del chevrón más la separación).
 const INDENT: f32 = 22.;
+
+/// El número que lleva un botón del riel: cuánto, y si es un «míralo cuando
+/// puedas» (ámbar) en vez de algo sin leer (el color de acento).
+struct RailCount {
+    id: &'static str,
+    count: Option<i64>,
+    warning: bool,
+}
 
 /// Casi sin estado propio: lo que pinta lo lee del core al pintarse, y GPUI
 /// repinta una vista cuando cambia algo que leyó. No hace falta suscribirse.
@@ -390,11 +398,49 @@ impl Workspace {
             .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
     }
 
+    /// El número de un botón del riel, en su esquina: el `span` de
+    /// `AppRail.tsx` (`absolute -right-0.5 -top-0.5 min-w-4 rounded-full px-1
+    /// text-[9px] font-medium leading-4 ring-2 ring-sidebar`). El aro es del
+    /// color del riel: separa el número del icono que pisa. Qué se escribe
+    /// —nada, el número o «99+»— lo dice el core.
+    fn rail_badge(badge: RailCount, cx: &App) -> Option<impl IntoElement> {
+        let text = count_badge(badge.count, RAIL_CAP)?;
+        let theme = cx.theme();
+        let (fill, ink) = if badge.warning { (theme.warning, black()) } else { (theme.primary, theme.primary_foreground) };
+        let ring = BoxShadow { color: theme.sidebar, offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(2.), inset: false };
+        Some(
+            div()
+                .id(badge.id)
+                .absolute()
+                .right(px(-2.))
+                .top(px(-2.))
+                .min_w_4()
+                .flex()
+                .justify_center()
+                .rounded_full()
+                .px_1()
+                .text_size(px(9.))
+                .font_weight(FontWeight::MEDIUM)
+                .line_height(px(16.))
+                .bg(fill)
+                .text_color(ink)
+                .shadow(vec![ring])
+                .aria_label(text.clone())
+                .child(text)
+                .test_support(),
+        )
+    }
+
     /// Un módulo que la app de siempre tiene y ésta todavía no: está en su
-    /// sitio y lo dice al pasar el ratón.
-    fn pending_module(id: &'static str, icon: Lucide, label_key: &str, cx: &App) -> impl IntoElement {
-        let label = format!("{} · {}", tr(cx, label_key), tr(cx, "common:misc.notInThisApp"));
-        Self::rail_button(id, icon, label, false, cx).test_support()
+    /// sitio y lo dice al pasar el ratón. Si tiene algo pendiente lo cuenta,
+    /// en su esquina y en lo que dice: «Comunicación (3)».
+    fn pending_module(id: &'static str, icon: Lucide, label_key: &str, count: Option<RailCount>, cx: &App) -> impl IntoElement {
+        let pending = count.as_ref().and_then(|count| count.count);
+        let label = format!("{} · {}", counted_label(&tr(cx, label_key), pending), tr(cx, "common:misc.notInThisApp"));
+        Self::rail_button(id, icon, label.clone(), false, cx)
+            .aria_label(label)
+            .children(count.and_then(|count| Self::rail_badge(count, cx)))
+            .test_support()
     }
 
     /// Una fila del panel que la app de siempre tiene y ésta todavía no.
@@ -443,14 +489,41 @@ impl Workspace {
     }
 
     /// La barra de arriba de la app de siempre: el buscador en el centro y
-    /// la campana a la derecha (`AppLayout.tsx`). Ninguno de los dos tiene
-    /// todavía nada detrás en esta app, y lo dicen al pasar el ratón.
+    /// la campana a la derecha (`AppLayout.tsx`). Ninguno de los dos abre
+    /// todavía nada en esta app, y lo dicen al pasar el ratón; la campana ya
+    /// cuenta lo que hay sin leer.
     fn render_top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (border, muted, surface, hover, foreground) = (theme.border, theme.muted_foreground, theme.muted, theme.accent, theme.foreground);
+        let (primary, on_primary) = (theme.primary, theme.primary_foreground);
         let mono = theme.mono_font_family.clone();
         let not_yet = tr(cx, "common:misc.notInThisApp");
-        let bell_hint = format!("{} · {}", tr(cx, "common:last.notifications"), not_yet);
+        let unread = Backend::snapshot(cx).read(cx).counters.notifications;
+        let bell_hint = format!("{} · {}", counted_label(&tr(cx, "common:last.notifications"), unread), not_yet);
+        // El `span` de la campana en `AppLayout.tsx`: `absolute -right-0.5
+        // -top-0.5 flex min-w-4 items-center justify-center rounded-full
+        // bg-primary px-1 text-[10px] font-medium text-primary-foreground`.
+        let bell_count = count_badge(unread, BELL_CAP).map(|text| {
+            div()
+                .id("bell-count")
+                .absolute()
+                .right(px(-2.))
+                .top(px(-2.))
+                .min_w_4()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(primary)
+                .px_1()
+                .text_size(px(10.))
+                .line_height(px(15.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(on_primary)
+                .aria_label(text.clone())
+                .child(text)
+                .test_support()
+        });
         div()
             .id("top-bar")
             .h(px(48.))
@@ -489,6 +562,7 @@ impl Workspace {
             .child(
                 div()
                     .id("notifications-bell")
+                    .relative()
                     .ml_2()
                     .p_1p5()
                     .flex_none()
@@ -496,6 +570,8 @@ impl Workspace {
                     .text_color(muted)
                     .hover(move |style| style.bg(hover).text_color(foreground))
                     .child(Icon::new(Lucide::Bell).small())
+                    .children(bell_count)
+                    .aria_label(bell_hint.clone())
                     .tooltip(move |window, cx| Tooltip::new(bell_hint.clone()).build(window, cx))
                     .test_support(),
             )
@@ -505,6 +581,12 @@ impl Workspace {
     fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (sidebar, border) = (theme.sidebar, theme.sidebar_border);
+        let counters = Backend::snapshot(cx).read(cx).counters.clone();
+        let comms = RailCount { id: "rail-comms-count", count: counters.comms, warning: false };
+        // En ámbar: un servidor que no está en línea es un «míralo cuando
+        // puedas», no algo sin leer.
+        let servers = RailCount { id: "rail-platform-count", count: counters.servers, warning: true };
+        let invitations = RailCount { id: "rail-organization-count", count: counters.invitations, warning: false };
         div()
             .w(px(RAIL_WIDTH))
             .h_full()
@@ -526,11 +608,11 @@ impl Workspace {
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx)))
                     .test_support(),
             )
-            .child(Self::pending_module("rail-docs", Lucide::BookOpen, "nav:module.docs", cx))
-            .child(Self::pending_module("rail-comms", Lucide::MessagesSquare, "nav:module.comms", cx))
-            .child(Self::pending_module("rail-platform", Lucide::Server, "nav:module.platform", cx))
+            .child(Self::pending_module("rail-docs", Lucide::BookOpen, "nav:module.docs", None, cx))
+            .child(Self::pending_module("rail-comms", Lucide::MessagesSquare, "nav:module.comms", Some(comms), cx))
+            .child(Self::pending_module("rail-platform", Lucide::Server, "nav:module.platform", Some(servers), cx))
             .child(div().flex_1())
-            .child(Self::pending_module("rail-organization", Lucide::Building2, "nav:rail.organization", cx))
+            .child(Self::pending_module("rail-organization", Lucide::Building2, "nav:rail.organization", Some(invitations), cx))
             .child(self.render_account(cx))
     }
 
@@ -1591,4 +1673,84 @@ mod tests {
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
+    /// Lo que un elemento dice de sí mismo: un contador, su número; un botón
+    /// del riel, lo que enseña al pasar el ratón.
+    fn label(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> String {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.find(id).label().unwrap_or_default().to_string()
+        })
+        .unwrap()
+    }
+
+    const COUNTS: [&str; 4] = ["bell-count", "rail-comms-count", "rail-platform-count", "rail-organization-count"];
+
+    /// La campana y el riel cuentan lo pendiente, cada uno lo suyo, y lo
+    /// dicen también al pasar el ratón.
+    ///
+    /// Roturas que atrapa: los números del core que no llegan a la pantalla;
+    /// un contador en el botón de otro (los servidores caídos en la
+    /// comunicación); «12» en la campana o «120» en el riel, que no caben; un
+    /// botón que no dice cuánto tiene, o que dice el número recortado.
+    #[gpui_kit::test]
+    fn the_bell_and_the_rail_count_what_is_pending(cx: &mut TestAppContext) {
+        let server = server();
+        let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+        server.mount(get("/api/v1/notifications/").and(query_param("orgId", "o1")).respond_with(ok(json!({ "items": [], "unread": 12 }))));
+        server.mount(get("/api/v1/chat/unread").respond_with(ok(json!([{ "spaceId": "a", "count": 118 }]))));
+        server.mount(get("/api/v1/dm/").respond_with(ok(json!([{ "conversationId": "c1", "orgId": "o1", "unread": 2 }]))));
+        server.mount(get("/api/v1/servers/").respond_with(ok(json!([
+            { "id": "s1", "orgId": "o1", "status": "offline" }, { "id": "s2", "orgId": "o1", "status": "online" },
+        ]))));
+        server.mount(get("/api/v1/invitations/").respond_with(ok(json!([{ "id": "i1" }, { "id": "i2" }, { "id": "i3" }]))));
+        server.install(cx);
+        let window = open(cx);
+
+        wait_until(cx, "los cuatro contadores llegan a la pantalla", |cx| COUNTS.iter().all(|id| on_screen(window, id, cx)));
+
+        assert_eq!(label(window, "bell-count", cx), "9+");
+        assert_eq!(label(window, "rail-comms-count", cx), "99+");
+        assert_eq!(label(window, "rail-platform-count", cx), "1");
+        assert_eq!(label(window, "rail-organization-count", cx), "3");
+        assert_eq!(label(window, "notifications-bell", cx), "Notificaciones (12) · Todavía no está en esta app");
+        assert_eq!(label(window, "rail-comms", cx), "Comunicación (120) · Todavía no está en esta app");
+        assert_eq!(label(window, "rail-platform", cx), "Plataforma (1) · Todavía no está en esta app");
+        assert_eq!(label(window, "rail-organization", cx), "Organización (3) · Todavía no está en esta app");
+        assert!(!on_screen(window, "rail-docs-count", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Sin nada pendiente no hay número, y lo que no se pudo contar tampoco
+    /// se pinta.
+    ///
+    /// Roturas que atrapa: un «0» en la esquina de cada botón; un número
+    /// inventado cuando el servidor no contestó; «Comunicación (0)» al pasar
+    /// el ratón.
+    #[gpui_kit::test]
+    fn nothing_pending_or_unknown_paints_no_count(cx: &mut TestAppContext) {
+        let server = server();
+        let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+        server.mount(get("/api/v1/notifications/").respond_with(ok(json!({ "items": [], "unread": 0 }))));
+        server.mount(get("/api/v1/chat/unread").respond_with(ok(json!([]))));
+        server.mount(get("/api/v1/dm/").respond_with(ok(json!([]))));
+        server.mount(get("/api/v1/servers/").respond_with(ok(json!([{ "id": "s1", "orgId": "o1", "status": "online" }]))));
+        // Las invitaciones no contestan: no se sabe cuántas hay.
+        server.install(cx);
+        let window = open(cx);
+
+        wait_until(cx, "llegan los ceros", |cx| {
+            let counters = cx.update(|cx| Backend::snapshot(cx).read(cx).counters.clone());
+            (counters.notifications, counters.comms, counters.servers) == (Some(0), Some(0), Some(0)) && on_screen(window, "tree-l-a", cx)
+        });
+        settle_frames(window, cx);
+
+        assert_eq!(cx.update(|cx| Backend::snapshot(cx).read(cx).counters.invitations), None);
+        for id in COUNTS {
+            assert!(!on_screen(window, id, cx), "{id} se pinta sin nada que contar");
+        }
+        assert_eq!(label(window, "rail-comms", cx), "Comunicación · Todavía no está en esta app");
+        assert_eq!(label(window, "notifications-bell", cx), "Notificaciones · Todavía no está en esta app");
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
 }

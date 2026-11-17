@@ -17,8 +17,8 @@ use std::future::Future;
 use std::sync::Arc;
 
 use cac_core::{
-    ApiError, Config, ConnectionState, Core, DocsState, Listener, MyWorkState, OrgsState, Session, Storage, TaskState,
-    TreeState,
+    ApiError, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, OrgsState, Session, Storage,
+    TaskState, TreeState,
 };
 use gpui_kit::{App, AppContext, Entity, Global};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
@@ -31,6 +31,7 @@ enum CoreEvent {
     Tree(TreeState),
     Docs(DocsState),
     Task(TaskState),
+    Counters(CountersState),
     Connection(ConnectionState),
 }
 
@@ -64,6 +65,9 @@ impl Listener for Forwarder {
     fn task_changed(&self, state: TaskState) {
         self.send(CoreEvent::Task(state));
     }
+    fn counters_changed(&self, state: CountersState) {
+        self.send(CoreEvent::Counters(state));
+    }
     fn connection_changed(&self, state: ConnectionState) {
         self.send(CoreEvent::Connection(state));
     }
@@ -81,6 +85,8 @@ pub struct Snapshot {
     pub tree: TreeState,
     pub docs: DocsState,
     pub task: TaskState,
+    /// Los números de la campana y del riel.
+    pub counters: CountersState,
     pub connection: ConnectionState,
 }
 
@@ -93,6 +99,7 @@ impl Snapshot {
             CoreEvent::Tree(state) => self.tree = state,
             CoreEvent::Docs(state) => self.docs = state,
             CoreEvent::Task(state) => self.task = state,
+            CoreEvent::Counters(state) => self.counters = state,
             CoreEvent::Connection(state) => self.connection = state,
         }
     }

@@ -1,0 +1,27 @@
+{
+  "items": [
+    {
+      "id": "n1",
+      "createdAt": "2026-09-30T00:00:00Z",
+      "updatedAt": "2026-09-30T00:00:00Z",
+      "orgId": "35d32154-922f-47dc-a6d9-051d4e78ae8a",
+      "kind": "chat:mention",
+      "title": "Ana te mencionó en #producto",
+      "body": "¿lo miras?",
+      "link": "/chat/e8bd6d46-a9ab-494e-ac29-de84d80a55f4",
+      "readAt": "2026-09-30T00:00:00Z",
+      "via": "mcp",
+      "groupKey": "chat:e8bd6d46-a9ab-494e-ac29-de84d80a55f4",
+      "groupLabel": "#producto"
+    }
+  ],
+  "unread": 3,
+  "groups": [
+    {
+      "key": "chat:e8bd6d46-a9ab-494e-ac29-de84d80a55f4",
+      "label": "#producto",
+      "total": 5,
+      "unread": 3
+    }
+  ]
+}

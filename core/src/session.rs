@@ -156,6 +156,7 @@ impl Core {
         *self.inner.held.lock().expect("held lock") = None;
         // Sin sesión no hay stream: el que hubiera se retira en su próximo turno.
         self.stream().stop();
+        self.counters().clear();
         self.inner.listener.session_changed(None);
     }
 
@@ -275,6 +276,21 @@ impl Core {
     pub(crate) async fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, ApiError> {
         let reply = self.request("GET", path, None, true).await?;
         unwrap_data(&reply)
+    }
+
+    /// Un GET con sesión cuyo `data` es una lista.
+    ///
+    /// Go no escribe una lista vacía (`data` lleva `omitempty`): en una
+    /// respuesta buena, que falte es «ninguno». Una lista con otra forma sí
+    /// es un fallo: leerla como vacía sería decir «cero» sin saberlo.
+    pub(crate) async fn get_list<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<Vec<T>, ApiError> {
+        let reply = self.request("GET", path, None, true).await?;
+        if reply.status < 400 {
+            if let Ok(Envelope { success: true, data, .. }) = serde_json::from_str::<Envelope<Vec<T>>>(&reply.body) {
+                return Ok(data.unwrap_or_default());
+            }
+        }
+        Err(server_error(&reply))
     }
 
     /// Una petición con sesión y cuerpo JSON que devuelve el `data` del sobre.

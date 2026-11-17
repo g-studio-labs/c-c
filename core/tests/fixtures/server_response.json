@@ -1,0 +1,15 @@
+{
+  "id": "s1",
+  "orgId": "35d32154-922f-47dc-a6d9-051d4e78ae8a",
+  "name": "pixel-vps",
+  "host": "203.0.113.7",
+  "sshPort": 22,
+  "sshUser": "deploy",
+  "type": "docker-swarm",
+  "agentPort": 8080,
+  "status": "offline",
+  "hasAgentToken": true,
+  "agentTokenPreview": "cac_…9f2a",
+  "agentSeenAt": "2026-09-30T00:00:00Z",
+  "agentVersion": 2
+}
