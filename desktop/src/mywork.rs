@@ -29,26 +29,9 @@ const LENSES: [(WorkLens, &str); 5] = [
     (WorkLens::All, "all"),
 ];
 
-/// Las clases de letra de la app de siempre, con su interlineado: `text-sm`
-/// 14/20 y `text-lg` 18/28, los de Tailwind, y `text-xs` **13/18**, que
-/// `index.css` cambia a propósito (`--text-xs: 0.8125rem`; el `text_xs` del
-/// kit es el 12 de fábrica). GPUI, sin decirle nada, da de interlineado
-/// 1,618 veces la letra: cada fila de la lista salía tres píxeles más alta
-/// que en la app de siempre y la cabecera entera, ocho (medido contra una
-/// captura de la de siempre, 17-nov-2026).
-pub(crate) trait Leading: Styled + Sized {
-    fn leading_xs(self) -> Self {
-        self.text_size(px(13.)).line_height(px(18.))
-    }
-    fn leading_sm(self) -> Self {
-        self.text_sm().line_height(px(20.))
-    }
-    fn leading_lg(self) -> Self {
-        self.text_lg().line_height(px(28.))
-    }
-}
-
-impl<T: Styled> Leading for T {}
+// Los tamaños de letra con su interlineado de Tailwind viven en el tema,
+// para todas las pantallas.
+pub(crate) use crate::theme::Leading;
 
 /// El botón de un desplegable, con la forma del `Picker` de la app de
 /// siempre en su tamaño `sm` (`SelectTrigger` en `ui/select.tsx`: `h-7
