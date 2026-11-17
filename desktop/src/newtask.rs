@@ -9,19 +9,19 @@
 
 use cac_core::{Choice, Destination, TaskDraft, PRIORITIES};
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::button::Button;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::*;
 
 use crate::backend::Backend;
-use crate::lang::{error_text, tr};
+use crate::lang::{error_text, locale, tr};
+use crate::mywork::{picker, Leading};
 
 /// La fila se cerró: quien la tiene la quita.
 pub struct NewTaskClosed;
@@ -159,12 +159,20 @@ impl NewTaskRow {
         .detach();
     }
 
-    /// Un desplegable de una sola elección.
+    /// Quita el vencimiento elegido.
+    pub(crate) fn clear_due(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.due.update(cx, |due, cx| due.set_date(Date::Single(None), window, cx));
+        cx.notify();
+    }
+
+    /// Un desplegable de una sola elección. `max_width` es el tope del de
+    /// la lista (`max-w-[16rem]`), que lleva la ruta entera.
     fn render_picker<T: Clone + PartialEq + 'static>(
         &self,
         id: &'static str,
         chosen: T,
         choices: Vec<(T, String)>,
+        max_width: Option<Pixels>,
         choose: fn(&mut Self, T, &mut Context<Self>),
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -172,7 +180,7 @@ impl NewTaskRow {
         let label = choices.iter().find(|(value, _)| *value == chosen).map(|(_, label)| label.clone()).unwrap_or_default();
         // El `Picker` de la app de siempre en su tamaño `sm`: con borde y
         // su chevrón, no un texto suelto.
-        Button::new(id).outline().small().label(label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+        picker(id, label, max_width, cx, move |mut menu, _, _| {
             for (value, label) in choices.clone() {
                 let view = view.clone();
                 menu = menu.item(PopupMenuItem::new(label).checked(value == chosen).on_click(move |_, _, cx| {
@@ -187,8 +195,8 @@ impl NewTaskRow {
 impl Render for NewTaskRow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (muted, foreground, primary, card, danger, mono) =
-            (theme.muted_foreground, theme.foreground, theme.primary, theme.group_box, theme.danger, theme.mono_font_family.clone());
+        let (muted, foreground, primary, card, danger, border, mono) =
+            (theme.muted_foreground, theme.foreground, theme.primary, theme.group_box, theme.danger, theme.border, theme.mono_font_family.clone());
         let close_hint = tr(cx, "work:board.closeComposer");
         let destinations = Backend::core(cx).tasks().destinations();
         let destination = destinations.chosen(&self.list_id).cloned();
@@ -199,18 +207,75 @@ impl Render for NewTaskRow {
                 div().id("new-task-list").test_support().max_w(px(256.)).truncate().px_1().text_color(muted).child(destination.label.clone()).into_any_element()
             } else {
                 let choices = destinations.options.iter().map(|option| (option.list_id.clone(), option.label.clone())).collect();
-                self.render_picker("new-task-list", destination.list_id.clone(), choices, Self::choose_list, cx).into_any_element()
+                self.render_picker("new-task-list", destination.list_id.clone(), choices, Some(px(256.)), Self::choose_list, cx).into_any_element()
             }
         });
         let priorities = PRIORITIES.iter().map(|name| (name.to_string(), tr(cx, &format!("work:taskPriority.{name}")))).collect();
-        let priority = self.render_picker("new-task-priority", self.priority.clone(), priorities, Self::choose_priority, cx);
+        let priority = self.render_picker("new-task-priority", self.priority.clone(), priorities, None, Self::choose_priority, cx);
         let mut people = vec![(None, tr(cx, "work:board.nobodyYet"))];
         people.extend(self.people.iter().map(|person| (Some(person.id.clone()), person.name.clone())));
-        let assignee = self.render_picker("new-task-assignee", self.assignee.clone(), people, Self::choose_assignee, cx);
+        let assignee = self.render_picker("new-task-assignee", self.assignee.clone(), people, None, Self::choose_assignee, cx);
         // Quién la ve sólo se pregunta donde un cliente podría leerla.
         let audience = destination.as_ref().filter(|destination| destination.client).map(|_| {
             let choices = vec![(false, tr(cx, "work:board.clientSeesIt")), (true, tr(cx, "work:board.internalOnly"))];
-            self.render_picker("new-task-audience", self.internal, choices, Self::set_internal, cx)
+            self.render_picker("new-task-audience", self.internal, choices, None, Self::set_internal, cx)
+        });
+
+        // El botón de `DatePicker.tsx` (`flex items-center gap-1.5 rounded
+        // border px-2 py-1 text-sm` a `h-7`, el calendario `size-3.5`
+        // delante y el día con números; sin día, apagado). Lo que se abre al
+        // pulsarlo es el calendario del kit, que va encima y sin pintar: su
+        // campo lleva el icono detrás y un ancho fijo. Es el mismo arreglo
+        // que el vencimiento del detalle de una tarea (`task.rs`).
+        let picked = match self.due.read(cx).date() {
+            Date::Single(day) => day,
+            _ => None,
+        };
+        let due_label = picked.map(|day| cac_core::short_date(locale(cx), day)).unwrap_or_else(|| tr(cx, "work:board.dueDate"));
+        let unseen = gpui_kit::transparent_black();
+        let due = div()
+            .id("new-task-due")
+            .relative()
+            .flex_none()
+            .child(
+                div()
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .px_2()
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(border)
+                    .leading_sm()
+                    .when(picked.is_none(), |this| this.text_color(muted))
+                    .child(Icon::new(Lucide::CalendarDays).size_3p5().flex_none())
+                    .child(due_label),
+            )
+            // Más ancho que el botón y recortado a él: así el icono que el
+            // campo del kit lleva a la derecha cae fuera de lo que se ve.
+            .child(
+                div().absolute().top_0().left_0().size_full().overflow_hidden().child(
+                    div().w(px(480.)).h_full().child(DatePicker::new(&self.due).small().appearance(false).placeholder(" ").h_full().text_color(unseen)),
+                ),
+            )
+            .test_support();
+        // Quitar la fecha: en la app de siempre es un botón dentro del
+        // calendario («Sin fecha»); el del kit no lo tiene, así que va al lado.
+        let clear_due = picked.is_some().then(|| {
+            let hint = tr(cx, "common:last.clearDate");
+            div()
+                .id("new-task-due-clear")
+                .flex_none()
+                .p_1()
+                .rounded(px(4.))
+                .text_color(muted)
+                .cursor_pointer()
+                .hover(move |style| style.text_color(foreground))
+                .on_click(cx.listener(|this, _, window, cx| this.clear_due(window, cx)))
+                .child(Icon::new(Lucide::X).size_3())
+                .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+                .test_support()
         });
 
         // Las medidas son las de `app/src/components/tasks/NewTaskRow.tsx`:
@@ -237,7 +302,8 @@ impl Render for NewTaskRow {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.title).id("new-task-title").appearance(false)))
+                    // `h-8 w-full bg-transparent text-sm`, sin relleno a los lados.
+                    .child(div().flex_1().min_w_0().child(Input::new(&self.title).id("new-task-title").appearance(false).px_0()))
                     .when(self.busy, |this| this.child(div().id("new-task-busy").flex_none().child(Spinner::new().color(muted)).test_support()))
                     .child(
                         div()
@@ -259,17 +325,15 @@ impl Render for NewTaskRow {
                     .flex_wrap()
                     .items_center()
                     .gap_1p5()
-                    .text_xs()
+                    .leading_xs()
                     .children(place)
                     .child(priority)
-                    .child(div().id("new-task-due").test_support().w(px(150.)).child(
-                        DatePicker::new(&self.due).small().cleanable(true).placeholder(tr(cx, "work:board.dueDate")),
-                    ))
+                    .child(div().flex().flex_none().items_center().gap_1().child(due).children(clear_due))
                     .child(assignee)
                     .children(audience)
-                    .child(div().ml_auto().font_family(mono).text_size(px(10.)).text_color(muted).child(tr(cx, "work:board.composerKeys"))),
+                    .child(div().ml_auto().font_family(mono).text_size(px(10.)).line_height(px(15.)).text_color(muted).child(tr(cx, "work:board.composerKeys"))),
             )
-            .children(self.problem.clone().map(|problem| div().id("new-task-problem").test_support().mt_2().text_xs().text_color(danger).child(problem)))
+            .children(self.problem.clone().map(|problem| div().id("new-task-problem").test_support().mt_2().leading_xs().text_color(danger).child(problem)))
     }
 }
 
@@ -462,6 +526,30 @@ mod tests {
         );
         assert!(on_screen(window, "new-task-row", cx), "la fila se cerró tras crear");
         assert_eq!(cx.update(|cx| row.read(cx).priority.clone()), "high");
+        stop(cx);
+    }
+
+    /// El vencimiento elegido se puede quitar desde la fila, y sin él no se
+    /// ofrece quitarlo.
+    ///
+    /// Roturas que atrapa: una fecha puesta por error (o heredada del día del
+    /// calendario desde el que se abrió la fila) que ya no hay cómo quitar;
+    /// una × que no quita nada; una × a la vista sin fecha que quitar.
+    #[gpui_kit::test]
+    fn the_due_day_can_be_taken_back(cx: &mut TestAppContext) {
+        let server = server();
+        let (window, view) = open(&server, cx);
+        click(window, "new-task", cx);
+        let row = row(&view, cx);
+        assert!(on_screen(window, "new-task-due", cx));
+        assert!(!on_screen(window, "new-task-due-clear", cx), "ofrece quitar una fecha que no hay");
+
+        cx.update_window(window, |_, window, cx| row.update(cx, |row, cx| row.set_due_day(NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(), window, cx))).unwrap();
+        assert!(on_screen(window, "new-task-due-clear", cx), "con una fecha puesta no hay cómo quitarla");
+
+        click(window, "new-task-due-clear", cx);
+        assert_eq!(cx.update(|cx| row.read(cx).due.read(cx).date()), Date::Single(None), "la × no quitó la fecha");
+        assert!(!on_screen(window, "new-task-due-clear", cx));
         stop(cx);
     }
 

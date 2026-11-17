@@ -8,9 +8,9 @@
 use cac_core::{DueState, ScopeKind, TaskFilter, WorkGroup, WorkLayout, WorkLens, WorkRow, NOBODY};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
@@ -28,6 +28,61 @@ const LENSES: [(WorkLens, &str); 5] = [
     (WorkLens::Clients, "clients"),
     (WorkLens::All, "all"),
 ];
+
+/// Las clases de letra de la app de siempre, con su interlineado: `text-sm`
+/// 14/20 y `text-lg` 18/28, los de Tailwind, y `text-xs` **13/18**, que
+/// `index.css` cambia a propósito (`--text-xs: 0.8125rem`; el `text_xs` del
+/// kit es el 12 de fábrica). GPUI, sin decirle nada, da de interlineado
+/// 1,618 veces la letra: cada fila de la lista salía tres píxeles más alta
+/// que en la app de siempre y la cabecera entera, ocho (medido contra una
+/// captura de la de siempre, 17-nov-2026).
+pub(crate) trait Leading: Styled + Sized {
+    fn leading_xs(self) -> Self {
+        self.text_size(px(13.)).line_height(px(18.))
+    }
+    fn leading_sm(self) -> Self {
+        self.text_sm().line_height(px(20.))
+    }
+    fn leading_lg(self) -> Self {
+        self.text_lg().line_height(px(28.))
+    }
+}
+
+impl<T: Styled> Leading for T {}
+
+/// El botón de un desplegable, con la forma del `Picker` de la app de
+/// siempre en su tamaño `sm` (`SelectTrigger` en `ui/select.tsx`: `h-7
+/// rounded-md border border-input py-2 pr-2 pl-2.5 gap-1.5`, la letra
+/// `text-xs` que le pone quien lo usa y su chevrón `size-4` apagado). El
+/// botón pequeño del kit mide 24 y escribe a 14.
+pub(crate) fn picker(
+    id: &'static str,
+    label: String,
+    max_width: Option<Pixels>,
+    cx: &App,
+    menu: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
+) -> impl IntoElement {
+    let muted = cx.theme().muted_foreground;
+    Button::new(id)
+        .outline()
+        .small()
+        .h(px(28.))
+        .pl(px(10.))
+        .pr_2()
+        .when_some(max_width, |this, width| this.max_w(width))
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .leading_xs()
+                .font_weight(FontWeight::NORMAL)
+                .child(div().min_w_0().truncate().child(label))
+                .child(Icon::new(gpui_kit::component::IconName::ChevronDown).size_4().flex_none().text_color(muted)),
+        )
+        .dropdown_menu(menu)
+}
 
 /// La prioridad de una tarea como chip: punto y nombre sobre su color al
 /// 15%; sin prioridad no se pinta nada. Las medidas y los tonos son los de
@@ -61,7 +116,7 @@ pub(crate) fn priority_chip_shown(priority: &str, cx: &App) -> Div {
         .py(px(1.))
         .rounded_full()
         .when(!none, |this| this.bg(tone.opacity(0.15)))
-        .text_xs()
+        .leading_xs()
         .font_weight(FontWeight::MEDIUM)
         .text_color(tone)
         .child(div().size_1p5().flex_none().rounded_full().map(|dot| if none { dot.border_1().border_color(tone) } else { dot.bg(tone) }))
@@ -182,7 +237,7 @@ impl MyWorkView {
             }
             choices.extend(options.assignees.iter().map(|name| (name.clone(), name.clone())));
             let view = view.clone();
-            Button::new("filter-assignee").outline().small().label(label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+            picker("filter-assignee", label, None, cx, move |mut menu, _, _| {
                 for (value, label) in choices.clone() {
                     let view = view.clone();
                     menu = menu.item(PopupMenuItem::new(label).checked(chosen == value).on_click(move |_, _, cx| {
@@ -202,7 +257,7 @@ impl MyWorkView {
             let mut choices = vec![(String::new(), phrase("work:board.filter.anyPriority"))];
             choices.extend(options.priorities.iter().map(|name| (name.clone(), phrase(&format!("work:taskPriority.{name}")))));
             let view = view.clone();
-            Button::new("filter-priority").outline().small().label(label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+            picker("filter-priority", label, None, cx, move |mut menu, _, _| {
                 for (value, label) in choices.clone() {
                     let view = view.clone();
                     menu = menu.item(PopupMenuItem::new(label).checked(chosen == value).on_click(move |_, _, cx| {
@@ -214,12 +269,28 @@ impl MyWorkView {
         });
 
         let clear = filter.is_filtering().then(|| {
-            Button::new("filter-clear")
-                .ghost()
-                .small()
-                .icon(Icon::new(Lucide::X))
-                .label(phrase("work:board.filter.clear"))
+            // `Button size="xs" variant="ghost"` (`ui/button.tsx`): `h-6
+            // gap-1 rounded-md px-2 text-xs font-medium`, la × `size-3`, y al
+            // pasar `bg-muted` (en oscuro, a la mitad). El botón más pequeño
+            // del kit escribe a 12.
+            let (wash, dark) = (cx.theme().muted, cx.theme().mode.is_dark());
+            div()
+                .id("filter-clear")
+                .h_6()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .rounded(px(8.))
+                .leading_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .cursor_pointer()
+                .hover(move |style| style.bg(if dark { wash.opacity(0.5) } else { wash }))
+                .child(Icon::new(Lucide::X).size_3())
+                .child(phrase("work:board.filter.clear"))
                 .on_click(cx.listener(|this, _, window, cx| this.clear_filters(window, cx)))
+                .test_support()
         });
 
         div().flex().flex_none().items_center().gap_2().children(assignee).children(priority).children(clear)
@@ -274,17 +345,20 @@ impl MyWorkView {
                     .flex()
                     .items_baseline()
                     .gap_2()
-                    .child(div().id("view-title").text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(tr(cx, "work:myWork.title")).test_support())
-                    .child(div().id("view-count").text_xs().text_color(muted).child(count).test_support())
-                    .child(div().flex_1())
+                    .child(div().id("view-title").leading_lg().font_weight(FontWeight::SEMIBOLD).child(tr(cx, "work:myWork.title")).test_support())
+                    .child(div().id("view-count").leading_xs().text_color(muted).child(count).test_support())
+                    // Los dos botones, centrados en la fila (`self-center`):
+                    // el título y la cuenta se alinean por su línea base.
                     .child(
                         div()
                             .id("new-task")
+                            .ml_auto()
+                            .self_center()
                             .px_2()
                             .py_1()
                             .rounded(px(4.))
                             .bg(primary)
-                            .text_xs()
+                            .leading_xs()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(on_primary)
                             .cursor_pointer()
@@ -295,6 +369,7 @@ impl MyWorkView {
                     .child(
                         div()
                             .id("toggle-closed")
+                            .self_center()
                             .flex()
                             .items_center()
                             .gap_1p5()
@@ -303,7 +378,7 @@ impl MyWorkView {
                             .rounded(px(4.))
                             .border_1()
                             .border_color(border)
-                            .text_xs()
+                            .leading_xs()
                             .text_color(muted)
                             .cursor_pointer()
                             .hover(move |style| style.bg(accent).text_color(foreground))
@@ -319,6 +394,7 @@ impl MyWorkView {
                 div().mt_1().flex().items_center().gap_1p5().child(
                     div()
                         .id("scope-clear")
+                        .min_w_0()
                         .flex()
                         .items_center()
                         .gap_1()
@@ -328,12 +404,12 @@ impl MyWorkView {
                         .border_1()
                         .border_color(border)
                         .bg(accent.opacity(0.4))
-                        .text_xs()
+                        .leading_xs()
                         .cursor_pointer()
                         .hover(move |style| style.bg(accent))
                         .on_click(|_, _, cx| Backend::core(cx).my_work().set_scope(None))
-                        .child(scope)
-                        .child(Icon::new(Lucide::X).size_3())
+                        .child(div().min_w_0().truncate().child(scope))
+                        .child(Icon::new(Lucide::X).size_3().flex_none())
                         .tooltip(move |window, cx| Tooltip::new(show_everything.clone()).build(window, cx))
                         .test_support(),
                 )
@@ -353,61 +429,77 @@ impl MyWorkView {
                         .rounded(px(4.))
                         .bg(surface.opacity(0.6))
                         .font_family(cx.theme().mono_font_family.clone())
-                        .text_xs()
+                        .leading_xs()
                         .text_color(muted)
                         .cursor_pointer()
                         .hover(move |style| style.bg(surface).text_color(foreground))
                         .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copied.clone())))
-                        .child(Icon::new(Lucide::Copy).size(px(10.)))
+                        .child(Icon::new(Lucide::Copy).size_2p5())
                         .child(short)
                         .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
                         .test_support()
                 }))
             }))
+            // La fila de lentes (`<nav className="-mb-px flex items-center
+            // gap-4 pt-2 text-sm">`): se monta un píxel sobre la raya de la
+            // cabecera, y la raya de la lente puesta (`TabIndicator`:
+            // `-bottom-px h-0.5 rounded-full bg-primary`) otro más abajo.
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_4()
                     .pt_2()
-                    .children(LENSES.map(|(lens, name)| {
+                    .mb(px(-1.))
+                    .child(div().min_w_0().flex().items_center().gap_4().children(LENSES.map(|(lens, name)| {
                         let active = my_work.lens == lens;
                         div()
                             .id(SharedString::from(format!("lens-{name}")))
-                            .pb_2()
-                            .border_b_2()
-                            .border_color(if active { primary } else { primary.opacity(0.) })
-                            .text_sm()
+                            .relative()
+                            .flex_none()
+                            // `border-b-2 pb-2`: la raya es transparente y
+                            // sólo ocupa; la que se ve es el indicador.
+                            .pb(px(10.))
+                            .leading_sm()
                             .text_color(if active { foreground } else { muted })
-                            .when(active, |this| this.font_weight(FontWeight::MEDIUM))
+                            .when(active, |this| {
+                                this.font_weight(FontWeight::MEDIUM)
+                                    .child(div().absolute().left_0().right_0().bottom(px(-1.)).h(px(2.)).rounded_full().bg(primary))
+                            })
+                            .when(!active, |this| this.hover(move |style| style.text_color(foreground)))
                             .cursor_pointer()
                             .on_click(move |_, _, cx| Self::show_lens(lens, cx))
                             .child(tr(cx, &format!("work:myWork.lens.{name}")))
                             .test_support()
-                    }))
-                    .child(div().flex_1())
-                    .child(Self::render_layouts(cx))
-                    // La documentación del nodo, detrás de un divisor y a un
-                    // clic con cualquier ámbito, sea lista o espacio
+                    })))
+                    // Las vistas y, detrás de un divisor (`mx-0.5 h-4 w-px
+                    // bg-border`), la documentación del nodo: a un clic con
+                    // cualquier ámbito, sea lista o espacio
                     // (command-and-control-372).
-                    .when(docs, |this| {
-                        this.child(div().w(px(1.)).h(px(16.)).mb_1p5().mx(px(-12.)).bg(border)).child(
-                            div()
-                                .id("open-docs")
-                                .mb_1p5()
-                                .px_1p5()
-                                .py_1()
-                                .rounded(px(4.))
-                                .text_color(muted)
-                                .cursor_pointer()
-                                .hover(move |style| style.bg(accent.opacity(0.5)).text_color(foreground))
-                                .on_click(|_, _, cx| Backend::run(cx, |core| async move { core.open_scope_docs().await }))
-                                .child(Icon::new(Lucide::FileText).size_3p5())
-                                .tooltip(move |window, cx| Tooltip::new(docs_hint.clone()).build(window, cx))
-                                .test_support(),
-                        )
-                    }),
+                    .child(
+                        div().ml_auto().flex().flex_none().items_center().gap_0p5().pb_1p5().child(Self::render_layouts(cx)).when(docs, |this| {
+                            this.child(div().w(px(1.)).h_4().mx_0p5().flex_none().bg(border)).child(
+                                div()
+                                    .id("open-docs")
+                                    .px_1p5()
+                                    .py_1()
+                                    .rounded(px(4.))
+                                    .text_color(muted)
+                                    .cursor_pointer()
+                                    .hover(move |style| style.bg(accent.opacity(0.5)).text_color(foreground))
+                                    .on_click(|_, _, cx| Backend::run(cx, |core| async move { core.open_scope_docs().await }))
+                                    .child(Icon::new(Lucide::FileText).size_3p5())
+                                    .tooltip(move |window, cx| Tooltip::new(docs_hint.clone()).build(window, cx))
+                                    .test_support(),
+                            )
+                        }),
+                    ),
             );
+        // La barra de `TaskFilters.tsx` (`h-10 gap-2 px-4`): el buscador
+        // (`w-56`, `h-7 rounded-md border-input text-xs`, la lupa `size-3.5`
+        // y, en oscuro, `bg-input/30`) y los desplegables.
+        let input = cx.theme().input;
+        let dark = cx.theme().mode.is_dark();
         let bar = div()
             .id("work-filters")
             .h(px(40.))
@@ -419,19 +511,31 @@ impl MyWorkView {
             .border_b_1()
             .border_color(border)
             .overflow_x_scroll()
-            .child(div().w(px(240.)).flex_none().child(Input::new(&self.search).id("work-search").small().cleanable(true).prefix(Icon::new(Lucide::Search).xsmall().text_color(muted))))
+            .child(
+                div().w(px(224.)).flex_none().child(
+                    Input::new(&self.search)
+                        .id("work-search")
+                        .small()
+                        .h(px(28.))
+                        .leading_xs()
+                        .when(dark, |this| this.bg(input.opacity(0.3)))
+                        .cleanable(true)
+                        .prefix(Icon::new(Lucide::Search).size_3p5().text_color(muted)),
+                ),
+            )
             .child(filters);
         div().flex().flex_none().flex_col().child(header).child(bar)
     }
 
     /// Las tres maneras de mirar lo mismo, como iconos al final de la fila
-    /// de lentes (`VIEWS` en `MyWork.tsx`). Cuál está puesta lo recuerda el
-    /// core.
+    /// de lentes (`VIEWS` en `MyWork.tsx`: `gap-0.5`, cada uno `rounded
+    /// px-1.5 py-1` con su icono `size-3.5`). Cuál está puesta lo recuerda
+    /// el core.
     fn render_layouts(cx: &App) -> impl IntoElement {
         let theme = cx.theme();
         let (accent, on_accent, muted, foreground) = (theme.accent, theme.accent_foreground, theme.muted_foreground, theme.foreground);
         let chosen = Backend::core(cx).work_layout();
-        div().flex().flex_none().items_center().gap_0p5().pb_1p5().children(LAYOUTS.map(|(layout, name, icon)| {
+        div().flex().flex_none().items_center().gap_0p5().children(LAYOUTS.map(|(layout, name, icon)| {
             let active = chosen == layout;
             let label = tr(cx, &format!("work:myWork.view.{name}"));
             div()
@@ -440,7 +544,9 @@ impl MyWorkView {
                 .py_1()
                 .rounded(px(4.))
                 .cursor_pointer()
-                .when(active, |this| this.bg(accent).text_color(on_accent))
+                // La puesta lleva la pastilla del `TabIndicator` (`rounded-md
+                // bg-accent`), más redonda que el `rounded` de las demás.
+                .when(active, |this| this.rounded(px(8.)).bg(accent).text_color(on_accent))
                 .when(!active, |this| this.text_color(muted).hover(move |style| style.bg(accent.opacity(0.5)).text_color(foreground)))
                 .on_click(move |_, _, cx| {
                     // Si no se pudo guardar, la vista no cambia: lo que se
@@ -469,7 +575,7 @@ impl MyWorkView {
                 .id(SharedString::from(format!("work-due-{}", row.id)))
                 .w_20()
                 .flex_none()
-                .text_xs()
+                .leading_xs()
                 .text_right()
                 .text_color(tone)
                 .when(strong, |this| this.font_weight(FontWeight::MEDIUM))
@@ -497,7 +603,7 @@ impl MyWorkView {
                     Backend::run(cx, move |core| async move { core.tasks().open(&id).await });
                 }
             })
-            .child(div().w_10().flex_none().font_family(mono).text_xs().text_color(muted).child(format!("#{}", row.seq)))
+            .child(div().w_10().flex_none().font_family(mono).leading_xs().text_color(muted).child(format!("#{}", row.seq)))
             .child(
                 div()
                     .min_w_0()
@@ -505,14 +611,14 @@ impl MyWorkView {
                     .flex()
                     .items_baseline()
                     .gap_1()
-                    .text_sm()
+                    .leading_sm()
                     // El título entero primero; lo que se recorta es la miga.
                     .child(div().flex_shrink_0().max_w_full().truncate().child(row.title))
-                    .children(row.parent.map(|parent| div().min_w_0().truncate().text_xs().text_color(muted).child(parent))),
+                    .children(row.parent.map(|parent| div().min_w_0().truncate().leading_xs().text_color(muted).child(parent))),
             )
             .children(priority)
             .children(due)
-            .child(div().id(SharedString::from(format!("work-list-{}", row.id))).w(rems(7.)).flex_none().truncate().text_xs().text_right().text_color(muted).child(row.list).test_support())
+            .child(div().id(SharedString::from(format!("work-list-{}", row.id))).w(rems(7.)).flex_none().truncate().leading_xs().text_right().text_color(muted).child(row.list).test_support())
     }
 
     /// Un espacio y sus tareas: el rótulo (`mb-1 text-xs font-medium
@@ -527,7 +633,7 @@ impl MyWorkView {
             .child(
                 div()
                     .mb_1()
-                    .text_xs()
+                    .leading_xs()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(muted)
                     .child(format!("{} · {}", group.name.to_uppercase(), group.rows.len())),
@@ -607,14 +713,14 @@ impl Render for MyWorkView {
                         .flex()
                         .items_center()
                         .gap_1p5()
-                        .text_xs()
+                        .leading_xs()
                         .text_color(danger)
                         .child(Icon::new(Lucide::CircleAlert).size_3())
                         .child(error)
                         .test_support()
                 }))
                 .when(arriving, |this| this.child(Self::render_skeleton(cx)))
-                .children(empty.map(|phrase| div().id("work-empty").test_support().text_sm().text_color(muted).child(phrase)))
+                .children(empty.map(|phrase| div().id("work-empty").test_support().leading_sm().text_color(muted).child(phrase)))
                 .child(div().flex().flex_col().gap_5().children(groups.into_iter().map(|group| self.render_group(group, &zone_hint, cx))))
                 .into_any_element(),
         };
@@ -625,6 +731,9 @@ impl Render for MyWorkView {
             .flex_col()
             .bg(background)
             .text_color(foreground)
+            // El 1,5 del cuerpo de la app de siempre, para la letra de
+            // tamaño suelto (`text-[11px]`); ver `Leading`.
+            .line_height(relative(1.5))
             .child(header)
             // La fila de «tarea nueva» va sobre cualquiera de las vistas; en
             // la lista, dentro de lo que se desliza.
