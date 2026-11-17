@@ -13,47 +13,51 @@ tablero: **App** `ca0bfd49-0909-43eb-8135-bc8ecd0f282c` y **Backend**
 
 ## 🟢 Al día
 
-**15-nov, cac de escritorio nativo en GPUI** (command-and-control-373), en la
-misma rama del core. Desde el 14-nov todo el trabajo va a esta app y la de
-Tauri queda congelada: lo que se le vea se anota como requisito, no se arregla.
-Vive en `desktop/` (`cac-desktop`, GPUI Kit 0.9.1 fijado) y no decide nada:
-toda regla va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
-- **Hecho, en la rama:** la viabilidad (374: pinta en bspwm, acentos, lista
-  virtual, compila en los tres sistemas); el core con organizaciones, árbol,
-  detalle de tarea, stream de eventos y textos (375); y la carcasa (376):
-  entrar, «olvidé mi contraseña», cambio obligado, y dentro el riel, la
-  organización, el árbol que acota «Mi trabajo», el aviso de corte y salir.
-- **A falta de probarlo jose (377):** «Mi trabajo» en lista — grupos por
-  espacio, lentes, «sólo lo abierto», buscador, ámbito, filtros de
-  responsable y prioridad, y la documentación del nodo a un clic con
-  cualquier ámbito (372), en sólo lectura: cuatro pestañas y las decisiones
-  vigentes. Una carpeta abre la suya. Sin hacer: subpáginas del documento,
-  cambio a tablero y calendario (379) y lista virtual.
-- **En curso (378):** el detalle de una tarea. Pulsar una fila la abre a
-  pantalla completa, como en la app de siempre (lectura a la izquierda y un
-  riel de propiedades a la derecha; en ventana estrecha, debajo), para leerla (estado, prioridad, vencimiento, «dónde quedó»,
-  descripción, subtareas, adjuntos por nombre, y el hilo con las notas de
-  agentes en su pestaña). Se editan el estado, la prioridad, el vencimiento,
-  las etiquetas, los responsables, el título y la descripción (markdown en
-  una caja de texto), se marcan subtareas y se comenta (diciendo si lo lee
-  el cliente). «Tarea nueva» en la cabecera de «Mi trabajo» abre una fila
-  que se queda abierta: va a la lista que se mira (o a la que se elija), con
-  prioridad, fecha y responsable, y en la lista de un cliente pregunta si la
-  ve. Los adjuntos de la tarea salen en su sección: el nombre lo baja y lo
-  abre con el programa del sistema, y al lado guardar una copia, quitar
-  (preguntando) y «Adjuntar un fichero» (tope de 30 MB dicho antes de subir).
-  Un comentario propio se edita y se borra (preguntando) desde el hilo.
-  Los textos siguen la escala de macOS (13 de cuerpo, 11 de secundario, 17
-  y 22 de títulos), puesta en un solo sitio (`desktop/src/theme.rs`).
-  El sidebar va como el de la app de siempre: la organización con la marca y
-  «papel · miembros · espacios», la sección «Trabajo», el árbol con el color
-  de cada espacio, carpeta, lista, marca de documento y de cliente, y la
-  cuenta (tema, idioma, salir) en un avatar al pie del riel.
-  El login y el riel llevan la marca (los tres racks con la línea roja), y
-  la frase del login ya no dice «Plano de control del VPS».
-- **Falta:** de la carcasa, las fuentes incrustadas y el filtro del panel;
-  del detalle, ver las imágenes dentro del cajón, los adjuntos de un comentario, las menciones, crear una etiqueta y buscar entre más de 50 personas; después
-  tablero y calendario (379) y los instaladores (380).
+**17-nov, cac de escritorio nativo en GPUI** (command-and-control-373), en la
+misma rama del core (`command-and-control-366-rust-core`, sin fusionar y sin
+release). Desde el 14-nov todo el trabajo va a esta app y la de Tauri queda
+congelada: lo que se le vea se anota como requisito, no se arregla. Vive en
+`desktop/` (`cac-desktop`, GPUI Kit 0.9.1 fijado) y no decide nada: toda regla
+va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
+- **Hecho, en la rama** (cada fase con su «dónde quedó» en cac; ninguna está
+  `done` porque nada se ha publicado):
+  - **Viabilidad (374) y core (375):** organizaciones, árbol, detalle y
+    cambios de tarea, stream de eventos, textos, contadores.
+  - **Carcasa (376):** entrar, «olvidé mi contraseña», cambio obligado; el
+    sidebar entero de la app de siempre (riel con sus módulos, organización,
+    árbol con filtro, menú de la cuenta, barra de arriba), el panel que se
+    pliega y se asoma, y la campana y el riel contando lo pendiente.
+  - **«Mi trabajo» (377, 379, 382):** lista, tablero con arrastre entre
+    columnas (respeta el flujo de cada tarea) y calendario (mes con el detalle
+    del día, semana, «Por programar», arrastrar para poner fecha). Pulsar un
+    espacio, una carpeta o una lista acota sin cambiar de vista, y la
+    documentación del nodo está a un clic con cualquier ámbito (372).
+  - **Detalle de tarea (378):** página completa; estado, prioridad, fecha,
+    etiquetas (también crear una), responsables, título en el sitio,
+    descripción y comentarios en un editor de markdown con la barra de la app
+    de siempre, menciones, adjuntos con miniaturas, subtareas, y los avisos de
+    sistema aparte, en «Actividad» (decisión 216e3391).
+  - **Instaladores (380):** identidad propia («CAC Nativa», provisional),
+    `.deb` y `.tar.gz` en Linux, `.dmg` y NSIS escritos sin ejecutar, y
+    `desktop-release.yml` sólo a mano, sin publicar nada.
+- **Como la app de siempre:** texto a 14 con Inter e Iosevka dentro del
+  binario (decisión 8fc8ce7b), `text-xs` a 13/18 y las alturas de línea de
+  Tailwind (`theme::Leading`), y una pasada de estilos con capturas sobre
+  todas las pantallas. Lo que la de Tauri tiene y aquí no tiene pantalla
+  detrás se pinta en su sitio y dice «Todavía no está en esta app».
+- **Toca el servidor, sin desplegar (383):** cambiar de estado una tarea
+  interna deja una línea de sistema interna con quien lo hizo, y esas líneas
+  no salen en las búsquedas. Sólo sale al fusionar a `main`, y el backend va
+  antes que la app.
+- **En curso:** dar comportamiento a lo pintado sin él en el detalle (editar
+  «dónde quedó», añadir subtarea, mover de lista, borrar, retirar) y en la
+  carcasa (⌘B y panel recordado, idioma del sistema en macOS y Windows, crear,
+  renombrar y borrar nodos del árbol).
+- **Falta decidir (jose):** nombre definitivo, firma de los instaladores y
+  dónde se publican; cuándo se fusiona a `main` y se corta la release.
+- **No entra en la primera entrega:** documentación con su editor, chat,
+  llamadas, servidores, notas, buscador global y el panel de avisos; siguen
+  en la de Tauri.
 - **Cómo se mira:** `cd desktop && cargo run --release`. Su sesión va aparte
   de la de Tauri (`~/.local/share/cac-desktop`): se entra una vez en cada una.
 
