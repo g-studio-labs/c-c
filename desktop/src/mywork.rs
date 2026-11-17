@@ -155,7 +155,7 @@ impl MyWorkView {
             }
             choices.extend(options.assignees.iter().map(|name| (name.clone(), name.clone())));
             let view = view.clone();
-            Button::new("filter-assignee").ghost().small().label(label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+            Button::new("filter-assignee").outline().small().label(label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
                 for (value, label) in choices.clone() {
                     let view = view.clone();
                     menu = menu.item(PopupMenuItem::new(label).checked(chosen == value).on_click(move |_, _, cx| {
@@ -175,7 +175,7 @@ impl MyWorkView {
             let mut choices = vec![(String::new(), phrase("work:board.filter.anyPriority"))];
             choices.extend(options.priorities.iter().map(|name| (name.clone(), phrase(&format!("work:taskPriority.{name}")))));
             let view = view.clone();
-            Button::new("filter-priority").ghost().small().label(label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+            Button::new("filter-priority").outline().small().label(label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
                 for (value, label) in choices.clone() {
                     let view = view.clone();
                     menu = menu.item(PopupMenuItem::new(label).checked(chosen == value).on_click(move |_, _, cx| {
@@ -195,7 +195,7 @@ impl MyWorkView {
                 .on_click(cx.listener(|this, _, window, cx| this.clear_filters(window, cx)))
         });
 
-        div().flex().flex_none().items_center().gap_1().children(assignee).children(priority).children(clear)
+        div().flex().flex_none().items_center().gap_2().children(assignee).children(priority).children(clear)
     }
 
     fn show_lens(lens: WorkLens, cx: &App) {
@@ -215,6 +215,8 @@ impl MyWorkView {
         let here = locale(cx);
         let count = if my_work.loading { "…".to_string() } else { cac_core::text_count(here, "work:myWork.visible", shown as i64) };
         // A qué está acotado: «Lista: nombre» o «Espacio: nombre».
+        let scope_id = my_work.scope.as_ref().map(|scope| scope.id.clone());
+        let surface = theme.muted;
         let scope = my_work.scope.as_ref().map(|scope| {
             let kind = match scope.kind {
                 ScopeKind::Space => tr(cx, "work:myWork.scopeSpace"),
@@ -245,7 +247,7 @@ impl MyWorkView {
                     .flex()
                     .items_baseline()
                     .gap_2()
-                    .child(div().id("view-title").text_size(px(crate::theme::TITLE_SIZE)).font_weight(FontWeight::SEMIBOLD).child(tr(cx, "work:myWork.title")).test_support())
+                    .child(div().id("view-title").text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(tr(cx, "work:myWork.title")).test_support())
                     .child(div().id("view-count").text_xs().text_color(muted).child(count).test_support())
                     .child(div().flex_1())
                     .child(
@@ -287,7 +289,7 @@ impl MyWorkView {
             )
             // A qué está acotado, y cómo dejar de estarlo.
             .children(scope.map(|scope| {
-                div().mt_1().flex().child(
+                div().mt_1().flex().items_center().gap_1p5().child(
                     div()
                         .id("scope-clear")
                         .flex()
@@ -308,6 +310,32 @@ impl MyWorkView {
                         .tooltip(move |window, cx| Tooltip::new(show_everything.clone()).build(window, cx))
                         .test_support(),
                 )
+                // El id del nodo, a un clic (`CopyId.tsx`): se llega aquí
+                // pulsando una lista del árbol, y copiarlo a mano de otro
+                // sitio es donde se tuerce una sesión de MCP.
+                .children(scope_id.clone().map(|id| {
+                    let (short, hint, copied) = (id.chars().take(8).collect::<String>(), id.clone(), id);
+                    div()
+                        .id("scope-copy-id")
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_1()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded(px(4.))
+                        .bg(surface.opacity(0.6))
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .text_xs()
+                        .text_color(muted)
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(surface).text_color(foreground))
+                        .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copied.clone())))
+                        .child(Icon::new(Lucide::Copy).size(px(10.)))
+                        .child(short)
+                        .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+                        .test_support()
+                }))
             }))
             .child(
                 div()
@@ -364,7 +392,7 @@ impl MyWorkView {
             .border_b_1()
             .border_color(border)
             .overflow_x_scroll()
-            .child(div().w(px(240.)).flex_none().child(Input::new(&self.search).id("work-search").small().cleanable(true)))
+            .child(div().w(px(240.)).flex_none().child(Input::new(&self.search).id("work-search").small().cleanable(true).prefix(Icon::new(Lucide::Search).xsmall().text_color(muted))))
             .child(filters);
         div().flex().flex_none().flex_col().child(header).child(bar)
     }
