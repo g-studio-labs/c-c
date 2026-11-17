@@ -195,7 +195,7 @@ impl MyWorkView {
                 .on_click(cx.listener(|this, _, window, cx| this.clear_filters(window, cx)))
         });
 
-        div().flex().items_center().gap_1().pb_1().children(assignee).children(priority).children(clear)
+        div().flex().flex_none().items_center().gap_1().children(assignee).children(priority).children(clear)
     }
 
     fn show_lens(lens: WorkLens, cx: &App) {
@@ -209,24 +209,33 @@ impl MyWorkView {
     fn render_header(&self, shown: usize, filter: &TaskFilter, cx: &mut Context<Self>) -> impl IntoElement {
         let filters = self.render_filters(filter, cx);
         let theme = cx.theme();
-        let (border, muted, foreground, primary, accent) =
-            (theme.border, theme.muted_foreground, theme.foreground, theme.primary, theme.accent);
+        let (border, muted, foreground, primary, on_primary, accent) =
+            (theme.border, theme.muted_foreground, theme.foreground, theme.primary, theme.primary_foreground, theme.accent);
         let my_work = Backend::snapshot(cx).read(cx).my_work.clone();
         let here = locale(cx);
-        let title = my_work.scope.as_ref().map(|scope| scope.name.clone()).unwrap_or_else(|| tr(cx, "work:myWork.title"));
         let count = if my_work.loading { "…".to_string() } else { cac_core::text_count(here, "work:myWork.visible", shown as i64) };
-        let scope_kind = my_work.scope.as_ref().map(|scope| match scope.kind {
-            ScopeKind::Space => tr(cx, "work:myWork.scopeSpace"),
-            ScopeKind::List => tr(cx, "work:myWork.scopeList"),
+        // A qué está acotado: «Lista: nombre» o «Espacio: nombre».
+        let scope = my_work.scope.as_ref().map(|scope| {
+            let kind = match scope.kind {
+                ScopeKind::Space => tr(cx, "work:myWork.scopeSpace"),
+                ScopeKind::List => tr(cx, "work:myWork.scopeList"),
+            };
+            format!("{kind}: {}", scope.name)
         });
         let closed = my_work.include_closed;
         let docs = cac_core::docs_reachable_from_scope(my_work.scope.as_ref().map(|scope| scope.kind));
+        let docs_hint = tr(cx, "work:board.view.docs");
+        let closed_hint = tr(cx, if closed { "work:myWork.hideFinished" } else { "work:myWork.showFinished" });
+        let show_everything = tr(cx, "work:myWork.showEverything");
 
-        div()
+        // Las medidas son las de la cabecera de `MyWork.tsx` y la barra de
+        // `TaskFilters.tsx`: el título no cambia con el ámbito (va en su
+        // pastilla), las vistas van al final de la fila de lentes, y buscar
+        // y filtrar tienen su propia barra debajo.
+        let header = div()
             .flex()
             .flex_none()
             .flex_col()
-            .gap_3()
             .px_4()
             .pt_3()
             .border_b_1()
@@ -234,72 +243,130 @@ impl MyWorkView {
             .child(
                 div()
                     .flex()
-                    .items_center()
+                    .items_baseline()
                     .gap_2()
-                    .child(div().id("view-title").test_support().text_size(px(crate::theme::TITLE_SIZE)).font_weight(FontWeight::SEMIBOLD).child(title))
-                    .child(div().id("view-count").test_support().text_xs().text_color(muted).child(count))
-                    // A qué está acotado, y cómo dejar de estarlo.
-                    .children(scope_kind.map(|kind| {
+                    .child(div().id("view-title").text_size(px(crate::theme::TITLE_SIZE)).font_weight(FontWeight::SEMIBOLD).child(tr(cx, "work:myWork.title")).test_support())
+                    .child(div().id("view-count").text_xs().text_color(muted).child(count).test_support())
+                    .child(div().flex_1())
+                    .child(
                         div()
-                            .id("scope-clear")
-                            .test_support()
+                            .id("new-task")
+                            .px_2()
+                            .py_1()
+                            .rounded(px(4.))
+                            .bg(primary)
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(on_primary)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, window, cx| this.toggle_new_task(window, cx)))
+                            .child(tr(cx, "work:myWork.newTask"))
+                            .test_support(),
+                    )
+                    .child(
+                        div()
+                            .id("toggle-closed")
                             .flex()
                             .items_center()
-                            .gap_1()
+                            .gap_1p5()
                             .px_2()
-                            .rounded_md()
-                            .bg(accent)
+                            .py_1()
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(border)
                             .text_xs()
                             .text_color(muted)
                             .cursor_pointer()
-                            .on_click(|_, _, cx| Backend::core(cx).my_work().set_scope(None))
-                            .child(kind)
-                            .child(Icon::new(Lucide::X).xsmall())
-                    }))
-                    .child(div().flex_1())
-                    // La documentación del nodo, a un clic con cualquier
-                    // ámbito, sea lista o espacio (command-and-control-372).
-                    .when(docs, |this| {
-                        this.child(
-                            Button::new("open-docs")
-                                .ghost()
-                                .small()
-                                .label(tr(cx, "work:board.view.docs"))
-                                .on_click(|_, _, cx| Backend::run(cx, |core| async move { core.open_scope_docs().await })),
-                        )
-                    })
-                    .child(div().w(px(240.)).child(Input::new(&self.search).id("work-search").small().cleanable(true)))
-                    .child(
-                        Button::new("new-task")
-                            .primary()
-                            .small()
-                            .label(tr(cx, "work:myWork.newTask"))
-                            .on_click(cx.listener(|this, _, window, cx| this.toggle_new_task(window, cx))),
-                    )
-                    .child(
-                        Button::new("toggle-closed")
-                            .ghost()
-                            .small()
-                            .label(tr(cx, if closed { "work:myWork.allStates" } else { "work:myWork.openOnly" }))
-                            .tooltip(tr(cx, if closed { "work:myWork.hideFinished" } else { "work:myWork.showFinished" }))
-                            .on_click(move |_, _, cx| Self::show_closed(!closed, cx)),
+                            .hover(move |style| style.bg(accent).text_color(foreground))
+                            .on_click(move |_, _, cx| Self::show_closed(!closed, cx))
+                            .child(Icon::new(if closed { Lucide::Eye } else { Lucide::EyeOff }).size_3())
+                            .child(tr(cx, if closed { "work:myWork.allStates" } else { "work:myWork.openOnly" }))
+                            .tooltip(move |window, cx| Tooltip::new(closed_hint.clone()).build(window, cx))
+                            .test_support(),
                     ),
             )
-            .child(div().flex().items_center().gap_4().children(LENSES.map(|(lens, name)| {
-                let active = my_work.lens == lens;
+            // A qué está acotado, y cómo dejar de estarlo.
+            .children(scope.map(|scope| {
+                div().mt_1().flex().child(
+                    div()
+                        .id("scope-clear")
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(border)
+                        .bg(accent.opacity(0.4))
+                        .text_xs()
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(accent))
+                        .on_click(|_, _, cx| Backend::core(cx).my_work().set_scope(None))
+                        .child(scope)
+                        .child(Icon::new(Lucide::X).size_3())
+                        .tooltip(move |window, cx| Tooltip::new(show_everything.clone()).build(window, cx))
+                        .test_support(),
+                )
+            }))
+            .child(
                 div()
-                    .id(SharedString::from(format!("lens-{name}")))
-                    .test_support()
-                    .pb_2()
-                    .border_b_2()
-                    .border_color(if active { primary } else { primary.opacity(0.) })
-                    .text_sm()
-                    .text_color(if active { foreground } else { muted })
-                    .when(active, |this| this.font_weight(FontWeight::MEDIUM))
-                    .cursor_pointer()
-                    .on_click(move |_, _, cx| Self::show_lens(lens, cx))
-                    .child(tr(cx, &format!("work:myWork.lens.{name}")))
-            })).child(div().flex_1()).child(filters).child(Self::render_layouts(cx)))
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .pt_2()
+                    .children(LENSES.map(|(lens, name)| {
+                        let active = my_work.lens == lens;
+                        div()
+                            .id(SharedString::from(format!("lens-{name}")))
+                            .pb_2()
+                            .border_b_2()
+                            .border_color(if active { primary } else { primary.opacity(0.) })
+                            .text_sm()
+                            .text_color(if active { foreground } else { muted })
+                            .when(active, |this| this.font_weight(FontWeight::MEDIUM))
+                            .cursor_pointer()
+                            .on_click(move |_, _, cx| Self::show_lens(lens, cx))
+                            .child(tr(cx, &format!("work:myWork.lens.{name}")))
+                            .test_support()
+                    }))
+                    .child(div().flex_1())
+                    .child(Self::render_layouts(cx))
+                    // La documentación del nodo, detrás de un divisor y a un
+                    // clic con cualquier ámbito, sea lista o espacio
+                    // (command-and-control-372).
+                    .when(docs, |this| {
+                        this.child(div().w(px(1.)).h(px(16.)).mb_1p5().mx(px(-12.)).bg(border)).child(
+                            div()
+                                .id("open-docs")
+                                .mb_1p5()
+                                .px_1p5()
+                                .py_1()
+                                .rounded(px(4.))
+                                .text_color(muted)
+                                .cursor_pointer()
+                                .hover(move |style| style.bg(accent.opacity(0.5)).text_color(foreground))
+                                .on_click(|_, _, cx| Backend::run(cx, |core| async move { core.open_scope_docs().await }))
+                                .child(Icon::new(Lucide::FileText).size_3p5())
+                                .tooltip(move |window, cx| Tooltip::new(docs_hint.clone()).build(window, cx))
+                                .test_support(),
+                        )
+                    }),
+            );
+        let bar = div()
+            .id("work-filters")
+            .h(px(40.))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .px_4()
+            .border_b_1()
+            .border_color(border)
+            .overflow_x_scroll()
+            .child(div().w(px(240.)).flex_none().child(Input::new(&self.search).id("work-search").small().cleanable(true)))
+            .child(filters);
+        div().flex().flex_none().flex_col().child(header).child(bar)
     }
 
     /// Las tres maneras de mirar lo mismo, como iconos al final de la fila
