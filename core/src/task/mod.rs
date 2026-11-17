@@ -96,6 +96,8 @@ pub struct TaskPatch {
     pub list_id: Option<String>,
     /// El «dónde quedó», entero; vacío lo quita.
     pub handoff: Option<String>,
+    /// `internal` la retira de la vista del cliente; `public` se la enseña.
+    pub visibility: Option<String>,
 }
 
 /// Una tarea por crear.
@@ -160,6 +162,9 @@ pub fn patch_body(patch: &TaskPatch) -> Result<Value, ApiError> {
     }
     if let Some(handoff) = &patch.handoff {
         body.insert("handoff".into(), json!(handoff));
+    }
+    if let Some(visibility) = &patch.visibility {
+        body.insert("visibility".into(), json!(visibility));
     }
     Ok(Value::Object(body))
 }

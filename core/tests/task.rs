@@ -1455,3 +1455,71 @@ async fn a_delete_the_server_refuses_changes_nothing() {
     assert_eq!(refusal(rig.core.tasks().delete().await), "no-task-open");
     assert_eq!(rig.server.received_requests().await.unwrap().iter().filter(|request| request.method.as_str() == "DELETE").count(), 1);
 }
+
+/// Retirar una tarea de la vista del cliente pregunta con el aviso de la
+/// app de siempre, manda `visibility: internal` y la tarea queda como la
+/// contesta el servidor: ya no la lee nadie de fuera.
+///
+/// Roturas que atrapa: una pregunta sin el aviso de que el número de ticket
+/// se queda gastado; mandar otra visibilidad, u otro campo; seguir diciendo
+/// que el cliente la lee después de retirarla.
+#[tokio::test]
+async fn withdrawing_takes_the_task_from_the_clients_view() {
+    use cac_core::texts::Locale;
+    let rig = rig().await;
+    mount_task(&rig.server, "t1", detail("t1", "Del cliente", "pending", "p1", "public")).await;
+    mount_columns(&rig.server).await;
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/tasks/t1"))
+        .respond_with(ok(detail("t1", "Del cliente", "pending", "p1", "internal")))
+        .mount(&rig.server)
+        .await;
+    rig.core.tasks().open("t1").await;
+    assert!(rig.core.tasks().sheet(Locale::Es).unwrap().client_reads);
+
+    let question = rig.core.tasks().withdraw_question(Locale::Es).expect("un cliente la lee");
+    assert_eq!(question.title, "¿Quitar esto del tablero del cliente?");
+    assert_eq!(
+        question.body,
+        "Deja de verlo. Su número de ticket se queda gastado —puede que ya lo haya citado— así que su numeración conserva el hueco."
+    );
+    assert_eq!((question.confirm.as_str(), question.cancel.as_str()), ("Retirar", "Cancelar"));
+
+    rig.core.tasks().withdraw().await.expect("se retiró");
+
+    assert_eq!(patches(&rig.server).await, [json!({ "visibility": "internal" })]);
+    assert!(!rig.core.tasks().sheet(Locale::Es).unwrap().client_reads);
+    // Ya retirada no hay nada que preguntar ni que mandar otra vez.
+    assert_eq!(rig.core.tasks().withdraw_question(Locale::Es), None);
+    assert_eq!(refusal(rig.core.tasks().withdraw().await), "not-on-client-board");
+    assert_eq!(patches(&rig.server).await.len(), 1);
+}
+
+/// Lo que ningún cliente lee no se retira: ni se pregunta ni se manda. Y si
+/// el servidor no la retira, se dice y sigue a la vista.
+///
+/// Roturas que atrapa: «retirar» una tarea del equipo (un `PATCH` que no
+/// cambia nada, tras una pregunta que asusta); dar por retirada una que el
+/// cliente sigue viendo.
+#[tokio::test]
+async fn only_what_a_client_reads_is_withdrawn() {
+    use cac_core::texts::Locale;
+    let rig = rig().await;
+    mount_task(&rig.server, "t1", detail("t1", "Del equipo", "pending", "", "")).await;
+    mount_task(&rig.server, "t2", detail("t2", "Del cliente", "pending", "p1", "public")).await;
+    mount_columns(&rig.server).await;
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/tasks/t2"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({ "success": false, "message": "Forbidden", "error": "insufficient-role" })))
+        .mount(&rig.server)
+        .await;
+    rig.core.tasks().open("t1").await;
+
+    assert_eq!(rig.core.tasks().withdraw_question(Locale::Es), None);
+    assert_eq!(refusal(rig.core.tasks().withdraw().await), "not-on-client-board");
+    assert_eq!(patches(&rig.server).await, Vec::<Value>::new());
+
+    rig.core.tasks().open("t2").await;
+    assert_eq!(refusal(rig.core.tasks().withdraw().await), "insufficient-role");
+    assert!(rig.core.tasks().sheet(Locale::Es).unwrap().client_reads);
+}

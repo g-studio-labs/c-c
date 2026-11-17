@@ -1426,6 +1426,21 @@ impl TaskView {
         );
     }
 
+    /// Retira la tarea abierta de la vista del cliente, preguntando antes con
+    /// el aviso de la app de siempre (su número de ticket se queda gastado):
+    /// «Retirar» en el pie de `TaskDetailDrawer.tsx`. Si se retiró, la
+    /// página lo dice sola: deja de enseñar que un cliente la lee.
+    pub(crate) fn ask_withdraw(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(question) = Backend::core(cx).tasks().withdraw_question(locale(cx)) else { return };
+        self.ask(
+            question,
+            PromptLevel::Warning,
+            |this, window, cx| this.change(|core| async move { core.tasks().withdraw().await }, window, cx),
+            window,
+            cx,
+        );
+    }
+
     /// Un desplegable de cosas que se ponen y se quitan: lo que la tarea
     /// tiene, marcado. Lo que ya tiene se pinta al lado, cada cosa con su
     /// forma; el botón sólo dice qué se puede hacer (`face`).
@@ -2570,8 +2585,8 @@ impl Render for TaskView {
             (place, reference, visible, task_id)
         });
         // El pie (`border-t px-4 py-2`): borrar la tarea, retirarla de la
-        // vista del cliente y cuándo se tocó por última vez. Retirar
-        // todavía no está en esta app.
+        // vista del cliente (sólo en la que un cliente lee) y cuándo se tocó
+        // por última vez. Las dos preguntan antes.
         let foot = sheet.as_ref().map(|sheet| {
             let action = |id: &'static str, icon: Lucide, label: String, tone: Hsla| {
                 div()
@@ -2609,7 +2624,12 @@ impl Render for TaskView {
                         .test_support(),
                 )
                 .when(sheet.client_reads, |this| {
-                    this.child(action("task-withdraw", Lucide::EyeOff, tr(cx, "work:task.withdraw"), foreground).tooltip(not_yet(cx)).test_support())
+                    this.child(
+                        action("task-withdraw", Lucide::EyeOff, tr(cx, "work:task.withdraw"), foreground)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, window, cx| this.ask_withdraw(window, cx)))
+                            .test_support(),
+                    )
                 })
                 .child(div().id("task-updated").ml_auto().leading_xs().text_color(muted).child(sheet.updated.clone()).test_support())
         });
@@ -4202,6 +4222,61 @@ mod tests {
         settle(cx);
         assert_eq!(deletions(&server, "t2"), 0, "borró la tarea que se abrió después de preguntar");
         assert_eq!(deletions(&server, "t1"), 1);
+        stop(cx);
+    }
+
+    /// «Retirar» pregunta antes, con el aviso de que el número de ticket se
+    /// queda gastado; «Cancelar» no manda nada, y «Retirar» la pasa a
+    /// interna y la página deja de decir que un cliente la lee.
+    ///
+    /// Roturas que atrapa: un botón que no hace nada (lo que había) o que
+    /// retira sin preguntar; una pregunta sin su aviso; un «Cancelar» que
+    /// retira igual; un «Retirar» que manda otra cosa; seguir diciendo
+    /// «visible para el cliente» después.
+    #[gpui_kit::test]
+    fn withdrawing_asks_first_with_its_warning(cx: &mut TestAppContext) {
+        let server = server();
+        let mut withdrawn = detail("t1");
+        withdrawn["task"]["visibility"] = json!("internal");
+        server.mount(Mock::given(method("PATCH")).and(path("/api/v1/tasks/t1")).respond_with(ok(withdrawn)));
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+        assert!(on_screen(window, "task-withdraw", cx) && on_screen(window, "task-visible-to-client", cx));
+
+        click(window, "task-withdraw", cx);
+        let (question, detail) = cx.pending_prompt().expect("no preguntó antes de retirar");
+        assert_eq!(question, "¿Quitar esto del tablero del cliente?");
+        assert!(detail.contains("Su número de ticket se queda gastado"), "{detail}");
+        cx.simulate_prompt_answer("Cancelar");
+        settle(cx);
+        assert!(patches(&server).is_empty(), "la retiró aunque se canceló");
+
+        click(window, "task-withdraw", cx);
+        assert!(patches(&server).is_empty(), "la retiró sin esperar la respuesta");
+        cx.simulate_prompt_answer("Retirar");
+
+        wait_until(cx, "deja de decir que un cliente la lee", |cx| !on_screen(window, "task-visible-to-client", cx));
+        assert_eq!(patches(&server), [json!({ "visibility": "internal" })]);
+        assert!(!on_screen(window, "task-withdraw", cx) && !on_screen(window, "task-problem", cx));
+        stop(cx);
+    }
+
+    /// Si no se pudo retirar, se dice y sigue a la vista del cliente.
+    ///
+    /// Rotura que atrapa: callar el fallo, y que quien retiró crea que el
+    /// cliente ya no lo ve.
+    #[gpui_kit::test]
+    fn a_withdrawal_that_fails_is_said(cx: &mut TestAppContext) {
+        // Sin `PATCH` montado: el servidor contesta 404.
+        let server = server();
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+
+        click(window, "task-withdraw", cx);
+        cx.simulate_prompt_answer("Retirar");
+
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+        assert!(on_screen(window, "task-visible-to-client", cx));
         stop(cx);
     }
 

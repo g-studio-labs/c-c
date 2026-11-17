@@ -1,17 +1,17 @@
 //! Lo que se le hace a una tarea entera desde su página: dejar escrito dónde
-//! quedó, llevarla a otra lista y borrarla.
+//! quedó, llevarla a otra lista, borrarla y retirarla de la vista del cliente.
 //!
 //! Vino de `app/src/components/TaskDetailDrawer.tsx` (`HandoffSection`,
-//! `MoveToList`, el pie con «Borrar la tarea») y de
+//! `MoveToList`, el pie con «Borrar la tarea» y «Retirar») y de
 //! `app/src/lib/move-targets.ts`.
 //!
-//! Mover o borrar una tarea toca algo que ve más gente, así que cada cosa
-//! trae **su pregunta** ([`Question`]): qué se va a hacer y a dónde va, con
-//! las frases de la app de siempre. La pantalla la enseña y sólo pide el
+//! Todo lo de aquí mueve, borra o esconde algo que ve más gente, así que cada
+//! cosa trae **su pregunta** ([`Question`]): qué se va a hacer y a dónde va,
+//! con las frases de la app de siempre. La pantalla la enseña y sólo pide el
 //! cambio si contestan que sí; qué dice la pregunta se decide aquí, una vez,
 //! para todas las apps.
 
-use super::{refused, TaskDetail, TaskPatch, Tasks};
+use super::{client_reads, refused, TaskDetail, TaskPatch, Tasks};
 use crate::texts::{text, text_with, Locale};
 use crate::tree::{FolderTree, SpaceTree};
 use crate::ApiError;
@@ -269,5 +269,28 @@ impl Tasks {
             self.core.tree().load(&org_id).await;
         }
         Ok(())
+    }
+
+    /// Lo que se pregunta antes de retirar la tarea abierta de la vista del
+    /// cliente, o `None` si no la lee ningún cliente.
+    pub fn withdraw_question(&self, locale: Locale) -> Option<Question> {
+        let detail = self.state().detail?;
+        client_reads(&detail).then(|| Question {
+            title: text(locale, "work:task.withdrawTitle"),
+            body: text(locale, "work:task.withdrawBody"),
+            confirm: text(locale, "work:task.withdraw"),
+            cancel: text(locale, "work:task.cancel"),
+        })
+    }
+
+    /// Retira la tarea abierta de la vista del cliente: pasa a interna, y su
+    /// folio no se devuelve (ya pudo citarlo; su numeración conserva el
+    /// hueco). Es `visibility: internal` en el `PATCH`, como «Retirar» en
+    /// `TaskDetailDrawer.tsx`. Una que ningún cliente lee no se manda.
+    pub async fn withdraw(&self) -> Result<(), ApiError> {
+        if !client_reads(&self.detail_or_refuse()?) {
+            return Err(refused("not-on-client-board", "No client reads this task"));
+        }
+        self.update(TaskPatch { visibility: Some("internal".to_string()), ..TaskPatch::default() }).await
     }
 }
