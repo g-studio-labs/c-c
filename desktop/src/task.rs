@@ -50,6 +50,9 @@ pub(crate) const STACK_BELOW: f32 = 1024.;
 const COMMENT_ROWS: usize = 4;
 const COMMENT_EDIT_ROWS: usize = 3;
 const DESCRIPTION_ROWS: usize = 8;
+/// El «dónde quedó» empieza con las del `<textarea>` de `HandoffSection`
+/// (`min-h-[6rem]`).
+const HANDOFF_ROWS: usize = 5;
 /// Hasta cuántos renglones crece el título antes de deslizarse por dentro.
 /// El `<textarea>` de la app de siempre no tiene tope; el campo del kit pide
 /// uno, y con éste no lo alcanza ningún título que quepa en el servidor.
@@ -114,6 +117,10 @@ pub struct TaskView {
     title_shown: Option<(String, String)>,
     _title_left: Subscription,
     body_input: Entity<TextareaState>,
+    /// De qué tarea se está escribiendo el «dónde quedó», y lo escrito. Al
+    /// abrir otra no se sigue: lo escrito era de aquélla.
+    editing_handoff: Option<String>,
+    handoff_input: Entity<TextareaState>,
     /// El selector del vencimiento.
     due: Entity<DatePickerState>,
     /// De qué tarea y qué día es lo que el selector enseña: se le pone el de
@@ -281,6 +288,8 @@ impl TaskView {
             title_shown: None,
             _title_left: title_left,
             body_input: cx.new(|cx| TextareaState::new(window, cx).auto_grow(DESCRIPTION_ROWS, 30)),
+            editing_handoff: None,
+            handoff_input: cx.new(|cx| TextareaState::new(window, cx).auto_grow(HANDOFF_ROWS, 30)),
             due,
             due_shown: None,
             _due_changed: due_changed,
@@ -826,6 +835,39 @@ impl TaskView {
             "common:misc.errSave",
             move |core| async move { core.tasks().set_description(&body).await },
             |this, _, _| this.editing = None,
+            window,
+            cx,
+        );
+    }
+
+    /// Pasa a escribir el «dónde quedó», con lo que la tarea dice (o en
+    /// blanco, si nadie lo ha escrito): el «Editar» de `HandoffSection` en
+    /// `TaskDetailDrawer.tsx`.
+    pub(crate) fn start_handoff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sheet) = Backend::core(cx).tasks().sheet(locale(cx)) else { return };
+        self.handoff_input.update(cx, |input, cx| {
+            input.set_value(sheet.handoff.unwrap_or_default(), window, cx);
+            input.focus(window, cx);
+        });
+        self.editing_handoff = Some(sheet.id);
+        cx.notify();
+    }
+
+    /// Deja de escribirlo sin guardar: lo escrito se tira.
+    pub(crate) fn cancel_handoff(&mut self, cx: &mut Context<Self>) {
+        self.editing_handoff = None;
+        cx.notify();
+    }
+
+    /// Guarda el «dónde quedó» escrito (en blanco lo quita) y, si se guardó,
+    /// vuelve a la lectura, con la firma que contestó el servidor. Si no, se
+    /// dice y se sigue escribiendo con lo escrito.
+    pub(crate) fn save_handoff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.handoff_input.read(cx).value().to_string();
+        self.save(
+            "work:task.errHandoff",
+            move |core| async move { core.tasks().set_handoff(&text).await },
+            |this, _, _| this.editing_handoff = None,
             window,
             cx,
         );
@@ -1873,6 +1915,7 @@ impl TaskView {
         let chosen = if self.thread_of.as_deref() == Some(sheet.id.as_str()) { self.thread } else { Thread::Talk };
         let thread = if sheet.notes.is_empty() { Thread::Talk } else { chosen };
         let editing = self.editing.as_deref() == Some(sheet.id.as_str());
+        let editing_handoff = self.editing_handoff.as_deref() == Some(sheet.id.as_str());
         let done = sheet.subtasks.iter().filter(|subtask| subtask.done).count();
         let comments = match thread {
             Thread::Talk => &sheet.talk,
@@ -1937,7 +1980,10 @@ impl TaskView {
             .test_support();
 
         // Dónde quedó: siempre a la vista, también sin nada escrito, que es
-        // cuando hay que decir que falta.
+        // cuando hay que decir que falta. «Editar» (o «Escribir dónde
+        // quedó», sin nada) lo cambia por el editor, con «Guardar» y
+        // «Cancelar» debajo: `HandoffSection` en `TaskDetailDrawer.tsx`, que
+        // allí es un `<textarea>` y aquí el editor de la descripción.
         let handoff = div()
             .id("task-handoff")
             .test_support()
@@ -1950,17 +1996,55 @@ impl TaskView {
                     .items_center()
                     .gap_2()
                     .child(section_title(tr(cx, "work:task.handoff"), cx))
-                    // Escribirlo o corregirlo desde aquí todavía no está.
-                    .child(
-                        section_action("task-handoff-edit", tr(cx, if sheet.handoff.is_some() { "work:task.edit" } else { "work:task.writeHandoff" }), cx)
-                            .tooltip(not_yet(cx))
-                            .test_support(),
-                    )
-                    .children(sheet.handoff_signature.clone().map(|signature| div().min_w_0().truncate().leading_xs().text_color(muted).child(signature))),
+                    .when(!editing_handoff, |this| {
+                        let label = tr(cx, if sheet.handoff.is_some() { "work:task.edit" } else { "work:task.writeHandoff" });
+                        this.child(
+                            section_action("task-handoff-edit", label.clone(), cx)
+                                .aria_label(label)
+                                .on_click(cx.listener(|this, _, window, cx| this.start_handoff(window, cx)))
+                                .test_support(),
+                        )
+                    })
+                    .children(sheet.handoff_signature.clone().map(|signature| {
+                        div().id("task-handoff-signature").aria_label(signature.clone()).min_w_0().truncate().leading_xs().text_color(muted).child(signature).test_support()
+                    })),
             )
-            .child(match sheet.handoff.clone() {
-                Some(handoff) => self.prose(format!("handoff-{}", sheet.id), handoff, cx).into_any_element(),
-                None => div().id("task-no-handoff").test_support().leading_sm().text_color(muted).child(tr(cx, "work:task.noHandoff")).into_any_element(),
+            .child(if editing_handoff {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(MarkdownEditor::new("task-handoff", &self.handoff_input).placeholder(tr(cx, "work:task.handoffHint")))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new("task-handoff-save")
+                                    .primary()
+                                    .xsmall()
+                                    .h_7()
+                                    .px_2p5()
+                                    .label(tr(cx, "work:task.save"))
+                                    .on_click(cx.listener(|this, _, window, cx| this.save_handoff(window, cx))),
+                            )
+                            .child(
+                                Button::new("task-handoff-cancel")
+                                    .outline()
+                                    .xsmall()
+                                    .h_7()
+                                    .px_2p5()
+                                    .label(tr(cx, "work:task.cancel"))
+                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_handoff(cx))),
+                            ),
+                    )
+                    .into_any_element()
+            } else {
+                match sheet.handoff.clone() {
+                    Some(handoff) => self.prose(format!("handoff-{}", sheet.id), handoff, cx).into_any_element(),
+                    None => div().id("task-no-handoff").test_support().leading_sm().text_color(muted).child(tr(cx, "work:task.noHandoff")).into_any_element(),
+                }
             });
 
         let description = div()
@@ -3351,6 +3435,140 @@ mod tests {
         });
 
         assert!(on_screen(window, "task-edit", cx) && !on_screen(window, "task-description-input", cx));
+        stop(cx);
+    }
+
+    /// Lo que dice la caja del «dónde quedó».
+    fn handoff_typed(view: &Entity<TaskView>, cx: &mut TestAppContext) -> String {
+        cx.update(|cx| view.read(cx).handoff_input.read(cx).value().to_string())
+    }
+
+    /// Escribe eso en el «dónde quedó» que se está editando.
+    fn rewrite_handoff(window: AnyWindowHandle, view: &Entity<TaskView>, text: &str, cx: &mut TestAppContext) {
+        let text = text.to_string();
+        with_view(window, view, cx, |view, window, cx| {
+            view.handoff_input.update(cx, |input, cx| input.set_value(text, window, cx));
+        });
+    }
+
+    /// El servidor de siempre, con un `PATCH` que contesta la tarea con ese
+    /// «dónde quedó» firmado por Luis.
+    fn server_that_signs(handoff: &str) -> FakeServer {
+        let server = server();
+        let mut signed = detail("t1");
+        signed["task"]["handoff"] = json!(handoff);
+        signed["task"]["handoffAt"] = json!("2026-11-17T10:00:00Z");
+        signed["handoffBy"] = json!("Luis Mora");
+        server.mount(Mock::given(method("PATCH")).and(path("/api/v1/tasks/t1")).respond_with(ok(signed)));
+        server
+    }
+
+    /// «Editar» junto a «Dónde quedó» abre el editor con lo que la tarea
+    /// dice; «Guardar» manda lo escrito, vuelve a la lectura y la firma pasa
+    /// a ser la que contestó el servidor.
+    ///
+    /// Roturas que atrapa: un «Editar» que no hace nada (lo que había); una
+    /// caja en blanco sobre un texto que existe (y guardar lo borra); un
+    /// «Guardar» que no manda o manda otro campo; quedarse editando después
+    /// de guardar; seguir enseñando la firma de antes.
+    #[gpui_kit::test]
+    fn where_it_was_left_is_edited_from_what_it_says(cx: &mut TestAppContext) {
+        let server = server_that_signs("Falta desplegar.");
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        assert!(!on_screen(window, "task-handoff-input", cx) && !on_screen(window, "task-handoff-save", cx));
+        assert_eq!(label_of(window, "task-handoff-edit", cx), "Editar");
+        assert!(label_of(window, "task-handoff-signature", cx).starts_with("Ana Pérez, "));
+
+        click(window, "task-handoff-edit", cx);
+        assert!(on_screen(window, "task-handoff-input", cx) && !on_screen(window, "task-handoff-edit", cx));
+        assert_eq!(handoff_typed(&view, cx), "Dónde quedó.");
+
+        rewrite_handoff(window, &view, "Falta desplegar.", cx);
+        click(window, "task-handoff-save", cx);
+        wait_until(cx, "se guarda y vuelve a la lectura", |cx| !patches(&server).is_empty() && on_screen(window, "task-handoff-edit", cx));
+
+        assert_eq!(patches(&server), [json!({ "handoff": "Falta desplegar." })]);
+        assert!(!on_screen(window, "task-handoff-input", cx) && !on_screen(window, "task-problem", cx));
+        assert!(label_of(window, "task-handoff-signature", cx).starts_with("Luis Mora, "));
+        stop(cx);
+    }
+
+    /// «Cancelar» tira lo escrito: no se manda, y al volver a editar la caja
+    /// dice otra vez lo que dice la tarea.
+    ///
+    /// Roturas que atrapa: un «Cancelar» que guarda; volver a editar y
+    /// encontrarse lo que se había descartado.
+    #[gpui_kit::test]
+    fn cancelling_where_it_was_left_sends_nothing(cx: &mut TestAppContext) {
+        let server = server_that_signs("Otra cosa");
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        click(window, "task-handoff-edit", cx);
+        rewrite_handoff(window, &view, "Tampoco", cx);
+
+        click(window, "task-handoff-cancel", cx);
+        settle(cx);
+        assert!(on_screen(window, "task-handoff-edit", cx) && !on_screen(window, "task-handoff-input", cx));
+        assert!(patches(&server).is_empty(), "cancelar guardó {:?}", patches(&server));
+
+        click(window, "task-handoff-edit", cx);
+        assert_eq!(handoff_typed(&view, cx), "Dónde quedó.");
+        stop(cx);
+    }
+
+    /// Sin nada escrito se dice que falta y el botón invita a escribirlo;
+    /// la caja se abre en blanco. Y vaciar uno que existe lo quita.
+    ///
+    /// Roturas que atrapa: un «Editar» sobre nada; abrir la caja con el
+    /// texto de la tarea anterior; no poder quitar un «dónde quedó» (en
+    /// blanco no se manda).
+    #[gpui_kit::test]
+    fn where_it_was_left_can_be_written_when_there_is_none_and_cleared(cx: &mut TestAppContext) {
+        let server = server_that_signs("");
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        // Se deja escrito algo de antes en la caja: no tiene que heredarse.
+        rewrite_handoff(window, &view, "de otra tarea", cx);
+
+        click(window, "task-handoff-edit", cx);
+        rewrite_handoff(window, &view, "   ", cx);
+        click(window, "task-handoff-save", cx);
+        wait_until(cx, "se quita", |cx| on_screen(window, "task-no-handoff", cx));
+        assert_eq!(patches(&server), [json!({ "handoff": "" })]);
+        assert_eq!(label_of(window, "task-handoff-edit", cx), "Escribir dónde quedó");
+        assert!(!on_screen(window, "task-handoff-signature", cx));
+
+        click(window, "task-handoff-edit", cx);
+        assert_eq!(handoff_typed(&view, cx), "");
+        stop(cx);
+    }
+
+    /// Si no se pudo guardar, se dice y se sigue escribiendo con lo escrito;
+    /// y al abrir otra tarea no se sigue editando el de la anterior.
+    ///
+    /// Roturas que atrapa: perder lo escrito por un fallo de red; callar el
+    /// fallo; guardar en una tarea el «dónde quedó» escrito para otra.
+    #[gpui_kit::test]
+    fn where_it_was_left_is_kept_when_it_cannot_be_saved(cx: &mut TestAppContext) {
+        // Sin `PATCH` montado: el servidor contesta 404.
+        let server = server();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t2")).respond_with(ok(detail("t2"))));
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        click(window, "task-handoff-edit", cx);
+        rewrite_handoff(window, &view, "Mucho texto", cx);
+
+        click(window, "task-handoff-save", cx);
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+        assert!(on_screen(window, "task-handoff-input", cx));
+        assert_eq!(handoff_typed(&view, cx), "Mucho texto");
+
+        open_other_task(cx);
+        wait_until(cx, "llega la otra", |cx| {
+            cx.update(|cx| Backend::snapshot(cx).read(cx).task.detail.as_ref().is_some_and(|detail| detail.task.id == "t2"))
+        });
+        assert!(on_screen(window, "task-handoff-edit", cx) && !on_screen(window, "task-handoff-input", cx));
         stop(cx);
     }
 

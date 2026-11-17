@@ -5,6 +5,7 @@
 //! abierta a la vez (la del panel de detalle); el tablero, que mueve tarjetas
 //! sin abrirlas, llega en su fase.
 
+mod actions;
 mod compose;
 mod edit;
 mod files;
@@ -18,6 +19,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+pub use actions::MAX_HANDOFF;
 pub use compose::{compose, continue_list, ComposeAction, ComposeEdit};
 pub use edit::{assignee_choices, retitled, shown_name, tag_choices, tag_color_for, title_line, Choice, MAX_TAG_NAME, TAG_PALETTE};
 pub use mention::{
@@ -92,6 +94,8 @@ pub struct TaskPatch {
     pub assignee_ids: Option<Vec<String>>,
     /// Llevarla a otra lista.
     pub list_id: Option<String>,
+    /// El «dónde quedó», entero; vacío lo quita.
+    pub handoff: Option<String>,
 }
 
 /// Una tarea por crear.
@@ -153,6 +157,9 @@ pub fn patch_body(patch: &TaskPatch) -> Result<Value, ApiError> {
     }
     if let Some(list_id) = &patch.list_id {
         body.insert("listId".into(), json!(list_id));
+    }
+    if let Some(handoff) = &patch.handoff {
+        body.insert("handoff".into(), json!(handoff));
     }
     Ok(Value::Object(body))
 }

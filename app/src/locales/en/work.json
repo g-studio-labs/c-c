@@ -227,6 +227,7 @@
     "noHandoff": "Nobody has written down where this was left.",
     "handoffBy": "{{who}}, {{when}}",
     "writeHandoff": "Write where it was left",
+    "errHandoff": "Couldn't save where it was left. It can be 2,000 characters at most.",
     "blockedBy": "Waits for",
     "blockerDone": "done"
   },

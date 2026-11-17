@@ -227,6 +227,7 @@
     "noHandoff": "Nadie ha dejado escrito dónde quedó.",
     "handoffBy": "{{who}}, {{when}}",
     "writeHandoff": "Escribir dónde quedó",
+    "errHandoff": "No se pudo guardar dónde quedó. Caben 2000 caracteres como mucho.",
     "blockedBy": "Espera a",
     "blockerDone": "hecha"
   },

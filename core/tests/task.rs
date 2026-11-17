@@ -941,3 +941,110 @@ fn a_new_tag_gets_the_colour_the_other_app_would_give_it() {
         assert!(TAG_PALETTE.contains(&tag_color_for(name)));
     }
 }
+
+/// Los `PATCH` que llegaron a la tarea `t1`.
+async fn patches(server: &MockServer) -> Vec<Value> {
+    requests_to(server, "PATCH", "/tasks/t1").await
+}
+
+/// La tarea abierta, tal como quedó en el estado.
+fn open_task(rig: &Rig) -> cac_core::TaskDetail {
+    rig.core.tasks().state().detail.expect("hay tarea abierta")
+}
+
+/// Escribir dónde quedó manda el texto limpio, y lo que se enseña después
+/// (el texto, quién y cuándo) es lo que contestó el servidor.
+///
+/// Roturas que atrapa: mandarlo en otro campo, o con los blancos de los
+/// lados; firmarlo aquí en vez de leer la firma de la respuesta; no poner en
+/// pantalla lo que el servidor contestó.
+#[tokio::test]
+async fn writing_where_it_was_left_shows_what_the_server_signed() {
+    let rig = rig().await;
+    mount_task(&rig.server, "t1", detail("t1", "Tarea", "pending", "", "")).await;
+    mount_columns(&rig.server).await;
+    let mut signed = detail("t1", "Tarea", "pending", "", "");
+    signed["task"]["handoff"] = json!("Falta desplegar.");
+    signed["task"]["handoffAt"] = json!("2026-11-17T10:00:00Z");
+    signed["task"]["handoffById"] = json!("u1");
+    signed["handoffBy"] = json!("Ana Ruiz");
+    Mock::given(method("PATCH")).and(path("/api/v1/tasks/t1")).respond_with(ok(signed)).mount(&rig.server).await;
+    rig.core.tasks().open("t1").await;
+    assert_eq!(open_task(&rig).task.handoff, None);
+
+    rig.core.tasks().set_handoff("  Falta desplegar.\n").await.expect("se guardó");
+
+    assert_eq!(patches(&rig.server).await, [json!({ "handoff": "Falta desplegar." })]);
+    let now = open_task(&rig);
+    assert_eq!(now.task.handoff.as_deref(), Some("Falta desplegar."));
+    assert_eq!((now.handoff_by.as_deref(), now.task.handoff_at.as_deref()), (Some("Ana Ruiz"), Some("2026-11-17T10:00:00Z")));
+}
+
+/// En blanco lo quita: se manda vacío, que es como el servidor lo borra.
+///
+/// Roturas que atrapa: no mandar nada al vaciarlo (no habría cómo quitarlo);
+/// tratar «sólo espacios» como un texto.
+#[tokio::test]
+async fn an_empty_handoff_clears_it() {
+    let rig = rig().await;
+    let mut written = detail("t1", "Tarea", "pending", "", "");
+    written["task"]["handoff"] = json!("Lo de antes.");
+    mount_task(&rig.server, "t1", written).await;
+    mount_columns(&rig.server).await;
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/tasks/t1"))
+        .respond_with(ok(detail("t1", "Tarea", "pending", "", "")))
+        .mount(&rig.server)
+        .await;
+    rig.core.tasks().open("t1").await;
+
+    rig.core.tasks().set_handoff("   \n ").await.expect("se quitó");
+
+    assert_eq!(patches(&rig.server).await, [json!({ "handoff": "" })]);
+    assert_eq!(open_task(&rig).task.handoff, None);
+}
+
+/// Lo que no cambia nada, o no cabe, no se le pide al servidor.
+///
+/// Roturas que atrapa: volver a firmar con la fecha de hoy un texto que nadie
+/// tocó; mandar uno de más de 2000 letras, que el servidor rechaza con un 400
+/// sin frase; contar bytes en vez de letras (2000 eñes caben).
+#[tokio::test]
+async fn a_handoff_that_says_the_same_or_does_not_fit_is_not_sent() {
+    let rig = rig().await;
+    let mut written = detail("t1", "Tarea", "pending", "", "");
+    written["task"]["handoff"] = json!("Lo de antes.");
+    mount_task(&rig.server, "t1", written.clone()).await;
+    mount_columns(&rig.server).await;
+    Mock::given(method("PATCH")).and(path("/api/v1/tasks/t1")).respond_with(ok(written)).mount(&rig.server).await;
+    rig.core.tasks().open("t1").await;
+
+    rig.core.tasks().set_handoff(" Lo de antes. ").await.expect("no hay nada que guardar");
+    assert_eq!(refusal(rig.core.tasks().set_handoff(&"ñ".repeat(2001)).await), "handoff-too-long");
+    assert_eq!(patches(&rig.server).await, Vec::<Value>::new());
+
+    rig.core.tasks().set_handoff(&"ñ".repeat(2000)).await.expect("2000 letras caben");
+    assert_eq!(patches(&rig.server).await.len(), 1);
+}
+
+/// Si el servidor no lo guarda, se dice y la tarea sigue diciendo lo de antes.
+///
+/// Roturas que atrapa: dar por guardado lo que no se guardó; poner en la
+/// tarea el texto que se quería sin que el servidor lo aceptara.
+#[tokio::test]
+async fn a_handoff_the_server_refuses_leaves_the_task_as_it_was() {
+    let rig = rig().await;
+    let mut written = detail("t1", "Tarea", "pending", "", "");
+    written["task"]["handoff"] = json!("Lo de antes.");
+    mount_task(&rig.server, "t1", written).await;
+    mount_columns(&rig.server).await;
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/tasks/t1"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({ "success": false, "message": "Forbidden", "error": "insufficient-role" })))
+        .mount(&rig.server)
+        .await;
+    rig.core.tasks().open("t1").await;
+
+    assert_eq!(refusal(rig.core.tasks().set_handoff("Otra cosa.").await), "insufficient-role");
+    assert_eq!(open_task(&rig).task.handoff.as_deref(), Some("Lo de antes."));
+}
