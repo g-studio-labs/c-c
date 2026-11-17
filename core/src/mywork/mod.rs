@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dates::due_day;
 use crate::error::ApiError;
-use crate::tree::{find_folder, folder_list_ids, SpaceTree};
+use crate::tree::{folder_list_ids, node_name, SpaceTree};
 use crate::Core;
 
 pub use board::{
@@ -144,31 +144,39 @@ impl MyWork {
         self.update(|state| state.scope = scope);
     }
 
-    /// El árbol se volvió a cargar, y el ámbito de una carpeta vive de él.
+    /// El árbol se volvió a cargar, y el ámbito es un nodo suyo.
     ///
-    /// Si la carpeta ya no está (la borraron, o el árbol es de otra
+    /// Si el nodo ya no está (lo borraron, o el árbol es de otra
     /// organización), el ámbito se tira, igual que se tira el de otra
-    /// organización al cargar: quedarse filtrando por una carpeta que no
-    /// existe es una pantalla vacía que parece que no hay trabajo. Si sigue,
-    /// se avisa a quien pinta —lo que hay dentro pudo cambiar: una lista
-    /// creada o movida a ella trae sus tareas— y se le pone el nombre que
-    /// tenga ahora. Una lista o un espacio se leen de la tarea, no del árbol,
-    /// y no les toca.
+    /// organización al cargar: quedarse filtrando por algo que no existe es
+    /// una pantalla vacía, con su pastilla, que parece que no hay trabajo.
+    /// Hasta el 17-nov-2026 sólo se tiraba el de una carpeta; una lista o un
+    /// espacio borrados dejaban esa pantalla (command-and-control-382). Si
+    /// sigue, se le pone el nombre que tenga ahora.
+    ///
+    /// Se avisa a quien pinta sólo si algo cambió: el árbol se recarga a
+    /// menudo y cada aviso repinta la pantalla. Salvo con una carpeta, que
+    /// avisa siempre: lo que hay dentro se le pregunta al árbol, y una lista
+    /// creada o movida a ella trae sus tareas sin que el ámbito cambie.
     pub(crate) fn tree_reloaded(&self) {
-        let on_a_folder = |state: &MyWorkState| state.scope.as_ref().is_some_and(|scope| scope.kind == ScopeKind::Folder);
-        // Sin una carpeta acotada no cambia nada, y no se avisa: el árbol se
-        // recarga a menudo y cada aviso repinta la pantalla.
-        if !on_a_folder(&self.state()) {
+        let Some(scope) = self.state().scope else { return };
+        let spaces = self.core.tree().state().spaces;
+        let name = node_name(&spaces, scope.kind.node_kind(), &scope.id);
+        if scope.kind != ScopeKind::Folder && name.as_deref() == Some(scope.name.as_str()) {
             return;
         }
-        let spaces = self.core.tree().state().spaces;
         self.update(|state| {
-            if !on_a_folder(state) {
+            // El mismo de antes: si mientras tanto se acotó a otro nodo, lo
+            // que se sabe de aquél no es de éste.
+            if !state.scope.as_ref().is_some_and(|now| now.kind == scope.kind && now.id == scope.id) {
                 return;
             }
-            let Some(scope) = state.scope.as_mut() else { return };
-            match find_folder(&spaces, &scope.id) {
-                Some(folder) => scope.name = folder.name.clone(),
+            match name {
+                Some(name) => {
+                    if let Some(now) = state.scope.as_mut() {
+                        now.name = name;
+                    }
+                }
                 None => state.scope = None,
             }
         });

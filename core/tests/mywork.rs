@@ -647,9 +647,10 @@ async fn a_folder_scope_follows_the_tree_when_it_reloads() {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": body })))
             .up_to_n_times(1)
     };
-    // En orden: como está, con la lista movida dentro y otro nombre, y sin
-    // la carpeta.
+    // En orden: como está, con la lista movida dentro, con otro nombre, y
+    // sin la carpeta.
     tree_once(serde_json::json!([foldered_space("Carpeta", false)])).mount(&rig.server).await;
+    tree_once(serde_json::json!([foldered_space("Carpeta", true)])).mount(&rig.server).await;
     tree_once(serde_json::json!([foldered_space("Plataforma", true)])).mount(&rig.server).await;
     let mut without = foldered_space("Plataforma", true);
     without["folders"].as_array_mut().unwrap().remove(0);
@@ -665,19 +666,94 @@ async fn a_folder_scope_follows_the_tree_when_it_reloads() {
     let notices = rig.recorder.0.lock().unwrap().len();
     tree.load("o1").await;
     assert_eq!(ids(&work.visible()), ["t-in", "t-moved"], "la lista movida a la carpeta no trajo sus tareas");
-    assert_eq!(work.state().scope.unwrap().name, "Plataforma");
+    // La carpeta es la misma y se llama igual: lo que cambió es lo que hay
+    // dentro, y eso también hay que repintarlo.
     assert!(rig.recorder.0.lock().unwrap().len() > notices, "quien pinta no se enteró de que lo visible cambió");
+
+    tree.load("o1").await;
+    assert_eq!(work.state().scope.unwrap().name, "Plataforma");
 
     tree.load("o1").await;
     assert_eq!(work.state().scope, None, "sigue acotado a una carpeta que ya no existe");
     assert_eq!(work.visible().len(), 3);
 
-    // Una lista no se lee del árbol: esté o no en él, su ámbito se queda.
-    work.set_scope(Some(scope(ScopeKind::List, "l-in", "o1")));
+    // Una lista que sigue en el árbol con su nombre no cambia en nada, y no
+    // se repinta por ella: sus tareas se leen de la tarea, no del árbol.
+    work.set_scope(Some(WorkScope { name: "Suelta".into(), ..scope(ScopeKind::List, "l-loose", "o1") }));
     let notices = rig.recorder.0.lock().unwrap().len();
     tree.load("o1").await;
-    assert_eq!(work.state().scope.map(|scope| scope.id).as_deref(), Some("l-in"));
-    assert_eq!(rig.recorder.0.lock().unwrap().len(), notices, "se repintó «Mi trabajo» por un árbol que no le toca");
+    assert_eq!(work.state().scope.map(|scope| scope.id).as_deref(), Some("l-loose"));
+    assert_eq!(rig.recorder.0.lock().unwrap().len(), notices, "se repintó «Mi trabajo» por un árbol que no le cambia nada");
+}
+
+/// Un ámbito cuyo nodo ya no está en el árbol se tira, sea lista, carpeta o
+/// espacio; y si sigue, la pastilla lleva el nombre que tenga ahora.
+///
+/// Roturas que atrapa: quedarse acotado a una lista o a un espacio borrados
+/// (pantalla vacía con su pastilla, que parece que no hay trabajo); tirar el
+/// ámbito de un nodo que sigue ahí; seguir llamándolo por el nombre de antes
+/// de renombrarlo; tomar por la lista acotada una carpeta con su mismo id;
+/// no avisar a quien pinta de que la pastilla cambió.
+#[tokio::test]
+async fn a_scope_whose_node_is_gone_is_dropped() {
+    let rig = rig(vec![task("t-loose", "l-loose", "s1"), task("t-deep", "l-deep", "s1")]).await;
+    let tree_once = |body: serde_json::Value| {
+        Mock::given(method("GET"))
+            .and(path("/api/v1/task-spaces/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": body })))
+            .up_to_n_times(1)
+    };
+    let renamed = |space: &str, loose: &str, deep: &str| {
+        let mut tree = foldered_space("Carpeta", false);
+        tree["name"] = serde_json::json!(space);
+        tree["lists"][0]["name"] = serde_json::json!(loose);
+        tree["folders"][0]["folders"][0]["lists"][0]["name"] = serde_json::json!(deep);
+        tree
+    };
+    // Sin la lista suelta, pero con una carpeta que lleva su id.
+    let mut list_gone = foldered_space("Carpeta", false);
+    list_gone["lists"].as_array_mut().unwrap().remove(0);
+    list_gone["folders"][1]["id"] = serde_json::json!("l-loose");
+    let other_space = serde_json::json!({ "id": "s2", "orgId": "o1", "name": "Otro", "color": "", "folders": [], "lists": [], "people": [] });
+    for body in [
+        serde_json::json!([foldered_space("Carpeta", false)]),
+        // Renombrados: el espacio, la lista suelta y la del fondo.
+        serde_json::json!([renamed("Producto", "A mano", "Al fondo")]),
+        serde_json::json!([renamed("Producto", "A mano", "Al fondo")]),
+        serde_json::json!([list_gone]),
+        serde_json::json!([renamed("Plataforma", "A mano", "Al fondo")]),
+        serde_json::json!([other_space]),
+    ] {
+        tree_once(body).mount(&rig.server).await;
+    }
+    let (work, tree) = (rig.core.my_work(), rig.core.tree());
+    let pill = || work.state().scope.map(|scope| (scope.kind, scope.name));
+    work.load(Some("o1".into())).await;
+    tree.load("o1").await;
+
+    // Una lista, también la que cuelga de una subcarpeta: renombrada sigue,
+    // con su nombre nuevo, y quien pinta se entera.
+    tree.click("l-deep", Looking::Tasks).unwrap();
+    let notices = rig.recorder.0.lock().unwrap().len();
+    tree.load("o1").await;
+    assert_eq!(pill(), Some((ScopeKind::List, "Al fondo".to_string())));
+    assert_eq!(ids(&work.visible()), ["t-deep"]);
+    assert!(rig.recorder.0.lock().unwrap().len() > notices, "quien pinta no se enteró del nombre nuevo");
+
+    tree.click("l-loose", Looking::Tasks).unwrap();
+    tree.load("o1").await;
+    assert_eq!(pill(), Some((ScopeKind::List, "A mano".to_string())));
+    // Borrada: se tira, aunque una carpeta lleve ahora su id.
+    tree.load("o1").await;
+    assert_eq!(work.state().scope, None, "sigue acotado a una lista que ya no existe");
+    assert_eq!(work.visible().len(), 2);
+
+    // Un espacio: lo mismo.
+    work.set_scope(Some(WorkScope { name: "Producto".into(), ..scope(ScopeKind::Space, "s1", "o1") }));
+    tree.load("o1").await;
+    assert_eq!(pill(), Some((ScopeKind::Space, "Plataforma".to_string())));
+    tree.load("o1").await;
+    assert_eq!(work.state().scope, None, "sigue acotado a un espacio que ya no existe");
 }
 
 /// La pastilla del ámbito dice qué clase de nodo es, en el idioma de quien

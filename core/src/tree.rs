@@ -124,6 +124,22 @@ pub fn find_folder<'a>(spaces: &'a [SpaceTree], folder_id: &str) -> Option<&'a F
     spaces.iter().find_map(|space| within(&space.folders, folder_id))
 }
 
+/// Cómo se llama ahora un nodo de esa clase, esté donde esté del árbol.
+/// `None` si ya no está.
+///
+/// Con la clase además del id: una lista y una carpeta son de tablas
+/// distintas y nada impide que compartan id.
+pub fn node_name(spaces: &[SpaceTree], kind: NodeKind, id: &str) -> Option<String> {
+    fn list_within<'a>(folders: &'a [FolderTree], lists: &'a [ListSummary], id: &str) -> Option<&'a ListSummary> {
+        lists.iter().find(|list| list.id == id).or_else(|| folders.iter().find_map(|folder| list_within(&folder.folders, &folder.lists, id)))
+    }
+    match kind {
+        NodeKind::Space => spaces.iter().find(|space| space.id == id).map(|space| space.name.clone()),
+        NodeKind::Folder => find_folder(spaces, id).map(|folder| folder.name.clone()),
+        NodeKind::List => spaces.iter().find_map(|space| list_within(&space.folders, &space.lists, id)).map(|list| list.name.clone()),
+    }
+}
+
 /// Las listas que cuelgan de una carpeta, también las de sus subcarpetas a
 /// cualquier profundidad. `None` si la carpeta no está en el árbol, que no es
 /// lo mismo que estar vacía.
@@ -229,8 +245,8 @@ impl Tree {
                     state.spaces = spaces.into_iter().filter(|space| !space.is_general()).collect();
                     state.loading = false;
                 });
-                // Un ámbito de carpeta se lee de este árbol: con uno nuevo
-                // hay que volver a mirarlo.
+                // El ámbito de «Mi trabajo» es un nodo de este árbol: con
+                // uno nuevo hay que volver a mirar si sigue y cómo se llama.
                 self.core.my_work().tree_reloaded();
             }
             Err(error) => self.update(|state| {

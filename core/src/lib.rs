@@ -53,7 +53,7 @@ pub use hue::{hue_index, HUES};
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
 pub use prefs::{folds_panel, is_dark, shortcut_text, KeysHeld, ThemePreference, WorkLayout};
 pub use session::Session;
-pub use tree::{doc_key, find_folder, folder_list_ids, DocMark, FolderTree, ListSummary, SpacePerson, SpaceTree, Tree, TreeState};
+pub use tree::{doc_key, find_folder, folder_list_ids, node_name, DocMark, FolderTree, ListSummary, SpacePerson, SpaceTree, Tree, TreeState};
 pub use tree_rows::{filter_tree, tree_rows, tree_rows_matching, TreeRow};
 pub use storage::{FileStorage, Storage};
 pub use stream::{backoff, parse_frame, Connection, ConnectionState, FrameBuffer, ServerEvent, Stream};

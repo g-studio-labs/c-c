@@ -100,6 +100,15 @@ pub enum ScopeKind {
 }
 
 impl ScopeKind {
+    /// La clase de nodo del árbol a la que se acota.
+    pub fn node_kind(self) -> crate::nav::NodeKind {
+        match self {
+            ScopeKind::Space => crate::nav::NodeKind::Space,
+            ScopeKind::Folder => crate::nav::NodeKind::Folder,
+            ScopeKind::List => crate::nav::NodeKind::List,
+        }
+    }
+
     /// Cómo se llama esta clase de nodo en la pastilla del ámbito
     /// («Carpeta: nombre»), como clave del catálogo.
     pub fn label_key(self) -> &'static str {
