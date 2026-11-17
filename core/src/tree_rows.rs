@@ -325,8 +325,20 @@ impl Tree {
         let Some(row) = self.rows().into_iter().find(|row| row.id == id && row.kind != NodeKind::List) else {
             return;
         };
+        self.decide(&row.id, !row.open);
+    }
+
+    /// Deja abierta una rama, y lo recuerda: quien va a crear algo dentro
+    /// tiene que ver dónde nace (el `setOpen(true)` de `startAdding` en
+    /// `SpacesNavigator.tsx`). Con el id solo, sin mirar las filas: un nodo
+    /// vacío no es «expandible» y también se abre para enseñar el campo.
+    pub fn open(&self, id: &str) {
+        self.decide(id, true);
+    }
+
+    fn decide(&self, id: &str, open: bool) {
         self.update(|state| {
-            state.decided.insert(row.id.clone(), !row.open);
+            state.decided.insert(id.to_string(), open);
         });
         let state = self.state();
         let Some(org_id) = state.org_id else { return };

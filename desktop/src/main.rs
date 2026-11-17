@@ -25,6 +25,7 @@ mod lang;
 mod mywork;
 mod newtask;
 mod platform;
+mod prompt;
 mod shell;
 mod spike;
 mod task;
@@ -95,6 +96,8 @@ fn main() {
 
     gpui_kit::application().with_assets(assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
+        // Las confirmaciones, donde el sistema no tiene diálogo propio (Linux).
+        prompt::install(cx);
         // Antes de abrir ninguna ventana: es con lo que Windows agrupa la app
         // en la barra y con lo que el sistema firma sus avisos.
         cx.set_app_identity(identity::APP_ID, identity::APP_NAME);

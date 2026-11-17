@@ -4,9 +4,9 @@
 //! Qué filas tiene el árbol, cuáles van abiertas, qué hace un clic y qué se
 //! trae al entrar lo dice el core. Aquí se pinta y se le pasa cada gesto.
 
-use cac_core::{count_badge, counted_label, Locale, NodeKind, ThemePreference, TreeRow, BELL_CAP, RAIL_CAP};
+use cac_core::{count_badge, counted_label, Locale, NodeAction, NodeKind, ThemePreference, TreeEditError, TreeRow, BELL_CAP, RAIL_CAP};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::tooltip::Tooltip;
@@ -59,6 +59,31 @@ struct RailCount {
     warning: bool,
 }
 
+/// A qué se le está poniendo nombre en el árbol.
+#[derive(Clone, PartialEq)]
+enum Naming {
+    /// Un espacio nuevo, al final del árbol.
+    NewSpace,
+    /// Una carpeta o una lista nueva, dentro de un espacio o de una carpeta.
+    NewChild { parent: NodeKind, parent_id: String, child: NodeKind },
+    /// Un nodo que ya existe: el campo va en su fila, con su nombre.
+    Rename { kind: NodeKind, id: String },
+}
+
+/// El campo en el que se escribe un nombre, en el árbol, donde la cosa va a
+/// estar: el `InlineName.tsx` de la app de siempre, que sustituyó a un
+/// diálogo (nombrar una lista son tres palabras, y cinco listas seguidas
+/// eran cinco diálogos).
+struct NameField {
+    naming: Naming,
+    input: Entity<InputState>,
+    /// Esperando al servidor: otro Enter no manda otra vez.
+    busy: bool,
+    /// Por qué no se guardó, dicho bajo el campo. Lo escrito se queda.
+    problem: Option<String>,
+    _on_enter: Subscription,
+}
+
 /// Casi sin estado propio: lo que pinta lo lee del core al pintarse, y GPUI
 /// repinta una vista cuando cambia algo que leyó. No hace falta suscribirse.
 pub struct Workspace {
@@ -80,6 +105,10 @@ pub struct Workspace {
     /// hasta pulsar algo con el ratón.
     focus_anchor: FocusHandle,
     _on_focus_lost: Subscription,
+    /// El nombre que se está escribiendo en el árbol, si alguno.
+    naming: Option<NameField>,
+    /// Por qué no se pudo borrar lo último que se pidió borrar.
+    tree_problem: Option<String>,
 }
 
 impl Workspace {
@@ -105,7 +134,171 @@ impl Workspace {
             over_panel: false,
             focus_anchor,
             _on_focus_lost: on_focus_lost,
+            naming: None,
+            tree_problem: None,
         }
+    }
+
+    /// Abre el campo para nombrar algo en el árbol, con el foco puesto. Al
+    /// renombrar lleva el nombre de ahora, seleccionado: lo normal es
+    /// cambiarlo entero. Al crear dentro de un nodo, el nodo se abre para
+    /// que se vea dónde nace.
+    fn start_naming(&mut self, naming: Naming, window: &mut Window, cx: &mut Context<Self>) {
+        let tree = Backend::core(cx).tree();
+        let (placeholder, current) = match &naming {
+            Naming::NewSpace => ("work:tree.newSpace", None),
+            Naming::NewChild { parent_id, child, .. } => {
+                tree.open(parent_id);
+                (if *child == NodeKind::Folder { "work:tree.newFolder" } else { "work:tree.newList" }, None)
+            }
+            Naming::Rename { kind, id } => {
+                let key = match kind {
+                    NodeKind::Space => "work:tree.spaceName",
+                    NodeKind::Folder => "work:tree.folderName",
+                    NodeKind::List => "work:tree.listName",
+                };
+                (key, cac_core::node_name(&tree.state().spaces, *kind, id))
+            }
+        };
+        let placeholder = tr(cx, placeholder);
+        let renaming = current.is_some();
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).default_value(current.unwrap_or_default()));
+        let on_enter = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.commit_name(window, cx);
+            }
+        });
+        // El foco, ya: el menú desde el que se llega aquí se lo devuelve a
+        // quien lo tenía salvo que alguien lo haya movido antes de cerrarse.
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            if renaming {
+                input.select_all(window, cx);
+            }
+        });
+        self.naming = Some(NameField { naming, input, busy: false, problem: None, _on_enter: on_enter });
+        self.tree_problem = None;
+        cx.notify();
+    }
+
+    /// Escape: se deja de nombrar, y no se manda nada.
+    fn cancel_naming(&mut self, cx: &mut Context<Self>) {
+        self.naming = None;
+        cx.notify();
+    }
+
+    /// Enter: manda el nombre. Qué es un nombre que vale, y a dónde va cada
+    /// cosa, lo dice el core.
+    ///
+    /// Si se guardó: al renombrar el campo se cierra; al crear se queda
+    /// abierto y vacío, que lo normal es crear más de una. Si no, lo escrito
+    /// se queda y se dice por qué (un nombre en blanco no dice nada: el
+    /// campo sigue esperándolo).
+    fn commit_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(field) = self.naming.as_mut() else { return };
+        if field.busy {
+            return;
+        }
+        let name = field.input.read(cx).value().to_string();
+        let naming = field.naming.clone();
+        field.busy = true;
+        field.problem = None;
+        cx.notify();
+        let sent = naming.clone();
+        let answer = Backend::ask(cx, move |core| async move {
+            let tree = core.tree();
+            match sent {
+                Naming::NewSpace => tree.create_space(&name).await,
+                Naming::NewChild { parent, parent_id, child } => tree.create_in(parent, &parent_id, child, &name).await,
+                Naming::Rename { kind, id } => tree.rename(kind, &id, &name).await,
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(result) = answer.await else { return };
+            this.update_in(cx, |this, window, cx| {
+                // Sólo si sigue siendo el mismo campo: pudo cancelarse, o
+                // abrirse otro, mientras el servidor contestaba.
+                let Some(field) = this.naming.as_mut().filter(|field| field.naming == naming) else { return };
+                field.busy = false;
+                match result {
+                    Ok(()) if matches!(naming, Naming::Rename { .. }) => this.naming = None,
+                    Ok(()) => field.input.update(cx, |input, cx| input.set_value("", window, cx)),
+                    Err(TreeEditError::EmptyName) => {}
+                    Err(error) => {
+                        let fallback = if matches!(naming, Naming::NewSpace) { "common:misc.errCreateSpace" } else { "common:misc.errSave" };
+                        field.problem = Some(cac_core::tree_edit_phrase(locale(cx), &error, fallback));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Borra un nodo, preguntando antes: la pregunta nombra el nodo y dice
+    /// qué se va con él (lo escribe el core). Lo que no se puede borrar se
+    /// explica, y entonces no hay nada que confirmar.
+    fn ask_delete(&mut self, kind: NodeKind, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(notice) = Backend::core(cx).tree().delete_notice(kind, &id, locale(cx)) else { return };
+        self.tree_problem = None;
+        cx.notify();
+        if !notice.allowed {
+            let close = tr(cx, "common:action.close");
+            let _ = window.prompt(PromptLevel::Info, &notice.title, Some(&notice.body), &[close.as_str()], cx);
+            return;
+        }
+        let cancel = tr(cx, "common:action.cancel");
+        let answer = window.prompt(PromptLevel::Warning, &notice.title, Some(&notice.body), &[notice.confirm.as_str(), cancel.as_str()], cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let Ok(deleted) = cx.update(|_, cx| Backend::ask(cx, move |core| async move { core.tree().delete(kind, &id).await })) else { return };
+            let Ok(Err(error)) = deleted.await else { return };
+            this.update(cx, |this, cx| {
+                this.tree_problem = Some(cac_core::tree_edit_phrase(locale(cx), &error, "common:admin.errDelete"));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Lo que hace una entrada del menú de una fila.
+    fn act_on_node(&mut self, action: NodeAction, kind: NodeKind, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            NodeAction::OpenDocs => Self::open_docs(id, cx),
+            NodeAction::NewFolder => self.start_naming(Naming::NewChild { parent: kind, parent_id: id, child: NodeKind::Folder }, window, cx),
+            NodeAction::NewList => self.start_naming(Naming::NewChild { parent: kind, parent_id: id, child: NodeKind::List }, window, cx),
+            NodeAction::Rename => self.start_naming(Naming::Rename { kind, id }, window, cx),
+            NodeAction::Delete => self.ask_delete(kind, id, window, cx),
+        }
+    }
+
+    /// El campo del nombre, con la sangría de la fila en la que va
+    /// (`InlineName.tsx`: `px-2 py-1` y un campo `h-6`).
+    fn render_name_field(&self, field: &NameField, depth: u32, cx: &mut Context<Self>) -> impl IntoElement {
+        let danger = cx.theme().danger;
+        div()
+            .id("tree-name")
+            .test_support()
+            .flex()
+            .flex_none()
+            .flex_col()
+            .mx_2()
+            .pl(px(8. + INDENT * depth as f32))
+            .pr_2()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    this.cancel_naming(cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(div().h(px(ROW_HEIGHT)).flex().items_center().child(Input::new(&field.input).id("tree-name-input").small().h_6().disabled(field.busy)))
+            .children(field.problem.clone().map(|problem| {
+                div().id("tree-name-problem").pb_1().leading_xs().text_color(danger).aria_label(problem.clone()).child(problem).test_support()
+            }))
     }
 
     /// Fija el panel o lo suelta. Al cambiar, el ratón no cuenta como
@@ -505,9 +698,14 @@ impl Workspace {
     /// Un botón pequeño de cabecera que todavía no hace nada aquí: dice qué
     /// es y que aún no está.
     fn pending_tool(id: &'static str, icon: Lucide, label_key: &str, cx: &App) -> impl IntoElement {
+        let label = format!("{} · {}", tr(cx, label_key), tr(cx, "common:misc.notInThisApp"));
+        Self::header_tool(id, icon, label, cx).test_support()
+    }
+
+    /// Un botón pequeño de cabecera: su icono y, al pasar el ratón, qué es.
+    fn header_tool(id: &'static str, icon: Lucide, label: String, cx: &App) -> Stateful<Div> {
         let theme = cx.theme();
         let (muted, hover, foreground) = (theme.muted_foreground, theme.sidebar_accent, theme.foreground);
-        let label = format!("{} · {}", tr(cx, label_key), tr(cx, "common:misc.notInThisApp"));
         div()
             .id(id)
             .size(px(24.))
@@ -520,7 +718,6 @@ impl Workspace {
             .hover(move |style| style.bg(hover).text_color(foreground))
             .child(Icon::new(icon).size_3p5())
             .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
-            .test_support()
     }
 
     /// La barra de arriba de la app de siempre: el buscador en el centro y
@@ -732,8 +929,9 @@ impl Workspace {
     /// (`size-3.5` en un espacio, `size-3` en una carpeta), la marca y el
     /// nombre a `gap-1` (`gap-1.5` en una lista), y al final lo que la fila
     /// tiene: el ojo, el documento, lo abierto y el «···», todo pequeño.
-    fn render_row(&self, row: TreeRow, first: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_row(&self, row: TreeRow, first: bool, can_edit: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let danger = theme.danger;
         let (hover, active_bg, muted, foreground, primary) =
             (theme.sidebar_accent.opacity(0.5), theme.sidebar_accent, theme.muted_foreground, theme.sidebar_foreground, theme.primary);
         let chevron = if row.open { IconName::ChevronDown } else { IconName::ChevronRight };
@@ -760,7 +958,29 @@ impl Workspace {
                 NodeKind::List => "work:tree.listMenu",
             },
         );
-        let (menu_id, docs_label) = (row.id.clone(), tr(cx, "work:tree.openDocs"));
+        // Lo que ofrece el menú de este nodo a quien lo abre lo dice el core;
+        // aquí cada cosa lleva su texto y su icono, los de los menús de
+        // `SpacesNavigator.tsx`.
+        let here = locale(cx);
+        let delete_key = match row.kind {
+            NodeKind::Space => "work:tree.deleteSpace",
+            NodeKind::Folder => "work:tree.deleteFolder",
+            NodeKind::List => "work:tree.deleteList",
+        };
+        let actions: Vec<(NodeAction, &'static str, String, Lucide)> = cac_core::node_menu(row.kind, can_edit)
+            .into_iter()
+            .map(|action| {
+                let (slug, key, icon) = match action {
+                    NodeAction::OpenDocs => ("docs", "work:tree.openDocs", Lucide::FileText),
+                    NodeAction::NewFolder => ("new-folder", "work:tree.newFolder", Lucide::FolderPlus),
+                    NodeAction::NewList => ("new-list", "work:tree.newList", Lucide::ListChecks),
+                    NodeAction::Rename => ("rename", "work:tree.rename", Lucide::Pencil),
+                    NodeAction::Delete => ("delete", delete_key, Lucide::Trash),
+                };
+                (action, slug, cac_core::text(here, key), icon)
+            })
+            .collect();
+        let (menu_id, menu_kind, workspace) = (row.id.clone(), row.kind, cx.entity().downgrade());
         // Lo ve un cliente: es su canal. En un espacio va delante del nombre;
         // en una lista, detrás.
         let client = row.client.then(|| {
@@ -838,13 +1058,23 @@ impl Workspace {
                         .p_0()
                         .child(Icon::new(IconName::Ellipsis).size_3p5().text_color(muted))
                         .tooltip(menu_label)
-                        .dropdown_menu(move |menu, _, _| {
-                            let id = menu_id.clone();
-                            menu.item(
-                                PopupMenuItem::new(docs_label.clone())
-                                    .icon(Icon::new(Lucide::FileText))
-                                    .on_click(move |_, _, cx| Self::open_docs(id.clone(), cx)),
-                            )
+                        .dropdown_menu(move |mut menu, _, _| {
+                            for (action, slug, label, icon) in actions.clone() {
+                                let (id, workspace) = (menu_id.clone(), workspace.clone());
+                                let item_id = SharedString::from(format!("tree-act-{slug}-{id}"));
+                                let deletes = action == NodeAction::Delete;
+                                menu = menu.item(
+                                    PopupMenuItem::element(move |_, _| {
+                                        // Borrar va en rojo, como en la app de siempre.
+                                        div().id(item_id.clone()).when(deletes, |this| this.text_color(danger)).child(label.clone()).test_support()
+                                    })
+                                    .icon(Icon::new(icon))
+                                    .on_click(move |_, window, cx| {
+                                        workspace.update(cx, |this, cx| this.act_on_node(action, menu_kind, id.clone(), window, cx)).ok();
+                                    }),
+                                );
+                            }
+                            menu
                         }),
                 ),
             )
@@ -865,9 +1095,56 @@ impl Workspace {
         let toggle_hint = cac_core::shortcut_text(&tr(cx, "nav:rail.collapsePanel"), on_a_mac);
         let query = self.tree_filter.read(cx).value().to_string();
         let rows = Backend::core(cx).tree().rows_matching(&query);
+        // A quien sólo puede mirar no se le ofrece cambiar el árbol.
+        let can_edit = Backend::core(cx).tree().can_edit();
+        let danger = theme.danger;
+        let tree_problem = self.tree_problem.clone();
+        let new_space = can_edit.then(|| {
+            Self::header_tool("spaces-new", Lucide::Plus, tr(cx, "work:tree.newSpace"), cx)
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, window, cx| this.start_naming(Naming::NewSpace, window, cx)))
+                .test_support()
+        });
+        // Dónde va el campo del nombre: en la fila que se renombra; tras lo
+        // último que cuelga del nodo en el que se crea; o al final, para un
+        // espacio nuevo (y para un nodo que el filtro ha dejado sin fila).
+        let place = self.naming.as_ref().map(|field| match &field.naming {
+            Naming::NewSpace => (rows.len(), 0, false),
+            Naming::Rename { kind, id } => match rows.iter().position(|row| row.kind == *kind && &row.id == id) {
+                Some(at) => (at, rows[at].depth, true),
+                None => (rows.len(), 0, false),
+            },
+            Naming::NewChild { parent, parent_id, .. } => match rows.iter().position(|row| row.kind == *parent && &row.id == parent_id) {
+                Some(at) => {
+                    let depth = rows[at].depth;
+                    let end = rows[at + 1..].iter().position(|row| row.depth <= depth).map_or(rows.len(), |after| at + 1 + after);
+                    (end, depth + 1, false)
+                }
+                None => (rows.len(), 0, false),
+            },
+        });
+        let mut tree: Vec<AnyElement> = Vec::with_capacity(rows.len() + 1);
+        let count = rows.len();
+        for (index, row) in rows.into_iter().enumerate() {
+            match (place, self.naming.as_ref()) {
+                (Some((at, depth, replaces)), Some(field)) if at == index => {
+                    tree.push(self.render_name_field(field, depth, cx).into_any_element());
+                    if replaces {
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            tree.push(self.render_row(row, index == 0, can_edit, cx).into_any_element());
+        }
+        if let (Some((at, depth, _)), Some(field)) = (place, self.naming.as_ref()) {
+            if at >= count {
+                tree.push(self.render_name_field(field, depth, cx).into_any_element());
+            }
+        }
         // Filtrando y sin nada que enseñar se dice: un árbol en blanco se lee
         // como que la organización no tiene espacios.
-        let nothing = rows.is_empty() && !query.trim().is_empty();
+        let nothing = count == 0 && !query.trim().is_empty();
 
         div()
             .w(px(PANEL_WIDTH))
@@ -950,11 +1227,30 @@ impl Workspace {
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(foreground.opacity(0.7))
                     .child(div().flex_1().child(tr(cx, "nav:panel.spaces")))
-                    // Reordenar y crear un espacio: están donde en la app de
-                    // siempre, y todavía no hacen nada aquí.
+                    // Reordenar está donde en la app de siempre, y todavía
+                    // no hace nada aquí. El «+» abre el campo del nombre al
+                    // final del árbol, que es donde nace un espacio.
                     .child(Self::pending_tool("spaces-rearrange", Lucide::Lock, "work:tree.rearrange", cx))
-                    .child(Self::pending_tool("spaces-new", Lucide::Plus, "work:tree.newSpace", cx)),
+                    .children(new_space),
             )
+            // Un borrado que el servidor rechazó: se dice, y un clic lo quita.
+            .children(tree_problem.map(|problem| {
+                div()
+                    .id("tree-problem")
+                    .mx_2()
+                    .px_2()
+                    .py_1()
+                    .leading_xs()
+                    .text_color(danger)
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.tree_problem = None;
+                        cx.notify();
+                    }))
+                    .aria_label(problem.clone())
+                    .child(problem)
+                    .test_support()
+            }))
             .when(nothing, |this| {
                 this.child(div().id("tree-no-matches").test_support().px_5().py_3().leading_xs().text_color(muted).child(tr(cx, "nav:panel.noMatches")))
             })
@@ -965,7 +1261,7 @@ impl Workspace {
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .children(rows.into_iter().enumerate().map(|(index, row)| self.render_row(row, index == 0, cx))),
+                    .children(tree),
             )
     }
 }
@@ -1131,6 +1427,10 @@ mod tests {
     }
 
     fn open_sized(width: f32, cx: &mut TestAppContext) -> AnyWindowHandle {
+        open_with_view(width, cx).0
+    }
+
+    fn open_with_view(width: f32, cx: &mut TestAppContext) -> (AnyWindowHandle, gpui_kit::Entity<Workspace>) {
         sign_in(cx);
         cx.update(|cx| {
             let options = WindowOptions {
@@ -1140,7 +1440,7 @@ mod tests {
                 })),
                 ..WindowOptions::default()
             };
-            gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx))).expect("open test window").0
+            gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx))).expect("open test window")
         })
     }
 
@@ -1695,7 +1995,8 @@ mod tests {
         settle_frames(window, cx);
         assert_eq!(scope(cx), None, "abrir el menú acotó las tareas al espacio");
 
-        cx.update(|cx| Workspace::open_docs("a".into(), cx));
+        wait_until(cx, "el menú se abre", |cx| on_screen(window, "tree-act-docs-a", cx));
+        click(window, "tree-act-docs-a", cx);
         wait_until(cx, "llega la documentación del espacio", |cx| on_screen(window, "doc-body", cx));
         assert_eq!(doc_open(cx).as_deref(), Some("a"));
         assert_eq!(scope(cx), None);
@@ -1936,6 +2237,379 @@ mod tests {
         assert!(on_screen(window, "tree-client-l-a", cx), "no avisa de que la lista la ve un cliente");
         assert!(!on_screen(window, "tree-client-a", cx) && !on_screen(window, "tree-client-f-a", cx));
         assert!(on_screen(window, "account-menu", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    // ── Crear, renombrar y borrar nodos (command-and-control-376) ───────
+
+    /// El servidor de siempre, que además acepta cualquier cambio en el árbol.
+    fn server_accepting_edits() -> FakeServer {
+        let server = server();
+        accept_edits(&server);
+        server
+    }
+
+    fn accept_edits(server: &FakeServer) {
+        for verb in ["POST", "PATCH", "DELETE"] {
+            server.mount(
+                Mock::given(method(verb))
+                    .and(wiremock::matchers::path_regex("^/api/v1/task-(spaces|folders|lists)/"))
+                    .respond_with(ok(json!(null))),
+            );
+        }
+    }
+
+    /// Lo que se le pidió cambiar al servidor en el árbol: verbo, ruta y
+    /// cuerpo, en orden.
+    fn edits(server: &FakeServer) -> Vec<(String, String, Option<serde_json::Value>)> {
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.method.as_str() != "GET" && request.url.path().starts_with("/api/v1/task-"))
+            .map(|request| (request.method.to_string(), request.url.path().to_string(), serde_json::from_slice(&request.body).ok()))
+            .collect()
+    }
+
+    fn edit(verb: &str, route: &str, body: Option<serde_json::Value>) -> (String, String, Option<serde_json::Value>) {
+        (verb.to_string(), route.to_string(), body)
+    }
+
+    /// Escribe en lo que tenga el foco.
+    fn type_text(window: AnyWindowHandle, text: &str, cx: &mut TestAppContext) {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.input(text, cx);
+        })
+        .unwrap();
+    }
+
+    /// Abre el «···» de un nodo y pulsa una de sus entradas.
+    fn choose(window: AnyWindowHandle, node: &str, action: &str, cx: &mut TestAppContext) {
+        let item = format!("tree-act-{action}-{node}");
+        click(window, &format!("tree-menu-{node}"), cx);
+        wait_until(cx, "el menú de la fila se abre", |cx| on_screen(window, &item, cx));
+        click(window, &item, cx);
+    }
+
+    /// A qué altura de la ventana está algo.
+    fn top(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> f32 {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            f32::from(window.try_find(id).expect("no está a la vista").bounds().origin.y)
+        })
+        .unwrap()
+    }
+
+    /// El «+» de «Espacios» abre un campo al final del árbol; Enter crea el
+    /// espacio con lo escrito y deja el campo listo para otro; Escape lo
+    /// cierra sin mandar nada, y un nombre en blanco no se manda.
+    ///
+    /// Roturas que atrapa: un «+» pintado que no hace nada; crear al pulsar
+    /// el «+», sin haber escrito ni confirmado nada; un Escape que crea lo
+    /// que había escrito; crear un espacio sin nombre; mandarlo a otra ruta
+    /// o sin la organización; tener que volver a pulsar «+» para cada uno, o
+    /// que el segundo arrastre el nombre del primero.
+    #[gpui_kit::test]
+    fn the_plus_of_spaces_names_a_new_space_where_it_will_be(cx: &mut TestAppContext) {
+        let server = server_accepting_edits();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-l-a", cx));
+        assert!(!on_screen(window, "tree-name-input", cx), "hay un campo de nombre sin haberlo pedido");
+
+        click(window, "spaces-new", cx);
+        assert!(on_screen(window, "tree-name-input", cx), "el «+» no abrió el campo del nombre");
+        assert!(top(window, "tree-name", cx) > top(window, "tree-l-a", cx), "el campo no está al final, donde nace un espacio");
+        type_text(window, "Un borrador", cx);
+        press(window, "escape", cx);
+        assert!(!on_screen(window, "tree-name-input", cx), "Escape no cerró el campo");
+
+        click(window, "spaces-new", cx);
+        press(window, "enter", cx);
+        type_text(window, "   ", cx);
+        press(window, "enter", cx);
+        settle_frames(window, cx);
+        assert!(on_screen(window, "tree-name-input", cx), "un nombre en blanco cerró el campo");
+        assert_eq!(edits(&server), [], "se mandó algo sin un nombre que mandar, o tras cancelar");
+
+        type_text(window, "Diseño ", cx);
+        press(window, "enter", cx);
+        wait_until(cx, "se pide crear el espacio", |_| !edits(&server).is_empty());
+        assert_eq!(edits(&server), [edit("POST", "/api/v1/task-spaces/", Some(json!({ "orgId": "o1", "name": "Diseño" })))]);
+
+        // El campo sigue, vacío: el siguiente no arrastra el nombre anterior.
+        wait_until(cx, "el campo queda listo para otro", |cx| {
+            type_text(window, "", cx);
+            on_screen(window, "tree-name-input", cx) && server.hits("/api/v1/task-spaces/") >= 3
+        });
+        settle_frames(window, cx);
+        type_text(window, "Soporte", cx);
+        press(window, "enter", cx);
+        wait_until(cx, "se pide crear el segundo", |_| edits(&server).len() == 2);
+        assert_eq!(edits(&server)[1], edit("POST", "/api/v1/task-spaces/", Some(json!({ "orgId": "o1", "name": "Soporte" }))));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// El menú de un espacio o de una carpeta crea dentro: abre el nodo,
+    /// pone el campo bajo lo que ya cuelga de él, y Enter lo manda por la
+    /// ruta de su espacio. El de una lista no ofrece crear dentro.
+    ///
+    /// Roturas que atrapa: unas entradas de menú que no hacen nada; crear
+    /// dentro de una carpeta plegada sin ver dónde nace; el campo en otro
+    /// sitio que donde va a quedar la cosa; crear una lista donde se pidió
+    /// una carpeta, o en el espacio lo que se pidió en la carpeta; ofrecer
+    /// «lista nueva» dentro de una lista; que abrir el menú o crear acote
+    /// «Mi trabajo».
+    #[gpui_kit::test]
+    fn the_row_menu_creates_inside_a_space_or_a_folder(cx: &mut TestAppContext) {
+        let server = server_accepting_edits();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-l-a", cx));
+        assert!(!on_screen(window, "tree-in-a", cx));
+
+        choose(window, "f-a", "new-folder", cx);
+        assert!(on_screen(window, "tree-name-input", cx), "«Carpeta nueva» no abrió el campo");
+        assert!(on_screen(window, "tree-in-a", cx), "la carpeta no se abrió para ver dónde nace");
+        let field = top(window, "tree-name", cx);
+        assert!(field > top(window, "tree-in-a", cx) && field < top(window, "tree-l-a", cx), "el campo no está dentro de la carpeta");
+        settle_frames(window, cx);
+        assert_eq!(edits(&server), [], "se creó algo al elegir la entrada, sin nombre ni confirmación");
+        type_text(window, "Diseño", cx);
+        press(window, "enter", cx);
+        wait_until(cx, "se pide crear la carpeta", |_| !edits(&server).is_empty());
+        assert_eq!(edits(&server), [edit("POST", "/api/v1/task-spaces/a/folders", Some(json!({ "name": "Diseño", "parentFolderId": "f-a" })))]);
+        press(window, "escape", cx);
+
+        choose(window, "a", "new-list", cx);
+        assert!(top(window, "tree-name", cx) > top(window, "tree-l-a", cx), "el campo no está bajo lo último del espacio");
+        type_text(window, "Un borrador", cx);
+        press(window, "escape", cx);
+        settle_frames(window, cx);
+        assert_eq!(edits(&server).len(), 1, "Escape creó lo que había escrito");
+        choose(window, "a", "new-list", cx);
+        type_text(window, "Ideas", cx);
+        press(window, "enter", cx);
+        wait_until(cx, "se pide crear la lista", |_| edits(&server).len() == 2);
+        assert_eq!(edits(&server)[1], edit("POST", "/api/v1/task-spaces/a/lists", Some(json!({ "name": "Ideas", "folderId": null }))));
+        press(window, "escape", cx);
+        assert!(!on_screen(window, "tree-name-input", cx));
+
+        click(window, "tree-menu-l-a", cx);
+        wait_until(cx, "el menú de la lista se abre", |cx| on_screen(window, "tree-act-rename-l-a", cx));
+        assert!(on_screen(window, "tree-act-docs-l-a", cx) && on_screen(window, "tree-act-delete-l-a", cx));
+        assert!(!on_screen(window, "tree-act-new-list-l-a", cx) && !on_screen(window, "tree-act-new-folder-l-a", cx), "una lista ofrece crear dentro");
+        assert_eq!(scope(cx), None, "el menú o crear acotó «Mi trabajo»");
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Renombrar pone el campo en la fila, con el nombre de ahora
+    /// seleccionado: Enter guarda sólo si cambió y cierra; Escape cierra sin
+    /// mandar nada.
+    ///
+    /// Roturas que atrapa: la fila pintada dos veces, con su campo al lado;
+    /// un campo vacío que obliga a reescribir el nombre entero, o uno sin
+    /// seleccionar en el que lo escrito se pega detrás del viejo; un Escape
+    /// que renombra; gastar una petición para dejarlo igual; renombrar una
+    /// lista por la ruta de otra clase de nodo; un campo que se queda
+    /// abierto después de guardar; mandarlo dos veces con dos Enter seguidos.
+    #[gpui_kit::test]
+    fn renaming_happens_in_the_row(cx: &mut TestAppContext) {
+        let server = server_accepting_edits();
+        server.install(cx);
+        let (window, workspace) = open_with_view(1100., cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-l-a", cx));
+        let row = top(window, "tree-l-a", cx);
+
+        choose(window, "l-a", "rename", cx);
+        assert!(on_screen(window, "tree-name-input", cx), "«Renombrar» no abrió el campo");
+        assert!(!on_screen(window, "tree-l-a", cx), "la fila sigue pintada junto a su campo");
+        assert!((top(window, "tree-name", cx) - row).abs() < 1., "el campo no está donde estaba la fila");
+        type_text(window, "Un borrador", cx);
+        press(window, "escape", cx);
+        assert!(on_screen(window, "tree-l-a", cx) && !on_screen(window, "tree-name-input", cx), "Escape no devolvió la fila");
+
+        // Enter sin tocar nada: es el nombre que ya tiene.
+        choose(window, "l-a", "rename", cx);
+        press(window, "enter", cx);
+        wait_until(cx, "se cierra sin más", |cx| !on_screen(window, "tree-name-input", cx));
+        settle_frames(window, cx);
+        assert_eq!(edits(&server), [], "se mandó algo al cancelar, o para dejarlo igual");
+
+        choose(window, "l-a", "rename", cx);
+        type_text(window, "Entrada", cx);
+        // Dos Enter seguidos, sin esperar al servidor ni a que se repinte:
+        // se manda una vez. Llamando a lo que hace Enter y no pulsando la
+        // tecla, porque entre dos pulsaciones la prueba repinta y el campo
+        // ya sale apagado, que también lo para (se midió: quitando sólo la
+        // guarda de `commit_name`, con teclas la prueba seguía en verde).
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.commit_name(window, cx);
+                workspace.commit_name(window, cx);
+            })
+        })
+        .unwrap();
+        wait_until(cx, "se pide renombrar", |_| !edits(&server).is_empty());
+        wait_until(cx, "guardado, el campo se cierra", |cx| !on_screen(window, "tree-name-input", cx));
+        settle_frames(window, cx);
+        assert_eq!(edits(&server), [edit("PATCH", "/api/v1/task-lists/l-a", Some(json!({ "name": "Entrada" })))]);
+
+        choose(window, "f-a", "rename", cx);
+        type_text(window, "Clientes", cx);
+        press(window, "enter", cx);
+        wait_until(cx, "se pide renombrar la carpeta", |_| edits(&server).len() == 2);
+        wait_until(cx, "el campo se cierra", |cx| !on_screen(window, "tree-name-input", cx));
+        choose(window, "a", "rename", cx);
+        type_text(window, "Plataforma", cx);
+        press(window, "enter", cx);
+        wait_until(cx, "se pide renombrar el espacio", |_| edits(&server).len() == 3);
+        assert_eq!(
+            edits(&server)[1..],
+            [
+                edit("PATCH", "/api/v1/task-folders/f-a", Some(json!({ "name": "Clientes" }))),
+                edit("PATCH", "/api/v1/task-spaces/a", Some(json!({ "name": "Plataforma" }))),
+            ]
+        );
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Borrar pregunta antes, nombrando el nodo y diciendo qué se va con
+    /// él; «Cancelar» no borra, y el botón que borra dice qué borra.
+    ///
+    /// Roturas que atrapa: una entrada de menú que borra sin preguntar; una
+    /// pregunta que no dice qué se borra ni cuánto se lleva; un «Cancelar»
+    /// que borra igual; un botón de borrar que no hace nada, o que borra por
+    /// la ruta de otra clase de nodo.
+    #[gpui_kit::test]
+    fn deleting_asks_first_naming_the_node_and_what_goes_with_it(cx: &mut TestAppContext) {
+        let server = server_accepting_edits();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-l-a", cx));
+
+        choose(window, "l-a", "delete", cx);
+        assert!(cx.has_pending_prompt(), "no preguntó antes de borrar");
+        assert_eq!(
+            cx.pending_prompt(),
+            Some(("¿Borrar la lista «Pendientes»?".to_string(), "Borra sus 5 tareas y sus columnas. No se puede deshacer.".to_string()))
+        );
+        cx.simulate_prompt_answer("Cancelar");
+        settle_frames(window, cx);
+        assert_eq!(edits(&server), [], "borró aunque se canceló, o sin esperar la respuesta");
+
+        choose(window, "a", "delete", cx);
+        let (title, body) = cx.pending_prompt().expect("no preguntó antes de borrar el espacio");
+        assert_eq!(title, "¿Borrar el espacio «Producto»?");
+        assert!(body.ends_with("1 carpeta · 2 listas · 7 tareas"), "no dice qué se va con el espacio: {body}");
+        cx.simulate_prompt_answer("Cancelar");
+        choose(window, "f-a", "delete", cx);
+        assert_eq!(cx.pending_prompt().map(|(title, _)| title).as_deref(), Some("¿Borrar la carpeta «Carpeta»?"));
+        cx.simulate_prompt_answer("Cancelar");
+        settle_frames(window, cx);
+        assert_eq!(edits(&server), []);
+
+        choose(window, "l-a", "delete", cx);
+        cx.simulate_prompt_answer("Borrar la lista");
+        wait_until(cx, "se pide borrarla", |_| !edits(&server).is_empty());
+        assert_eq!(edits(&server), [edit("DELETE", "/api/v1/task-lists/l-a", None)]);
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Una carpeta con carpetas dentro no se puede borrar: se explica por
+    /// qué, sin botón de borrar, y no se manda nada.
+    ///
+    /// Roturas que atrapa: ofrecer «Borrar la carpeta» cuando el servidor
+    /// dejaría a las de dentro fuera del árbol; callar por qué no se puede.
+    #[gpui_kit::test]
+    fn a_folder_with_folders_inside_explains_instead_of_asking(cx: &mut TestAppContext) {
+        let server = FakeServer::start();
+        let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+        let mut nested = space("a", "Producto");
+        nested["folders"][0]["folders"] = json!([{ "id": "ff-a", "name": "Dentro", "folders": [], "lists": [] }]);
+        server.mount(get("/api/v1/organizations/").respond_with(ok(json!([org("o1", "G Studio")]))));
+        server.mount(get("/api/v1/task-spaces/").respond_with(ok(json!([nested]))));
+        server.mount(get("/api/v1/docs/").respond_with(ok(json!({}))));
+        server.mount(get("/api/v1/tasks/").respond_with(ok(json!([]))));
+        accept_edits(&server);
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-f-a", cx));
+
+        choose(window, "f-a", "delete", cx);
+        let (title, body) = cx.pending_prompt().expect("no dijo nada");
+        assert_eq!(title, "¿Borrar la carpeta «Carpeta»?");
+        assert_eq!(body, cac_core::text(cac_core::Locale::Es, "work:tree.folderHasFolders"));
+        // Sólo se puede cerrar: si ofreciera borrar, «Cerrar» no estaría.
+        cx.simulate_prompt_answer("Cerrar");
+        settle_frames(window, cx);
+        assert_eq!(edits(&server), []);
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// A quien sólo puede mirar no se le ofrece cambiar el árbol: ni el «+»,
+    /// ni crear, renombrar o borrar en el menú. La documentación sí.
+    ///
+    /// Roturas que atrapa: enseñar a un `viewer` acciones que el servidor le
+    /// va a negar; quitarle de paso el camino a la documentación.
+    #[gpui_kit::test]
+    fn someone_who_can_only_look_gets_no_way_to_change_the_tree(cx: &mut TestAppContext) {
+        let server = FakeServer::start();
+        let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+        let mut looking = org("o1", "G Studio");
+        looking["role"] = json!("viewer");
+        server.mount(get("/api/v1/organizations/").respond_with(ok(json!([looking]))));
+        server.mount(get("/api/v1/task-spaces/").respond_with(ok(json!([space("a", "Producto")]))));
+        server.mount(get("/api/v1/docs/").respond_with(ok(json!({}))));
+        server.mount(get("/api/v1/tasks/").respond_with(ok(json!([]))));
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-l-a", cx));
+
+        assert!(!on_screen(window, "spaces-new", cx), "ofrece crear un espacio a quien sólo mira");
+        click(window, "tree-menu-a", cx);
+        wait_until(cx, "el menú se abre", |cx| on_screen(window, "tree-act-docs-a", cx));
+        for action in ["new-folder", "new-list", "rename", "delete"] {
+            assert!(!on_screen(window, &format!("tree-act-{action}-a"), cx), "ofrece {action} a quien sólo mira");
+        }
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Lo que el servidor rechaza se dice con su motivo: bajo el campo, con
+    /// lo escrito todavía en él; o sobre el árbol, si era un borrado.
+    ///
+    /// Roturas que atrapa: un cambio rechazado que parece hecho; perder lo
+    /// escrito al fallar; un borrado que falla en silencio; un aviso que no
+    /// se puede quitar.
+    #[gpui_kit::test]
+    fn a_change_the_server_refuses_is_said_and_what_was_typed_stays(cx: &mut TestAppContext) {
+        let server = server();
+        let refuse = |status: u16, code: &str| wiremock::ResponseTemplate::new(status).set_body_json(json!({ "success": false, "error": code, "message": "No" }));
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/task-spaces/")).respond_with(refuse(403, "viewer-read-only")));
+        server.mount(Mock::given(method("DELETE")).and(path("/api/v1/task-lists/l-a")).respond_with(refuse(409, "list-in-use-by-channel")));
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-l-a", cx));
+
+        click(window, "spaces-new", cx);
+        type_text(window, "Diseño", cx);
+        press(window, "enter", cx);
+        wait_until(cx, "dice por qué no se creó", |cx| on_screen(window, "tree-name-problem", cx));
+        assert_eq!(label(window, "tree-name-problem", cx), "Aquí puedes mirar, pero no cambiar nada.");
+        // Lo escrito sigue en el campo: otro Enter manda lo mismo.
+        press(window, "enter", cx);
+        wait_until(cx, "se vuelve a pedir", |_| edits(&server).len() == 2);
+        assert_eq!(edits(&server)[1].2, Some(json!({ "orgId": "o1", "name": "Diseño" })), "lo escrito se perdió al fallar");
+        press(window, "escape", cx);
+
+        choose(window, "l-a", "delete", cx);
+        cx.simulate_prompt_answer("Borrar la lista");
+        wait_until(cx, "dice por qué no se borró", |cx| on_screen(window, "tree-problem", cx));
+        assert_eq!(label(window, "tree-problem", cx), "Hay un canal apuntando a esta lista.");
+        assert!(on_screen(window, "tree-l-a", cx));
+        click(window, "tree-problem", cx);
+        assert!(!on_screen(window, "tree-problem", cx), "el aviso no se quita");
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
