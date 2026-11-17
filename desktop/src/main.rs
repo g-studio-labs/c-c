@@ -6,6 +6,11 @@
 //! Con `CAC_SPIKE=1` abre la prueba de viabilidad de la Fase 0 en vez de la
 //! app (command-and-control-374).
 
+// En Windows, una app de ventana: sin esto cada arranque abre además una
+// consola negra. Sólo en release, para que al desarrollar se siga viendo lo
+// que la app escribe.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod assets;
 mod auth;
 mod backend;
@@ -14,6 +19,7 @@ mod brand;
 mod calendar;
 mod docs;
 mod files;
+mod identity;
 mod lang;
 mod mywork;
 mod newtask;
@@ -88,6 +94,9 @@ fn main() {
 
     gpui_kit::application().with_assets(assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
+        // Antes de abrir ninguna ventana: es con lo que Windows agrupa la app
+        // en la barra y con lo que el sistema firma sus avisos.
+        cx.set_app_identity(identity::APP_ID, identity::APP_NAME);
         cx.set_global(lang::SystemLanguage(system_language));
         if let Err(error) = backend::Backend::install(config, Arc::new(FileStorage::new(data_dir)), cx) {
             eprintln!("cac: no se pudo arrancar: {error}");
@@ -95,14 +104,7 @@ fn main() {
         }
         theme::apply_preference(cx);
 
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                None,
-                size(px(1100.), px(760.)),
-                cx,
-            ))),
-            ..WindowOptions::default()
-        };
+        let options = identity::main_window_options(cx);
         if spike {
             gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| spike::Spike::new(window, cx)))
                 .expect("no se pudo abrir la ventana");

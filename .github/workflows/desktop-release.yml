@@ -1,0 +1,158 @@
+name: desktop release
+
+# Los instaladores de la app de escritorio nativa (`desktop/`, en GPUI), para
+# Linux, macOS y Windows.
+#
+# **Sólo a mano, y no publica nada.** No hay disparador por tag ni por push, y
+# no crea ninguna release de GitHub: deja los instaladores como artefactos de
+# la ejecución, para bajarlos y probarlos. Cortar una release es una decisión
+# que se toma cada vez; este workflow sólo construye lo que se repartiría.
+#
+# Se lanza con `gh workflow run desktop-release.yml` (o desde la pestaña
+# Actions). Los sistemas se eligen: los minutos de macOS son los caros y sus
+# máquinas a veces no están, así que una ejecución puede ir sin él
+# (`-f macos=false`).
+#
+# Nada va firmado: en este proyecto no hay certificados de Apple ni de
+# Windows, y aquí no entra ningún secreto. macOS (Gatekeeper) y Windows
+# (SmartScreen) avisarán al abrir lo que sale de aquí. Dónde iría la firma
+# está señalado en `desktop/packaging/macos/package.sh` y en
+# `desktop/packaging/windows/installer.nsi`.
+on:
+  workflow_dispatch:
+    inputs:
+      linux:
+        description: "Linux (.deb y .tar.gz)"
+        type: boolean
+        default: true
+      windows:
+        description: "Windows (instalador y .zip)"
+        type: boolean
+        default: true
+      macos:
+        description: "macOS (.dmg, Apple Silicon)"
+        type: boolean
+        default: true
+
+# Sólo leer el repo. Sin permiso de escritura, este workflow no puede publicar
+# una release ni aunque alguien le añada el paso.
+permissions:
+  contents: read
+
+jobs:
+  # Las pruebas del escritorio, por delante de compilar nada: el mismo trabajo
+  # que corre en cada push (`desktop.yml`). Aquí es la puerta, y allí el aviso
+  # temprano. Corren en Linux, que es donde el arnés de GPUI tiene ventanas de
+  # mentira.
+  test:
+    uses: ./.github/workflows/desktop.yml
+
+  # Qué sistemas se construyen en esta ejecución, a partir de las casillas.
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      os: ${{ steps.pick.outputs.os }}
+    steps:
+      - id: pick
+        # Las casillas llegan por el entorno y no interpoladas en el script.
+        env:
+          LINUX: ${{ inputs.linux }}
+          WINDOWS: ${{ inputs.windows }}
+          MACOS: ${{ inputs.macos }}
+        run: |
+          set -euo pipefail
+          os=()
+          if [ "$LINUX" = "true" ]; then os+=('"ubuntu-24.04"'); fi
+          if [ "$WINDOWS" = "true" ]; then os+=('"windows-latest"'); fi
+          if [ "$MACOS" = "true" ]; then os+=('"macos-latest"'); fi
+          # Sin ninguno, la matriz vacía falla con un error que no dice por qué.
+          if [ "${#os[@]}" -eq 0 ]; then
+            echo "No se eligió ningún sistema." >&2
+            exit 1
+          fi
+          list="$(IFS=,; echo "${os[*]}")"
+          echo "os=[$list]" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [test, plan]
+    strategy:
+      # Que falle un sistema no tira los instaladores de los otros dos.
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
+    runs-on: ${{ matrix.os }}
+    # Compilar GPUI en release desde cero ronda la media hora en Windows; con
+    # esto un paso colgado falla en un tiempo que se puede mirar y relanzar, en
+    # vez de comerse las seis horas por defecto.
+    timeout-minutes: 90
+
+    defaults:
+      run:
+        working-directory: desktop
+
+    env:
+      # La mínima de macOS que admite GPUI, la misma que declara el
+      # `Info.plist`. Fuera de macOS no hace nada.
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System libraries
+        if: runner.os == 'Linux'
+        run: bash packaging/linux/install-build-deps.sh
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./desktop -> target"
+
+      # `--locked`: con las dependencias exactas de `Cargo.lock`, las mismas
+      # que pasaron las pruebas.
+      - name: Build
+        run: cargo build --release --locked
+
+      # --- Linux ------------------------------------------------------------
+      # Versión exacta: lo que arma el `.deb` no cambia sin que alguien lo
+      # decida. Queda en la caché de cargo, así que sólo se compila una vez.
+      - name: cargo-deb
+        if: runner.os == 'Linux'
+        run: command -v cargo-deb >/dev/null || cargo install --locked cargo-deb@3.8.0
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: bash packaging/linux/package.sh
+
+      # --- macOS ------------------------------------------------------------
+      # Sólo con lo que trae el sistema, y firma «ad hoc»: ni certificados ni
+      # notarización (no los hay). Ver `packaging/macos/package.sh`.
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: bash packaging/macos/package.sh
+
+      # --- Windows ----------------------------------------------------------
+      # NSIS suele venir en la imagen, pero no está prometido: si no está, se
+      # instala esa versión exacta.
+      - name: NSIS
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $found = (Get-Command makensis -ErrorAction SilentlyContinue) -or
+            (Test-Path "${env:ProgramFiles(x86)}\NSIS\makensis.exe")
+          if (-not $found) { choco install nsis --version=3.10.0 --yes --no-progress }
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/windows/package.ps1
+
+      # Artefactos de la ejecución, no una release: se bajan de la página de
+      # la ejecución (o con `gh run download`) y caducan solos.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cac-desktop-${{ runner.os }}
+          path: desktop/target/packaging/out/*
+          if-no-files-found: error
+          retention-days: 14

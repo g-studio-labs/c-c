@@ -5,6 +5,7 @@ license = "AGPL-3.0-or-later"
 description = "cac de escritorio, nativo: la interfaz en GPUI sobre cac-core"
 edition = "2021"
 publish = false
+build = "build.rs"
 
 [dependencies]
 # La lógica. Aquí no se decide nada: toda regla va al core con su prueba.
@@ -22,6 +23,42 @@ log = "0.4"
 # Sólo para darle un día al selector de fecha de GPUI Kit, que lo pide con
 # este tipo. Qué día es lo dice el core.
 chrono = { version = "0.4", default-features = false }
+# Sólo para leer el PNG del icono de la ventana: GPUI lo pide ya descodificado.
+# Es la misma versión que ya trae GPUI; aquí no se añade nada al binario.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# El icono y los datos del `.exe` (ver `build.rs`). Sólo existe en Windows.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.34"
+
+# El `.deb`, con `cargo deb` (cargo-deb): lee esto y no necesita ni `dpkg` ni
+# ser root, así que sale igual en el CI que en una máquina que no es Debian.
+# El nombre del lanzador y de los iconos es el identificador de la app
+# (`packaging/identity.env`); aquí va repetido porque cargo-deb no sabe leerlo
+# de otro sitio, y `identity::tests` falla si deja de coincidir.
+[package.metadata.deb]
+name = "cac-desktop"
+maintainer = "Guz Studio <dev@guz-studio.dev>"
+section = "office"
+priority = "optional"
+extended-description = "Cliente de escritorio nativo de cac (CAC Nativa). Convive con la app anterior: guarda su sesión y sus datos en una carpeta propia."
+# `$auto` son las bibliotecas que el binario enlaza (libc, xcb, xkbcommon), tal
+# como las llama la distribución donde se empaqueta; van también a mano porque
+# fuera de Debian no hay `dpkg-shlibdeps` que las calcule. Vulkan y Wayland las
+# abre GPUI en marcha (`dlopen`), así que ningún análisis del binario las ve:
+# sin Vulkan no hay ventana. Lo recomendado es lo que usa si está: el camino
+# de reserva por OpenGL, y `xdg-open`/el portal para abrir enlaces.
+depends = "$auto, libvulkan1, libwayland-client0, libxkbcommon0, libxkbcommon-x11-0, libxcb1"
+recommends = "mesa-vulkan-drivers, libwayland-egl1, libegl1, xdg-utils, xdg-desktop-portal"
+assets = [
+    ["target/release/cac-desktop", "usr/bin/", "755"],
+    ["packaging/linux/dev.guz-studio.cac.native.desktop", "usr/share/applications/", "644"],
+    ["packaging/icons/32x32.png", "usr/share/icons/hicolor/32x32/apps/dev.guz-studio.cac.native.png", "644"],
+    ["packaging/icons/64x64.png", "usr/share/icons/hicolor/64x64/apps/dev.guz-studio.cac.native.png", "644"],
+    ["packaging/icons/128x128.png", "usr/share/icons/hicolor/128x128/apps/dev.guz-studio.cac.native.png", "644"],
+    ["packaging/icons/256x256.png", "usr/share/icons/hicolor/256x256/apps/dev.guz-studio.cac.native.png", "644"],
+    ["packaging/icons/512x512.png", "usr/share/icons/hicolor/512x512/apps/dev.guz-studio.cac.native.png", "644"],
+]
 
 [dev-dependencies]
 # El arnés de pruebas de GPUI: ventanas sin pantalla, clics y teclado de verdad.

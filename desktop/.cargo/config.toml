@@ -1,0 +1,10 @@
+# En Windows, la biblioteca de C va dentro del `.exe`.
+#
+# Sin esto el binario pide `vcruntime140.dll`, que no viene con Windows: en una
+# máquina sin el «Visual C++ Redistributable» la app no abre y sólo dice que
+# falta una DLL. El instalador no lo lleva, así que lo lleva el binario.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

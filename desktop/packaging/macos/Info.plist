@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Plantilla. Lo que va entre guiones bajos lo pone `package.sh` al empaquetar:
+  la identidad sale de `packaging/identity.env` y la versión de `Cargo.toml`.
+  Aquí no se escribe ninguna de las dos (lo comprueba `identity::tests`).
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>es</string>
+    <key>CFBundleDisplayName</key>
+    <string>__APP_NAME__</string>
+    <key>CFBundleExecutable</key>
+    <string>__APP_BINARY__</string>
+    <key>CFBundleIconFile</key>
+    <string>icon.icns</string>
+    <key>CFBundleIdentifier</key>
+    <string>__APP_ID__</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>__APP_NAME__</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__APP_VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__APP_VERSION__</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.productivity</string>
+    <!-- La mínima con la que compila GPUI (su `build.rs` pide
+         `-mmacosx-version-min=12.0`). El workflow compila con el mismo
+         `MACOSX_DEPLOYMENT_TARGET`. -->
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- En un portátil con dos gráficas, no obligar a encender la dedicada. -->
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+</dict>
+</plist>

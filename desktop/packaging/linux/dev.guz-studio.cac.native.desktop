@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=CAC Nativa
+GenericName=Team workspace
+GenericName[es]=Espacio de trabajo del equipo
+Comment=Tasks, documents and servers of the team
+Comment[es]=Las tareas, los documentos y los servidores del equipo
+Exec=cac-desktop
+Icon=dev.guz-studio.cac.native
+Terminal=false
+Categories=Office;ProjectManagement;
+StartupNotify=true
+StartupWMClass=dev.guz-studio.cac.native

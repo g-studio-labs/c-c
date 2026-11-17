@@ -16,6 +16,8 @@ on:
       - "core/**"
       - ".github/workflows/desktop.yml"
   workflow_dispatch:
+  # Para `desktop-release.yml`: las mismas pruebas, por delante de empaquetar.
+  workflow_call:
 
 jobs:
   test:
@@ -29,14 +31,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Lo que GPUI enlaza en Linux. La lista es la del CI de GPUI Kit
-      # (`script/install-linux.sh`), menos WebKit: aquí no hay webview.
+      # Lo que GPUI enlaza en Linux. La lista vive en un script porque es la
+      # misma con la que se construye el instalador (`desktop-release.yml`).
       - name: System libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc g++ clang libfontconfig-dev libwayland-dev \
-            libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev libasound2-dev \
-            vulkan-validationlayers libvulkan1
+        run: bash packaging/linux/install-build-deps.sh
 
       - uses: dtolnay/rust-toolchain@stable
 
