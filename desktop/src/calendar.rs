@@ -35,7 +35,10 @@ const LIFTED_WIDTH: f32 = 200.;
 /// columnas quedaban en 47 px y no se leía nada (el CSS de la app de siempre
 /// da lo mismo); un día no se estrecha más que esto, y si los siete no caben
 /// la semana se desliza de lado dentro de su hueco.
-const DAY_MIN_WIDTH: f32 = 150.;
+// 140 y no 150: en una ventana de 1500 con el carril y el panel abiertos
+// la semana tiene 932 de ancho, y con 150 ya se deslizaba unos 50 px sin
+// necesidad.
+const DAY_MIN_WIDTH: f32 = 140.;
 /// Lo que mide el fin de semana frente a un día de diario: de lunes a
 /// viernes `1fr`, sábado y domingo `.62fr`. También en su mínimo.
 const WEEKEND_SHARE: f32 = 0.62;
@@ -1592,8 +1595,8 @@ mod tests {
             right - left
         };
 
-        assert!(width(&first, cx) >= 150., "el lunes mide {} de ancho", width(&first, cx));
-        assert!(width(&saturday, cx) >= 93., "el sábado mide {} de ancho", width(&saturday, cx));
+        assert!(width(&first, cx) >= 140., "el lunes mide {} de ancho", width(&first, cx));
+        assert!(width(&saturday, cx) >= 86., "el sábado mide {} de ancho", width(&saturday, cx));
         let (body_left, body_right, ..) = edges(window, "cal-body", cx);
         assert!(body_right - body_left < 984., "la ventana de la prueba no es estrecha: la semana cabe");
         assert!(edges(window, &last, cx).1 > body_right, "el domingo cabe sin deslizar");
@@ -1619,7 +1622,7 @@ mod tests {
         let body = edges(window, "cal-body", cx);
 
         assert!((first.0 - body.0).abs() < 1. && (last.1 - body.1).abs() < 1., "la semana va de {} a {} y su hueco de {} a {}", first.0, last.1, body.0, body.1);
-        assert!(first.1 - first.0 > 150., "con sitio, el lunes se queda en su mínimo");
+        assert!(first.1 - first.0 > 140., "con sitio, el lunes se queda en su mínimo");
         // El fin de semana, angosto: 0,62 de un día de diario (los dos
         // llevan además su relleno y su borde, que no se reparten).
         let share = (last.1 - last.0) / (first.1 - first.0);
