@@ -8,6 +8,8 @@
 //! Lo que es de esta pantalla y de nadie más: si se mira el mes o la semana,
 //! si el carril está abierto y qué día tiene su detalle a la vista.
 
+use std::time::Duration;
+
 use cac_core::{
     lane_open_by_default, BoardStatus, CalendarChip, CalendarCursor, CalendarDay, CalendarView, MonthView, TaskFilter, ToneCount, WeekView,
     CALENDAR_TONES,
@@ -28,6 +30,12 @@ const LIFTED_WIDTH: f32 = 200.;
 /// taparle el borde.
 const POPOVER_WIDTH: f32 = 340.;
 const POPOVER_OVERHANG: f32 = -8.;
+/// Cuánto tiene que quedarse el ratón sobre un día para que su detalle se
+/// asome (`HOVER_DELAY` en `MonthGrid.tsx`): menos, y cruzar el mes abre uno
+/// por celda.
+const HOVER_DELAY: Duration = Duration::from_millis(220);
+/// El margen para pasar de la celda al detalle que la tapa sin que se cierre.
+const LEAVE_GRACE: Duration = Duration::from_millis(80);
 /// Cómo se cuenta lo que hay en un día: «3 tareas».
 const COUNT_KEY: &str = "common:count.tasks";
 
@@ -42,15 +50,40 @@ pub(crate) struct CalendarState {
     lifted: Option<String>,
     /// Lo que el servidor contestó al rechazar un cambio de fecha.
     error: Option<String>,
-    /// El día del mes que tiene su detalle abierto.
+    /// El día del mes que tiene su detalle fijado (con un clic).
     day_open: Option<String>,
+    /// El día cuyo detalle se asoma porque el ratón lleva un rato encima;
+    /// se va al salir. Con uno fijado no se asoma ningún otro.
+    day_peek: Option<String>,
+    /// El ratón está sobre el detalle asomado: tapa su celda, así que para
+    /// la celda el ratón «se fue» en cuanto el detalle salió.
+    over_detail: bool,
+    /// La espera antes de asomar el detalle; soltarla la cancela.
+    peek_wait: Option<Task<()>>,
     /// El foco del detalle: sin él, Esc no llega a nadie.
     focus: FocusHandle,
 }
 
 impl CalendarState {
+    /// Cierra el detalle del día, fijado o asomado.
+    fn forget_day(&mut self) {
+        self.day_open = None;
+        self.day_peek = None;
+        self.over_detail = false;
+        self.peek_wait = None;
+    }
+
+    /// El día cuyo detalle se enseña: el fijado manda sobre el asomado, y
+    /// con una tarjeta en el aire ninguno (taparía dónde soltar).
+    fn shown_day(&self) -> Option<&str> {
+        if self.lifted.is_some() {
+            return None;
+        }
+        self.day_open.as_deref().or(self.day_peek.as_deref())
+    }
+
     pub(crate) fn new(cx: &mut App) -> Self {
-        Self { cursor: None, lane_open: [None, None], lifted: None, error: None, day_open: None, focus: cx.focus_handle() }
+        Self { cursor: None, lane_open: [None, None], lifted: None, error: None, day_open: None, day_peek: None, over_detail: false, peek_wait: None, focus: cx.focus_handle() }
     }
 }
 
@@ -279,7 +312,7 @@ fn liftable(element: Stateful<Div>, chip: &CalendarChip, view: WeakEntity<MyWork
         let id = lifted.chip.id.clone();
         let _ = view.update(cx, |this, cx| {
             this.calendar.lifted = Some(id);
-            this.calendar.day_open = None;
+            this.calendar.forget_day();
             cx.notify();
         });
         let lifted = lifted.clone();
@@ -326,7 +359,7 @@ impl MyWorkView {
 
     fn move_calendar(&mut self, cursor: CalendarCursor, cx: &mut Context<Self>) {
         self.calendar.cursor = Some(cursor);
-        self.calendar.day_open = None;
+        self.calendar.forget_day();
         cx.notify();
     }
 
@@ -339,8 +372,62 @@ impl MyWorkView {
         cx.notify();
     }
 
+    /// El ratón entra en un día o sale de él. Encima un rato, su detalle se
+    /// asoma; al salir se va, salvo que el ratón esté ya sobre el detalle.
+    fn hover_day(&mut self, day: &str, over: bool, cx: &mut Context<Self>) {
+        if self.calendar.day_open.is_some() || self.calendar.lifted.is_some() {
+            return;
+        }
+        let day = day.to_string();
+        if over {
+            self.calendar.peek_wait = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(HOVER_DELAY).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.calendar.day_open.is_none() {
+                        this.calendar.day_peek = Some(day);
+                        cx.notify();
+                    }
+                });
+            }));
+        } else if self.calendar.day_peek.as_deref() == Some(day.as_str()) {
+            self.calendar.peek_wait = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(LEAVE_GRACE).await;
+                let _ = this.update(cx, |this, cx| {
+                    if !this.calendar.over_detail && this.calendar.day_peek.as_deref() == Some(day.as_str()) {
+                        this.calendar.day_peek = None;
+                        cx.notify();
+                    }
+                });
+            }));
+        } else {
+            self.calendar.peek_wait = None;
+        }
+    }
+
+    /// El ratón entra en el detalle asomado o sale de él: al salir se va.
+    fn hover_detail(&mut self, over: bool, cx: &mut Context<Self>) {
+        self.calendar.over_detail = over;
+        if !over && self.calendar.day_open.is_none() {
+            self.calendar.day_peek = None;
+            self.calendar.peek_wait = None;
+        }
+        cx.notify();
+    }
+
+    /// Un clic en un día fija su detalle; otro en el mismo lo suelta.
+    fn pin_day(&mut self, day: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let already = self.calendar.day_open.as_deref() == Some(day);
+        self.calendar.forget_day();
+        if !already {
+            self.calendar.day_open = Some(day.to_string());
+            // Con el foco en el detalle, Esc lo cierra.
+            self.calendar.focus.focus(window, cx);
+        }
+        cx.notify();
+    }
+
     fn close_day(&mut self, cx: &mut Context<Self>) {
-        self.calendar.day_open = None;
+        self.calendar.forget_day();
         cx.notify();
     }
 
@@ -364,7 +451,7 @@ impl MyWorkView {
 
     /// Abre la fila de «tarea nueva» con ese día ya puesto.
     fn new_task_for_day(&mut self, day: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.calendar.day_open = None;
+        self.calendar.forget_day();
         if self.new_task.is_none() {
             self.toggle_new_task(window, cx);
         }
@@ -581,8 +668,9 @@ impl MyWorkView {
     /// derecha de lunes a jueves y hacia la izquierda de viernes a domingo;
     /// en las dos últimas filas, hacia arriba.
     ///
-    /// Se abre con un clic y queda fijado; se cierra con la ×, con Esc, con
-    /// un clic fuera y al empezar a arrastrar.
+    /// Se asoma con el ratón un rato encima de su día y se va al salir; un
+    /// clic lo fija (y entonces lleva la ×). Fijado se cierra con la ×, con
+    /// Esc, con un clic fuera y al empezar a arrastrar.
     fn render_day_popover(&self, day: &CalendarDay, column: usize, row: usize, rows: usize, paint: &Paint, cx: &mut Context<Self>) -> impl IntoElement {
         let here = locale(cx);
         let weekday = cac_core::weekday_name(here, day.weekday, false).to_uppercase();
@@ -591,6 +679,8 @@ impl MyWorkView {
         let count = cac_core::text_count(here, COUNT_KEY, day.chips.len() as i64);
         let (accent, foreground) = (paint.accent, paint.foreground);
         let iso = day.day.clone();
+        let pinned = self.calendar.day_open.as_deref() == Some(day.day.as_str());
+        let pin = day.day.clone();
 
         let tallies = (!day.tones.is_empty()).then(|| {
             div().flex().flex_wrap().gap(px(6.)).children(day.tones.iter().map(|segment| {
@@ -639,6 +729,9 @@ impl MyWorkView {
                 }
             }))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_day(cx)))
+            .on_hover(cx.listener(|this, over: &bool, _, cx| this.hover_detail(*over, cx)))
+            // Asomado, un clic en él lo fija, como el clic en su día.
+            .when(!pinned, |this| this.on_click(cx.listener(move |this, _, window, cx| this.pin_day(&pin, window, cx))))
             .child(
                 div()
                     .flex()
@@ -653,7 +746,7 @@ impl MyWorkView {
                             .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(title)),
                     )
                     .child(
-                        div().flex().items_center().gap(px(6.)).child(div().text_size(px(12.)).text_color(paint.muted_foreground).child(count)).child(
+                        div().flex().items_center().gap(px(6.)).child(div().text_size(px(12.)).text_color(paint.muted_foreground).child(count)).when(pinned, |this| this.child(
                             div()
                                 .id("cal-day-close")
                                 .size(px(26.))
@@ -668,13 +761,13 @@ impl MyWorkView {
                                 .on_click(cx.listener(|this, _, _, cx| this.close_day(cx)))
                                 .child(Icon::new(Lucide::X).size_4())
                                 .test_support(),
-                        ),
+                        )),
                     ),
             )
             .children(tallies)
             .child(rows_list)
             .child(
-                div().flex().items_center().border_t_1().border_color(paint.border).pt_2().text_size(px(12.)).child(
+                div().flex().items_center().justify_between().border_t_1().border_color(paint.border).pt_2().text_size(px(12.)).child(
                     div()
                         .id("cal-new-for-day")
                         .flex()
@@ -686,7 +779,8 @@ impl MyWorkView {
                         .child(Icon::new(Lucide::Plus).size_3p5())
                         .child(tr(cx, "common:calendar.newForDay"))
                         .test_support(),
-                ),
+                )
+                .when(!pinned, |this| this.child(div().id("cal-click-to-pin").text_color(paint.muted_foreground.opacity(0.7)).child(tr(cx, "common:calendar.clickToPin")).test_support())),
             )
             .test_support();
         // Diferido: se pinta después de todo el mes, encima de las celdas
@@ -699,7 +793,8 @@ impl MyWorkView {
     fn render_day_cell(&self, day: &CalendarDay, column: usize, row: usize, rows: usize, paint: &Paint, cx: &mut Context<Self>) -> impl IntoElement {
         let here = locale(cx);
         let count = day.chips.len();
-        let open = self.calendar.day_open.as_deref() == Some(day.day.as_str());
+        let open = self.calendar.shown_day() == Some(day.day.as_str());
+        let hover_day = day.day.clone();
         let (primary, heat_hover) = (paint.primary, paint.heat_hover);
         let date = chrono::NaiveDate::parse_from_str(&day.day, "%Y-%m-%d").map(|date| cac_core::day_title(here, date)).unwrap_or_else(|_| day.day.clone());
         let label = format!("{date} · {}", cac_core::text_count(here, COUNT_KEY, count as i64));
@@ -720,12 +815,8 @@ impl MyWorkView {
             .aria_label(label)
             .drag_over::<LiftedChip>(move |style, _, _, _| style.bg(primary.opacity(0.1)))
             .on_drop(cx.listener(move |this, lifted: &LiftedChip, _, cx| this.set_due(lifted.chip.id.clone(), Some(drop_day.clone()), cx)))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.calendar.day_open = Some(open_day.clone());
-                // Con el foco en el detalle, Esc lo cierra.
-                this.calendar.focus.focus(window, cx);
-                cx.notify();
-            }))
+            .on_hover(cx.listener(move |this, over: &bool, _, cx| this.hover_day(&hover_day, *over, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| this.pin_day(&open_day, window, cx)))
             .child(
                 div()
                     .min_h(px(84.))
@@ -1054,6 +1145,7 @@ impl MyWorkView {
         div()
             .id("cal-lane")
             .w(px(LANE_WIDTH))
+            .max_h_full()
             .flex()
             .flex_none()
             .flex_col()
@@ -1107,10 +1199,25 @@ impl MyWorkView {
                             .test_support(),
                     ),
             )
-            .children(chips.iter().map(|chip| self.render_card(chip, true, false, paint, cx)))
-            .children(empty)
+            // Las tarjetas se deslizan dentro del carril: con muchas sin
+            // fecha, el carril no estira la página ni se lleva el
+            // calendario hacia arriba.
             .child(
                 div()
+                    .id("cal-lane-cards")
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .overflow_y_scroll()
+                    .children(chips.iter().map(|chip| self.render_card(chip, true, false, paint, cx)))
+                    .children(empty)
+                    .test_support(),
+            )
+            .child(
+                div()
+                    .flex_none()
                     .px(px(2.))
                     .pt_1()
                     .pb(px(2.))
@@ -1161,11 +1268,16 @@ impl MyWorkView {
             .flex_col()
             .gap(px(14.))
             .p_4()
-            .overflow_y_scroll()
             .children(error.map(|error| div().id("calendar-error").flex_none().text_sm().text_color(paint.error).child(error).test_support()))
             .child(header)
             .children(summary)
-            .child(div().flex().flex_none().items_start().gap_3().min_w_0().children(lane).child(div().flex_1().min_w_0().child(body)))
+            // El carril y el calendario se deslizan cada uno por su lado,
+            // dentro de lo que queda de pantalla.
+            .child(
+                div().flex_1().min_h_0().flex().items_start().gap_3().min_w_0().children(lane).child(
+                    div().id("cal-body").flex_1().min_w_0().h_full().overflow_y_scroll().child(body).test_support(),
+                ),
+            )
             .test_support()
     }
 }
@@ -1282,12 +1394,17 @@ mod tests {
     /// las tareas se montan después de saberlo y por delante de la lista
     /// vacía del servidor de base.
     fn show_calendar(cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle, Days2) {
+        show_calendar_with(vec![], cx)
+    }
+
+    /// Lo mismo, con más tareas además de las dos de siempre.
+    fn show_calendar_with(more: Vec<Value>, cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle, Days2) {
         let server = server_with_tasks(vec![]);
         server.install(cx);
         let today = cx.update(|cx| Backend::core(cx).my_work().today());
         let monday = cac_core::week_start(today);
         let other = if today == monday { monday + Days::new(1) } else { monday };
-        let tasks = vec![
+        let mut tasks = vec![
             contract_task("t1", "a", |task| {
                 task["title"] = json!("Con fecha");
                 task["priority"] = json!("urgent");
@@ -1298,6 +1415,7 @@ mod tests {
                 task["dueAt"] = Value::Null;
             }),
         ];
+        tasks.extend(more);
         server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/")).respond_with(ok(Value::Array(tasks))).with_priority(1));
         sign_in(cx);
         let window = cx.update(|cx| {
@@ -1551,6 +1669,91 @@ mod tests {
         assert_eq!(patches(&server, "t1"), [json!({ "dueAt": format!("{}T00:00:00Z", days.other) })]);
         assert!(!on_screen(window, "cal-day-popover", cx), "el detalle sigue abierto tras arrastrar");
         assert!(label(window, &Days2::cell(days.other), cx).ends_with("· 1 tarea"));
+        stop(cx);
+    }
+
+    fn hover(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.hover(id, cx);
+        })
+        .unwrap();
+    }
+
+    /// Deja pasar ese rato del reloj de la app.
+    fn wait(cx: &mut TestAppContext, millis: u64) {
+        cx.executor().advance_clock(std::time::Duration::from_millis(millis));
+        cx.run_until_parked();
+    }
+
+    /// El detalle de un día se asoma con el ratón un rato encima y se va al
+    /// salir; un clic lo fija, y fijado ya no se va con el ratón.
+    ///
+    /// Roturas que atrapa: un detalle que sólo sale con clic (jose, 16-nov:
+    /// «el hover no abre el quick del día»); uno que sale al rozar la celda,
+    /// sin esperar; uno asomado que se queda al irse el ratón; uno que se
+    /// cierra solo al pasar de la celda a él; uno fijado que se va con el
+    /// ratón; el asomado con la × del fijado.
+    #[gpui_kit::test]
+    fn hovering_a_day_peeks_its_detail_and_a_click_pins_it(cx: &mut TestAppContext) {
+        let (_server, window, days) = show_calendar(cx);
+        let cell = Days2::cell(days.today);
+
+        hover(window, &cell, cx);
+        wait(cx, 100);
+        assert!(!on_screen(window, "cal-day-popover", cx), "el detalle sale sin esperar");
+        wait(cx, 200);
+        assert!(inside(window, "cal-row-t1", "cal-day-popover", cx), "el ratón encima no asoma el detalle");
+        assert!(on_screen(window, "cal-click-to-pin", cx));
+        assert!(!on_screen(window, "cal-day-close", cx), "asomado y ya con la ×");
+
+        // El detalle tapa su celda: el ratón pasa a estar sobre él.
+        hover(window, "cal-day-popover", cx);
+        wait(cx, 300);
+        assert!(on_screen(window, "cal-day-popover", cx), "se cierra al pasar de la celda al detalle");
+
+        hover(window, "cal-view-week", cx);
+        wait(cx, 300);
+        assert!(!on_screen(window, "cal-day-popover", cx), "el asomado se queda al irse el ratón");
+
+        hover(window, &cell, cx);
+        wait(cx, 300);
+        // El clic en el día cae ya sobre el detalle, que lo tapa.
+        click(window, &cell, cx);
+        assert!(on_screen(window, "cal-day-close", cx), "un clic no lo fija");
+        hover(window, "cal-view-week", cx);
+        wait(cx, 300);
+        assert!(on_screen(window, "cal-day-popover", cx), "fijado y se va con el ratón");
+        stop(cx);
+    }
+
+    /// Con muchas tareas sin fecha, el carril se desliza por dentro: no se
+    /// sale de la pantalla ni estira la página (jose, 16-nov: al bajar por
+    /// el carril el calendario se quedaba arriba).
+    ///
+    /// Rotura que atrapa: un carril tan alto como todas sus tarjetas.
+    #[gpui_kit::test]
+    fn a_long_lane_scrolls_inside_itself(cx: &mut TestAppContext) {
+        let undated = (0..40)
+            .map(|at| {
+                contract_task(&format!("u{at}"), "a", |task| {
+                    task["title"] = json!(format!("Sin fecha {at}"));
+                    task["dueAt"] = Value::Null;
+                })
+            })
+            .collect();
+        let (_server, window, _) = show_calendar_with(undated, cx);
+        click(window, "cal-lane-toggle", cx);
+        assert!(on_screen(window, "cal-lane", cx));
+
+        let bottom = cx
+            .update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.find("cal-lane").bounds().bottom()
+            })
+            .unwrap();
+        assert!(bottom <= px(1000.), "el carril se sale de la ventana: acaba en {bottom:?}");
         stop(cx);
     }
 
