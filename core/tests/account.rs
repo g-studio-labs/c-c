@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use cac_core::{
-    check_new_password, check_sign_in, error_phrase, gate, is_dark, pick_locale, text, text_count, text_with, ApiError, Config, Core,
+    check_new_password, check_sign_in, error_phrase, folds_panel, gate, is_dark, shortcut_text, KeysHeld, pick_locale, text, text_count, text_with, ApiError, Config, Core,
     FormCheck, Gate, Locale, ThemePreference, WorkLayout, NoListener, Session, Storage,
 };
 use wiremock::matchers::{body_json, header, method, path};
@@ -348,6 +348,56 @@ async fn my_work_opens_as_a_list_until_another_layout_is_chosen() {
 
     storage.set("work-layout", "\"timeline\"").unwrap();
     assert_eq!(reopened.work_layout(), WorkLayout::List);
+}
+
+/// El panel va fijo hasta que alguien lo pliega, y lo elegido se recuerda en
+/// esta máquina, aparte de lo demás.
+///
+/// Roturas que atrapa: una app que abre con el panel escondido sin que nadie
+/// lo pidiera; olvidar al cerrar que se plegó; guardarlo donde el tema o la
+/// vista (plegar pisaría el otro); que algo guardado que no se entiende deje
+/// la app sin panel.
+#[tokio::test]
+async fn the_panel_stays_pinned_until_folded_and_then_remembered() {
+    let server = MockServer::start().await;
+    let (core, storage) = core_at(&server).await;
+    assert!(core.panel_pinned());
+
+    core.set_theme(ThemePreference::Light).unwrap();
+    core.set_work_layout(WorkLayout::Board).unwrap();
+    core.set_panel_pinned(false).unwrap();
+    let reopened = Core::new(Config::new(server.uri()), storage.clone(), Arc::new(NoListener)).unwrap();
+    assert!(!reopened.panel_pinned());
+    assert_eq!(reopened.theme(), ThemePreference::Light);
+    assert_eq!(reopened.work_layout(), WorkLayout::Board);
+
+    reopened.set_panel_pinned(true).unwrap();
+    assert!(core.panel_pinned());
+
+    storage.set("panel-pinned", "\"a medias\"").unwrap();
+    assert!(core.panel_pinned());
+}
+
+/// El panel se pliega con ⌘B o Ctrl+B y con nada más, y el texto que lo
+/// anuncia nombra la tecla del sistema en el que se está.
+///
+/// Roturas que atrapa: plegar con una B suelta al escribir; plegar con
+/// Ctrl+Mayús+B o Ctrl+Alt+B, que son otros atajos; no plegar con Bloq Mayús
+/// puesto; anunciar «⌘B» en un teclado sin esa tecla, o «Ctrl+B» en un Mac.
+#[test]
+fn the_panel_folds_with_the_systems_shortcut_and_says_so() {
+    let secondary = KeysHeld { secondary: true, ..KeysHeld::default() };
+    assert!(folds_panel("b", secondary));
+    assert!(folds_panel("B", secondary));
+    assert!(!folds_panel("b", KeysHeld::default()));
+    assert!(!folds_panel("n", secondary));
+    assert!(!folds_panel("b", KeysHeld { shift: true, ..secondary }));
+    assert!(!folds_panel("b", KeysHeld { alt: true, ..secondary }));
+
+    let hint = text(Locale::Es, "nav:rail.collapsePanel");
+    assert_eq!(shortcut_text(&hint, true), "Plegar el panel (⌘B)");
+    assert_eq!(shortcut_text(&hint, false), "Plegar el panel (Ctrl+B)");
+    assert_eq!(shortcut_text(&text(Locale::En, "nav:rail.collapsePanel"), false), "Collapse the panel (Ctrl+B)");
 }
 
 /// El tema es oscuro hasta que alguien elige otro, y lo elegido se recuerda.

@@ -4,7 +4,9 @@
 //! mismo sitio, y es a propósito: el tema es de **esta máquina** (una pantalla
 //! con luz de día y otra de noche no quieren lo mismo) y se guarda aquí; el
 //! idioma es de **la persona** y se guarda en su cuenta, para que la siga a
-//! cualquier dispositivo.
+//! cualquier dispositivo. El panel plegado o fijo también es de la máquina:
+//! depende de lo ancha que sea su pantalla (`sidebar.tsx` lo guardaba en una
+//! cookie del navegador, que es lo mismo).
 
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +19,45 @@ const THEME_KEY: &str = "theme";
 
 /// La clave bajo la que se guarda cómo se mira «Mi trabajo».
 const WORK_LAYOUT_KEY: &str = "work-layout";
+
+/// La clave bajo la que se guarda si el panel va fijo o plegado.
+const PANEL_KEY: &str = "panel-pinned";
+
+/// La tecla que, con la del sistema (⌘ en un Mac, Ctrl en los demás), pliega
+/// y despliega el panel: la `b` de `SIDEBAR_KEYBOARD_SHORTCUT` en
+/// `app/src/components/ui/sidebar.tsx`.
+const PANEL_SHORTCUT_KEY: &str = "b";
+
+/// Las teclas que acompañan a una pulsación.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct KeysHeld {
+    /// La del sistema para los atajos: ⌘ en un Mac, Ctrl en los demás.
+    pub secondary: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
+/// Si esa pulsación es la que pliega el panel: ⌘B o Ctrl+B, sin nada más.
+///
+/// Con Mayúsculas o Alt no: son otros atajos (y en un teclado con AltGr,
+/// otra letra). `sidebar.tsx` sólo miraba `metaKey || ctrlKey`.
+pub fn folds_panel(key: &str, held: KeysHeld) -> bool {
+    held.secondary && !held.shift && !held.alt && key.eq_ignore_ascii_case(PANEL_SHORTCUT_KEY)
+}
+
+/// Un texto del catálogo que anuncia un atajo, dicho para este sistema.
+///
+/// Los catálogos los escriben como en un Mac («Plegar el panel (⌘B)»), que
+/// es donde nació la app de siempre; en Linux y Windows no hay tecla ⌘ y se
+/// dice «Ctrl+B».
+pub fn shortcut_text(text: &str, mac: bool) -> String {
+    if mac {
+        text.to_string()
+    } else {
+        text.replace('⌘', "Ctrl+")
+    }
+}
 
 /// Cómo se mira «Mi trabajo»: las tres leen las mismas tareas ya traídas,
 /// ninguna vuelve a pedirlas.
@@ -85,6 +126,19 @@ impl Core {
     pub fn set_work_layout(&self, layout: WorkLayout) -> Result<(), ApiError> {
         let raw = serde_json::to_string(&layout).map_err(|error| ApiError::Storage(error.to_string()))?;
         self.inner.storage.set(WORK_LAYOUT_KEY, &raw).map_err(ApiError::Storage)
+    }
+
+    /// Si el panel va fijo al lado del riel. Fijo si nadie lo plegó, y
+    /// también si lo guardado no se entiende: un panel escondido sin que
+    /// nadie lo pidiera parece una app a la que le falta el árbol.
+    pub fn panel_pinned(&self) -> bool {
+        self.inner.storage.get(PANEL_KEY).and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or(true)
+    }
+
+    /// Fija el panel o lo pliega, y lo recuerda en esta máquina.
+    pub fn set_panel_pinned(&self, pinned: bool) -> Result<(), ApiError> {
+        let raw = serde_json::to_string(&pinned).map_err(|error| ApiError::Storage(error.to_string()))?;
+        self.inner.storage.set(PANEL_KEY, &raw).map_err(ApiError::Storage)
     }
 
     /// El idioma que eligió quien está dentro; `None` es «el del sistema».

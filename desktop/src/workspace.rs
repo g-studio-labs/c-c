@@ -75,6 +75,11 @@ pub struct Workspace {
     /// el panel asomado. Con cualquiera de los dos, se ve.
     over_rail: bool,
     over_panel: bool,
+    /// Dónde está el foco cuando no lo tiene nada: sin nadie enfocado, una
+    /// tecla no llega a ningún elemento de la app y Ctrl+B no haría nada
+    /// hasta pulsar algo con el ratón.
+    focus_anchor: FocusHandle,
+    _on_focus_lost: Subscription,
 }
 
 impl Workspace {
@@ -83,14 +88,23 @@ impl Workspace {
         // stream de eventos.
         Backend::run(cx, |core| async move { core.open_workspace().await });
         let placeholder = tr(cx, "nav:panel.filter");
+        // Al entrar nada tiene el foco, y lo pierde cualquier campo que deja
+        // de pintarse con él puesto (el filtro del árbol al plegar el panel,
+        // el título de una tarea al cerrarla): se vuelve aquí.
+        let focus_anchor = cx.focus_handle();
+        window.focus(&focus_anchor, cx);
+        let on_focus_lost = cx.on_focus_lost(window, |this, window, cx| window.focus(&this.focus_anchor, cx));
         Self {
             my_work: cx.new(|cx| MyWorkView::new(window, cx)),
             docs: cx.new(|_| DocsView),
             task: cx.new(|cx| TaskView::new(window, cx)),
             tree_filter: cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)),
-            panel_pinned: true,
+            // Como se dejó en esta máquina la última vez.
+            panel_pinned: Backend::core(cx).panel_pinned(),
             over_rail: false,
             over_panel: false,
+            focus_anchor,
+            _on_focus_lost: on_focus_lost,
         }
     }
 
@@ -99,6 +113,9 @@ impl Workspace {
     /// siga ahí, que es lo que se acaba de pedir.
     pub(crate) fn toggle_panel(&mut self, cx: &mut Context<Self>) {
         self.panel_pinned = !self.panel_pinned;
+        // Se recuerda en esta máquina. Si no se pudo guardar, el panel hace
+        // igual lo que se le pidió: sólo no se acordará al volver a abrir.
+        let _ = Backend::core(cx).set_panel_pinned(self.panel_pinned);
         self.over_rail = false;
         self.over_panel = false;
         cx.notify();
@@ -842,9 +859,10 @@ impl Workspace {
         // árbol. Leyendo documentación ya no se está en ella.
         let on_my_work = snapshot.docs.target.is_none();
         let pinned = self.panel_pinned;
-        // El texto del catálogo anuncia un atajo de teclado que esta app
-        // todavía no tiene: se dice sólo lo que el botón hace.
-        let toggle_hint = tr(cx, "nav:rail.collapsePanel").split(" (").next().unwrap_or_default().to_string();
+        // El catálogo anuncia el atajo como en un Mac («⌘B»): se dice con
+        // la tecla de este sistema.
+        let on_a_mac = cx.platform_info().is_mac();
+        let toggle_hint = cac_core::shortcut_text(&tr(cx, "nav:rail.collapsePanel"), on_a_mac);
         let query = self.tree_filter.read(cx).value().to_string();
         let rows = Backend::core(cx).tree().rows_matching(&query);
         // Filtrando y sin nada que enseñar se dice: un árbol en blanco se lee
@@ -968,6 +986,21 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
+            // ⌘B o Ctrl+B pliega el panel y lo vuelve a fijar, como en
+            // `app/src/components/ui/sidebar.tsx`. Al subir, no al bajar: lo
+            // que tiene el foco lo oye antes, y el editor de markdown se
+            // queda con esa tecla para la negrita (`editor.rs` corta ahí la
+            // subida). Qué pulsación es la del panel lo dice el core.
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                let held = event.keystroke.modifiers;
+                let held = cac_core::KeysHeld { secondary: held.secondary(cx), shift: held.shift, alt: held.alt };
+                if cac_core::folds_panel(&event.keystroke.key, held) {
+                    this.toggle_panel(cx);
+                    cx.stop_propagation();
+                }
+            }))
+            // Sin tamaño: no se pinta ni se pulsa, sólo guarda el foco.
+            .child(div().absolute().size_0().track_focus(&self.focus_anchor))
             .when(lasting, |this| this.child(self.render_banner(cx)))
             .child(
                 div()
@@ -1762,6 +1795,117 @@ mod tests {
         assert!(!on_screen(window, "tree-a", cx));
         click(window, "rail-work", cx);
         assert!(on_screen(window, "tree-a", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    fn press(window: AnyWindowHandle, key: &str, cx: &mut TestAppContext) {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press(key, cx);
+        })
+        .unwrap();
+    }
+
+    fn pinned(cx: &mut TestAppContext) -> bool {
+        cx.update(|cx| Backend::core(cx).panel_pinned())
+    }
+
+    /// Ctrl+B (⌘B en un Mac) pliega el panel y lo vuelve a fijar, sin haber
+    /// pulsado antes en ningún sitio; una «b» suelta no, y con el filtro del
+    /// árbol enfocado el atajo sigue siendo el del panel.
+    ///
+    /// Roturas que atrapa: un atajo anunciado que no hace nada; uno que sólo
+    /// funciona después de pulsar algo con el ratón; plegar el panel al
+    /// escribir una «b»; plegar con Ctrl+Mayús+B.
+    #[gpui_kit::test]
+    fn the_keyboard_folds_the_panel(cx: &mut TestAppContext) {
+        let server = server();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+
+        press(window, "secondary-b", cx);
+        assert!(!on_screen(window, "tree-a", cx), "el atajo no plegó el panel");
+        press(window, "secondary-b", cx);
+        assert!(on_screen(window, "tree-a", cx), "el atajo no lo volvió a fijar");
+
+        press(window, "b", cx);
+        press(window, "secondary-shift-b", cx);
+        assert!(on_screen(window, "tree-a", cx), "se plegó con una tecla que no es su atajo");
+
+        // Escribiendo en un campo corriente el atajo es el mismo: sólo el
+        // editor de markdown tiene otro uso para esa tecla.
+        click(window, "tree-filter", cx);
+        press(window, "secondary-b", cx);
+        assert!(!on_screen(window, "tree-a", cx), "con el filtro enfocado el atajo no pliega");
+        // El filtro tenía el foco y ya no se pinta: el atajo tiene que seguir
+        // oyéndose para poder volver.
+        press(window, "secondary-b", cx);
+        assert!(on_screen(window, "tree-a", cx), "plegado con el foco dentro, el atajo ya no lo despliega");
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Plegado o fijo, el panel se recuerda: la app vuelve a abrir como se
+    /// dejó, se plegara con el teclado o con su botón.
+    ///
+    /// Roturas que atrapa: plegar sólo hasta cerrar la app; recordar lo que
+    /// hizo el botón y no lo que hizo el atajo; abrir siempre plegado una vez
+    /// que se plegó (no recordar que se volvió a fijar).
+    #[gpui_kit::test]
+    fn the_folded_panel_is_remembered(cx: &mut TestAppContext) {
+        let server = server();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        // Otra ventana de la misma app, como al volver a abrirla: el core y
+        // lo que guardó son los mismos. Se le pregunta a la pantalla y no a
+        // lo pintado: en las pruebas el ratón está en la esquina, sobre el
+        // riel, y un panel plegado se asoma.
+        let reopens_pinned = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                let options = WindowOptions::default();
+                let (_, workspace) = gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx))).expect("open test window");
+                workspace.read(cx).panel_pinned
+            })
+        };
+
+        press(window, "secondary-b", cx);
+        assert!(!pinned(cx), "el atajo no guardó que se plegó");
+        assert!(!reopens_pinned(cx), "volvió a abrir con el panel fijo");
+
+        // Con el ratón, que no depende de qué ventana tiene el teclado.
+        click(window, "rail-work", cx);
+        assert!(pinned(cx), "el botón no guardó que se volvió a fijar");
+        assert!(reopens_pinned(cx), "volvió a abrir plegado lo que se dejó fijo");
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Escribiendo un comentario, Ctrl+B es la negrita del editor y el panel
+    /// no se mueve.
+    ///
+    /// Rotura que atrapa: que el atajo del panel se adelante al del editor
+    /// (oírlo al bajar en vez de al subir, o como atajo global) y a quien
+    /// pone una negrita se le pliegue el panel debajo.
+    #[gpui_kit::test]
+    fn writing_a_comment_the_shortcut_is_the_editors_bold(cx: &mut TestAppContext) {
+        let server = server();
+        let mut detail: serde_json::Value = serde_json::from_str(include_str!("../../core/tests/fixtures/task_detail.json")).unwrap();
+        detail["task"]["id"] = json!("1");
+        let mut column = detail["status"].clone();
+        column["listId"] = detail["task"]["listId"].clone();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/1")).respond_with(ok(detail)));
+        server.mount(
+            Mock::given(method("GET")).and(wiremock::matchers::path_regex("^/api/v1/task-lists/[^/]+/statuses$")).respond_with(ok(json!([column]))),
+        );
+        server.install(cx);
+        let window = open_sized(1700., cx);
+        wait_until(cx, "las tareas llegan", |cx| on_screen(window, "work-row-1", cx));
+        click(window, "work-row-1", cx);
+        wait_until(cx, "llega el detalle", |cx| on_screen(window, "comment-input", cx));
+
+        click(window, "comment-input", cx);
+        press(window, "secondary-b", cx);
+        assert!(pinned(cx), "poner una negrita plegó el panel");
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
