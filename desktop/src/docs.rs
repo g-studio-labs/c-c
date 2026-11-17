@@ -15,6 +15,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
+use crate::theme::Leading as _;
 use crate::lang::{locale, tr};
 
 /// La medida de lectura: las 68 letras (`max-w-[68ch]`) de `.prose-doc`, a
@@ -49,7 +50,7 @@ fn not_yet(cx: &App) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
 /// Un botón fantasma pequeño con icono y texto (`Button size="sm"
 /// variant="ghost"`): los del pie y el de compartir.
 fn ghost_button(id: &'static str, icon: Lucide, label: String, cx: &App) -> Stateful<Div> {
-    let hover = cx.theme().muted;
+    let hover = crate::theme::ghost_hover(cx);
     div()
         .id(id)
         .h_7()
@@ -59,7 +60,8 @@ fn ghost_button(id: &'static str, icon: Lucide, label: String, cx: &App) -> Stat
         .items_center()
         .gap_1()
         .rounded(px(8.))
-        .text_xs()
+        // `text-[0.8rem]` del `size="sm"`.
+        .text_size(rems(0.8))
         .font_weight(FontWeight::MEDIUM)
         .hover(move |style| style.bg(hover))
         .child(Icon::new(icon).size_3())
@@ -84,10 +86,10 @@ fn reading_style(cx: &App) -> TextViewStyle {
                 _ => 15.,
             })
         })
-        .code_block(StyleRefinement::default().bg(muted).rounded(px(8.)).p_3().text_xs())
+        .code_block(StyleRefinement::default().bg(muted).rounded(px(8.)).p_3().leading_xs())
         .table(table)
         .table_head(StyleRefinement::default().bg(muted.opacity(0.5)).font_weight(FontWeight::MEDIUM))
-        .table_cell(StyleRefinement::default().px_2().py_1().text_xs())
+        .table_cell(StyleRefinement::default().px_2().py_1().leading_xs())
 }
 
 impl DocsView {
@@ -99,7 +101,7 @@ impl DocsView {
         let (muted, border, chip) = (theme.muted_foreground, theme.border, theme.muted);
         let when = decision.decided_on(locale(cx));
         let (from_task, origin) = decision.origin(locale(cx));
-        let body = (!decision.body.trim().is_empty()).then(|| div().mt_1().text_sm().text_color(muted).child(decision.body.trim().to_string()));
+        let body = (!decision.body.trim().is_empty()).then(|| div().mt_1().leading_sm().text_color(muted).child(decision.body.trim().to_string()));
 
         div()
             .id(SharedString::from(format!("doc-decision-{}", decision.id)))
@@ -115,7 +117,7 @@ impl DocsView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_xs()
+                    .leading_xs()
                     .text_color(muted)
                     .child(div().flex_none().child(when))
                     .children(decision.author_name.clone().filter(|name| !name.is_empty()).map(|name| div().min_w_0().truncate().child(name)))
@@ -132,7 +134,7 @@ impl DocsView {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .text_xs()
+                    .leading_xs()
                     .text_color(muted)
                     .when(from_task, |this| this.child(Icon::new(Lucide::SquareCheck).size_3()))
                     .child(origin),
@@ -184,7 +186,7 @@ impl DocsView {
                     .py_1()
                     .pr_2()
                     .map(|this| if heading.level == 3 { this.pl_5() } else { this.pl_3() })
-                    .text_xs()
+                    .leading_xs()
                     .text_color(muted)
                     .hover(move |style| style.text_color(foreground))
                     .child(heading.text)
@@ -197,8 +199,8 @@ impl DocsView {
 impl Render for DocsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (background, foreground, muted, border, primary, hover) =
-            (theme.background, theme.foreground, theme.muted_foreground, theme.border, theme.primary, theme.muted);
+        let (background, foreground, muted, border, primary) = (theme.background, theme.foreground, theme.muted_foreground, theme.border, theme.primary);
+        let hover = crate::theme::ghost_hover(cx);
         let docs = Backend::snapshot(cx).read(cx).docs.clone();
         let name = docs.target.as_ref().map(|target| target.name.clone()).unwrap_or_default();
         let node = docs.target.as_ref().map(|target| target.id.clone()).unwrap_or_default();
@@ -237,7 +239,7 @@ impl Render for DocsView {
             // Con una lista, la raya va bajo la fila de vistas.
             .when(!of_a_list, |this| this.border_b_1().border_color(border))
             .child(Icon::new(Lucide::FileText).size_4().flex_none().text_color(muted))
-            .child(div().id("doc-title").test_support().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(name))
+            .child(div().id("doc-title").test_support().min_w_0().truncate().leading_sm().font_weight(FontWeight::MEDIUM).child(name))
             .child(
                 crate::theme::id_chip("doc-id", short, false, cx)
                     .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone())))
@@ -284,7 +286,7 @@ impl Render for DocsView {
                             .items_center()
                             .border_b_2()
                             .border_color(if active { primary } else { primary.opacity(0.) })
-                            .text_sm()
+                            .leading_sm()
                             .whitespace_nowrap()
                             .text_color(if active { foreground } else { muted })
                             .when_some(layout, |this, layout| {
@@ -304,7 +306,7 @@ impl Render for DocsView {
         // Las cuatro pestañas, siempre (`gap-4 border-b px-4 text-sm`, cada
         // una `border-b-2 py-2`): la vacía apagada, y su pista al lado
         // mientras quepa.
-        let tabs = div().id("doc-tabs").flex().flex_none().gap_4().px_4().border_b_1().border_color(border).text_sm().overflow_x_scroll().children(DOC_TABS.map(|key| {
+        let tabs = div().id("doc-tabs").flex().flex_none().gap_4().px_4().border_b_1().border_color(border).leading_sm().overflow_x_scroll().children(DOC_TABS.map(|key| {
             let active = docs.tab == key;
             let empty = docs.tab_is_empty(key);
             div()
@@ -331,13 +333,13 @@ impl Render for DocsView {
         // Sin nada que leer: por qué, en el centro (`py-12 text-center`), y
         // cómo empezar a escribirlo, que todavía no está aquí.
         let nothing = empty.map(|key| {
-            let said = div().id("doc-empty").test_support().text_sm().text_color(muted).child(tr(cx, key));
+            let said = div().id("doc-empty").test_support().leading_sm().text_color(muted).child(tr(cx, key));
             let block = div().py_12().flex().flex_col().items_center().text_center();
             match key {
                 "work:decisions.empty" => block
                     .child(Icon::new(Lucide::Gavel).size_5().mb_2().text_color(muted))
                     .child(said)
-                    .child(div().mt_1().max_w(px(384.)).text_xs().text_color(muted).child(tr(cx, "work:decisions.emptyWhy"))),
+                    .child(div().mt_1().max_w(px(384.)).leading_xs().text_color(muted).child(tr(cx, "work:decisions.emptyWhy"))),
                 "work:docs.emptyTab" => block.child(said).child(
                     ghost_button("doc-write", Lucide::Pencil, tr(cx, "work:docs.writeIt"), cx).mt_3().border_1().border_color(border).tooltip(not_yet(cx)).test_support(),
                 ),
