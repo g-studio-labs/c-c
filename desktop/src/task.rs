@@ -88,6 +88,18 @@ fn decoded(picture: cac_core::Picture, svg: SvgRenderer) -> Option<Arc<RenderIma
     Image::from_bytes(format, picture.bytes).to_image_data(svg).ok()
 }
 
+/// Lo que se está preguntando antes de hacer algo que no se deshace o que ve
+/// más gente, y qué hacer si contestan que sí.
+struct Asking {
+    /// De qué tarea es la pregunta: si se abre otra, ya no vale.
+    task_id: String,
+    question: Question,
+    /// Borra algo: su botón va en rojo, como el `destructive` de
+    /// `ConfirmDialog.tsx`.
+    destructive: bool,
+    then: Box<dyn FnOnce(&mut TaskView, &mut Window, &mut Context<TaskView>)>,
+}
+
 /// Las dos pestañas del hilo.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Thread {
@@ -173,6 +185,10 @@ pub struct TaskView {
     /// Qué identificador se acaba de copiar: su pastilla lo dice un momento
     /// con una marca en vez del icono de copiar.
     copied: Option<&'static str>,
+    /// La pregunta que hay a la vista, si hay alguna.
+    asking: Option<Asking>,
+    /// El foco mientras se pregunta: Escape la cancela y Enter la acepta.
+    confirm_focus: FocusHandle,
     _task_closed: Subscription,
 }
 
@@ -343,6 +359,8 @@ impl TaskView {
             citing: None,
             thumbs: HashMap::new(),
             copied: None,
+            asking: None,
+            confirm_focus: cx.focus_handle(),
             // Cerrada la página ya no se pinta, así que no es al pintar
             // donde se tiran sus imágenes: una captura decodificada pesa.
             _task_closed: cx.observe(&Backend::snapshot(cx), |this, snapshot, cx| {
@@ -578,38 +596,37 @@ impl TaskView {
     /// Borra un comentario, preguntando antes: si el cliente podía verlo,
     /// también deja de verlo.
     pub(crate) fn delete_comment(&mut self, comment_id: String, window: &mut Window, cx: &mut Context<Self>) {
-        let (title, detail) = (tr(cx, "work:task.deleteCommentTitle"), tr(cx, "work:task.deleteCommentBody"));
-        let (delete, cancel) = (tr(cx, "work:task.delete"), tr(cx, "work:task.cancel"));
-        let answer = window.prompt(PromptLevel::Warning, &title, Some(&detail), &[delete.as_str(), cancel.as_str()], cx);
-        cx.spawn_in(window, async move |this, cx| {
-            if answer.await != Ok(0) {
-                return;
-            }
-            this.update_in(cx, |this, window, cx| {
-                this.change(move |core| async move { core.tasks().delete_comment(&comment_id).await }, window, cx);
-            })
-            .ok();
-        })
-        .detach();
+        let question = Question {
+            title: tr(cx, "work:task.deleteCommentTitle"),
+            body: tr(cx, "work:task.deleteCommentBody"),
+            confirm: tr(cx, "work:task.delete"),
+            cancel: tr(cx, "work:task.cancel"),
+        };
+        self.ask(
+            question,
+            true,
+            move |this, window, cx| this.change(move |core| async move { core.tasks().delete_comment(&comment_id).await }, window, cx),
+            window,
+            cx,
+        );
     }
 
     /// Quita un adjunto, preguntando antes: si la descripción lo enseña, se
     /// dice que también se va del texto.
     pub(crate) fn remove_file(&mut self, file: SheetFile, window: &mut Window, cx: &mut Context<Self>) {
-        let title = cac_core::text_with(locale(cx), "work:task.removeAttachmentTitle", &[("name", &file.name)]);
-        let detail = tr(cx, if file.cited { "work:task.removeAttachmentInUse" } else { "work:task.removeAttachmentPlain" });
-        let (remove, cancel) = (tr(cx, "work:task.remove"), tr(cx, "work:task.cancel"));
-        let answer = window.prompt(PromptLevel::Warning, &title, Some(&detail), &[remove.as_str(), cancel.as_str()], cx);
-        cx.spawn_in(window, async move |this, cx| {
-            if answer.await != Ok(0) {
-                return;
-            }
-            this.update_in(cx, |this, window, cx| {
-                this.change(move |core| async move { core.tasks().remove_attachment(&file.id).await }, window, cx);
-            })
-            .ok();
-        })
-        .detach();
+        let question = Question {
+            title: cac_core::text_with(locale(cx), "work:task.removeAttachmentTitle", &[("name", &file.name)]),
+            body: tr(cx, if file.cited { "work:task.removeAttachmentInUse" } else { "work:task.removeAttachmentPlain" }),
+            confirm: tr(cx, "work:task.remove"),
+            cancel: tr(cx, "work:task.cancel"),
+        };
+        self.ask(
+            question,
+            true,
+            move |this, window, cx| this.change(move |core| async move { core.tasks().remove_attachment(&file.id).await }, window, cx),
+            window,
+            cx,
+        );
     }
 
     /// Pide las imágenes de la tarea que aún no se han pedido, y tira las
@@ -1462,31 +1479,184 @@ impl TaskView {
         );
     }
 
-    /// Hace una pregunta del core y sólo si contestan que sí sigue con
-    /// `then`. Cancelar o Escape no hacen nada. Y si mientras se pregunta la
-    /// tarea abierta pasa a ser otra, tampoco: la respuesta era para aquélla.
+    /// Hace una pregunta y sólo si contestan que sí sigue con `then`. La
+    /// pregunta se pinta sobre la página (`render_question`), entera: el
+    /// aviso del sistema, que es lo que había, en Linux es una caja blanca
+    /// que corta el cuerpo en un renglón, y el cuerpo es justo lo que hay
+    /// que leer antes de contestar (a dónde va, qué se pierde).
     fn ask(
         &mut self,
         question: Question,
-        level: PromptLevel,
+        destructive: bool,
         then: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(task_id) = Self::open_task_id(cx) else { return };
-        let answer = window.prompt(level, &question.title, Some(&question.body), &[question.confirm.as_str(), question.cancel.as_str()], cx);
-        cx.spawn_in(window, async move |this, cx| {
-            if answer.await != Ok(0) {
-                return;
-            }
-            this.update_in(cx, |this, window, cx| {
-                if Self::open_task_id(cx).as_deref() == Some(task_id.as_str()) {
-                    then(this, window, cx);
+        self.asking = Some(Asking { task_id, question, destructive, then: Box::new(then) });
+        self.confirm_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Contesta la pregunta que hay a la vista. Con un no (el botón, la ×
+    /// o Escape) no se hace nada. Y si la tarea abierta ya es otra,
+    /// tampoco: la respuesta era para aquélla.
+    ///
+    /// Esto último no tiene prueba que lo distinga, y se sabe (se le quitó
+    /// la comprobación y las pruebas siguieron en verde): al abrirse otra
+    /// tarea la pintura ya quita la pregunta, que es lo que la prueba mira.
+    /// Se queda por el hueco entre que cambia la tarea y se vuelve a
+    /// pintar, donde un clic aún caería sobre la pregunta vieja; y lo que
+    /// está en juego ahí es borrar la tarea que no era.
+    pub(crate) fn answer(&mut self, yes: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(asking) = self.asking.take() else { return };
+        self.page_focus.focus(window, cx);
+        cx.notify();
+        if yes && Self::open_task_id(cx).as_deref() == Some(asking.task_id.as_str()) {
+            (asking.then)(self, window, cx);
+        }
+    }
+
+    /// La pregunta, sobre la página: el diálogo de `ConfirmDialog.tsx`
+    /// (`ui/dialog.tsx`: el velo `bg-black/35`; la tarjeta `max-w-sm gap-4
+    /// rounded-xl bg-background p-4 text-sm shadow-2xl ring-1
+    /// ring-foreground/10`; el título `text-base font-medium`, el cuerpo
+    /// apagado, y el pie `border-t bg-muted/50 p-4` con «Cancelar» y, a la
+    /// derecha, el botón que lo hace). El velo se queda con los clics: lo
+    /// de debajo no se pulsa mientras se pregunta.
+    fn render_question(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let asking = self.asking.as_ref()?;
+        let theme = cx.theme();
+        let (background, foreground, muted, soft, border, danger) =
+            (theme.background, theme.foreground, theme.muted_foreground, theme.muted, theme.border, theme.danger);
+        let dark = theme.is_dark();
+        let (title, body) = (asking.question.title.clone(), asking.question.body.clone());
+        let cancel = Button::new("task-confirm-cancel")
+            .outline()
+            .small()
+            .h_8()
+            .px_2p5()
+            .label(asking.question.cancel.clone())
+            .on_click(cx.listener(|this, _, window, cx| this.answer(false, window, cx)));
+        let confirm = if asking.destructive {
+            // `variant="destructive"`: `bg-destructive/10 text-destructive
+            // hover:bg-destructive/20`, y en oscuro 20 y 30.
+            let (rest, over) = if dark { (0.2, 0.3) } else { (0.1, 0.2) };
+            div()
+                .id("task-confirm-yes")
+                .h_8()
+                .px_2p5()
+                .flex()
+                .flex_none()
+                .items_center()
+                .rounded(px(8.))
+                .bg(danger.opacity(rest))
+                .leading_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(danger)
+                .cursor_pointer()
+                .hover(move |style| style.bg(danger.opacity(over)))
+                .on_click(cx.listener(|this, _, window, cx| this.answer(true, window, cx)))
+                .child(asking.question.confirm.clone())
+                .test_support()
+                .into_any_element()
+        } else {
+            Button::new("task-confirm-yes")
+                .primary()
+                .small()
+                .h_8()
+                .px_2p5()
+                .label(asking.question.confirm.clone())
+                .on_click(cx.listener(|this, _, window, cx| this.answer(true, window, cx)))
+                .into_any_element()
+        };
+        let card = div()
+            .id("task-confirm")
+            .track_focus(&self.confirm_focus)
+            // Escape la cancela y Enter la acepta (allí el botón que lo
+            // hace nace con el foco). Ninguna de las dos llega a la página.
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "escape" => this.answer(false, window, cx),
+                    "enter" => this.answer(true, window, cx),
+                    _ => return,
                 }
-            })
-            .ok();
-        })
-        .detach();
+                cx.stop_propagation();
+            }))
+            .relative()
+            .w_full()
+            .max_w(px(384.))
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_4()
+            .rounded(px(14.))
+            .border_1()
+            .border_color(foreground.opacity(0.1))
+            .bg(background)
+            .shadow_2xl()
+            .leading_sm()
+            .text_color(foreground)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    // A la derecha, sitio para la ×.
+                    .child(
+                        div()
+                            .id("task-confirm-title")
+                            .aria_label(title.clone())
+                            .pr_6()
+                            .text_size(rems(1.))
+                            .line_height(rems(1.25))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(title)
+                            .test_support(),
+                    )
+                    .child(div().id("task-confirm-body").aria_label(body.clone()).text_color(muted).child(body).test_support()),
+            )
+            .child(
+                div()
+                    .mx(px(-16.))
+                    .mb(px(-16.))
+                    .p_4()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .rounded_b(px(14.))
+                    .border_t_1()
+                    .border_color(border)
+                    .bg(soft.opacity(0.5))
+                    .child(cancel)
+                    .child(confirm),
+            )
+            .child(
+                div().absolute().top_2().right_2().child(
+                    Button::new("task-confirm-close")
+                        .ghost()
+                        .xsmall()
+                        .size_7()
+                        .p_0()
+                        .child(Icon::new(Lucide::X).size_4())
+                        .on_click(cx.listener(|this, _, window, cx| this.answer(false, window, cx))),
+                ),
+            )
+            .test_support();
+        Some(
+            div()
+                .id("task-confirm-veil")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .bg(gpui_kit::black().opacity(0.35))
+                .child(card)
+                .into_any_element(),
+        )
     }
 
     /// Lleva la tarea abierta a otra lista, preguntando antes y diciendo a
@@ -1497,7 +1667,7 @@ impl TaskView {
         let Some(question) = Backend::core(cx).tasks().move_question(locale(cx), &list_id) else { return };
         self.ask(
             question,
-            PromptLevel::Info,
+            false,
             move |this, window, cx| {
                 this.save("work:task.errMoveList", move |core| async move { core.tasks().move_to_list(&list_id).await }, |_, _, _| {}, window, cx);
             },
@@ -1514,7 +1684,7 @@ impl TaskView {
         let Some(question) = Backend::core(cx).tasks().delete_question(locale(cx)) else { return };
         self.ask(
             question,
-            PromptLevel::Critical,
+            true,
             |this, window, cx| this.save("work:notes.errDelete", |core| async move { core.tasks().delete().await }, |_, _, _| {}, window, cx),
             window,
             cx,
@@ -1529,7 +1699,7 @@ impl TaskView {
         let Some(question) = Backend::core(cx).tasks().withdraw_question(locale(cx)) else { return };
         self.ask(
             question,
-            PromptLevel::Warning,
+            false,
             |this, window, cx| this.change(|core| async move { core.tasks().withdraw().await }, window, cx),
             window,
             cx,
@@ -1712,8 +1882,11 @@ impl TaskView {
         // dicen que allí cambia la ref) y la suya marcada. Cuáles se ofrecen
         // lo dice el core; sin ninguna (el árbol aún no llegó), sólo dice en
         // cuál vive.
+        // (`w-full` en la app de siempre. Aquí con su medida: dentro del
+        // botón del desplegable un cien por cien no tiene de quién serlo, y
+        // la caja se encogía a su nombre.)
         let list_face = div()
-            .w_full()
+            .w(px(RAIL_WIDTH - 32.))
             .h_7()
             .flex()
             .items_center()
@@ -1730,14 +1903,13 @@ impl TaskView {
             .child(Icon::new(IconName::ChevronDown).size_4().flex_none().text_color(muted));
         let targets = tasks.move_targets();
         let list = if targets.is_empty() {
-            div().id("task-list").w_full().child(list_face).test_support().into_any_element()
+            div().id("task-list").child(list_face).test_support().into_any_element()
         } else {
             let (view, changes) = (view.clone(), tr(cx, "work:task.refWillChange"));
             Button::new("task-list")
                 .ghost()
                 .p_0()
                 .h_auto()
-                .w_full()
                 .child(list_face)
                 .dropdown_menu(move |mut menu, _, _| {
                     menu = menu.scrollable(true).max_h(px(360.));
@@ -2606,6 +2778,11 @@ impl Render for TaskView {
                 self.page_focus.focus(window, cx);
             }
         }
+        // Una pregunta es de la tarea que se miraba: al abrirse otra (o
+        // cerrarse ésta) se va con ella, sin contestar.
+        if self.asking.as_ref().is_some_and(|asking| state.task_id.as_deref() != Some(asking.task_id.as_str())) {
+            self.asking = None;
+        }
         let sheet = Backend::core(cx).tasks().sheet(locale(cx));
         if let Some(sheet) = &sheet {
             self.show_due(sheet, window, cx);
@@ -2794,6 +2971,7 @@ impl Render for TaskView {
                     Backend::core(cx).tasks().close();
                 }
             }))
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -2830,6 +3008,7 @@ impl Render for TaskView {
             )
             .child(body)
             .children(foot)
+            .children(self.render_question(cx))
     }
 }
 
@@ -2954,6 +3133,16 @@ mod tests {
             window.click(id, cx);
         })
         .unwrap();
+    }
+
+    /// La pregunta que hay a la vista: su título y su cuerpo.
+    fn shown_question(window: AnyWindowHandle, cx: &mut TestAppContext) -> Option<(String, String)> {
+        on_screen(window, "task-confirm", cx).then(|| (label_of(window, "task-confirm-title", cx), label_of(window, "task-confirm-body", cx)))
+    }
+
+    /// Contesta la pregunta con su botón: el que lo hace, o «Cancelar».
+    fn answer(window: AnyWindowHandle, yes: bool, cx: &mut TestAppContext) {
+        click(window, if yes { "task-confirm-yes" } else { "task-confirm-cancel" }, cx);
     }
 
     fn stop(cx: &mut TestAppContext) {
@@ -4161,21 +4350,21 @@ mod tests {
         // En su mismo espacio: dice a cuál y que la ref no cambia.
         click(window, "task-list", cx);
         click_label(window, "Clientes · Incidencias", cx);
-        let (question, detail) = cx.pending_prompt().expect("no preguntó antes de mover");
+        let (question, detail) = shown_question(window, cx).expect("no preguntó antes de mover");
         assert!(question.contains("«Clientes · Incidencias»"), "no dice a cuál va: {question}");
         assert!(detail.contains("Su ref no cambia"), "{detail}");
-        cx.simulate_prompt_answer("Cancelar");
+        answer(window, false, cx);
         settle(cx);
         assert!(patches(&server).is_empty(), "movió la tarea aunque se canceló");
 
         // A otro espacio: lo avisa en el desplegable y en la pregunta.
         click(window, "task-list", cx);
         click_label(window, "Backend · cambia la ref", cx);
-        let (question, detail) = cx.pending_prompt().expect("no preguntó antes de mover");
+        let (question, detail) = shown_question(window, cx).expect("no preguntó antes de mover");
         assert!(question.contains("«Proteus › Backend»"), "no dice a cuál va: {question}");
         assert!(detail.contains("acme-7 deja de ser su ref"), "{detail}");
         assert!(patches(&server).is_empty(), "movió la tarea sin esperar la respuesta");
-        cx.simulate_prompt_answer("Mover");
+        answer(window, true, cx);
 
         wait_until(cx, "la página enseña el sitio nuevo", |cx| label_of(window, "task-place", cx) == "Proteus / Backend");
         assert_eq!(patches(&server), [json!({ "listId": "l2" })]);
@@ -4201,11 +4390,11 @@ mod tests {
         open_first_task_with_places(window, cx);
 
         with_view(window, &view, cx, |view, window, cx| view.ask_move_to_list("l1".into(), window, cx));
-        assert!(cx.pending_prompt().is_none(), "preguntó por la lista en la que ya está");
+        assert!(shown_question(window, cx).is_none(), "preguntó por la lista en la que ya está");
 
         click(window, "task-list", cx);
         click_label(window, "Backend · cambia la ref", cx);
-        cx.simulate_prompt_answer("Mover");
+        answer(window, true, cx);
 
         wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
         assert_eq!(label_of(window, "task-place", cx), "Interno / App");
@@ -4272,17 +4461,32 @@ mod tests {
         open_first_task(window, cx);
 
         click(window, "task-delete", cx);
-        let (question, detail) = cx.pending_prompt().expect("no preguntó antes de borrar");
+        let (question, detail) = shown_question(window, cx).expect("no preguntó antes de borrar");
         assert!(question.contains("«Subir el backend»"), "no dice qué tarea: {question}");
         assert!(detail.contains("comentarios") && detail.contains("subtareas no se borran"), "{detail}");
-        cx.simulate_prompt_answer("Cancelar");
+        // Mientras se pregunta, lo de debajo no se pulsa.
+        click(window, "task-add-subtask", cx);
+        assert!(!on_screen(window, "task-new-subtask", cx), "se pulsó la página por debajo de la pregunta");
+        answer(window, false, cx);
         settle(cx);
         assert_eq!(deletions(&server, "t1"), 0, "borró la tarea aunque se canceló");
-        assert!(on_screen(window, "task-page", cx));
+        assert!(on_screen(window, "task-page", cx) && shown_question(window, cx).is_none());
+
+        // Escape es un no: ni borra ni se lleva la página; la × también.
+        click(window, "task-delete", cx);
+        press(window, "escape", cx);
+        settle(cx);
+        assert!(shown_question(window, cx).is_none(), "Escape no quitó la pregunta");
+        assert_eq!(open_task_id(cx).as_deref(), Some("t1"), "Escape cerró la página en vez de la pregunta");
+        click(window, "task-delete", cx);
+        click(window, "task-confirm-close", cx);
+        settle(cx);
+        assert!(shown_question(window, cx).is_none());
+        assert_eq!(deletions(&server, "t1"), 0, "borró la tarea con un no");
 
         click(window, "task-delete", cx);
         assert_eq!(deletions(&server, "t1"), 0, "borró la tarea sin esperar la respuesta");
-        cx.simulate_prompt_answer("Borrar");
+        answer(window, true, cx);
 
         wait_until(cx, "se cierra la página", |cx| !on_screen(window, "task-page", cx));
         assert_eq!(deletions(&server, "t1"), 1);
@@ -4307,17 +4511,19 @@ mod tests {
         open_first_task(window, cx);
 
         click(window, "task-delete", cx);
-        cx.simulate_prompt_answer("Borrar");
+        answer(window, true, cx);
         wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
         assert!(on_screen(window, "task-page", cx));
         assert_eq!(my_work(cx), ["t1", "t2"]);
 
         click(window, "task-delete", cx);
+        assert!(shown_question(window, cx).is_some());
         open_other_task(cx);
         wait_until(cx, "llega la otra", |cx| {
             cx.update(|cx| Backend::snapshot(cx).read(cx).task.detail.as_ref().is_some_and(|detail| detail.task.id == "t2"))
         });
-        cx.simulate_prompt_answer("Borrar");
+        // La pregunta era de la anterior: se fue con ella.
+        assert!(shown_question(window, cx).is_none(), "la pregunta de una tarea siguió a la vista sobre otra");
         settle(cx);
         assert_eq!(deletions(&server, "t2"), 0, "borró la tarea que se abrió después de preguntar");
         assert_eq!(deletions(&server, "t1"), 1);
@@ -4343,16 +4549,17 @@ mod tests {
         assert!(on_screen(window, "task-withdraw", cx) && on_screen(window, "task-visible-to-client", cx));
 
         click(window, "task-withdraw", cx);
-        let (question, detail) = cx.pending_prompt().expect("no preguntó antes de retirar");
+        let (question, detail) = shown_question(window, cx).expect("no preguntó antes de retirar");
         assert_eq!(question, "¿Quitar esto del tablero del cliente?");
         assert!(detail.contains("Su número de ticket se queda gastado"), "{detail}");
-        cx.simulate_prompt_answer("Cancelar");
+        answer(window, false, cx);
         settle(cx);
         assert!(patches(&server).is_empty(), "la retiró aunque se canceló");
 
         click(window, "task-withdraw", cx);
         assert!(patches(&server).is_empty(), "la retiró sin esperar la respuesta");
-        cx.simulate_prompt_answer("Retirar");
+        // Enter la acepta: el foco está en la pregunta.
+        press(window, "enter", cx);
 
         wait_until(cx, "deja de decir que un cliente la lee", |cx| !on_screen(window, "task-visible-to-client", cx));
         assert_eq!(patches(&server), [json!({ "visibility": "internal" })]);
@@ -4372,7 +4579,7 @@ mod tests {
         open_first_task(window, cx);
 
         click(window, "task-withdraw", cx);
-        cx.simulate_prompt_answer("Retirar");
+        answer(window, true, cx);
 
         wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
         assert!(on_screen(window, "task-visible-to-client", cx));
@@ -5041,15 +5248,15 @@ mod tests {
         let removals = |server: &FakeServer| asked(server, "DELETE", "/api/v1/tasks/t1/attachments/a1").len();
 
         click(window, "task-file-remove-a1", cx);
-        let (question, _) = cx.pending_prompt().expect("no preguntó antes de quitar");
+        let (question, _) = shown_question(window, cx).expect("no preguntó antes de quitar");
         assert!(question.contains("plan.pdf"), "no dice qué fichero: {question}");
-        cx.simulate_prompt_answer("Cancelar");
+        answer(window, false, cx);
         settle(cx);
         assert_eq!(removals(&server), 0, "quitó el fichero aunque se canceló");
 
         click(window, "task-file-remove-a1", cx);
         assert_eq!(removals(&server), 0, "quitó el fichero sin esperar la respuesta");
-        cx.simulate_prompt_answer("Quitar");
+        answer(window, true, cx);
         wait_until(cx, "se pide quitarlo", |_| removals(&server) == 1);
         stop(cx);
     }
@@ -5422,9 +5629,9 @@ mod tests {
             assert_eq!(asked(&server, "GET", SHOT).len(), 1, "la pide en bucle");
 
             click(window, "task-file-remove-a2", cx);
-            let (question, _) = cx.pending_prompt().expect("no preguntó antes de quitar");
+            let (question, _) = shown_question(window, cx).expect("no preguntó antes de quitar");
             assert!(question.contains("captura.png"), "no dice qué fichero: {question}");
-            cx.simulate_prompt_answer("Cancelar");
+            answer(window, false, cx);
             stop(cx);
             cx.update_window(window, |_, window, _| window.remove_window()).unwrap();
         }
@@ -5538,13 +5745,13 @@ mod tests {
         let deletions = |server: &FakeServer| asked(server, "DELETE", SAID).len();
 
         click(window, "comment-delete-said", cx);
-        assert!(cx.has_pending_prompt(), "no preguntó antes de borrar");
-        cx.simulate_prompt_answer("Cancelar");
+        assert!(shown_question(window, cx).is_some(), "no preguntó antes de borrar");
+        answer(window, false, cx);
         settle(cx);
         assert_eq!(deletions(&server), 0, "borró aunque se canceló");
 
         click(window, "comment-delete-said", cx);
-        cx.simulate_prompt_answer("Borrar");
+        answer(window, true, cx);
         wait_until(cx, "se pide borrarlo", |_| deletions(&server) == 1);
         stop(cx);
     }
@@ -5636,8 +5843,9 @@ mod tests {
         stop(cx);
     }
 
-    /// Lo que la app de siempre tiene en esta página y aquí todavía no se
-    /// hace está pintado en su sitio, y el pie dice cuándo se tocó.
+    /// Cada pieza que la app de siempre tiene en esta página está pintada
+    /// en su sitio, también la que aquí todavía no se hace («Registrar una
+    /// decisión»), y el pie dice cuándo se tocó.
     ///
     /// Roturas que atrapa: dejar fuera una pieza por no tener aún qué hacer
     /// con ella (el ojo la echa en falta al comparar las dos apps); decir
