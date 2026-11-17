@@ -4,12 +4,12 @@
 //! pantalla recibe frases, nombres y listas ya partidas, y no vuelve a decidir
 //! quién es un agente, qué subtarea está hecha ni en qué día cae nada.
 
-use chrono::{NaiveDate, Timelike, Utc};
+use chrono::{NaiveDate, Utc};
 
 use super::files::{is_image, size_label};
 use super::{shown_name, StatusOption, TaskComment, TaskDetail, Tasks};
-use crate::dates::{due_day, today_in};
-use crate::mywork::{day_and_month, due_label, BoardStatus, DueLabel};
+use crate::dates::{date_and_time, due_day, today_in};
+use crate::mywork::{due_label, BoardStatus, DueLabel};
 use crate::session::Session;
 use crate::texts::{text, text_with, Locale};
 
@@ -146,12 +146,12 @@ pub struct TaskSheet {
     /// Dónde la dejó la última sesión, y quién lo escribió.
     pub handoff: Option<String>,
     pub handoff_by: Option<String>,
-    /// «Ana Pérez, 14 nov, 14:17»: de quién y de cuándo es el «dónde
+    /// «Ana Pérez, 14/11/26, 14:17:40»: de quién y de cuándo es el «dónde
     /// quedó». Falta si no se sabe alguna de las dos cosas.
     pub handoff_signature: Option<String>,
     /// De qué depende; sólo se enseña.
     pub blockers: Vec<SheetBlocker>,
-    /// «Actualizada el 14 nov, 14:17», al pie.
+    /// «Actualizada el 14/11/26, 14:17:40», al pie.
     pub updated: String,
     pub subtasks: Vec<SheetSubtask>,
     /// La conversación, en el orden en que se escribió.
@@ -163,6 +163,17 @@ pub struct TaskSheet {
     /// Si un cliente lee esta tarea: entonces lo que se comente lo lee él,
     /// salvo que se diga que es interno, y la pantalla tiene que decirlo.
     pub client_reads: bool,
+    /// Si tiene ramas, PRs o commits enlazados. Sin nada, la app de siempre
+    /// no pinta el panel de desarrollo sino una línea: «Enlazar una PR»
+    /// (`TaskGitPanel.tsx`).
+    pub git_linked: bool,
+}
+
+/// Si eso es un comentario que mandar: uno en blanco no lo es, y el botón de
+/// comentar está apagado mientras (`disabled={sending || !comment.trim()}`
+/// en `TaskDetailDrawer.tsx`).
+pub fn says_something(body: &str) -> bool {
+    !body.trim().is_empty()
 }
 
 /// Si un cliente lee la tarea: es de su proyecto y no se le ha escondido.
@@ -170,10 +181,12 @@ pub fn client_reads(detail: &TaskDetail) -> bool {
     !detail.task.project_id.is_empty() && detail.task.visibility != "internal"
 }
 
+/// Cuándo se dijo algo, en la hora de quien mira y con el formato de los
+/// sellos de tiempo de la app de siempre (`fechaYHora`): la firma del «dónde
+/// quedó», el pie y cada comentario.
 fn said_at(locale: Locale, instant: &str) -> String {
     let Ok(at) = chrono::DateTime::parse_from_rfc3339(instant) else { return String::new() };
-    let at = at.with_timezone(&chrono::Local);
-    format!("{}, {:02}:{:02}", day_and_month(locale, at.date_naive()), at.hour(), at.minute())
+    date_and_time(locale, at.with_timezone(&chrono::Local).naive_local())
 }
 
 /// El detalle, dicho. `statuses` son las columnas de su lista (de ellas sale
@@ -265,6 +278,7 @@ pub fn task_sheet(
             })
             .collect(),
         client_reads,
+        git_linked: detail.git.as_ref().is_some_and(|git| !(git.branches.is_empty() && git.prs.is_empty() && git.commits.is_empty())),
     }
 }
 
@@ -291,7 +305,7 @@ impl Tasks {
     /// Un comentario en blanco no se manda.
     pub async fn say(&self, body: &str, internal: bool) -> Result<(), crate::ApiError> {
         let body = body.trim();
-        if body.is_empty() {
+        if !says_something(body) {
             return Err(super::refused("empty-comment", "A comment needs some text"));
         }
         let to_the_client = self.state().detail.as_ref().is_some_and(client_reads);
@@ -562,12 +576,43 @@ mod tests {
         assert_eq!(stale.waiting_reason(), None);
     }
 
+    /// Sin ramas, PRs ni commits no hay nada enlazado; con cualquiera, sí. Y
+    /// un comentario en blanco no es un comentario.
+    ///
+    /// Roturas que atrapa: ofrecer «Enlazar una PR» como si no hubiera nada
+    /// en una tarea que ya tiene su PR (o callarlo en la que no tiene);
+    /// mirar sólo las PRs y no las ramas o los commits; un botón de comentar
+    /// encendido con la caja llena de espacios.
+    #[test]
+    fn the_sheet_says_if_code_is_linked_and_if_there_is_something_to_say() {
+        let mut detail = contract();
+        assert!(sheet_of(detail.clone(), json!([])).git_linked);
+        for only in ["branches", "prs", "commits"] {
+            let mut one = detail.clone();
+            for kind in ["branches", "prs", "commits"] {
+                if kind != only {
+                    one["git"][kind] = json!([]);
+                }
+            }
+            assert!(sheet_of(one, json!([])).git_linked, "sólo con {only}");
+        }
+        for kind in ["branches", "prs", "commits"] {
+            detail["git"][kind] = json!([]);
+        }
+        assert!(!sheet_of(detail.clone(), json!([])).git_linked);
+        detail["git"] = Value::Null;
+        assert!(!sheet_of(detail, json!([])).git_linked);
+
+        assert!(says_something(" hola\n"));
+        assert!(!says_something("") && !says_something(" \n\t "));
+    }
+
     /// Rotura que atrapa: la hora de un comentario en Greenwich, o sin hora.
     #[test]
     fn a_comment_says_when_in_local_time() {
-        let local = chrono::DateTime::parse_from_rfc3339("2026-11-14T12:05:00Z").unwrap().with_timezone(&chrono::Local);
-        let expected = format!("{}, {:02}:05", day_and_month(Locale::Es, local.date_naive()), local.hour());
-        assert_eq!(said_at(Locale::Es, "2026-11-14T12:05:00Z"), expected);
+        let local = chrono::DateTime::parse_from_rfc3339("2026-11-14T12:05:09Z").unwrap().with_timezone(&chrono::Local);
+        let expected = format!("{}, {}:05:09", crate::dates::short_date(Locale::Es, local.date_naive()), chrono::Timelike::hour(&local));
+        assert_eq!(said_at(Locale::Es, "2026-11-14T12:05:09Z"), expected);
         assert_eq!(said_at(Locale::Es, "nunca"), "");
     }
     fn viewer(id: &str, superadmin: bool) -> Session {

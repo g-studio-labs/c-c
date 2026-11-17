@@ -53,6 +53,36 @@ pub fn zone_hint<Viewer: TimeZone>(locale: crate::texts::Locale, zone: Option<&s
     Some(crate::texts::text_with(locale, "work:due.zone", &[("city", &city)]))
 }
 
+/// Un día con números: «30/10/26». Es `fecha()` de `app/src/lib/fechas.ts`
+/// (`dateStyle: "short"`): día, mes y año de dos cifras, sin ceros delante;
+/// en inglés, el mes primero.
+pub fn short_date(locale: crate::texts::Locale, day: NaiveDate) -> String {
+    use chrono::Datelike;
+    let year = day.year().rem_euclid(100);
+    match locale {
+        crate::texts::Locale::Es => format!("{}/{}/{year:02}", day.day(), day.month()),
+        crate::texts::Locale::En => format!("{}/{}/{year:02}", day.month(), day.day()),
+    }
+}
+
+/// Un momento con números y segundos: «11/11/26, 10:38:42». Es `fechaYHora()`
+/// de `app/src/lib/fechas.ts` (`dateStyle: "short", timeStyle: "medium"`),
+/// para sellos de tiempo: quién dijo qué y cuándo. En castellano el reloj es
+/// de 24 horas; en inglés, de 12 con su «AM» o «PM».
+///
+/// El momento viene ya en la hora de quien mira: de eso se ocupa quien llama.
+pub fn date_and_time(locale: crate::texts::Locale, at: chrono::NaiveDateTime) -> String {
+    use chrono::Timelike;
+    let day = short_date(locale, at.date());
+    match locale {
+        crate::texts::Locale::Es => format!("{day}, {}:{:02}:{:02}", at.hour(), at.minute(), at.second()),
+        crate::texts::Locale::En => {
+            let (afternoon, hour) = at.hour12();
+            format!("{day}, {hour}:{:02}:{:02} {}", at.minute(), at.second(), if afternoon { "PM" } else { "AM" })
+        }
+    }
+}
+
 /// Cómo está un vencimiento respecto a hoy.
 ///
 /// Vino de `cuando()` en `app/src/components/tasks/TaskCardMini.tsx`. El color
@@ -101,6 +131,28 @@ mod tests {
 
     fn day(y: i32, m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    /// Un día y un sello de tiempo salen con números, como en la app de
+    /// siempre: `30/10/26` y `11/11/26, 10:38:42`.
+    ///
+    /// Roturas que atrapa: el mes con letras («11 nov»), que es otro formato;
+    /// el año entero o sin su cero; ceros delante del día o del mes; el sello
+    /// sin segundos, o con la hora rellenada a dos cifras; en inglés, el día
+    /// antes del mes o el reloj de 24 horas; las doce de la noche como «0 AM».
+    #[test]
+    fn dates_are_said_with_numbers() {
+        use crate::texts::Locale;
+        let at = |h, m, s| day(2026, 11, 5).and_hms_opt(h, m, s).unwrap();
+        assert_eq!(short_date(Locale::Es, day(2026, 10, 30)), "30/10/26");
+        assert_eq!(short_date(Locale::Es, day(2005, 3, 1)), "1/3/05");
+        assert_eq!(short_date(Locale::En, day(2026, 10, 30)), "10/30/26");
+        assert_eq!(date_and_time(Locale::Es, day(2026, 11, 11).and_hms_opt(10, 38, 42).unwrap()), "11/11/26, 10:38:42");
+        assert_eq!(date_and_time(Locale::Es, at(21, 7, 6)), "5/11/26, 21:07:06");
+        assert_eq!(date_and_time(Locale::Es, at(8, 0, 0)), "5/11/26, 8:00:00");
+        assert_eq!(date_and_time(Locale::En, at(21, 7, 6)), "11/5/26, 9:07:06 PM");
+        assert_eq!(date_and_time(Locale::En, at(0, 30, 0)), "11/5/26, 12:30:00 AM");
+        assert_eq!(date_and_time(Locale::En, at(12, 0, 1)), "11/5/26, 12:00:01 PM");
     }
 
     /// Los casos de `app/src/lib/month.test.ts`, «el día de vencimiento».

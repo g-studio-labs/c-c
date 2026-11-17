@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use account::{check_new_password, check_sign_in, gate, FormCheck, Gate, MIN_PASSWORD};
-pub use dates::{due_day, due_state, today_in, zone_hint, DueState};
+pub use dates::{date_and_time, due_day, due_state, short_date, today_in, zone_hint, DueState};
 pub use docs::{doc_blocks, doc_headings, DocBlock, DocDecision, DocHeading, DocTab, DocTarget, Docs, DocsState, DOC_TABS};
 pub use error::ApiError;
 pub use events::{Listener, NoListener};
@@ -70,8 +70,9 @@ pub use task::{
     comment_placeholder, mention_link, mention_matches, mention_query, mentioned_user, mentions_allowed, offered_mentions, with_mention,
     mention_closed, mention_highlighted, mention_mark_kept, mention_menu, mention_moved, MentionEdit, MentionMark, MentionMenu, MentionPerson, MentionQuery,
 };
+pub use task::{compose, continue_list, ComposeAction, ComposeEdit};
 pub use task::{assignee_choices, shown_name, tag_choices, tag_color_for, Choice, MAX_TAG_NAME, TAG_PALETTE};
-pub use task::{can_change_comment, is_agent_note, task_sheet, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};
+pub use task::{can_change_comment, is_agent_note, says_something, task_sheet, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};
 pub use texts::{error_phrase, pick_locale, text, text_count, text_count_unit, text_with, Locale};
 pub use transport::Reply;
 

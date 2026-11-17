@@ -5,6 +5,7 @@
 //! abierta a la vez (la del panel de detalle); el tablero, que mueve tarjetas
 //! sin abrirlas, llega en su fase.
 
+mod compose;
 mod edit;
 mod files;
 mod flow;
@@ -17,6 +18,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+pub use compose::{compose, continue_list, ComposeAction, ComposeEdit};
 pub use edit::{assignee_choices, shown_name, tag_choices, tag_color_for, Choice, MAX_TAG_NAME, TAG_PALETTE};
 pub use mention::{
     comment_placeholder, mention_link, mention_matches, mention_query, mentioned_user, mentions_allowed, offered_mentions, with_mention,
@@ -28,7 +30,7 @@ pub use files::{attachment_fits, attachment_path, file_citation, image_type, is_
     MAX_ATTACHMENT_BYTES, THUMBNAIL_MAX_HEIGHT, THUMBNAIL_MAX_WIDTH,
 };
 pub use flow::{can_transition, canonical_priority, canonical_status, flow_for, Flow};
-pub use sheet::{client_reads, can_change_comment, is_agent_note, task_sheet, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};
+pub use sheet::{client_reads, can_change_comment, is_agent_note, says_something, task_sheet, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};
 pub use types::{
     CommentAuthor, DecisionRef, GitSummary, ReleaseRef, Task, TaskAttachment, TaskBlocker, TaskCard,
     TaskComment, TaskDetail, TaskGitLink, TaskGitLinks, TaskStatus, TaskTag, UserSummary,
