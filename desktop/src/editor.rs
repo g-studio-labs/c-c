@@ -133,13 +133,14 @@ pub struct MarkdownEditor {
     attach: Option<Attach>,
     take_files: Option<TakeFiles>,
     attaching: bool,
+    placeholder: Option<SharedString>,
 }
 
 impl MarkdownEditor {
     /// `prefix` nombra sus piezas: el campo es `<prefix>-input` y cada botón
     /// `<prefix>-bold`, `<prefix>-attach`…
     pub fn new(prefix: &'static str, state: &Entity<TextareaState>) -> Self {
-        Self { prefix, state: state.clone(), attach: None, take_files: None, attaching: false }
+        Self { prefix, state: state.clone(), attach: None, take_files: None, attaching: false, placeholder: None }
     }
 
     /// Con esto la barra lleva el clip: lo que hace al pulsarlo, y qué se
@@ -151,6 +152,13 @@ impl MarkdownEditor {
     ) -> Self {
         self.attach = Some(Rc::new(choose));
         self.take_files = Some(Rc::new(take));
+        self
+    }
+
+    /// Lo que la caja dice mientras está en blanco. Sin esto dice lo de
+    /// siempre («Escribe en markdown…»), como `MarkdownEditor.tsx`.
+    pub fn placeholder(mut self, text: impl Into<SharedString>) -> Self {
+        self.placeholder = Some(text.into());
         self
     }
 
@@ -220,6 +228,15 @@ impl RenderOnce for MarkdownEditor {
             })
         });
 
+        // El texto de ejemplo no es el del campo del kit, que lo pone arriba,
+        // donde va el cursor. En `MarkdownEditor.tsx` es un párrafo aparte
+        // debajo del editor (`-mt-[1.6rem] text-sm text-muted-foreground/60`)
+        // que cae en la última línea de la caja, a 8 px del borde de abajo, y
+        // con él la caja en blanco mide 5,6 px menos que con algo escrito.
+        // Así se ve allí, y así se pinta aquí.
+        let blank = self.state.read(cx).value().is_empty();
+        let example = blank.then(|| self.placeholder.clone().unwrap_or_else(|| tr(cx, "common:editor.writeInMarkdown").into()));
+
         let (for_keys, for_enter) = (self.state.clone(), self.state.clone());
         // La caja de `MarkdownEditor.tsx`: `rounded-md border bg-background`,
         // la barra con su raya debajo y el texto en `px-3 py-2`. El campo
@@ -258,6 +275,17 @@ impl RenderOnce for MarkdownEditor {
                 })
             })
             .child(bar)
-            .child(div().id(SharedString::from(format!("{prefix}-input"))).px(px(2.)).child(field).test_support())
+            .child(
+                div()
+                    .id(SharedString::from(format!("{prefix}-input")))
+                    .relative()
+                    .px(px(2.))
+                    .when(blank, |this| this.mb(px(-6.)))
+                    .child(field)
+                    .children(example.map(|example| {
+                        div().absolute().left_3().right_3().bottom(px(14.)).truncate().text_sm().line_height(px(20.)).text_color(muted.opacity(0.6)).child(example)
+                    }))
+                    .test_support(),
+            )
     }
 }

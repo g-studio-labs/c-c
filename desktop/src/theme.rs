@@ -199,11 +199,68 @@ pub fn prose_with_links(
     id: impl Into<gpui_kit::SharedString>,
     text: impl Into<gpui_kit::SharedString>,
     follow: impl Fn(&str, &mut gpui_kit::Window, &mut gpui_kit::App) + Send + Sync + 'static,
+    cx: &App,
 ) -> gpui_kit::Div {
     use gpui_kit::{ParentElement, Styled};
-    gpui_kit::div().text_sm().child(
-        gpui_kit::component::text::TextView::markdown(id.into(), text.into()).on_link_click(move |url, _, window, cx| follow(url, window, cx)),
+    // `md-body text-sm leading-relaxed` (`Markdown.tsx`).
+    gpui_kit::div().text_sm().line_height(gpui_kit::relative(1.625)).child(
+        gpui_kit::component::text::TextView::markdown(id.into(), text.into())
+            .style(md_body_style(cx))
+            .on_link_click(move |url, _, window, cx| follow(url, window, cx)),
     )
+}
+
+/// Cómo se lee el markdown de una tarea o de un comentario: el `.md-body`
+/// de `index.css`. Los párrafos a `my-2`; los títulos a 18, 16 y 14
+/// (`text-lg`, `text-base`, `text-sm`); el bloque de código sobre el fondo
+/// apagado (`rounded-md bg-muted p-3 text-xs`); y la tabla en pequeño, con
+/// la cabecera apagada (`text-xs`, celdas `px-2 py-1`, `th` con
+/// `bg-muted/50 font-medium`).
+pub fn md_body_style(cx: &App) -> gpui_kit::component::text::TextViewStyle {
+    use gpui_kit::component::ActiveTheme as _;
+    use gpui_kit::{FontWeight, Overflow, StyleRefinement, Styled as _};
+    let muted = cx.theme().muted;
+    let mut table = StyleRefinement::default();
+    // Una tabla que no cabe se desliza por dentro en vez de ensanchar la
+    // página (`overflow-x-auto`).
+    table.overflow.x = Some(Overflow::Scroll);
+    gpui_kit::component::text::TextViewStyle::default()
+        .paragraph_gap(gpui_kit::rems(0.5))
+        .heading_font_size(|level, _| {
+            px(match level {
+                1 => 18.,
+                2 => 16.,
+                _ => 14.,
+            })
+        })
+        .code_block(StyleRefinement::default().bg(muted).rounded(px(8.)).p_3().text_xs())
+        .table(table)
+        .table_head(StyleRefinement::default().bg(muted.opacity(0.5)).font_weight(FontWeight::MEDIUM))
+        .table_cell(StyleRefinement::default().px_2().py_1().text_xs())
+}
+
+/// El fondo de un botón fantasma bajo el ratón: `hover:bg-muted`, y en
+/// oscuro `dark:hover:bg-muted/50` (`ui/button.tsx`).
+pub fn ghost_hover(cx: &App) -> Hsla {
+    use gpui_kit::component::ActiveTheme as _;
+    let theme = cx.theme();
+    if theme.mode.is_dark() {
+        theme.muted.opacity(0.5)
+    } else {
+        theme.muted
+    }
+}
+
+/// El fondo de un campo o de un desplegable: transparente, y en oscuro
+/// `dark:bg-input/30` (`ui/input.tsx`, `ui/select.tsx`).
+pub fn field_background(cx: &App) -> Hsla {
+    use gpui_kit::component::ActiveTheme as _;
+    let theme = cx.theme();
+    if theme.mode.is_dark() {
+        theme.input.opacity(0.3)
+    } else {
+        gpui_kit::transparent_black()
+    }
 }
 
 /// Si pulsar ese enlace lleva a algún sitio. Una mención no: es el nombre de

@@ -196,7 +196,7 @@ fn section_title(title: String, cx: &App) -> Div {
 /// «+ Añadir»): el `Button size="sm" variant="ghost"` con `h-6 px-2
 /// text-xs` de la app de siempre.
 fn section_action(id: &'static str, label: String, cx: &App) -> Stateful<Div> {
-    let hover = cx.theme().muted;
+    let hover = crate::theme::ghost_hover(cx);
     div()
         .id(id)
         .h_6()
@@ -233,7 +233,6 @@ fn tag_tone(tag: &SheetTag) -> Hsla {
 
 impl TaskView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let placeholder = tr(cx, "work:task.writeComment");
         let due = cx.new(|cx| DatePickerState::new(window, cx));
         // El selector avisa cuando alguien elige un día o lo quita; ponerle
         // desde aquí el de la tarea no avisa.
@@ -253,7 +252,7 @@ impl TaskView {
             thread: Thread::Talk,
             thread_of: None,
             problem: None,
-            comment: cx.new(|cx| TextareaState::new(window, cx).auto_grow(COMMENT_ROWS, 16).placeholder(placeholder)),
+            comment: cx.new(|cx| TextareaState::new(window, cx).auto_grow(COMMENT_ROWS, 16)),
             internal: false,
             editing: None,
             title_input: cx.new(|cx| InputState::new(window, cx)),
@@ -470,9 +469,14 @@ impl TaskView {
     /// [`Self::follow_link`].
     fn prose(&self, id: String, text: String, cx: &mut Context<Self>) -> Div {
         let view = cx.entity().downgrade();
-        crate::theme::prose_with_links(id, text, move |url, window, cx| {
-            let _ = view.update(cx, |this, cx| this.follow_link(url, window, cx));
-        })
+        crate::theme::prose_with_links(
+            id,
+            text,
+            move |url, window, cx| {
+                let _ = view.update(cx, |this, cx| this.follow_link(url, window, cx));
+            },
+            cx,
+        )
     }
 
     /// Pasa a editar un comentario, con lo que dice.
@@ -1075,7 +1079,7 @@ impl TaskView {
                             }
                         }))
                     })
-                    .child(self.render_draft("comment", Draft::Comment, cx)),
+                    .child(self.render_draft("comment", Draft::Comment, cx).placeholder(tr(cx, self.comment_promise))),
             )
             .children(self.render_mentions(cx))
             .child(
@@ -1086,7 +1090,9 @@ impl TaskView {
                     .child(
                         Button::new("comment-send")
                             .primary()
-                            .small()
+                            .xsmall()
+                                    .h_7()
+                                    .px_2p5()
                             .icon(Icon::new(Lucide::Send))
                             .label(tr(cx, if internal { "work:task.commentInternally" } else { "work:task.comment" }))
                             .disabled(empty)
@@ -1105,7 +1111,10 @@ impl TaskView {
                             .rounded(px(4.))
                             .text_xs()
                             .text_color(muted)
-                            .hover(move |style| style.text_color(foreground))
+                            // `disabled={sending || !comment.trim()}`, con
+                            // su `disabled:opacity-50`: apagado como «Comentar».
+                            .when(empty, |this| this.opacity(0.5))
+                            .when(!empty, |this| this.hover(move |style| style.text_color(foreground)))
                             .child(Icon::new(Lucide::Gavel).size_3())
                             .child(tr(cx, "work:decisions.record"))
                             .tooltip(not_yet(cx))
@@ -1260,6 +1269,7 @@ impl TaskView {
         let theme = cx.theme();
         let (muted, foreground, border, secondary, on_secondary, unknown, input) =
             (theme.muted_foreground, theme.foreground, theme.border, theme.secondary, theme.secondary_foreground, theme.muted, theme.input);
+        let field = crate::theme::field_background(cx);
         let view = cx.entity().downgrade();
         let tasks = Backend::core(cx).tasks();
         // El rótulo lleva `mb-1` y todo va a `space-y-3`: 4 px del rótulo a
@@ -1318,6 +1328,7 @@ impl TaskView {
             .rounded(px(8.))
             .border_1()
             .border_color(input)
+            .bg(field)
             .text_sm()
             .child(div().min_w_0().truncate().child(sheet.list.clone()))
             .child(Icon::new(IconName::ChevronDown).size_4().flex_none().text_color(muted))
@@ -1426,9 +1437,11 @@ impl TaskView {
             .flex()
             .items_center()
             .px_2p5()
-            .rounded(px(8.))
+            // `rounded-lg`: 10 px con el `--radius` de `index.css`.
+            .rounded(px(10.))
             .border_1()
             .border_color(input)
+            .bg(field)
             .text_sm()
             .text_color(muted)
             .child(tr(cx, "work:task.assign"))
@@ -1534,11 +1547,15 @@ impl TaskView {
             .flex_col()
             .gap_3()
             .text_sm()
-            .child(property(rail_label(IconName::Check, tr(cx, "work:task.status"), cx), status.into_any_element()))
+            // El chip del estado, el de la prioridad y la fila de etiquetas
+            // van en la app de siempre dentro de un renglón de texto, que
+            // mide más que ellos (24 px los dos chips, 2 px de más la fila):
+            // de ahí el relleno, que deja cada rótulo donde cae allí.
+            .child(property(rail_label(IconName::Check, tr(cx, "work:task.status"), cx), div().pb(px(2.)).child(status).into_any_element()))
             // Una subtarea no se mueve de lista: vive en la de su madre.
             .when(sheet.parent.is_none(), |this| this.child(property(rail_label(Lucide::FolderInput, tr(cx, "work:task.list"), cx), list.into_any_element())))
-            .child(property(rail_label(Lucide::Flag, tr(cx, "work:board.priority"), cx), priority.into_any_element()))
-            .child(property(rail_label(Lucide::Tag, tr(cx, "work:task.tags"), cx), tags.into_any_element()))
+            .child(property(rail_label(Lucide::Flag, tr(cx, "work:board.priority"), cx), div().pt(px(3.)).pb(px(1.)).child(priority).into_any_element()))
+            .child(property(rail_label(Lucide::Tag, tr(cx, "work:task.tags"), cx), tags.pb(px(2.)).into_any_element()))
             .child(property(rail_label(Lucide::Users, tr(cx, "work:task.assignees"), cx), assignees.into_any_element()))
             .children(blockers)
             .child(property(rail_label(Lucide::Calendar, tr(cx, "work:task.due"), cx), due.into_any_element()))
@@ -1700,7 +1717,9 @@ impl TaskView {
                             .child(
                                 Button::new("comment-edit-save")
                                     .primary()
-                                    .small()
+                                    .xsmall()
+                                    .h_7()
+                                    .px_2p5()
                                     .label(tr(cx, "work:task.save"))
                                     // `disabled={saving || !draft.trim()}`.
                                     .disabled(!cac_core::says_something(self.comment_edit.read(cx).value().as_ref()))
@@ -1709,7 +1728,9 @@ impl TaskView {
                             .child(
                                 Button::new("comment-edit-cancel")
                                     .outline()
-                                    .small()
+                                    .xsmall()
+                                    .h_7()
+                                    .px_2p5()
                                     .label(tr(cx, "work:task.cancel"))
                                     .on_click(cx.listener(|this, _, _, cx| this.cancel_editing_comment(cx))),
                             ),
@@ -1749,7 +1770,19 @@ impl TaskView {
         } else {
             // `text-lg font-semibold`: el título de una tarea no es el de
             // una pantalla.
-            div().id("task-title").test_support().text_lg().font_weight(FontWeight::SEMIBOLD).child(sheet.title.clone()).into_any_element()
+            div()
+                .id("task-title")
+                .test_support()
+                // El `textarea` del título: `text-lg` con su interlínea de
+                // 28 px, 2 px de relleno arriba y abajo, y el hueco que una
+                // caja en línea deja bajo su renglón.
+                .pt(px(2.))
+                .pb(px(5.))
+                .text_lg()
+                .line_height(px(28.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(sheet.title.clone())
+                .into_any_element()
         };
 
         // Dónde quedó: siempre a la vista, también sin nada escrito, que es
@@ -1806,14 +1839,18 @@ impl TaskView {
                             .child(
                                 Button::new("task-save")
                                     .primary()
-                                    .small()
+                                    .xsmall()
+                                    .h_7()
+                                    .px_2p5()
                                     .label(tr(cx, "work:task.save"))
                                     .on_click(cx.listener(|this, _, window, cx| this.save_edit(window, cx))),
                             )
                             .child(
                                 Button::new("task-cancel")
                                     .outline()
-                                    .small()
+                                    .xsmall()
+                                    .h_7()
+                                    .px_2p5()
                                     .label(tr(cx, "work:task.cancel"))
                                     .on_click(cx.listener(|this, _, _, cx| this.cancel_editing(cx))),
                             ),
@@ -1968,8 +2005,11 @@ impl TaskView {
             .gap_5()
             .child(title)
             .children(problem.map(|phrase| div().id("task-problem").test_support().text_sm().text_color(danger).child(phrase)))
-            .child(handoff)
-            .child(description)
+            // «Dónde quedó» y la descripción van seguidas, sin el hueco de
+            // las demás secciones: en `TaskDetailDrawer.tsx` las dos viven
+            // dentro de la misma zona para soltar ficheros (`FileDropZone`),
+            // que es un solo hijo del `space-y-5`.
+            .child(div().flex().flex_col().child(handoff).child(description))
             .children(attachments)
             .child(subtasks)
             .children(link_pr)
@@ -1995,11 +2035,7 @@ impl Render for TaskView {
             // La caja promete el `@` sólo donde nombra a alguien: en lo que
             // lee un cliente dice quién lo lee.
             let promise = cac_core::comment_placeholder(sheet.client_reads, self.internal);
-            if promise != self.comment_promise {
-                self.comment_promise = promise;
-                let text = tr(cx, promise);
-                self.comment.update(cx, |comment, cx| comment.set_placeholder(text, window, cx));
-            }
+            self.comment_promise = promise;
             // Lo recordado de la lista es de un `@`: cuando deja de
             // escribirse, se olvida.
             if self.mention_mark.is_some() {
@@ -2008,8 +2044,9 @@ impl Render for TaskView {
             }
         }
         let theme = cx.theme();
-        let (background, foreground, muted, border, primary, danger, hover) =
-            (theme.background, theme.foreground, theme.muted_foreground, theme.border, theme.primary, theme.danger, theme.muted);
+        let (background, foreground, muted, border, primary, danger) =
+            (theme.background, theme.foreground, theme.muted_foreground, theme.border, theme.primary, theme.danger);
+        let hover = crate::theme::ghost_hover(cx);
         let waiting = state.waiting_reason().map(|key| tr(cx, key));
 
         // La cabecera de `TaskDetailDrawer.tsx` (`h-12 gap-2 border-b
@@ -2081,11 +2118,13 @@ impl Render for TaskView {
                     .items_center()
                     .gap_1()
                     .rounded(px(8.))
-                    .text_xs()
+                    // `Button size="sm"`: `text-[0.8rem]`, y el icono con
+                    // su `mr-1` además del `gap-1`.
+                    .text_size(rems(0.8))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(tone)
                     .hover(move |style| style.bg(hover))
-                    .child(Icon::new(icon).size_3())
+                    .child(Icon::new(icon).size_3().mr_1())
                     .child(label)
                     .tooltip(not_yet(cx))
                     .test_support()
@@ -2187,10 +2226,15 @@ impl Render for TaskView {
                     .children(task_id)
                     .child(div().flex_1())
                     .child(
+                        // `Button size="icon-xs"` (`size-6`) con la × a
+                        // `size-4`: como hijo y no como icono del botón,
+                        // que le pondría el tamaño de su talla.
                         Button::new("task-close")
                             .ghost()
                             .xsmall()
-                            .icon(Icon::new(Lucide::X))
+                            .size_6()
+                            .p_0()
+                            .child(Icon::new(Lucide::X).size_4())
                             .tooltip(tr(cx, "work:task.close"))
                             .on_click(|_, _, cx| Backend::core(cx).tasks().close()),
                     ),
