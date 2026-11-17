@@ -38,7 +38,8 @@ winresource = "0.1.34"
 # de otro sitio, y `identity::tests` falla si deja de coincidir.
 [package.metadata.deb]
 name = "cac-desktop"
-maintainer = "Guz Studio <dev@guz-studio.dev>"
+# El contacto que jose dio para los paquetes (17-nov-2026).
+maintainer = "G Studio <jose@guz-studio.dev>"
 section = "office"
 priority = "optional"
 extended-description = "Cliente de escritorio nativo de cac (CAC Nativa). Convive con la app anterior: guarda su sesión y sus datos en una carpeta propia."
