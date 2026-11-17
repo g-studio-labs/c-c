@@ -21,7 +21,7 @@ use gpui_kit::*;
 
 use crate::backend::Backend;
 use crate::lang::{locale, tr};
-use crate::mywork::MyWorkView;
+use crate::mywork::{Leading, MyWorkView};
 
 /// El ancho del carril y el de la tarjeta que va en el aire.
 const LANE_WIDTH: f32 = 220.;
@@ -36,6 +36,10 @@ const POPOVER_OVERHANG: f32 = -8.;
 const HOVER_DELAY: Duration = Duration::from_millis(220);
 /// El margen para pasar de la celda al detalle que la tapa sin que se cierre.
 const LEAVE_GRACE: Duration = Duration::from_millis(80);
+/// El interlineado del calendario (`leading-[normal]` en `ItemCalendar.tsx`):
+/// el de la propia letra, 1,21 en Inter, y no el 1,5 del resto de la app.
+/// Las medidas del diseño están tomadas con él.
+const LEADING: f32 = 1.21;
 /// Cómo se cuenta lo que hay en un día: «3 tareas».
 const COUNT_KEY: &str = "common:count.tasks";
 
@@ -92,6 +96,11 @@ fn view_index(view: CalendarView) -> usize {
         CalendarView::Month => 0,
         CalendarView::Week => 1,
     }
+}
+
+/// Un anillo por dentro (`ring-N ring-inset`): no ocupa, como el de CSS.
+fn inset_ring(color: Hsla, width: f32) -> Vec<BoxShadow> {
+    vec![BoxShadow { color, offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(width), inset: true }]
 }
 
 /// Los colores del calendario, leídos una vez por pintado: los del tema y
@@ -214,7 +223,8 @@ fn avatar(chip: &CalendarChip, size: f32, paint: &Paint, cx: &App) -> Option<Div
             .justify_center()
             .rounded_full()
             .bg(crate::theme::space_color("", cac_core::hue_index(name), cx))
-            .text_size(px(size / 2. - 0.5))
+            // `INITIALS_SIZE` en `parts.tsx`: 8,5 px en el de 18 y 9 en el de 20.
+            .text_size(px(if size <= 18. { 8.5 } else { 9. }))
             .font_weight(FontWeight::BOLD)
             .text_color(paint.primary_foreground)
             .child(initials),
@@ -300,7 +310,7 @@ pub(crate) struct LiftedChip {
 impl Render for LiftedChip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let paint = Paint::of(cx);
-        div().w(px(LIFTED_WIDTH)).text_color(paint.foreground).child(card_face(&self.chip, false, None, &paint, cx).shadow_lg())
+        div().w(px(LIFTED_WIDTH)).text_color(paint.foreground).line_height(relative(LEADING)).child(card_face(&self.chip, false, None, &paint, cx).shadow_lg())
     }
 }
 
@@ -692,6 +702,9 @@ impl MyWorkView {
         } else {
             div()
                 .id("cal-day-rows")
+                // `-mx-1`: las filas se salen cuatro píxeles del relleno
+                // del detalle, y su fondo al pasar llega más cerca del borde.
+                .mx(px(-4.))
                 .max_h(px(320.))
                 .flex()
                 .flex_col()
@@ -718,7 +731,8 @@ impl MyWorkView {
             .border_color(paint.border_strong)
             .bg(paint.popover)
             .text_color(paint.popover_foreground)
-            .shadow_xl()
+            // `shadow-[0_18px_40px_rgba(0,0,0,.55)]`.
+            .shadow(vec![BoxShadow { color: gpui_kit::black().opacity(0.55), offset: point(px(0.), px(18.)), blur_radius: px(40.), spread_radius: px(0.), inset: false }])
             .cursor_default()
             // Lo que se pulsa dentro no llega a la celda de debajo.
             .occlude()
@@ -759,7 +773,7 @@ impl MyWorkView {
                                 .cursor_pointer()
                                 .hover(move |style| style.bg(accent).text_color(foreground))
                                 .on_click(cx.listener(|this, _, _, cx| this.close_day(cx)))
-                                .child(Icon::new(Lucide::X).size_4())
+                                .child(Icon::new(Lucide::X).size(px(15.)))
                                 .test_support(),
                         )),
                     ),
@@ -780,7 +794,7 @@ impl MyWorkView {
                         .child(tr(cx, "common:calendar.newForDay"))
                         .test_support(),
                 )
-                .when(!pinned, |this| this.child(div().id("cal-click-to-pin").text_color(paint.muted_foreground.opacity(0.7)).child(tr(cx, "common:calendar.clickToPin")).test_support())),
+                .when(!pinned, |this| this.child(div().id("cal-click-to-pin").text_color(paint.muted_soft).child(tr(cx, "common:calendar.clickToPin")).test_support())),
             )
             .test_support();
         // Diferido: se pinta después de todo el mes, encima de las celdas
@@ -812,8 +826,11 @@ impl MyWorkView {
             .when(last && column == 6, |this| this.rounded_br(px(9.)))
             .cursor_pointer()
             .hover(move |style| style.bg(heat_hover))
+            // Con su detalle a la vista, `ring-1 ring-primary/70 ring-inset`;
+            // con una tarjeta encima, `bg-primary/10 ring-2 ring-primary`.
+            .when(open, |this| this.shadow(inset_ring(primary.opacity(0.7), 1.)))
             .aria_label(label)
-            .drag_over::<LiftedChip>(move |style, _, _, _| style.bg(primary.opacity(0.1)))
+            .drag_over::<LiftedChip>(move |style, _, _, _| style.bg(primary.opacity(0.1)).shadow(inset_ring(primary, 2.)))
             .on_drop(cx.listener(move |this, lifted: &LiftedChip, _, cx| this.set_due(lifted.chip.id.clone(), Some(drop_day.clone()), cx)))
             .on_hover(cx.listener(move |this, over: &bool, _, cx| this.hover_day(&hover_day, *over, cx)))
             .on_click(cx.listener(move |this, _, window, cx| this.pin_day(&open_day, window, cx)))
@@ -1268,7 +1285,8 @@ impl MyWorkView {
             .flex_col()
             .gap(px(14.))
             .p_4()
-            .children(error.map(|error| div().id("calendar-error").flex_none().text_sm().text_color(paint.error).child(error).test_support()))
+            .line_height(relative(LEADING))
+            .children(error.map(|error| div().id("calendar-error").flex_none().leading_sm().text_color(paint.error).child(error).test_support()))
             .child(header)
             .children(summary)
             // El carril y el calendario se deslizan cada uno por su lado,
