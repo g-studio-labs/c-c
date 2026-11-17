@@ -14,6 +14,7 @@ use gpui_kit::component::{ActiveTheme, Disableable, Icon};
 use gpui_kit::*;
 
 use crate::backend::Backend;
+use crate::theme::Leading as _;
 use crate::lang::{error_text, locale, tr};
 
 /// El ancho de la tarjeta, el de la app de siempre (`max-w-sm`).
@@ -46,13 +47,14 @@ fn card_body(cx: &App) -> Div {
         .border_1()
         .border_color(theme.foreground.opacity(0.1))
         .bg(theme.group_box)
-        .text_sm()
+        .leading_sm()
 }
 
 /// Un campo con su rótulo encima (`Label`: `text-sm font-medium`), a
 /// `space-y-2`.
 fn field(label: String, input: impl IntoElement) -> Div {
-    div().flex().flex_col().gap_2().child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label)).child(input)
+    // `leading-none`: el rótulo mide lo que su letra, no un renglón.
+    div().flex().flex_col().gap_2().child(div().leading_sm().line_height(px(14.)).font_weight(FontWeight::MEDIUM).child(label)).child(input)
 }
 
 /// Un fallo, en su caja (`rounded-md bg-destructive/10 px-3 py-2 text-sm`).
@@ -66,7 +68,7 @@ fn failure(id: &'static str, message: String, cx: &App) -> impl IntoElement {
         .py_2()
         .rounded(px(8.))
         .bg(danger.opacity(0.1))
-        .text_sm()
+        .leading_sm()
         .text_color(danger)
         .child(message)
 }
@@ -230,7 +232,7 @@ impl SignIn {
                                 div()
                                     .id("sign-in-forgot")
                                     .test_support()
-                                    .text_xs()
+                                    .leading_xs()
                                     .text_color(muted)
                                     .cursor_pointer()
                                     .hover(move |style| style.underline().text_color(foreground))
@@ -244,6 +246,8 @@ impl SignIn {
                         Button::new("sign-in-submit")
                             .primary()
                             .w_full()
+                            .rounded(px(10.))
+                            .font_weight(FontWeight::MEDIUM)
                             .loading(self.busy)
                             .disabled(self.busy)
                             .label(tr(cx, if self.busy { "common:misc.signingIn" } else { "common:misc.signIn" }))
@@ -257,7 +261,7 @@ impl SignIn {
                     .items_center()
                     .gap_2()
                     .child(rule())
-                    .child(div().text_xs().text_color(muted).child(tr(cx, "common:misc.orElse")))
+                    .child(div().leading_xs().text_color(muted).child(tr(cx, "common:misc.orElse")))
                     .child(rule()),
             )
             .child(
@@ -269,17 +273,20 @@ impl SignIn {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(8.))
+                    // `Button variant="outline"`: `rounded-lg` (10 px) y, en
+                    // oscuro, `dark:bg-input/30`.
+                    .rounded(px(10.))
                     .border_1()
                     .border_color(input)
-                    .text_sm()
+                    .bg(crate::theme::field_background(cx))
+                    .leading_sm()
                     .font_weight(FontWeight::MEDIUM)
                     .hover(move |style| style.bg(hover))
                     .child(tr(cx, "common:misc.continueAsGuest"))
                     .tooltip(move |window, cx| Tooltip::new(not_yet.clone()).build(window, cx))
                     .test_support(),
             )
-            .child(div().mt_2().text_xs().text_center().text_color(muted).child(tr(cx, "common:misc.guestNote")))
+            .child(div().mt_2().leading_xs().text_center().text_color(muted).child(tr(cx, "common:misc.guestNote")))
     }
 
     fn render_forgot(&self, step: Forgot, cx: &mut Context<Self>) -> Div {
@@ -291,7 +298,7 @@ impl SignIn {
                 .flex_col()
                 .gap_1()
                 .child(div().font_weight(FontWeight::MEDIUM).child(tr(cx, "common:account.forgotTitle")))
-                .child(div().text_sm().text_color(muted).child(tr(cx, "common:account.forgotLead"))),
+                .child(div().leading_sm().text_color(muted).child(tr(cx, "common:account.forgotLead"))),
         );
         form = match step {
             Forgot::Sent => form.child(
@@ -302,7 +309,7 @@ impl SignIn {
                     .py_2()
                     .rounded(px(8.))
                     .bg(sent_bg)
-                    .text_sm()
+                    .leading_sm()
                     .child(tr(cx, "common:account.forgotSent")),
             ),
             Forgot::Asking => form.child(field(
@@ -316,6 +323,8 @@ impl SignIn {
                 Button::new("forgot-send")
                     .primary()
                     .w_full()
+                    .rounded(px(10.))
+                    .font_weight(FontWeight::MEDIUM)
                     .loading(self.busy)
                     .disabled(self.busy || empty)
                     .label(tr(cx, "common:account.forgotSend"))
@@ -326,6 +335,8 @@ impl SignIn {
             Button::new("forgot-back")
                 .ghost()
                 .w_full()
+                .rounded(px(10.))
+                .font_weight(FontWeight::MEDIUM)
                 .label(tr(cx, "common:account.backToSignIn"))
                 .on_click(cx.listener(|this, _, window, cx| this.back_to_sign_in(window, cx))),
         )
@@ -350,7 +361,7 @@ impl Render for SignIn {
                         .flex_col()
                         .gap_1()
                         .child(crate::brand::brand(cx.theme().group_box, cx))
-                        .child(div().text_sm().text_color(muted).child(tr(cx, "common:misc.signInLead"))),
+                        .child(div().leading_sm().text_color(muted).child(tr(cx, "common:misc.signInLead"))),
                 )
                 .child(div().px_4().child(form)),
         )
@@ -443,7 +454,7 @@ impl Render for NewPassword {
             _ => None,
         };
         let refused = if complaint.is_none() { self.error.clone() } else { None };
-        let field = |label: String, input: Input| div().flex().flex_col().gap_1p5().child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label)).child(input);
+        let field = |label: String, input: Input| div().flex().flex_col().gap_1p5().child(div().leading_sm().font_weight(FontWeight::MEDIUM).child(label)).child(input);
         card(cx).child(
             div()
                 .w(px(CARD_WIDTH))
@@ -460,9 +471,9 @@ impl Render for NewPassword {
                         .items_center()
                         .gap_2()
                         .child(Icon::new(Lucide::KeyRound).size_5().flex_none().text_color(muted))
-                        .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(tr(cx, "common:admin.setNewPassword"))),
+                        .child(div().leading_lg().font_weight(FontWeight::SEMIBOLD).child(tr(cx, "common:admin.setNewPassword"))),
                 )
-                .child(div().text_sm().text_color(muted).child(tr(cx, "common:admin.setByAdmin")))
+                .child(div().leading_sm().text_color(muted).child(tr(cx, "common:admin.setByAdmin")))
                 .child(
                     div()
                         .flex()
@@ -472,13 +483,15 @@ impl Render for NewPassword {
                         .child(field(tr(cx, "common:admin.newPassword"), Input::new(&self.next).id("new-password-next").mask_toggle()))
                         .child(
                             field(tr(cx, "common:admin.confirmNewPassword"), Input::new(&self.confirm).id("new-password-confirm").mask_toggle())
-                                .children(complaint.map(|message| div().id("new-password-error").test_support().text_xs().text_color(danger).child(message))),
+                                .children(complaint.map(|message| div().id("new-password-error").test_support().leading_xs().text_color(danger).child(message))),
                         )
-                        .children(refused.map(|message| div().id("new-password-refused").test_support().text_sm().text_color(danger).child(message)))
+                        .children(refused.map(|message| div().id("new-password-refused").test_support().leading_sm().text_color(danger).child(message)))
                         .child(
                             Button::new("new-password-submit")
                                 .primary()
                                 .w_full()
+                                .rounded(px(10.))
+                                .font_weight(FontWeight::MEDIUM)
                                 .loading(self.busy)
                                 .disabled(self.busy || check != FormCheck::Ready)
                                 .label(tr(cx, if self.busy { "common:admin.saving" } else { "common:admin.changePassword" }))
