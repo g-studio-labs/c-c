@@ -8,7 +8,9 @@
 use cac_core::{check_new_password, check_sign_in, ApiError, FormCheck};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme, Disableable};
+use gpui_kit::assets::IconName as Lucide;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme, Disableable, Icon};
 use gpui_kit::*;
 
 use crate::backend::Backend;
@@ -28,6 +30,10 @@ fn card(cx: &App) -> Div {
         .text_color(theme.foreground)
 }
 
+/// La tarjeta de entrar: la `Card` de la app de siempre (`gap-4 rounded-xl
+/// bg-card py-4 text-sm` con su aro `ring-1 ring-foreground/10`; `rounded-xl`
+/// son 14 px con el `--radius` de `index.css`). El margen de los lados lo
+/// pone cada parte (`px-4`), como `CardHeader` y `CardContent`.
 fn card_body(cx: &App) -> Div {
     let theme = cx.theme();
     div()
@@ -35,18 +41,22 @@ fn card_body(cx: &App) -> Div {
         .flex()
         .flex_col()
         .gap_4()
-        .p_6()
-        .rounded(theme.radius)
+        .py_4()
+        .rounded(px(14.))
         .border_1()
-        .border_color(theme.border)
+        .border_color(theme.foreground.opacity(0.1))
         .bg(theme.group_box)
+        .text_sm()
 }
 
+/// Un campo con su rótulo encima (`Label`: `text-sm font-medium`), a
+/// `space-y-2`.
 fn field(label: String, input: impl IntoElement) -> Div {
     div().flex().flex_col().gap_2().child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label)).child(input)
 }
 
-/// Un fallo, en su caja. Con identificador para que una prueba lo encuentre.
+/// Un fallo, en su caja (`rounded-md bg-destructive/10 px-3 py-2 text-sm`).
+/// Con identificador para que una prueba lo encuentre.
 fn failure(id: &'static str, message: String, cx: &App) -> impl IntoElement {
     let danger = cx.theme().danger;
     div()
@@ -54,7 +64,7 @@ fn failure(id: &'static str, message: String, cx: &App) -> impl IntoElement {
         .test_support()
         .px_3()
         .py_2()
-        .rounded_md()
+        .rounded(px(8.))
         .bg(danger.opacity(0.1))
         .text_sm()
         .text_color(danger)
@@ -84,7 +94,8 @@ pub struct SignIn {
 
 impl SignIn {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let username = cx.new(|cx| InputState::new(window, cx));
+        // El ejemplo del campo es el de `Login.tsx`: no se traduce, es un usuario.
+        let username = cx.new(|cx| InputState::new(window, cx).placeholder("admin"));
         let password = cx.new(|cx| InputState::new(window, cx).masked(true));
         let forgot_login = cx.new(|cx| InputState::new(window, cx));
 
@@ -192,46 +203,87 @@ impl SignIn {
         .detach();
     }
 
+    /// El formulario de entrar, con las medidas de `Login.tsx`
+    /// (`space-y-4`), y debajo lo de entrar como invitado, que esta app
+    /// todavía no tiene: se pinta en su sitio y lo dice al pasar el ratón.
     fn render_sign_in(&self, cx: &mut Context<Self>) -> Div {
-        let muted = cx.theme().muted_foreground;
+        let theme = cx.theme();
+        let (muted, foreground, border, input, hover) = (theme.muted_foreground, theme.foreground, theme.border, theme.input, theme.muted);
+        let not_yet = tr(cx, "common:misc.notInThisApp");
+        let rule = move || div().h(px(1.)).flex_1().bg(border);
         div()
             .flex()
             .flex_col()
-            .gap_4()
-            .child(field(tr(cx, "common:misc.username"), Input::new(&self.username).id("sign-in-username")))
             .child(
-                field(
-                    tr(cx, "common:misc.password"),
-                    Input::new(&self.password).id("sign-in-password").mask_toggle(),
-                )
-                .child(
-                    div().flex().child(
-                        div()
-                            .id("sign-in-forgot")
-                            .test_support()
-                            .text_xs()
-                            .text_color(muted)
-                            .cursor_pointer()
-                            .hover(|style| style.underline())
-                            .on_click(cx.listener(|this, _, window, cx| this.open_forgot(window, cx)))
-                            .child(tr(cx, "common:account.forgot")),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(field(tr(cx, "common:misc.username"), Input::new(&self.username).id("sign-in-username")))
+                    .child(
+                        field(
+                            tr(cx, "common:misc.password"),
+                            Input::new(&self.password).id("sign-in-password").mask_toggle(),
+                        )
+                        .child(
+                            div().flex().child(
+                                div()
+                                    .id("sign-in-forgot")
+                                    .test_support()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .cursor_pointer()
+                                    .hover(move |style| style.underline().text_color(foreground))
+                                    .on_click(cx.listener(|this, _, window, cx| this.open_forgot(window, cx)))
+                                    .child(tr(cx, "common:account.forgot")),
+                            ),
+                        ),
+                    )
+                    .children(self.error.clone().map(|message| failure("sign-in-error", message, cx)))
+                    .child(
+                        Button::new("sign-in-submit")
+                            .primary()
+                            .w_full()
+                            .loading(self.busy)
+                            .disabled(self.busy)
+                            .label(tr(cx, if self.busy { "common:misc.signingIn" } else { "common:misc.signIn" }))
+                            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
                     ),
-                ),
             )
-            .children(self.error.clone().map(|message| failure("sign-in-error", message, cx)))
             .child(
-                Button::new("sign-in-submit")
-                    .primary()
-                    .w_full()
-                    .loading(self.busy)
-                    .disabled(self.busy)
-                    .label(tr(cx, if self.busy { "common:misc.signingIn" } else { "common:misc.signIn" }))
-                    .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
+                div()
+                    .mt_4()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(rule())
+                    .child(div().text_xs().text_color(muted).child(tr(cx, "common:misc.orElse")))
+                    .child(rule()),
             )
+            .child(
+                div()
+                    .id("sign-in-guest")
+                    .mt_4()
+                    .w_full()
+                    .h_8()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(input)
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .hover(move |style| style.bg(hover))
+                    .child(tr(cx, "common:misc.continueAsGuest"))
+                    .tooltip(move |window, cx| Tooltip::new(not_yet.clone()).build(window, cx))
+                    .test_support(),
+            )
+            .child(div().mt_2().text_xs().text_center().text_color(muted).child(tr(cx, "common:misc.guestNote")))
     }
 
     fn render_forgot(&self, step: Forgot, cx: &mut Context<Self>) -> Div {
-        let (muted, sent_bg) = (cx.theme().muted_foreground, cx.theme().accent);
+        let (muted, sent_bg) = (cx.theme().muted_foreground, cx.theme().muted);
         let empty = self.forgot_login.read(cx).value().trim().is_empty();
         let mut form = div().flex().flex_col().gap_4().child(
             div()
@@ -248,7 +300,7 @@ impl SignIn {
                     .test_support()
                     .px_3()
                     .py_2()
-                    .rounded_md()
+                    .rounded(px(8.))
                     .bg(sent_bg)
                     .text_sm()
                     .child(tr(cx, "common:account.forgotSent")),
@@ -289,16 +341,18 @@ impl Render for SignIn {
         };
         card(cx).child(
             card_body(cx)
+                // `CardHeader` (`px-4`, lo suyo a `space-y-1`): la marca y
+                // para qué se entra.
                 .child(
                     div()
+                        .px_4()
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .gap_3()
                         .child(crate::brand::brand(cx.theme().group_box, cx))
                         .child(div().text_sm().text_color(muted).child(tr(cx, "common:misc.signInLead"))),
                 )
-                .child(form),
+                .child(div().px_4().child(form)),
         )
     }
 }
@@ -317,7 +371,10 @@ pub struct NewPassword {
 impl NewPassword {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let masked = |window: &mut Window, cx: &mut Context<Self>| cx.new(|cx| InputState::new(window, cx).masked(true));
-        let (current, next, confirm) = (masked(window, cx), masked(window, cx), masked(window, cx));
+        let (current, confirm) = (masked(window, cx), masked(window, cx));
+        // La nueva dice en el propio campo cuánto tiene que medir.
+        let hint = tr(cx, "common:admin.min8chars");
+        let next = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(hint));
 
         // Lo que se reprocha depende de lo escrito, y no hace falta pedir que
         // se repinte: un campo que cambia ya invalida la ventana que lo pinta.
@@ -372,50 +429,61 @@ impl NewPassword {
 }
 
 impl Render for NewPassword {
+    /// La de `ForcedChangePassword` en `ChangePassword.tsx`: una caja con
+    /// borde y sin fondo (`max-w-sm space-y-4 rounded-xl border p-6`), la
+    /// llave junto al título, y el formulario a `space-y-3` con cada campo a
+    /// `space-y-1.5`. Lo que no vale de lo escrito se dice bajo el último
+    /// campo, en pequeño; lo que contestó el servidor, sobre el botón.
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted = cx.theme().muted_foreground;
+        let theme = cx.theme();
+        let (muted, border, danger) = (theme.muted_foreground, theme.border, theme.danger);
         let check = self.check(cx);
-        // Lo que no vale de lo escrito, o lo que contestó el servidor.
         let complaint = match &check {
             FormCheck::Problem { key } => Some(tr(cx, key)),
-            _ => self.error.clone(),
+            _ => None,
         };
+        let refused = if complaint.is_none() { self.error.clone() } else { None };
+        let field = |label: String, input: Input| div().flex().flex_col().gap_1p5().child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label)).child(input);
         card(cx).child(
-            card_body(cx)
+            div()
+                .w(px(CARD_WIDTH))
+                .flex()
+                .flex_col()
+                .gap_4()
+                .p_6()
+                .rounded(px(14.))
+                .border_1()
+                .border_color(border)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(Icon::new(Lucide::KeyRound).size_5().flex_none().text_color(muted))
+                        .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(tr(cx, "common:admin.setNewPassword"))),
+                )
+                .child(div().text_sm().text_color(muted).child(tr(cx, "common:admin.setByAdmin")))
                 .child(
                     div()
                         .flex()
                         .flex_col()
-                        .gap_1()
+                        .gap_3()
+                        .child(field(tr(cx, "common:admin.currentPassword"), Input::new(&self.current).id("new-password-current").mask_toggle()))
+                        .child(field(tr(cx, "common:admin.newPassword"), Input::new(&self.next).id("new-password-next").mask_toggle()))
                         .child(
-                            div()
-                                .text_lg()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(tr(cx, "common:admin.setNewPassword")),
+                            field(tr(cx, "common:admin.confirmNewPassword"), Input::new(&self.confirm).id("new-password-confirm").mask_toggle())
+                                .children(complaint.map(|message| div().id("new-password-error").test_support().text_xs().text_color(danger).child(message))),
                         )
-                        .child(div().text_sm().text_color(muted).child(tr(cx, "common:admin.setByAdmin"))),
-                )
-                .child(field(
-                    tr(cx, "common:admin.currentPassword"),
-                    Input::new(&self.current).id("new-password-current").mask_toggle(),
-                ))
-                .child(field(
-                    tr(cx, "common:admin.newPassword"),
-                    Input::new(&self.next).id("new-password-next").mask_toggle(),
-                ))
-                .child(field(
-                    tr(cx, "common:admin.confirmNewPassword"),
-                    Input::new(&self.confirm).id("new-password-confirm").mask_toggle(),
-                ))
-                .children(complaint.map(|message| failure("new-password-error", message, cx)))
-                .child(
-                    Button::new("new-password-submit")
-                        .primary()
-                        .w_full()
-                        .loading(self.busy)
-                        .disabled(self.busy || check != FormCheck::Ready)
-                        .label(tr(cx, if self.busy { "common:admin.saving" } else { "common:admin.changePassword" }))
-                        .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
+                        .children(refused.map(|message| div().id("new-password-refused").test_support().text_sm().text_color(danger).child(message)))
+                        .child(
+                            Button::new("new-password-submit")
+                                .primary()
+                                .w_full()
+                                .loading(self.busy)
+                                .disabled(self.busy || check != FormCheck::Ready)
+                                .label(tr(cx, if self.busy { "common:admin.saving" } else { "common:admin.changePassword" }))
+                                .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
+                        ),
                 ),
         )
     }
@@ -691,5 +759,37 @@ mod tests {
         wait_until(cx, "el rechazo del servidor llega", |cx| cx.update(|cx| view.read(cx).error.is_some()));
         assert_eq!(server.hits("/api/v1/auth/change-password"), 1);
         assert_eq!(cx.update(|cx| view.read(cx).error.clone()).as_deref(), Some("Falló el cambio"));
+        let (refused, complaint) = cx
+            .update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                (window.try_find("new-password-refused").is_some(), window.try_find("new-password-error").is_some())
+            })
+            .unwrap();
+        assert!(refused, "el rechazo del servidor no está en pantalla");
+        assert!(!complaint, "reprocha lo escrito cuando lo que falló fue el servidor");
+    }
+
+    /// Entrar como invitado, que la app de siempre ofrece y ésta todavía no,
+    /// está pintado en su sitio; y no sale al pedir el enlace de la contraseña.
+    ///
+    /// Roturas que atrapa: dejarlo fuera por no tener aún qué hacer con él
+    /// (la tarjeta se queda más corta que la de la otra app); arrastrarlo
+    /// al paso de «olvidé mi contraseña», donde no pinta nada.
+    #[gpui_kit::test]
+    fn guest_access_is_painted_only_on_the_sign_in_form(cx: &mut TestAppContext) {
+        let server = FakeServer::start();
+        server.install(cx);
+        let (window, _) = open(cx, SignIn::new);
+        let shown = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.try_find("sign-in-guest").is_some()
+            })
+            .unwrap()
+        };
+        assert!(shown(cx), "falta entrar como invitado");
+
+        click(window, cx, "sign-in-forgot");
+        assert!(!shown(cx), "sigue ofreciéndolo al pedir el enlace");
     }
 }

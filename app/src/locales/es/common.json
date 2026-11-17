@@ -467,6 +467,8 @@
     "signingIn": "Entrando…",
     "signIn": "Entrar",
     "continueAsGuest": "Continuar como invitado",
+    "guestNote": "El acceso de invitado se limita a las herramientas del propio equipo (imágenes y cripto).",
+    "orElse": "o",
     "errCreateOrg": "No se pudo crear la organización",
     "switchOrg": "Cambiar de organización",
     "noOrganization": "Sin organización",

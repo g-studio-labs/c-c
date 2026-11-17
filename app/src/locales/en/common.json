@@ -467,6 +467,8 @@
     "signingIn": "Signing in…",
     "signIn": "Sign in",
     "continueAsGuest": "Continue as guest",
+    "guestNote": "Guest access is limited to the on-device tools (Image Tool, Crypto Tools).",
+    "orElse": "or",
     "errCreateOrg": "Failed to create organization",
     "switchOrg": "Switch organization",
     "noOrganization": "No organization",
