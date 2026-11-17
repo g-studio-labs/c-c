@@ -53,6 +53,14 @@ pub struct SheetActivity {
     pub when: String,
     /// Texto llano, tal como lo escribió el servidor.
     pub body: String,
+    /// Quién hizo lo que la línea cuenta, por el nombre con que se le llama
+    /// («Agente de Ana» si fue un agente con su token). El servidor lo manda
+    /// en los cambios de estado de una tarea interna desde el 17-nov-2026
+    /// (command-and-control-383; jose: «quién lo hizo sería un plus útil»).
+    /// `None` en todo lo demás: lo que deja GitHub, lo de antes de esa
+    /// fecha, y lo de una tarea que lee un cliente, cuya línea es pública y
+    /// no dice qué compañero fue.
+    pub author: Option<String>,
 }
 
 /// Si esa persona puede editar o borrar ese comentario: quien lo escribió, o
@@ -219,13 +227,10 @@ pub fn task_sheet(
 ) -> TaskSheet {
     let task = &detail.task;
     let client_reads = client_reads(detail);
+    let agent_of = |name: &str| text_with(locale, "work:task.agentOf", &[("name", name)]);
     let comment = |comment: &TaskComment| SheetComment {
         id: comment.id.clone(),
-        author: if is_agent_note(comment) {
-            text_with(locale, "work:task.agentOf", &[("name", &comment.author_name)])
-        } else {
-            comment.author_name.clone()
-        },
+        author: if is_agent_note(comment) { agent_of(&comment.author_name) } else { comment.author_name.clone() },
         when: said_at(locale, &comment.created_at),
         body: comment.body.trim().to_string(),
         audience: client_reads.then(|| {
@@ -285,7 +290,16 @@ pub fn task_sheet(
         talk: talk.into_iter().map(comment).collect(),
         activity: system
             .into_iter()
-            .map(|line| SheetActivity { id: line.id.clone(), when: said_at(locale, &line.created_at), body: line.body.trim().to_string() })
+            .map(|line| SheetActivity {
+                id: line.id.clone(),
+                when: said_at(locale, &line.created_at),
+                body: line.body.trim().to_string(),
+                // El mismo campo del que sale el autor de un comentario. En
+                // una línea del servidor llega vacío casi siempre.
+                author: Some(line.author_name.trim()).filter(|name| !name.is_empty()).map(|name| {
+                    if line.via.as_deref() == Some("mcp") { agent_of(name) } else { name.to_string() }
+                }),
+            })
             .collect(),
         notes: notes.into_iter().map(comment).collect(),
         attachments: detail
@@ -539,6 +553,34 @@ mod tests {
         // Sin líneas del servidor no hay nada que enseñar aparte.
         detail["comments"] = json!([comment("person", |_| {})]);
         assert!(sheet_of(detail, json!([])).activity.is_empty());
+    }
+
+    /// Una línea del servidor dice quién hizo lo que cuenta cuando el servidor
+    /// lo manda, y nada cuando no.
+    ///
+    /// Roturas que atrapa: perder el nombre de quien cambió el estado; firmar
+    /// con un nombre vacío (o de espacios) las líneas que no traen ninguno,
+    /// que son casi todas; y decir que lo movió Ana cuando fue un agente con
+    /// su token.
+    #[test]
+    fn a_line_the_server_noted_says_who_did_it_when_the_server_says_so() {
+        let mut detail = contract();
+        let line = |id: &str, edit: fn(&mut Value)| {
+            comment(id, |c| {
+                c["kind"] = json!("system");
+                c["body"] = json!("status: pending → in_progress");
+                edit(c);
+            })
+        };
+        detail["comments"] = json!([
+            line("person", |c| c["authorName"] = json!("Jose Guzman")),
+            line("nobody", |c| c["authorName"] = json!("")),
+            line("blank", |c| c["authorName"] = json!("  ")),
+            line("agent", |c| c["via"] = json!("mcp")),
+        ]);
+        let sheet = sheet_of(detail, json!([]));
+        let who: Vec<(&str, Option<&str>)> = sheet.activity.iter().map(|line| (line.id.as_str(), line.author.as_deref())).collect();
+        assert_eq!(who, [("person", Some("Jose Guzman")), ("nobody", None), ("blank", None), ("agent", Some("Agente de Ana Pérez"))]);
     }
 
     /// En una tarea que el cliente lee, cada comentario dice quién lo lee; en

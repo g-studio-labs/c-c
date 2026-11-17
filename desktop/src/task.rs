@@ -1539,7 +1539,11 @@ impl TaskView {
         // mismo; quizá sí se pueda mover a la derecha para tenerlos más a
         // mano, abajo de la fecha, en un bloque con su propio scroll». Y
         // como renglones grises, no como tarjetas. Lo último, arriba; sin
-        // ninguna línea, el bloque no sale.
+        // ninguna línea, el bloque no sale. Junto a la hora, quién lo hizo
+        // cuando el servidor lo dice («11/11/26, 10:38:42 · Jose Guzman»):
+        // el mismo jose, ese día, sobre el cambio de estado de una tarea
+        // interna: «quién lo hizo sería un plus útil»
+        // (command-and-control-383). Sin nombre, la hora sola, como antes.
         let activity = (!sheet.activity.is_empty()).then(|| {
             property(
                 rail_label(Lucide::Activity, tr(cx, "work:task.activity"), cx),
@@ -1561,7 +1565,18 @@ impl TaskView {
                             .id(SharedString::from(format!("activity-{}", line.id)))
                             .flex()
                             .flex_col()
-                            .child(div().text_size(px(11.)).line_height(px(15.)).child(line.when.clone()))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap_x_1()
+                                    .text_size(px(11.))
+                                    .line_height(px(15.))
+                                    .child(line.when.clone())
+                                    .children(line.author.as_ref().map(|author| {
+                                        div().id(SharedString::from(format!("activity-{}-who", line.id))).child(format!("· {author}")).test_support()
+                                    })),
+                            )
                             .child(div().leading_xs().child(line.body.clone()))
                             .test_support()
                     }))
@@ -3077,6 +3092,8 @@ mod tests {
             let mut line = said.clone();
             line["id"] = json!(format!("line-{n}"));
             line["kind"] = json!("system");
+            // Las pares dicen quién; las impares, como casi todas, no.
+            line["authorName"] = json!(if n % 2 == 0 { "Jose Guzman" } else { "" });
             line["body"] = json!(format!("status: pending → in_progress, y un commit de nombre bien largo que la nombra ({n})"));
             thread.push(line);
         }
@@ -3126,6 +3143,23 @@ mod tests {
         let window = open(&plain, cx);
         open_first_task(window, cx);
         assert!(!on_screen(window, "task-activity", cx), "hay bloque de actividad sin ninguna línea");
+        stop(cx);
+    }
+
+    /// Junto a la hora de una línea sale quién lo hizo cuando el servidor lo
+    /// dice, y nada cuando no.
+    ///
+    /// Roturas que atrapa: no enseñar el nombre de quien cambió el estado; y
+    /// un «·» suelto, sin nombre detrás, en las líneas que no traen ninguno.
+    #[gpui_kit::test]
+    fn a_line_says_who_did_it_next_to_its_time_when_the_server_says_so(cx: &mut TestAppContext) {
+        let server = server_with_activity(2);
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+
+        assert!(on_screen(window, "activity-line-0", cx) && on_screen(window, "activity-line-1", cx));
+        assert!(on_screen(window, "activity-line-0-who", cx), "no dice quién cambió el estado");
+        assert!(!on_screen(window, "activity-line-1-who", cx), "firma una línea que no trae a nadie");
         stop(cx);
     }
 
