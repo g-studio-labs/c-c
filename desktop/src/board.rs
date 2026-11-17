@@ -13,10 +13,23 @@ use gpui_kit::*;
 
 use crate::backend::Backend;
 use crate::lang::locale;
-use crate::mywork::{due_tone, priority_chip, MyWorkView};
+use crate::mywork::{due_tone, priority_chip, Leading, MyWorkView};
 
 /// El ancho de una columna y de la tarjeta que va en el aire (`w-72`).
 const COLUMN_WIDTH: f32 = 288.;
+/// `rounded-lg` en la app de siempre: su `--radius`, 10 px, no los 8 de
+/// fábrica.
+const RADIUS: f32 = 10.;
+
+/// Una sombra de CSS (`0 y blur spread rgb(0 0 0 / alpha)`).
+fn shadow(y: f32, blur: f32, spread: f32, alpha: f32) -> BoxShadow {
+    BoxShadow { color: gpui_kit::black().opacity(alpha), offset: point(px(0.), px(y)), blur_radius: px(blur), spread_radius: px(spread), inset: false }
+}
+
+/// Un anillo por dentro (`ring-1 ring-inset`): no ocupa, como el de CSS.
+fn inset_ring(color: Hsla) -> BoxShadow {
+    BoxShadow { color, offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(1.), inset: true }
+}
 
 /// La tarjeta que va en el aire: de cuál se trata, para preguntarle al core
 /// dónde puede caer, y lo que se pinta bajo el puntero.
@@ -27,7 +40,10 @@ pub(crate) struct LiftedCard {
 
 impl Render for LiftedCard {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().w(px(COLUMN_WIDTH - 18.)).opacity(0.95).child(card_face(&self.card, cx).shadow_lg())
+        // `w-72 rotate-2 scale-[1.03] rounded-md opacity-95 shadow-2xl` en
+        // `KanbanBoard.tsx`: más ancha que en su columna y con la sombra
+        // grande. Girarla no se puede: GPUI sólo gira iconos, no cajas.
+        div().w(px(COLUMN_WIDTH)).opacity(0.95).child(card_face(&self.card, cx).shadow_2xl())
     }
 }
 
@@ -42,7 +58,8 @@ pub(crate) fn status_tone(status: BoardStatus, cx: &App) -> Hsla {
     crate::theme::css_color(token, cx)
 }
 
-/// Lo que se ve de una tarjeta, esté en su columna o en el aire.
+/// Lo que se ve de una tarjeta, esté en su columna o en el aire
+/// (`TaskCardMini.tsx`: `rounded-lg border bg-raised px-2.5 py-2 shadow-sm`).
 fn card_face(card: &BoardCard, cx: &App) -> Div {
     let theme = cx.theme();
     let (muted, border, mono) = (theme.muted_foreground, theme.border, theme.mono_font_family.clone());
@@ -71,10 +88,13 @@ fn card_face(card: &BoardCard, cx: &App) -> Div {
         .w_full()
         .flex()
         .flex_col()
-        .rounded_lg()
+        .rounded(px(RADIUS))
         .border_1()
         .border_color(border)
         .bg(raised)
+        // El 1,5 del cuerpo, también cuando va en el aire, fuera de la
+        // pantalla que se lo da a las demás.
+        .line_height(relative(1.5))
         .px_2p5()
         .py_2()
         .shadow_sm()
@@ -88,7 +108,7 @@ fn card_face(card: &BoardCard, cx: &App) -> Div {
                 .child(div().flex_none().font_family(mono.clone()).child(format!("#{}", card.seq)))
                 .child(div().min_w_0().truncate().child(card.path.clone())),
         )
-        .child(div().mt_0p5().text_sm().line_clamp(2).child(card.title.clone()))
+        .child(div().mt_0p5().leading_sm().line_clamp(2).text_ellipsis().child(card.title.clone()))
         .child(
             div()
                 .mt_1p5()
@@ -130,6 +150,9 @@ impl MyWorkView {
     fn render_column(&self, column: BoardColumn, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (border, muted, danger, primary, hover) = (theme.border, theme.muted_foreground, theme.danger, theme.primary, theme.primary.opacity(0.4));
+        // Al pasar por encima, la tarjeta se levanta (`.lift` en
+        // `index.css`): la sombra aparece sobre la suya de siempre.
+        let lifted_shadow = vec![shadow(1., 3., 0., 0.1), shadow(1., 2., -1., 0.1), shadow(8., 20., -8., 0.35)];
         let sunken = crate::theme::css_color("sunken", cx);
         let tone = status_tone(column.status, cx);
         let status = column.status;
@@ -141,16 +164,20 @@ impl MyWorkView {
             .as_ref()
             .is_some_and(|id| matches!(Backend::core(cx).my_work().drop_verdict(id, status), Some(DropVerdict::Refused { .. })));
         let count = column.cards.len();
-        let empty = column.cards.is_empty().then(|| div().px_1().py_6().text_xs().text_center().text_color(muted).child(column.empty_hint.clone()));
+        let empty = column.cards.is_empty().then(|| div().px_1().py_6().leading_xs().text_center().text_color(muted).child(column.empty_hint.clone()));
         let weak = cx.weak_entity();
         let cards = column.cards.into_iter().map(|card| {
             let (open_id, lifted, weak) = (card.id.clone(), LiftedCard { card: card.clone() }, weak.clone());
             let in_the_air = self.lifted.as_deref() == Some(card.id.as_str());
-            div()
+            let lifted_shadow = lifted_shadow.clone();
+            // La tarjeta misma es lo que se pulsa: el borde que cambia al
+            // pasar por encima es el suyo.
+            card_face(&card, cx)
                 .id(SharedString::from(format!("card-{}", card.id)))
+                .flex_none()
                 .cursor_pointer()
                 .when(in_the_air, |this| this.opacity(0.4))
-                .hover(move |style| style.border_color(hover))
+                .hover(move |style| style.border_color(hover).shadow(lifted_shadow.clone()))
                 .on_click(move |_, _, cx| {
                     let id = open_id.clone();
                     Backend::run(cx, move |core| async move { core.tasks().open(&id).await });
@@ -164,23 +191,28 @@ impl MyWorkView {
                     let lifted = lifted.clone();
                     cx.new(|_| lifted)
                 })
-                .child(card_face(&card, cx))
                 .test_support()
         });
         div()
             .id(SharedString::from(format!("column-{key}")))
+            .relative()
             .w(px(COLUMN_WIDTH))
             .h_full()
             .flex()
             .flex_none()
             .flex_col()
-            .rounded_lg()
+            .rounded(px(RADIUS))
             .border_1()
             .border_color(if refused { danger.opacity(0.4) } else { border })
             .border_t_2()
             .bg(sunken)
             .overflow_hidden()
-            .child(div().h(px(2.)).flex_none().bg(tone))
+            // El filo de arriba en el color de su estado (`border-t-2
+            // border-t-status-*`): GPUI da un solo color a los cuatro lados,
+            // así que el de arriba se pinta encima, sólo ese lado y con las
+            // mismas esquinas (lo absoluto se mide aquí desde el borde de
+            // fuera, no desde dentro de él como en CSS).
+            .child(div().absolute().top_0().left_0().right_0().h(px(RADIUS + 4.)).rounded_t(px(RADIUS)).border_t_2().border_color(tone))
             .child(
                 div()
                     .flex()
@@ -192,22 +224,25 @@ impl MyWorkView {
                     .border_b_1()
                     .border_color(border)
                     .child(div().size(px(8.)).flex_none().rounded_full().bg(tone))
-                    .child(div().truncate().text_xs().font_weight(FontWeight::SEMIBOLD).child(column.title.to_uppercase()))
+                    .child(div().truncate().leading_xs().font_weight(FontWeight::SEMIBOLD).child(column.title.to_uppercase()))
                     .child(
                         div()
                             .id(SharedString::from(format!("column-count-{key}")))
                             .px_1p5()
                             .rounded_full()
                             .bg(tone.opacity(0.15))
-                            .text_xs()
+                            .leading_xs()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(tone)
                             .child(count.to_string())
                             .test_support(),
                     )
                     // Terminadas y cerradas sin pedir: una raya, que no es
-                    // lo mismo que «no hay ninguna».
-                    .when(!column.asked, |this| this.child(div().ml_auto().text_xs().text_color(muted).child("—"))),
+                    // lo mismo que «no hay ninguna». Va a la letra del
+                    // cuerpo (16/24): en `MyWork.tsx` es un `<span>` sin
+                    // tamaño, y por eso esas dos cabeceras salen seis
+                    // píxeles más altas también en la app de siempre.
+                    .when(!column.asked, |this| this.child(div().ml_auto().flex_none().text_base().line_height(px(24.)).text_color(muted).child("—"))),
             )
             .child(
                 div()
@@ -222,7 +257,8 @@ impl MyWorkView {
                     .when(refused, |this| this.opacity(0.5))
                     .drag_over::<LiftedCard>(move |style, lifted, _, cx| {
                         match Backend::core(cx).my_work().drop_verdict(&lifted.card.id, status) {
-                            Some(DropVerdict::Refused { .. }) => style.bg(danger.opacity(0.15)).opacity(1.),
+                            // `bg-destructive/15 ring-1 ring-inset ring-destructive/50`.
+                            Some(DropVerdict::Refused { .. }) => style.bg(danger.opacity(0.15)).shadow(vec![inset_ring(danger.opacity(0.5))]).opacity(1.),
                             _ => style.bg(primary.opacity(0.05)),
                         }
                     })
@@ -253,7 +289,12 @@ impl MyWorkView {
             .min_h_0()
             .flex()
             .flex_col()
-            .children(error.map(|error| div().id("board-error").px_4().pt_3().text_sm().text_color(danger).child(error).test_support()))
+            // El relleno va dos veces, como en la app de siempre: el `p-4`
+            // del cuerpo de `MyWork.tsx` y el del propio tablero
+            // (`flex h-full gap-3 overflow-x-auto p-4`), que es el que se
+            // desliza de lado.
+            .p_4()
+            .children(error.map(|error| div().id("board-error").px_4().pb_2().leading_sm().text_color(danger).child(error).test_support()))
             .child(
                 div()
                     .id("board-columns")
