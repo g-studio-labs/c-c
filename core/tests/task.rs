@@ -1130,3 +1130,209 @@ async fn a_subtask_the_server_refuses_is_not_listed() {
     assert_eq!(refusal(rig.core.tasks().add_subtask("Otra línea").await), "insufficient-role");
     assert_eq!(open_task(&rig).subtasks.len(), 1);
 }
+
+/// Un árbol con dos espacios de la organización `o1` y uno de otra: listas
+/// sueltas, una carpeta con otra dentro, y dos listas del canal del cliente
+/// `p1`, una en cada espacio.
+fn places() -> Value {
+    json!([
+        { "id": "sp1", "orgId": "o1", "name": "Interno",
+          "lists": [{ "id": "l1", "name": "tasks" }],
+          "folders": [{ "id": "f1", "name": "Clientes",
+              "lists": [{ "id": "l3", "name": "Acme", "projectId": "p1" }],
+              "folders": [{ "id": "f2", "name": "Viejos", "folders": [], "lists": [{ "id": "l4", "name": "Archivo" }] }] }] },
+        { "id": "sp2", "orgId": "o1", "name": "Proteus", "folders": [],
+          "lists": [{ "id": "l2", "name": "App" }, { "id": "l5", "name": "Soporte", "projectId": "p1" }] },
+        { "id": "sp3", "orgId": "o2", "name": "De otra organización", "folders": [], "lists": [{ "id": "l9", "name": "Ajena" }] },
+    ])
+}
+
+/// Una tarea de la organización `o1`, en la lista `l1` del espacio `sp1`.
+fn placed(project: &str, visibility: &str) -> Value {
+    let mut task = detail("t1", "Tarea", "pending", project, visibility);
+    task["task"]["orgId"] = json!("o1");
+    task["task"]["spaceId"] = json!("sp1");
+    task["ref"] = json!("interno-12");
+    task
+}
+
+fn as_detail(task: &Value) -> cac_core::TaskDetail {
+    serde_json::from_value(task.clone()).unwrap()
+}
+
+/// Lo ofrecido, como `Espacio: lista` y sus marcas (`*` la suya, `!` cambia la ref).
+fn offered(task: &Value) -> Vec<String> {
+    let spaces: Vec<cac_core::SpaceTree> = serde_json::from_value(places()).unwrap();
+    cac_core::task::move_targets(&spaces, &as_detail(task))
+        .into_iter()
+        .flat_map(|group| {
+            group.targets.into_iter().map(move |target| {
+                let marks = format!("{}{}", if target.current { "*" } else { "" }, if target.crosses_space { "!" } else { "" });
+                format!("{}: {}{marks}", group.space, target.label)
+            })
+        })
+        .collect()
+}
+
+/// Una tarea del equipo puede ir a cualquier lista de su organización, y las
+/// de otro espacio avisan de que allí cambia de ref.
+///
+/// Roturas que atrapa: ofrecer listas de otra organización (el servidor
+/// contesta 403); dejarse las de una subcarpeta; no marcar la suya, o marcar
+/// como «cambia la ref» una de su mismo espacio; callar que cambia en otro.
+#[test]
+fn a_team_task_can_go_to_any_list_of_its_organization() {
+    assert_eq!(
+        offered(&placed("", "")),
+        [
+            "Interno: tasks*",
+            "Interno: Clientes · Acme",
+            "Interno: Clientes · Viejos · Archivo",
+            "Proteus: App!",
+            "Proteus: Soporte!",
+        ]
+    );
+    // Un servidor que no diga el espacio de la tarea: se lee del árbol, por
+    // la lista en la que está.
+    let mut unplaced = placed("", "");
+    unplaced["task"].as_object_mut().unwrap().remove("spaceId");
+    assert_eq!(offered(&unplaced)[3], "Proteus: App!");
+}
+
+/// La tarjeta de un cliente sólo se ofrece a las listas de su canal, y
+/// conserva su folio aunque cambie de espacio. Una subtarea, a ninguna.
+///
+/// Roturas que atrapa: ofrecerle una lista de otro canal o del equipo (el
+/// servidor contesta 409, `move-leaves-channel`); decir que su ref cambia
+/// (su número es del proyecto, no del espacio); ofrecer mover una subtarea,
+/// que vive en la lista de su madre; dejar de aplicar la regla a una
+/// tarjeta retirada, que sigue gastando su folio.
+#[test]
+fn a_clients_card_can_only_go_to_lists_of_that_client() {
+    let mut card = placed("p1", "public");
+    card["task"]["listId"] = json!("l3");
+    assert_eq!(offered(&card), ["Interno: Clientes · Acme*", "Proteus: Soporte"]);
+    card["task"]["visibility"] = json!("internal");
+    assert_eq!(offered(&card), ["Interno: Clientes · Acme*", "Proteus: Soporte"]);
+
+    let mut subtask = placed("", "");
+    subtask["task"]["parentId"] = json!("t0");
+    assert_eq!(offered(&subtask), Vec::<String>::new());
+}
+
+/// Antes de mover se pregunta diciendo a cuál va; a otro espacio, con el
+/// espacio delante y avisando de que la ref de ahora deja de serlo.
+///
+/// Roturas que atrapa: una pregunta que no nombra el destino, o que nombra
+/// «App» sin decir de qué espacio; callar que la ref cambia, o decirlo
+/// cuando no cambia; preguntar por la lista en la que ya está o por una que
+/// no se le ofrece.
+#[test]
+fn the_question_before_moving_says_where_it_goes_and_when_the_ref_changes() {
+    use cac_core::task::{move_question, move_targets};
+    use cac_core::texts::Locale;
+    let spaces: Vec<cac_core::SpaceTree> = serde_json::from_value(places()).unwrap();
+    let task = as_detail(&placed("", ""));
+    let groups = move_targets(&spaces, &task);
+
+    let near = move_question(Locale::Es, &task, &groups, "l4").expect("hay que preguntar");
+    assert_eq!(near.title, "¿Mover a «Clientes · Viejos · Archivo»?");
+    assert!(near.body.contains("Su ref no cambia"), "{}", near.body);
+    assert_eq!((near.confirm.as_str(), near.cancel.as_str()), ("Mover", "Cancelar"));
+
+    let far = move_question(Locale::Es, &task, &groups, "l2").expect("hay que preguntar");
+    assert_eq!(far.title, "¿Mover a «Proteus › App»?");
+    assert!(far.body.contains("interno-12 deja de ser su ref"), "{}", far.body);
+
+    assert_eq!(move_question(Locale::Es, &task, &groups, "l1"), None, "preguntó por la lista en la que ya está");
+    assert_eq!(move_question(Locale::Es, &task, &groups, "l9"), None, "preguntó por una lista de otra organización");
+
+    // Sin referencia (un servidor de antes), se nombra por su número.
+    let mut bare = placed("", "");
+    bare.as_object_mut().unwrap().remove("ref");
+    let bare = as_detail(&bare);
+    assert!(move_question(Locale::Es, &bare, &groups, "l2").unwrap().body.contains("#12 deja de ser su ref"));
+}
+
+/// `rig`, con el árbol de `places` cargado y esa tarea abierta.
+async fn rig_with_places(task: Value) -> Rig {
+    let rig = rig().await;
+    Mock::given(method("GET")).and(path("/api/v1/task-spaces/")).respond_with(ok(places())).mount(&rig.server).await;
+    mount_task(&rig.server, "t1", task).await;
+    mount_columns(&rig.server).await;
+    rig.core.tree().load("o1").await;
+    rig.core.tasks().open("t1").await;
+    rig
+}
+
+/// Mover a otra lista manda `listId` en un `PATCH`, y la tarea queda como la
+/// contesta el servidor: en su lista nueva y con su ref nueva.
+///
+/// Roturas que atrapa: mandar otra cosa que la lista elegida; seguir
+/// enseñando la lista y la ref de antes después de mover.
+#[tokio::test]
+async fn moving_to_another_list_shows_the_task_in_its_new_place() {
+    let rig = rig_with_places(placed("", "")).await;
+    let mut moved = placed("", "");
+    moved["task"]["listId"] = json!("l2");
+    moved["task"]["spaceId"] = json!("sp2");
+    moved["task"]["seq"] = json!(301);
+    moved["listName"] = json!("App");
+    moved["spaceName"] = json!("Proteus");
+    moved["ref"] = json!("proteus-301");
+    Mock::given(method("PATCH")).and(path("/api/v1/tasks/t1")).respond_with(ok(moved)).mount(&rig.server).await;
+    assert_eq!(rig.core.tasks().move_question(cac_core::texts::Locale::Es, "l2").map(|question| question.title).as_deref(), Some("¿Mover a «Proteus › App»?"));
+
+    rig.core.tasks().move_to_list("l2").await.expect("se movió");
+
+    assert_eq!(patches(&rig.server).await, [json!({ "listId": "l2" })]);
+    let now = open_task(&rig);
+    assert_eq!((now.task.list_id.as_str(), now.list_name.as_str(), now.space_name.as_str()), ("l2", "App", "Proteus"));
+    assert_eq!(now.reference.as_deref(), Some("proteus-301"));
+    // Y lo que se le ofrece ya cuenta desde donde está ahora.
+    let current: Vec<String> = rig.core.tasks().move_targets().into_iter().flat_map(|group| group.targets).filter(|target| target.current).map(|target| target.list_id).collect();
+    assert_eq!(current, ["l2"]);
+}
+
+/// Lo que el servidor rechazaría no se le pide: se rechaza aquí, con su
+/// mismo código. Y a la lista en la que ya está no se pide nada.
+///
+/// Roturas que atrapa: mandar un movimiento que va a contestar 409 (una
+/// subtarea; la tarjeta de un cliente fuera de su canal) o 403 (a otra
+/// organización); un `PATCH` por elegir la lista en la que ya está.
+#[tokio::test]
+async fn a_move_the_server_would_refuse_is_not_sent() {
+    let mut card = placed("p1", "public");
+    card["task"]["listId"] = json!("l3");
+    let rig = rig_with_places(card).await;
+    assert_eq!(refusal(rig.core.tasks().move_to_list("l2").await), "move-leaves-channel");
+    assert_eq!(refusal(rig.core.tasks().move_to_list("l9").await), "channel-other-org");
+    rig.core.tasks().move_to_list("l3").await.expect("ya está ahí");
+    assert_eq!(patches(&rig.server).await, Vec::<Value>::new());
+
+    let mut subtask = placed("", "");
+    subtask["task"]["parentId"] = json!("t0");
+    let rig = rig_with_places(subtask).await;
+    assert_eq!(refusal(rig.core.tasks().move_to_list("l2").await), "move-subtask");
+    assert_eq!(patches(&rig.server).await, Vec::<Value>::new());
+}
+
+/// A una lista que el árbol no conoce se pide igual, y decide el servidor:
+/// si la rechaza, se dice con su código y la tarea sigue donde estaba.
+///
+/// Roturas que atrapa: no poder mover a una lista recién creada que el
+/// árbol aún no trae; dar por movida una tarea que el servidor no movió.
+#[tokio::test]
+async fn the_server_has_the_last_word_on_a_move() {
+    let rig = rig_with_places(placed("", "")).await;
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/tasks/t1"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({ "success": false, "message": "No", "error": "move-leaves-channel" })))
+        .mount(&rig.server)
+        .await;
+
+    assert_eq!(refusal(rig.core.tasks().move_to_list("l-nueva").await), "move-leaves-channel");
+
+    assert_eq!(patches(&rig.server).await, [json!({ "listId": "l-nueva" })]);
+    assert_eq!(open_task(&rig).task.list_id, "l1");
+}

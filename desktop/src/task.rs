@@ -36,6 +36,7 @@ use crate::theme::Leading as _;
 use crate::editor::{Incoming, MarkdownEditor};
 use crate::files;
 use crate::lang::{error_text, locale, tr};
+use cac_core::task::Question;
 
 /// El ancho del riel de propiedades: el de la app de siempre (`lg:w-72`).
 const RAIL_WIDTH: f32 = 288.;
@@ -1366,6 +1367,50 @@ impl TaskView {
         );
     }
 
+    /// Hace una pregunta del core y sólo si contestan que sí sigue con
+    /// `then`. Cancelar o Escape no hacen nada. Y si mientras se pregunta la
+    /// tarea abierta pasa a ser otra, tampoco: la respuesta era para aquélla.
+    fn ask(
+        &mut self,
+        question: Question,
+        level: PromptLevel,
+        then: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(task_id) = Self::open_task_id(cx) else { return };
+        let answer = window.prompt(level, &question.title, Some(&question.body), &[question.confirm.as_str(), question.cancel.as_str()], cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            this.update_in(cx, |this, window, cx| {
+                if Self::open_task_id(cx).as_deref() == Some(task_id.as_str()) {
+                    then(this, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Lleva la tarea abierta a otra lista, preguntando antes y diciendo a
+    /// cuál va (y, a otro espacio, que su ref cambia): `MoveToList` en
+    /// `TaskDetailDrawer.tsx`, que pregunta siempre. Qué se pregunta y qué
+    /// no se puede lo dice el core; lo que el servidor rechace, se dice.
+    pub(crate) fn ask_move_to_list(&mut self, list_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(question) = Backend::core(cx).tasks().move_question(locale(cx), &list_id) else { return };
+        self.ask(
+            question,
+            PromptLevel::Info,
+            move |this, window, cx| {
+                this.save("work:task.errMoveList", move |core| async move { core.tasks().move_to_list(&list_id).await }, |_, _, _| {}, window, cx);
+            },
+            window,
+            cx,
+        );
+    }
+
     /// Un desplegable de cosas que se ponen y se quitan: lo que la tarea
     /// tiene, marcado. Lo que ya tiene se pinta al lado, cada cosa con su
     /// forma; el botón sólo dice qué se puede hacer (`face`).
@@ -1537,10 +1582,12 @@ impl TaskView {
             }
         });
 
-        // Mover a otra lista: en la app de siempre es un desplegable con las
-        // listas agrupadas por espacio. Aquí todavía sólo dice en cuál vive.
-        let list = div()
-            .id("task-list")
+        // Mover a otra lista: el desplegable de `MoveToList`, con las listas
+        // a las que puede ir agrupadas por espacio (las de otro espacio
+        // dicen que allí cambia la ref) y la suya marcada. Cuáles se ofrecen
+        // lo dice el core; sin ninguna (el árbol aún no llegó), sólo dice en
+        // cuál vive.
+        let list_face = div()
             .w_full()
             .h_7()
             .flex()
@@ -1554,10 +1601,35 @@ impl TaskView {
             .border_color(input)
             .bg(field)
             .leading_sm()
-            .child(div().min_w_0().truncate().child(sheet.list.clone()))
-            .child(Icon::new(IconName::ChevronDown).size_4().flex_none().text_color(muted))
-            .tooltip(not_yet(cx))
-            .test_support();
+            .child(div().id("task-list-name").aria_label(sheet.list.clone()).min_w_0().truncate().child(sheet.list.clone()).test_support())
+            .child(Icon::new(IconName::ChevronDown).size_4().flex_none().text_color(muted));
+        let targets = tasks.move_targets();
+        let list = if targets.is_empty() {
+            div().id("task-list").w_full().child(list_face).test_support().into_any_element()
+        } else {
+            let (view, changes) = (view.clone(), tr(cx, "work:task.refWillChange"));
+            Button::new("task-list")
+                .ghost()
+                .p_0()
+                .h_auto()
+                .w_full()
+                .child(list_face)
+                .dropdown_menu(move |mut menu, _, _| {
+                    menu = menu.scrollable(true).max_h(px(360.));
+                    for group in targets.clone() {
+                        menu = menu.label(group.space);
+                        for target in group.targets {
+                            let (view, id) = (view.clone(), target.list_id);
+                            let name = if target.crosses_space { format!("{} · {changes}", target.label) } else { target.label };
+                            menu = menu.item(PopupMenuItem::new(name).checked(target.current).on_click(move |_, window, cx| {
+                                let _ = view.update(cx, |this, cx| this.ask_move_to_list(id.clone(), window, cx));
+                            }));
+                        }
+                    }
+                    menu
+                })
+                .into_any_element()
+        };
 
         let current_priority = sheet.priority.clone();
         let priority = Button::new("task-priority")
@@ -1829,7 +1901,7 @@ impl TaskView {
             // de ahí el relleno, que deja cada rótulo donde cae allí.
             .child(property(rail_label(IconName::Check, tr(cx, "work:task.status"), cx), div().pb(px(2.)).child(status).into_any_element()))
             // Una subtarea no se mueve de lista: vive en la de su madre.
-            .when(sheet.parent.is_none(), |this| this.child(property(rail_label(Lucide::FolderInput, tr(cx, "work:task.list"), cx), list.into_any_element())))
+            .when(sheet.parent.is_none(), |this| this.child(property(rail_label(Lucide::FolderInput, tr(cx, "work:task.list"), cx), list)))
             .child(property(rail_label(Lucide::Flag, tr(cx, "work:board.priority"), cx), div().pt(px(3.)).pb(px(1.)).child(priority).into_any_element()))
             .child(property(rail_label(Lucide::Tag, tr(cx, "work:task.tags"), cx), tags.pb(px(2.)).into_any_element()))
             .child(property(rail_label(Lucide::Users, tr(cx, "work:task.assignees"), cx), assignees.into_any_element()))
@@ -2439,7 +2511,7 @@ impl Render for TaskView {
                 .whitespace_nowrap()
                 .leading_xs()
                 .text_color(muted)
-                .child(div().flex_none().child(sheet.place.clone()))
+                .child(div().id("task-place").aria_label(sheet.place.clone()).flex_none().child(sheet.place.clone()).test_support())
                 .children(sheet.parent.clone().zip(sheet.parent_id.clone()).map(|(parent, id)| {
                     let hint = tr(cx, "work:task.openParent");
                     div().flex().min_w_0().child(div().flex_none().child("\u{a0}/\u{a0}")).child(
@@ -3875,6 +3947,153 @@ mod tests {
         });
         click(window, "task-parent", cx);
         wait_until(cx, "vuelve a la madre", |cx| open_task_id(cx).as_deref() == Some("t1"));
+        stop(cx);
+    }
+
+    /// El árbol del servidor de mentira para mover: la lista de la tarea
+    /// (`l1`, «App») y otra en una carpeta, en su espacio; y una en otro.
+    fn tree_to_move_in() -> serde_json::Value {
+        json!([
+            { "id": "sp1", "orgId": "o1", "name": "Interno", "color": "#888", "people": [],
+              "lists": [{ "id": "l1", "name": "App", "openCount": 1, "taskCount": 1 }],
+              "folders": [{ "id": "f1", "name": "Clientes", "folders": [], "lists": [{ "id": "l3", "name": "Incidencias", "openCount": 0, "taskCount": 0 }] }] },
+            { "id": "sp2", "orgId": "o1", "name": "Proteus", "color": "#888", "people": [], "folders": [],
+              "lists": [{ "id": "l2", "name": "Backend", "openCount": 0, "taskCount": 0 }] },
+        ])
+    }
+
+    /// La primera tarea como una del equipo y sin madre: se puede mover.
+    fn movable() -> serde_json::Value {
+        let mut task = detail("t1");
+        task["task"]["projectId"] = json!("");
+        task["task"]["parentId"] = serde_json::Value::Null;
+        task["parent"] = serde_json::Value::Null;
+        task["listName"] = json!("App");
+        task["spaceName"] = json!("Interno");
+        task
+    }
+
+    /// El servidor de siempre con ese árbol y esa tarea como la primera.
+    fn server_with_places(task: serde_json::Value) -> FakeServer {
+        let server = server();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(task)).with_priority(1));
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/task-spaces/")).respond_with(ok(tree_to_move_in())).with_priority(1));
+        server
+    }
+
+    /// Abre la primera tarea y espera a que el árbol diga a dónde puede ir.
+    fn open_first_task_with_places(window: AnyWindowHandle, cx: &mut TestAppContext) {
+        open_first_task(window, cx);
+        wait_until(cx, "llega el árbol", |cx| cx.update(|cx| Backend::core(cx).tree().state().spaces.iter().any(|space| space.id == "sp2")));
+    }
+
+    /// Cuántas piezas a la vista dicen eso.
+    fn labelled(window: AnyWindowHandle, label: &str, cx: &mut TestAppContext) -> usize {
+        use gpui_kit::test::TestQueryExt;
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.find_all_by_label(label).len()
+        })
+        .unwrap()
+    }
+
+    /// Elegir otra lista en «Lista» pregunta antes, diciendo a cuál va (y, a
+    /// otro espacio, que la ref de ahora deja de serlo); «Cancelar» no mueve
+    /// nada, y «Mover» lo pide y la página enseña la tarea en su sitio nuevo.
+    ///
+    /// Roturas que atrapa: un desplegable que no hace nada (lo que había) o
+    /// que mueve sin preguntar; una pregunta que no nombra el destino o
+    /// calla que cambia la ref; un «Cancelar» que mueve igual; un «Mover»
+    /// que manda otra lista; seguir enseñando el sitio de antes.
+    #[gpui_kit::test]
+    fn moving_to_another_list_asks_first_and_says_where_it_goes(cx: &mut TestAppContext) {
+        let server = server_with_places(movable());
+        let mut moved = movable();
+        moved["task"]["listId"] = json!("l2");
+        moved["task"]["spaceId"] = json!("sp2");
+        moved["listName"] = json!("Backend");
+        moved["spaceName"] = json!("Proteus");
+        moved["ref"] = json!("proteus-301");
+        server.mount(Mock::given(method("PATCH")).and(path("/api/v1/tasks/t1")).respond_with(ok(moved)));
+        let window = open(&server, cx);
+        open_first_task_with_places(window, cx);
+        assert_eq!(label_of(window, "task-place", cx), "Interno / App");
+
+        // En su mismo espacio: dice a cuál y que la ref no cambia.
+        click(window, "task-list", cx);
+        click_label(window, "Clientes · Incidencias", cx);
+        let (question, detail) = cx.pending_prompt().expect("no preguntó antes de mover");
+        assert!(question.contains("«Clientes · Incidencias»"), "no dice a cuál va: {question}");
+        assert!(detail.contains("Su ref no cambia"), "{detail}");
+        cx.simulate_prompt_answer("Cancelar");
+        settle(cx);
+        assert!(patches(&server).is_empty(), "movió la tarea aunque se canceló");
+
+        // A otro espacio: lo avisa en el desplegable y en la pregunta.
+        click(window, "task-list", cx);
+        click_label(window, "Backend · cambia la ref", cx);
+        let (question, detail) = cx.pending_prompt().expect("no preguntó antes de mover");
+        assert!(question.contains("«Proteus › Backend»"), "no dice a cuál va: {question}");
+        assert!(detail.contains("acme-7 deja de ser su ref"), "{detail}");
+        assert!(patches(&server).is_empty(), "movió la tarea sin esperar la respuesta");
+        cx.simulate_prompt_answer("Mover");
+
+        wait_until(cx, "la página enseña el sitio nuevo", |cx| label_of(window, "task-place", cx) == "Proteus / Backend");
+        assert_eq!(patches(&server), [json!({ "listId": "l2" })]);
+        assert_eq!(label_of(window, "task-list-name", cx), "Backend");
+        assert_eq!(cx.update(|cx| Backend::snapshot(cx).read(cx).task.detail.as_ref().and_then(|detail| detail.reference.clone())).as_deref(), Some("proteus-301"));
+        assert!(!on_screen(window, "task-problem", cx));
+        stop(cx);
+    }
+
+    /// Si el servidor no deja mover, se dice con su frase y la tarea sigue
+    /// donde estaba. Y elegir la lista en la que ya está no pregunta nada.
+    ///
+    /// Roturas que atrapa: callar un rechazo (un desplegable que parece no
+    /// hacer nada); enseñar la tarea en un sitio al que no fue; preguntar
+    /// «¿mover a App?» a quien ya está en App.
+    #[gpui_kit::test]
+    fn a_move_the_server_refuses_is_said_and_the_task_stays(cx: &mut TestAppContext) {
+        let server = server_with_places(movable());
+        server.mount(Mock::given(method("PATCH")).and(path("/api/v1/tasks/t1")).respond_with(
+            wiremock::ResponseTemplate::new(409).set_body_json(json!({ "success": false, "message": "No", "error": "move-leaves-channel" })),
+        ));
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task_with_places(window, cx);
+
+        with_view(window, &view, cx, |view, window, cx| view.ask_move_to_list("l1".into(), window, cx));
+        assert!(cx.pending_prompt().is_none(), "preguntó por la lista en la que ya está");
+
+        click(window, "task-list", cx);
+        click_label(window, "Backend · cambia la ref", cx);
+        cx.simulate_prompt_answer("Mover");
+
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+        assert_eq!(label_of(window, "task-place", cx), "Interno / App");
+        stop(cx);
+    }
+
+    /// A la tarjeta de un cliente sólo se le ofrecen las listas de su canal.
+    ///
+    /// Rotura que atrapa: ofrecerle una lista del equipo, que el servidor
+    /// rechaza (gastó un folio de ese cliente).
+    #[gpui_kit::test]
+    fn a_clients_card_is_offered_only_its_clients_lists(cx: &mut TestAppContext) {
+        let mut card = movable();
+        card["task"]["projectId"] = json!("p1");
+        let server = server();
+        let mut tree = tree_to_move_in();
+        tree[0]["lists"][0]["projectId"] = json!("p1");
+        tree[1]["lists"].as_array_mut().unwrap().push(json!({ "id": "l5", "name": "Soporte", "projectId": "p1" }));
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(card)).with_priority(1));
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/task-spaces/")).respond_with(ok(tree)).with_priority(1));
+        let window = open(&server, cx);
+        open_first_task_with_places(window, cx);
+
+        click(window, "task-list", cx);
+        // Conserva su folio aunque cambie de espacio: no avisa de la ref.
+        assert_eq!(labelled(window, "Soporte", cx), 1);
+        assert_eq!(labelled(window, "Clientes · Incidencias", cx) + labelled(window, "Backend · cambia la ref", cx) + labelled(window, "Backend", cx), 0);
         stop(cx);
     }
 

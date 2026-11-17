@@ -19,7 +19,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-pub use actions::{MAX_HANDOFF, MAX_TASK_TITLE};
+pub use actions::{move_question, move_targets, MoveGroup, MoveTarget, Question, MAX_HANDOFF, MAX_TASK_TITLE};
 pub use compose::{compose, continue_list, ComposeAction, ComposeEdit};
 pub use edit::{assignee_choices, retitled, shown_name, tag_choices, tag_color_for, title_line, Choice, MAX_TAG_NAME, TAG_PALETTE};
 pub use mention::{
