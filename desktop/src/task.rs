@@ -1411,6 +1411,21 @@ impl TaskView {
         );
     }
 
+    /// Borra la tarea abierta, preguntando antes: cuál es y qué se va con
+    /// ella (lo dice el core). Sólo con el «Borrar» de la pregunta; si se
+    /// borró, el core cierra la página y la quita de «Mi trabajo». Si no se
+    /// pudo, se dice y la tarea sigue abierta.
+    pub(crate) fn ask_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(question) = Backend::core(cx).tasks().delete_question(locale(cx)) else { return };
+        self.ask(
+            question,
+            PromptLevel::Critical,
+            |this, window, cx| this.save("work:notes.errDelete", |core| async move { core.tasks().delete().await }, |_, _, _| {}, window, cx),
+            window,
+            cx,
+        );
+    }
+
     /// Un desplegable de cosas que se ponen y se quitan: lo que la tarea
     /// tiene, marcado. Lo que ya tiene se pinta al lado, cada cosa con su
     /// forma; el botón sólo dice qué se puede hacer (`face`).
@@ -2555,8 +2570,8 @@ impl Render for TaskView {
             (place, reference, visible, task_id)
         });
         // El pie (`border-t px-4 py-2`): borrar la tarea, retirarla de la
-        // vista del cliente y cuándo se tocó por última vez. Borrar y
-        // retirar todavía no están en esta app.
+        // vista del cliente y cuándo se tocó por última vez. Retirar
+        // todavía no está en esta app.
         let foot = sheet.as_ref().map(|sheet| {
             let action = |id: &'static str, icon: Lucide, label: String, tone: Hsla| {
                 div()
@@ -2576,8 +2591,6 @@ impl Render for TaskView {
                     .hover(move |style| style.bg(hover))
                     .child(Icon::new(icon).size_3().mr_1())
                     .child(label)
-                    .tooltip(not_yet(cx))
-                    .test_support()
             };
             div()
                 .id("task-foot")
@@ -2589,8 +2602,15 @@ impl Render for TaskView {
                 .py_2()
                 .border_t_1()
                 .border_color(border)
-                .child(action("task-delete", Lucide::Trash, tr(cx, "work:task.deleteTask"), danger))
-                .when(sheet.client_reads, |this| this.child(action("task-withdraw", Lucide::EyeOff, tr(cx, "work:task.withdraw"), foreground)))
+                .child(
+                    action("task-delete", Lucide::Trash, tr(cx, "work:task.deleteTask"), danger)
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, window, cx| this.ask_delete(window, cx)))
+                        .test_support(),
+                )
+                .when(sheet.client_reads, |this| {
+                    this.child(action("task-withdraw", Lucide::EyeOff, tr(cx, "work:task.withdraw"), foreground).tooltip(not_yet(cx)).test_support())
+                })
                 .child(div().id("task-updated").ml_auto().leading_xs().text_color(muted).child(sheet.updated.clone()).test_support())
         });
 
@@ -4094,6 +4114,94 @@ mod tests {
         // Conserva su folio aunque cambie de espacio: no avisa de la ref.
         assert_eq!(labelled(window, "Soporte", cx), 1);
         assert_eq!(labelled(window, "Clientes · Incidencias", cx) + labelled(window, "Backend · cambia la ref", cx) + labelled(window, "Backend", cx), 0);
+        stop(cx);
+    }
+
+    /// Los `DELETE` que llegaron a esa tarea.
+    fn deletions(server: &FakeServer, id: &str) -> usize {
+        asked(server, "DELETE", &format!("/api/v1/tasks/{id}")).len()
+    }
+
+    fn server_that_deletes() -> FakeServer {
+        let server = server();
+        server.mount(
+            Mock::given(method("DELETE"))
+                .and(path_regex("^/api/v1/tasks/[^/]+$"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({ "success": true, "message": "Task deleted" }))),
+        );
+        server
+    }
+
+    /// Las tareas que «Mi trabajo» tiene cargadas.
+    fn my_work(cx: &mut TestAppContext) -> Vec<String> {
+        cx.update(|cx| Backend::core(cx).my_work().state().tasks.into_iter().map(|task| task.id).collect())
+    }
+
+    /// «Borrar la tarea» pregunta antes, nombrándola y diciendo qué se va
+    /// con ella; «Cancelar» no borra nada, y «Borrar» la borra, cierra la
+    /// página y su fila sale de «Mi trabajo».
+    ///
+    /// Roturas que atrapa: un botón que no hace nada (lo que había) o que
+    /// borra sin preguntar; una pregunta que no dice qué tarea; un
+    /// «Cancelar» que borra igual; un «Borrar» que no pide nada; quedarse
+    /// en la página de una tarea que ya no existe, o con su fila en la
+    /// lista (el servidor de mentira la sigue listando).
+    #[gpui_kit::test]
+    fn deleting_the_task_asks_first_names_it_and_closes_the_page(cx: &mut TestAppContext) {
+        let server = server_that_deletes();
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+
+        click(window, "task-delete", cx);
+        let (question, detail) = cx.pending_prompt().expect("no preguntó antes de borrar");
+        assert!(question.contains("«Subir el backend»"), "no dice qué tarea: {question}");
+        assert!(detail.contains("comentarios") && detail.contains("subtareas no se borran"), "{detail}");
+        cx.simulate_prompt_answer("Cancelar");
+        settle(cx);
+        assert_eq!(deletions(&server, "t1"), 0, "borró la tarea aunque se canceló");
+        assert!(on_screen(window, "task-page", cx));
+
+        click(window, "task-delete", cx);
+        assert_eq!(deletions(&server, "t1"), 0, "borró la tarea sin esperar la respuesta");
+        cx.simulate_prompt_answer("Borrar");
+
+        wait_until(cx, "se cierra la página", |cx| !on_screen(window, "task-page", cx));
+        assert_eq!(deletions(&server, "t1"), 1);
+        assert_eq!(my_work(cx), ["t2"]);
+        assert!(!on_screen(window, "work-row-t1", cx) && on_screen(window, "work-row-t2", cx));
+        stop(cx);
+    }
+
+    /// Si no se pudo borrar, se dice y la tarea sigue abierta y en la lista.
+    /// Y una respuesta que llega con otra tarea abierta no borra ninguna.
+    ///
+    /// Roturas que atrapa: cerrar la página como si se hubiera borrado;
+    /// callar el fallo; borrar la tarea que se abrió mientras la pregunta
+    /// era de la anterior.
+    #[gpui_kit::test]
+    fn a_delete_that_fails_or_whose_task_changed_deletes_nothing(cx: &mut TestAppContext) {
+        // Sólo se puede borrar la segunda: de la primera el servidor dice 404.
+        let server = server();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t2")).respond_with(ok(detail("t2"))));
+        server.mount(Mock::given(method("DELETE")).and(path("/api/v1/tasks/t2")).respond_with(ok(json!(null))));
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+
+        click(window, "task-delete", cx);
+        cx.simulate_prompt_answer("Borrar");
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+        assert!(on_screen(window, "task-page", cx));
+        assert_eq!(my_work(cx), ["t1", "t2"]);
+
+        click(window, "task-delete", cx);
+        open_other_task(cx);
+        wait_until(cx, "llega la otra", |cx| {
+            cx.update(|cx| Backend::snapshot(cx).read(cx).task.detail.as_ref().is_some_and(|detail| detail.task.id == "t2"))
+        });
+        cx.simulate_prompt_answer("Borrar");
+        settle(cx);
+        assert_eq!(deletions(&server, "t2"), 0, "borró la tarea que se abrió después de preguntar");
+        assert_eq!(deletions(&server, "t1"), 1);
         stop(cx);
     }
 

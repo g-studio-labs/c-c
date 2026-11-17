@@ -188,6 +188,7 @@
     "activity": "Activity",
     "deleteTaskTitle": "Delete task \"{{name}}\"?",
     "deleteTaskBody": "Removes it with its comments and attachments. This can't be undone.",
+    "deleteTaskKeepsSubtasks": "Its subtasks are not deleted with it.",
     "deleteTask": "Delete task",
     "withdrawTitle": "Take this off the client's board?",
     "withdrawBody": "They stop seeing it. Its ticket number stays spent — they may already have quoted it — so their numbering keeps a gap.",

@@ -1336,3 +1336,122 @@ async fn the_server_has_the_last_word_on_a_move() {
     assert_eq!(patches(&rig.server).await, [json!({ "listId": "l-nueva" })]);
     assert_eq!(open_task(&rig).task.list_id, "l1");
 }
+
+/// `rig`, con «Mi trabajo» cargado con las tareas `t1` y `t2` y la `t1` abierta.
+async fn rig_with_my_work() -> Rig {
+    let rig = rig().await;
+    let row = |id: &str| {
+        let mut row: Value = serde_json::from_str(include_str!("fixtures/open_task.json")).unwrap();
+        row["id"] = json!(id);
+        row
+    };
+    Mock::given(method("GET")).and(path("/api/v1/tasks/")).respond_with(ok(json!([row("t1"), row("t2")]))).mount(&rig.server).await;
+    mount_task(&rig.server, "t1", detail("t1", "Subir el backend", "pending", "", "")).await;
+    mount_columns(&rig.server).await;
+    rig.core.my_work().load(None).await;
+    rig.core.tasks().open("t1").await;
+    rig
+}
+
+fn my_work_ids(rig: &Rig) -> Vec<String> {
+    rig.core.my_work().state().tasks.into_iter().map(|task| task.id).collect()
+}
+
+/// Antes de borrar se pregunta nombrando la tarea y diciendo qué se va con
+/// ella; si tiene subtareas, que ésas no se borran.
+///
+/// Roturas que atrapa: una pregunta que no dice qué tarea se borra; callar
+/// que las subtareas se quedan (el servidor no las borra, y quien borra una
+/// tarea partida en pasos da por hecho que se van); decirlo de una que no
+/// tiene ninguna.
+#[tokio::test]
+async fn the_question_before_deleting_names_the_task_and_what_goes_with_it() {
+    use cac_core::texts::Locale;
+    let rig = rig_with_my_work().await;
+    assert_eq!(rig.core.tasks().state().detail.unwrap().subtasks.len(), 1);
+
+    let question = rig.core.tasks().delete_question(Locale::Es).expect("hay tarea abierta");
+    assert_eq!(question.title, "¿Borrar la tarea «Subir el backend»?");
+    assert_eq!(question.body, "La quita con sus comentarios y sus adjuntos. No se puede deshacer. Sus subtareas no se borran con ella.");
+    assert_eq!((question.confirm.as_str(), question.cancel.as_str()), ("Borrar", "Cancelar"));
+
+    let mut alone = detail("t9", "Suelta", "pending", "", "");
+    alone["subtasks"] = json!([]);
+    mount_task(&rig.server, "t9", alone).await;
+    rig.core.tasks().open("t9").await;
+    assert_eq!(rig.core.tasks().delete_question(Locale::Es).unwrap().body, "La quita con sus comentarios y sus adjuntos. No se puede deshacer.");
+
+    rig.core.tasks().close();
+    assert_eq!(rig.core.tasks().delete_question(Locale::Es), None);
+}
+
+/// Borrar pide el `DELETE` de la tarea abierta, la cierra y la quita de «Mi
+/// trabajo» sin esperar a recargarlo.
+///
+/// Roturas que atrapa: borrar otra tarea, o por otra ruta; dejar abierta la
+/// página de una tarea que ya no existe; dejar su fila en «Mi trabajo»,
+/// pulsable (el servidor de mentira la sigue listando: sólo se va si se
+/// quita aquí); llevarse también las demás filas.
+#[tokio::test]
+async fn deleting_closes_the_task_and_takes_it_out_of_my_work() {
+    let rig = rig_with_my_work().await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/tasks/t1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true, "message": "Task deleted" })))
+        .mount(&rig.server)
+        .await;
+    assert_eq!(my_work_ids(&rig), ["t1", "t2"]);
+
+    rig.core.tasks().delete().await.expect("se borró");
+
+    assert_eq!(requests_to(&rig.server, "DELETE", "/api/v1/tasks/t1").await.len(), 1);
+    assert_eq!(rig.core.tasks().state().task_id, None);
+    assert_eq!(my_work_ids(&rig), ["t2"]);
+    // Sin árbol cargado no hay cuentas que poner al día.
+    assert_eq!(requests_to(&rig.server, "GET", "/api/v1/task-spaces/").await.len(), 0);
+}
+
+/// Con el árbol cargado, borrar lo vuelve a pedir: sus cuentas llevaban esa
+/// tarea (`fetchTree` tras `deleteTask` en la app de siempre).
+///
+/// Rotura que atrapa: una lista que sigue diciendo «3 abiertas» con dos.
+#[tokio::test]
+async fn deleting_brings_the_tree_again() {
+    let rig = rig_with_my_work().await;
+    Mock::given(method("GET")).and(path("/api/v1/task-spaces/")).respond_with(ok(places())).mount(&rig.server).await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/tasks/t1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true })))
+        .mount(&rig.server)
+        .await;
+    rig.core.tree().load("o1").await;
+
+    rig.core.tasks().delete().await.expect("se borró");
+
+    let asked = rig.server.received_requests().await.unwrap();
+    let trees: Vec<&str> = asked.iter().filter(|request| request.url.path() == "/api/v1/task-spaces/").map(|request| request.url.query().unwrap_or("")).collect();
+    assert_eq!(trees, ["orgId=o1", "orgId=o1"]);
+}
+
+/// Si el servidor no la borra, se dice y todo sigue como estaba; y sin tarea
+/// abierta no se pide nada.
+///
+/// Roturas que atrapa: cerrar la página y quitar la fila de una tarea que
+/// sigue existiendo; un `DELETE` sin tarea (a `/tasks/`).
+#[tokio::test]
+async fn a_delete_the_server_refuses_changes_nothing() {
+    let rig = rig_with_my_work().await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/tasks/t1"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({ "success": false, "message": "Forbidden", "error": "insufficient-role" })))
+        .mount(&rig.server)
+        .await;
+
+    assert_eq!(refusal(rig.core.tasks().delete().await), "insufficient-role");
+    assert_eq!(rig.core.tasks().state().task_id.as_deref(), Some("t1"));
+    assert_eq!(my_work_ids(&rig), ["t1", "t2"]);
+
+    rig.core.tasks().close();
+    assert_eq!(refusal(rig.core.tasks().delete().await), "no-task-open");
+    assert_eq!(rig.server.received_requests().await.unwrap().iter().filter(|request| request.method.as_str() == "DELETE").count(), 1);
+}

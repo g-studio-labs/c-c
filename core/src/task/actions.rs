@@ -1,14 +1,15 @@
 //! Lo que se le hace a una tarea entera desde su página: dejar escrito dónde
-//! quedó y llevarla a otra lista.
+//! quedó, llevarla a otra lista y borrarla.
 //!
 //! Vino de `app/src/components/TaskDetailDrawer.tsx` (`HandoffSection`,
-//! `MoveToList`) y de `app/src/lib/move-targets.ts`.
+//! `MoveToList`, el pie con «Borrar la tarea») y de
+//! `app/src/lib/move-targets.ts`.
 //!
-//! Mover una tarea la saca de donde la mira más gente, así que trae **su
-//! pregunta** ([`Question`]): qué se va a hacer y a dónde va, con las frases
-//! de la app de siempre. La pantalla la enseña y sólo pide el cambio si
-//! contestan que sí; qué dice la pregunta se decide aquí, una vez, para
-//! todas las apps.
+//! Mover o borrar una tarea toca algo que ve más gente, así que cada cosa
+//! trae **su pregunta** ([`Question`]): qué se va a hacer y a dónde va, con
+//! las frases de la app de siempre. La pantalla la enseña y sólo pide el
+//! cambio si contestan que sí; qué dice la pregunta se decide aquí, una vez,
+//! para todas las apps.
 
 use super::{refused, TaskDetail, TaskPatch, Tasks};
 use crate::texts::{text, text_with, Locale};
@@ -230,5 +231,43 @@ impl Tasks {
             }
         }
         self.update(TaskPatch { list_id: Some(list_id.to_string()), ..TaskPatch::default() }).await
+    }
+
+    /// Lo que se pregunta antes de borrar la tarea abierta: cuál es y qué se
+    /// va con ella.
+    ///
+    /// El servidor (`TaskRepository.DeleteTask`) borra la tarea con sus
+    /// comentarios y sus adjuntos, y **no** sus subtareas: si las tiene, se
+    /// dice, que quien borra una tarea partida en pasos da por hecho que los
+    /// pasos se van con ella.
+    pub fn delete_question(&self, locale: Locale) -> Option<Question> {
+        let detail = self.state().detail?;
+        let mut body = text(locale, "work:task.deleteTaskBody");
+        if !detail.subtasks.is_empty() {
+            body = format!("{body} {}", text(locale, "work:task.deleteTaskKeepsSubtasks"));
+        }
+        Some(Question {
+            title: text_with(locale, "work:task.deleteTaskTitle", &[("name", &detail.task.title)]),
+            body,
+            confirm: text(locale, "work:task.delete"),
+            cancel: text(locale, "work:task.cancel"),
+        })
+    }
+
+    /// Borra la tarea abierta. Si se borró, la página se cierra (no hay nada
+    /// que leer) y su fila sale de «Mi trabajo» sin esperar a recargarlo: en
+    /// la app de siempre la tarjeta se quedaba en pantalla, pulsable
+    /// (`deleteTask` en `tasks.store.ts`). Si no, todo sigue como estaba.
+    pub async fn delete(&self) -> Result<(), ApiError> {
+        let task_id = self.open_id()?;
+        self.core.call_ok("DELETE", &format!("/api/v1/tasks/{task_id}"), None).await?;
+        self.core.my_work().forget(&task_id);
+        self.task_deleted(&task_id);
+        // Las cuentas del árbol llevaban esa tarea. Sólo si hay árbol que
+        // poner al día; si falla, él dice lo suyo donde lo dice siempre.
+        if let Some(org_id) = self.core.tree().state().org_id {
+            self.core.tree().load(&org_id).await;
+        }
+        Ok(())
     }
 }

@@ -188,6 +188,7 @@
     "activity": "Actividad",
     "deleteTaskTitle": "¿Borrar la tarea «{{name}}»?",
     "deleteTaskBody": "La quita con sus comentarios y sus adjuntos. No se puede deshacer.",
+    "deleteTaskKeepsSubtasks": "Sus subtareas no se borran con ella.",
     "deleteTask": "Borrar la tarea",
     "withdrawTitle": "¿Quitar esto del tablero del cliente?",
     "withdrawBody": "Deja de verlo. Su número de ticket se queda gastado —puede que ya lo haya citado— así que su numeración conserva el hueco.",
