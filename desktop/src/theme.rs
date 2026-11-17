@@ -239,13 +239,9 @@ pub fn id_chip(id: impl Into<gpui_kit::ElementId>, shown: impl Into<gpui_kit::Sh
 }
 
 /// El cuerpo de texto de macOS, que es la escala que sigue la app (jose,
-/// 16-nov-2026): 13 de cuerpo, 11 de secundario, 17 de título de sección y
-/// 22 de título de pantalla.
+/// 16-nov-2026): 13 de cuerpo y 11 de secundario. Los títulos de pantalla
+/// van a 18, como el `text-lg` de la app de siempre.
 pub const BODY_SIZE: f32 = 13.;
-
-/// El título de una pantalla («Mi trabajo», el de una tarea): el Title 1 de
-/// macOS.
-pub const TITLE_SIZE: f32 = 22.;
 
 /// El `rem` con el que el texto normal (`text_sm`, 0.875rem) sale al cuerpo
 /// de macOS. De él salen solos los demás: `text_xs` (0.75rem) a 11 y
