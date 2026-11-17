@@ -6,7 +6,7 @@
 //! de `app/src/components/docs/DocTabs.tsx`. Escribirla sigue en la app de
 //! siempre.
 
-use cac_core::{DocBlock, DocDecision, DocHeading, NodeKind, WorkLayout, DOC_TABS};
+use cac_core::{DocBlock, DocDecision, DocHeading, WorkLayout, DOC_TABS};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::tooltip::Tooltip;
@@ -204,7 +204,6 @@ impl Render for DocsView {
         let docs = Backend::snapshot(cx).read(cx).docs.clone();
         let name = docs.target.as_ref().map(|target| target.name.clone()).unwrap_or_default();
         let node = docs.target.as_ref().map(|target| target.id.clone()).unwrap_or_default();
-        let of_a_list = docs.target.as_ref().is_some_and(|target| target.kind == NodeKind::List);
         let empty = docs.empty_reason();
         let blocks = docs.blocks();
         let decisions = docs.standing_decisions();
@@ -237,7 +236,6 @@ impl Render for DocsView {
             .h(px(48.))
             .px_4()
             // Con una lista, la raya va bajo la fila de vistas.
-            .when(!of_a_list, |this| this.border_b_1().border_color(border))
             .child(Icon::new(Lucide::FileText).size_4().flex_none().text_color(muted))
             .child(div().id("doc-title").test_support().min_w_0().truncate().leading_sm().font_weight(FontWeight::MEDIUM).child(name))
             .child(
@@ -268,9 +266,13 @@ impl Render for DocsView {
 
         // Las vistas de la lista, en su fila bajo el nombre (`ListToolbar`:
         // `h-9 gap-4 border-b px-4`), con la documentación tras un divisor.
-        // Sólo en la de una lista: un espacio o una carpeta no tienen
-        // tarjetas detrás.
-        let views = of_a_list.then(|| {
+        // En la de cualquier nodo, no sólo en la de una lista como en la app
+        // de siempre: sin ellas, quien abría la documentación de un espacio
+        // o de una carpeta no tenía cómo cambiar de vista más que cerrándola
+        // (jose, 17-nov-2026: «nos abre la doc sin opciones de cambiar»).
+        // A dónde vuelve cada una lo dice el core (`back_to_tasks`): a las
+        // tareas de ese nodo, o a las que hubiera si es una carpeta.
+        let views = Some({
             div().id("doc-views").h_9().flex().flex_none().items_stretch().gap_4().px_4().border_b_1().border_color(border).children(VIEWS.map(|(view, layout)| {
                 let active = layout.is_none();
                 div()

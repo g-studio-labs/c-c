@@ -1215,11 +1215,12 @@ mod tests {
         cx.update(|cx| Backend::snapshot(cx).read(cx).docs.target.as_ref().map(|target| target.id.clone()))
     }
 
-    /// Pulsar una carpeta abre su documentación en el sitio de la vista, y
-    /// su × devuelve a las tareas.
+    /// Pulsar una carpeta abre su documentación en el sitio de la vista; su
+    /// × devuelve a las tareas, y sus vistas también, en la que se pulse.
     ///
     /// Roturas que atrapa: una carpeta cuyo clic no hace nada; abrir el
-    /// documento en el core y seguir pintando la lista; no tener cómo volver.
+    /// documento en el core y seguir pintando la lista; no tener cómo volver;
+    /// una documentación sin vistas, de la que sólo se sale cerrándola.
     #[gpui_kit::test]
     fn a_folder_opens_its_docs_and_the_list_brings_the_tasks_back(cx: &mut TestAppContext) {
         let server = server_with_docs();
@@ -1233,11 +1234,20 @@ mod tests {
         assert!(!on_screen(window, "view-title", cx), "la lista sigue pintada debajo del documento");
         assert_eq!(scope(cx), None, "una carpeta no acota");
 
-        // Una carpeta no tiene tarjetas detrás: no ofrece vistas de lista.
-        assert!(!on_screen(window, "view-list", cx) && !on_screen(window, "view-board", cx), "ofrece el tablero de una carpeta");
         click(window, "doc-close", cx);
         wait_until(cx, "vuelven las tareas", |cx| on_screen(window, "view-title", cx));
         assert!(!on_screen(window, "docs", cx));
+
+        // También lleva las vistas, para no tener que cerrarla: pulsar una
+        // vuelve a las tareas en esa vista. Una carpeta no acota, así que
+        // son las que hubiera.
+        click(window, "tree-f-a", cx);
+        wait_until(cx, "llega otra vez", |cx| on_screen(window, "doc-body", cx));
+        assert!(on_screen(window, "view-list", cx) && on_screen(window, "view-docs", cx), "la documentación de una carpeta no deja cambiar de vista");
+        click(window, "view-board", cx);
+        wait_until(cx, "vuelve a las tareas, en tablero", |cx| on_screen(window, "work-board", cx));
+        assert!(!on_screen(window, "docs", cx));
+        assert_eq!(scope(cx), None, "volver desde una carpeta acotó la vista");
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
