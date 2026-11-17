@@ -1346,6 +1346,12 @@ impl MyWorkView {
         if self.calendar.lifted.is_some() && !cx.has_active_drag() {
             self.calendar.lifted = None;
         }
+        // Con una tarea abierta, el detalle de un día se cierra: se pinta por
+        // encima de todo, y se quedaba flotando sobre la página de la tarea
+        // que se acababa de abrir desde él (jose, 17-nov-2026).
+        if Backend::snapshot(cx).read(cx).task.task_id.is_some() {
+            self.calendar.forget_day();
+        }
         let paint = Paint::of(cx);
         let here = locale(cx);
         let cursor = self.calendar_cursor(cx);
@@ -2072,7 +2078,8 @@ mod tests {
     /// Pulsar una fila del detalle abre su tarea, y pulsar fuera lo cierra.
     ///
     /// Roturas que atrapa: una fila que no abre nada; un detalle que sólo
-    /// se va con la × o con Esc.
+    /// se va con la × o con Esc; un detalle que se queda flotando sobre la
+    /// página de la tarea que se abrió desde él.
     #[gpui_kit::test]
     fn a_row_of_the_detail_opens_the_task_and_a_click_outside_closes_it(cx: &mut TestAppContext) {
         let (_server, window, days) = show_calendar(cx);
@@ -2084,6 +2091,7 @@ mod tests {
         click(window, &Days2::cell(days.today), cx);
         click(window, "cal-row-t1", cx);
         wait_until(cx, "se abre la tarea", |cx| opened_task(cx).as_deref() == Some("t1"));
+        assert!(!on_screen(window, "cal-day-popover", cx), "el detalle del día sigue abierto sobre la tarea");
         stop(cx);
     }
 
