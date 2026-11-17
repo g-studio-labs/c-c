@@ -203,7 +203,7 @@ pub fn prose_with_links(
 ) -> gpui_kit::Div {
     use gpui_kit::{ParentElement, Styled};
     // `md-body text-sm leading-relaxed` (`Markdown.tsx`).
-    gpui_kit::div().text_sm().line_height(gpui_kit::relative(1.625)).child(
+    gpui_kit::div().leading_sm().line_height(gpui_kit::relative(1.625)).child(
         gpui_kit::component::text::TextView::markdown(id.into(), text.into())
             .style(md_body_style(cx))
             .on_link_click(move |url, _, window, cx| follow(url, window, cx)),
@@ -233,11 +233,32 @@ pub fn md_body_style(cx: &App) -> gpui_kit::component::text::TextViewStyle {
                 _ => 14.,
             })
         })
-        .code_block(StyleRefinement::default().bg(muted).rounded(px(8.)).p_3().text_xs())
+        .code_block(StyleRefinement::default().bg(muted).rounded(px(8.)).p_3().leading_xs())
         .table(table)
         .table_head(StyleRefinement::default().bg(muted.opacity(0.5)).font_weight(FontWeight::MEDIUM))
-        .table_cell(StyleRefinement::default().px_2().py_1().text_xs())
+        .table_cell(StyleRefinement::default().px_2().py_1().leading_xs())
 }
+
+/// Los tamaños de texto de la app de siempre **con su interlínea**: en
+/// Tailwind cada `text-*` trae la suya, fija, y aquí sin ponerla sale la de
+/// GPUI (1,618 veces el cuerpo), que hace cada renglón varios píxeles más
+/// alto. Y `text-xs` no es el de Tailwind: `index.css` lo sube a 13 px con
+/// 18 de interlínea (`--text-xs: 0.8125rem`), a propósito.
+pub trait Leading: gpui_kit::Styled + Sized {
+    /// `text-xs` de `index.css`: 13 px / 18 px.
+    fn leading_xs(self) -> Self {
+        self.text_size(gpui_kit::rems(0.8125)).line_height(gpui_kit::rems(1.125))
+    }
+    /// `text-sm`: 14 px / 20 px.
+    fn leading_sm(self) -> Self {
+        self.text_size(gpui_kit::rems(0.875)).line_height(gpui_kit::rems(1.25))
+    }
+    /// `text-lg`: 18 px / 28 px.
+    fn leading_lg(self) -> Self {
+        self.text_size(gpui_kit::rems(1.125)).line_height(gpui_kit::rems(1.75))
+    }
+}
+impl<T: gpui_kit::Styled> Leading for T {}
 
 /// El fondo de un botón fantasma bajo el ratón: `hover:bg-muted`, y en
 /// oscuro `dark:hover:bg-muted/50` (`ui/button.tsx`).
@@ -290,7 +311,7 @@ pub fn id_chip(id: impl Into<gpui_kit::ElementId>, shown: impl Into<gpui_kit::Sh
         .rounded(px(4.))
         .bg(chip.opacity(0.6))
         .font_family(mono)
-        .text_xs()
+        .leading_xs()
         .text_color(muted)
         .cursor_pointer()
         .hover(move |style| style.bg(chip).text_color(foreground))

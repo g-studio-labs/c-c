@@ -32,6 +32,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
+use crate::theme::Leading as _;
 use crate::editor::{Incoming, MarkdownEditor};
 use crate::files;
 use crate::lang::{error_text, locale, tr};
@@ -189,7 +190,7 @@ fn position_at(text: &str, offset: usize) -> Position {
 /// El rótulo de una sección de la columna de lectura: el `<h3>` de
 /// `TaskDetailDrawer.tsx` (`text-xs font-medium uppercase`, apagado).
 fn section_title(title: String, cx: &App) -> Div {
-    div().flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(cx.theme().muted_foreground).child(title.to_uppercase())
+    div().flex_none().leading_xs().font_weight(FontWeight::MEDIUM).text_color(cx.theme().muted_foreground).child(title.to_uppercase())
 }
 
 /// El botón pequeño que acompaña al rótulo de una sección («Editar»,
@@ -205,7 +206,7 @@ fn section_action(id: &'static str, label: String, cx: &App) -> Stateful<Div> {
         .flex_none()
         .items_center()
         .rounded(px(8.))
-        .text_xs()
+        .leading_xs()
         .font_weight(FontWeight::MEDIUM)
         .cursor_pointer()
         .hover(move |style| style.bg(hover))
@@ -215,7 +216,7 @@ fn section_action(id: &'static str, label: String, cx: &App) -> Stateful<Div> {
 /// El rótulo de una propiedad del riel, con su icono (`mb-1 flex
 /// items-center gap-1.5 text-xs text-muted-foreground`, icono `size-3.5`).
 fn rail_label(icon: impl Into<Icon>, text: String, cx: &App) -> Div {
-    div().flex().items_center().gap_1p5().text_xs().text_color(cx.theme().muted_foreground).child(icon.into().size_3p5().flex_none()).child(text)
+    div().flex().items_center().gap_1p5().leading_xs().text_color(cx.theme().muted_foreground).child(icon.into().size_3p5().flex_none()).child(text)
 }
 
 /// Lo que dice al pasar el ratón una pieza que la app de siempre tiene y
@@ -615,7 +616,7 @@ impl TaskView {
                     .justify_center()
                     .gap_1()
                     .child(Icon::new(Lucide::Image).text_color(muted))
-                    .child(div().w_full().overflow_hidden().text_ellipsis().whitespace_nowrap().text_xs().text_color(muted).child(file.name.clone()))
+                    .child(div().w_full().overflow_hidden().text_ellipsis().whitespace_nowrap().leading_xs().text_color(muted).child(file.name.clone()))
                     .into_any_element()
             }
         };
@@ -692,7 +693,7 @@ impl TaskView {
             .flex()
             .items_center()
             .gap_2()
-            .text_xs()
+            .leading_xs()
             .child(Icon::new(Lucide::Paperclip).size_3().flex_none().text_color(muted))
             .child(
                 div()
@@ -994,7 +995,7 @@ impl TaskView {
                         .px_2()
                         .py_1()
                         .rounded_md()
-                        .text_sm()
+                        .leading_sm()
                         .cursor_pointer()
                         .hover(move |style| style.bg(hover))
                         .on_click(cx.listener(move |this, _, window, cx| this.pick_mention(&picked, window, cx)))
@@ -1028,7 +1029,7 @@ impl TaskView {
                 .px_2()
                 .py_1()
                 .rounded(px(4.))
-                .text_xs()
+                .leading_xs()
                 .cursor_pointer()
                 .when(internal, |this| this.bg(chip).text_color(foreground))
                 .when(!internal, |this| this.text_color(muted).hover(move |style| style.text_color(foreground)))
@@ -1109,7 +1110,7 @@ impl TaskView {
                             .px_2()
                             .py_1()
                             .rounded(px(4.))
-                            .text_xs()
+                            .leading_xs()
                             .text_color(muted)
                             // `disabled={sending || !comment.trim()}`, con
                             // su `disabled:opacity-50`: apagado como «Comentar».
@@ -1252,7 +1253,7 @@ impl TaskView {
             .rounded(px(4.))
             .border_1()
             .border_color(border)
-            .text_xs()
+            .leading_xs()
             .cursor_pointer()
             .when(blocker.done, |this| this.line_through().opacity(0.6))
             .on_click(move |_, _, cx| Self::open_task(id.clone(), cx))
@@ -1284,7 +1285,7 @@ impl TaskView {
                 .px_2()
                 .py_0p5()
                 .rounded(px(4.))
-                .text_xs()
+                .leading_xs()
                 .font_weight(FontWeight::MEDIUM)
                 .map(|this| match tone {
                     Some(tone) => this.bg(tone.opacity(0.15)).text_color(tone),
@@ -1329,7 +1330,7 @@ impl TaskView {
             .border_1()
             .border_color(input)
             .bg(field)
-            .text_sm()
+            .leading_sm()
             .child(div().min_w_0().truncate().child(sheet.list.clone()))
             .child(Icon::new(IconName::ChevronDown).size_4().flex_none().text_color(muted))
             .tooltip(not_yet(cx))
@@ -1370,7 +1371,7 @@ impl TaskView {
                 .py_0p5()
                 .rounded(px(4.))
                 .bg(tone.opacity(0.15))
-                .text_xs()
+                .leading_xs()
                 .text_color(foreground)
                 .child(div().size_2().flex_none().rounded_full().bg(tone))
                 .child(tag.name.clone())
@@ -1382,7 +1383,7 @@ impl TaskView {
             .border_1()
             .border_dashed()
             .border_color(border)
-            .text_xs()
+            .leading_xs()
             .text_color(muted)
             .child(tr(cx, "work:task.addTagShort"))
             .into_any_element();
@@ -1413,7 +1414,7 @@ impl TaskView {
                 .px_2()
                 .rounded_full()
                 .bg(secondary)
-                .text_xs()
+                .leading_xs()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(on_secondary)
                 .child(person.name.clone())
@@ -1442,7 +1443,7 @@ impl TaskView {
             .border_1()
             .border_color(input)
             .bg(field)
-            .text_sm()
+            .leading_sm()
             .text_color(muted)
             .child(tr(cx, "work:task.assign"))
             .into_any_element();
@@ -1498,7 +1499,7 @@ impl TaskView {
                     .rounded(px(4.))
                     .border_1()
                     .border_color(border)
-                    .text_xs()
+                    .leading_xs()
                     .when(picked.is_none(), |this| this.text_color(muted))
                     .child(Icon::new(Lucide::CalendarDays).size_3p5().flex_none())
                     .child(
@@ -1546,7 +1547,7 @@ impl TaskView {
             .flex()
             .flex_col()
             .gap_3()
-            .text_sm()
+            .leading_sm()
             // El chip del estado, el de la prioridad y la fila de etiquetas
             // van en la app de siempre dentro de un renglón de texto, que
             // mide más que ellos (24 px los dos chips, 2 px de más la fila):
@@ -1576,7 +1577,7 @@ impl TaskView {
             .gap_2()
             .px_2()
             .py_1p5()
-            .text_sm()
+            .leading_sm()
             .when(!first, |this| this.border_t_1().border_color(border))
             .child(
                 div()
@@ -1612,7 +1613,7 @@ impl TaskView {
                     .when(subtask.done, |this| this.text_color(muted).line_through())
                     .child(subtask.title.clone()),
             )
-            .child(div().flex_none().font_family(mono).text_xs().text_color(muted).child(format!("#{}", subtask.seq)))
+            .child(div().flex_none().font_family(mono).leading_xs().text_color(muted).child(format!("#{}", subtask.seq)))
     }
 
     /// Un comentario: la tarjeta de `CommentItem` (`rounded-md border
@@ -1656,7 +1657,7 @@ impl TaskView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_xs()
+                    .leading_xs()
                     .text_color(muted)
                     .child(
                         div()
@@ -1778,7 +1779,7 @@ impl TaskView {
                 // caja en línea deja bajo su renglón.
                 .pt(px(2.))
                 .pb(px(5.))
-                .text_lg()
+                .leading_lg()
                 .line_height(px(28.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(sheet.title.clone())
@@ -1805,11 +1806,11 @@ impl TaskView {
                             .tooltip(not_yet(cx))
                             .test_support(),
                     )
-                    .children(sheet.handoff_signature.clone().map(|signature| div().min_w_0().truncate().text_xs().text_color(muted).child(signature))),
+                    .children(sheet.handoff_signature.clone().map(|signature| div().min_w_0().truncate().leading_xs().text_color(muted).child(signature))),
             )
             .child(match sheet.handoff.clone() {
                 Some(handoff) => self.prose(format!("handoff-{}", sheet.id), handoff, cx).into_any_element(),
-                None => div().id("task-no-handoff").test_support().text_sm().text_color(muted).child(tr(cx, "work:task.noHandoff")).into_any_element(),
+                None => div().id("task-no-handoff").test_support().leading_sm().text_color(muted).child(tr(cx, "work:task.noHandoff")).into_any_element(),
             });
 
         let description = div()
@@ -1857,7 +1858,7 @@ impl TaskView {
                     )
                     .into_any_element()
             } else if sheet.description.is_empty() {
-                div().id("task-no-description").test_support().text_sm().text_color(muted).child(tr(cx, "work:task.noDescription")).into_any_element()
+                div().id("task-no-description").test_support().leading_sm().text_color(muted).child(tr(cx, "work:task.noDescription")).into_any_element()
             } else {
                 div()
                     .id("task-description")
@@ -1903,7 +1904,7 @@ impl TaskView {
                     .flex_none()
                     .items_center()
                     .gap_1p5()
-                    .text_xs()
+                    .leading_xs()
                     .text_color(muted)
                     .hover(move |style| style.text_color(foreground))
                     .child(Icon::new(Lucide::GitPullRequest).size_3p5())
@@ -1932,13 +1933,13 @@ impl TaskView {
                             .items_center()
                             .gap_1()
                             .child(section_title(tr(cx, "work:task.subtasks"), cx))
-                            .children(count.map(|count| div().text_xs().font_weight(FontWeight::MEDIUM).text_color(muted).child(count))),
+                            .children(count.map(|count| div().leading_xs().font_weight(FontWeight::MEDIUM).text_color(muted).child(count))),
                     )
                     // Añadir una desde aquí todavía no está.
                     .child(section_action("task-add-subtask", tr(cx, "work:task.addSubtask"), cx).tooltip(not_yet(cx)).test_support()),
             )
             .child(if sheet.subtasks.is_empty() {
-                div().id("task-no-subtasks").test_support().text_xs().text_color(muted).child(tr(cx, "work:task.noSubtasks")).into_any_element()
+                div().id("task-no-subtasks").test_support().leading_xs().text_color(muted).child(tr(cx, "work:task.noSubtasks")).into_any_element()
             } else {
                 div()
                     .flex()
@@ -1976,7 +1977,7 @@ impl TaskView {
                         .pb_1p5()
                         .border_b_2()
                         .border_color(if active { primary } else { primary.opacity(0.) })
-                        .text_xs()
+                        .leading_xs()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(if active { foreground } else { muted })
                         .cursor_pointer()
@@ -1993,7 +1994,7 @@ impl TaskView {
             .gap_3()
             .child(thread_head)
             .when(thread == Thread::Notes, |this| {
-                this.child(div().text_xs().text_color(muted).child(tr(cx, "work:task.thread.agentNotesHint")))
+                this.child(div().leading_xs().text_color(muted).child(tr(cx, "work:task.thread.agentNotesHint")))
             })
             .children(comments.iter().map(|comment| self.render_comment(comment, cx)))
             // Se comenta en la conversación; las notas de agentes son suyas.
@@ -2004,7 +2005,7 @@ impl TaskView {
             .flex_col()
             .gap_5()
             .child(title)
-            .children(problem.map(|phrase| div().id("task-problem").test_support().text_sm().text_color(danger).child(phrase)))
+            .children(problem.map(|phrase| div().id("task-problem").test_support().leading_sm().text_color(danger).child(phrase)))
             // «Dónde quedó» y la descripción van seguidas, sin el hueco de
             // las demás secciones: en `TaskDetailDrawer.tsx` las dos viven
             // dentro de la misma zona para soltar ficheros (`FileDropZone`),
@@ -2059,7 +2060,7 @@ impl Render for TaskView {
                 .items_center()
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .text_xs()
+                .leading_xs()
                 .text_color(muted)
                 .child(div().flex_none().child(sheet.place.clone()))
                 .children(sheet.parent.clone().zip(sheet.parent_id.clone()).map(|(parent, id)| {
@@ -2094,7 +2095,7 @@ impl Render for TaskView {
                     .py_0p5()
                     .rounded(px(4.))
                     .bg(primary.opacity(0.1))
-                    .text_xs()
+                    .leading_xs()
                     .text_color(primary)
                     .child(Icon::new(Lucide::Eye).size_3())
                     .child(tr(cx, "work:task.visibleToClient"))
@@ -2141,7 +2142,7 @@ impl Render for TaskView {
                 .border_color(border)
                 .child(action("task-delete", Lucide::Trash, tr(cx, "work:task.deleteTask"), danger))
                 .when(sheet.client_reads, |this| this.child(action("task-withdraw", Lucide::EyeOff, tr(cx, "work:task.withdraw"), foreground)))
-                .child(div().id("task-updated").ml_auto().text_xs().text_color(muted).child(sheet.updated.clone()).test_support())
+                .child(div().id("task-updated").ml_auto().leading_xs().text_color(muted).child(sheet.updated.clone()).test_support())
         });
 
         // Ancha, el riel al lado; estrecha, debajo de la lectura.
@@ -2152,7 +2153,7 @@ impl Render for TaskView {
             .flex()
             .flex_col()
             .gap_4()
-            .children(waiting.map(|phrase| div().id("task-waiting").test_support().text_sm().text_color(muted).child(phrase)))
+            .children(waiting.map(|phrase| div().id("task-waiting").test_support().leading_sm().text_color(muted).child(phrase)))
             .children(sheet.map(|sheet| self.render_sheet(sheet, cx)));
         let body = if wide {
             div()

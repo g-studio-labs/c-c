@@ -30,6 +30,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::lang::tr;
+use crate::theme::Leading as _;
 
 /// Algo que llegó a la caja para adjuntarse: un fichero del disco (soltado,
 /// o copiado en el gestor de ficheros y pegado) o una imagen pegada, que no
@@ -215,7 +216,7 @@ impl RenderOnce for MarkdownEditor {
         // A la derecha, lo que la caja entiende. Sólo promete pegar o soltar
         // ficheros donde se pueden adjuntar.
         let hint = tr(cx, if self.attach.is_some() { "common:editor.hintFiles" } else { "common:editor.hint" });
-        bar = bar.child(div().ml_auto().pl_2().text_xs().text_color(muted).child(hint));
+        bar = bar.child(div().ml_auto().pl_2().leading_xs().text_color(muted).child(hint));
 
         let field = Textarea::new(&self.state).appearance(false).bordered(false).when_some(self.take_files.clone(), |this, take| {
             this.on_paste(move |item, window, cx| {
@@ -283,7 +284,7 @@ impl RenderOnce for MarkdownEditor {
                     .when(blank, |this| this.mb(px(-6.)))
                     .child(field)
                     .children(example.map(|example| {
-                        div().absolute().left_3().right_3().bottom(px(14.)).truncate().text_sm().line_height(px(20.)).text_color(muted.opacity(0.6)).child(example)
+                        div().absolute().left_3().right_3().bottom(px(14.)).truncate().leading_sm().line_height(px(20.)).text_color(muted.opacity(0.6)).child(example)
                     }))
                     .test_support(),
             )
