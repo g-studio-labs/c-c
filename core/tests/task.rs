@@ -1523,3 +1523,87 @@ async fn only_what_a_client_reads_is_withdrawn() {
     assert_eq!(refusal(rig.core.tasks().withdraw().await), "insufficient-role");
     assert!(rig.core.tasks().sheet(Locale::Es).unwrap().client_reads);
 }
+
+/// Qué es, a simple vista, la dirección de una PR de GitHub: la cuenta de
+/// `LinkPRForm` en la app de siempre.
+///
+/// Roturas que atrapa: mandar al servidor cualquier texto; aceptar otra
+/// página de GitHub (una issue, el repo) o un `http` sin cifrar; rechazar
+/// una PR buena por llevar algo detrás del número o blancos alrededor.
+#[test]
+fn only_what_looks_like_a_pull_request_is_one() {
+    use cac_core::task::is_pull_url;
+    for good in [
+        "https://github.com/dwit/api/pull/3",
+        "  https://github.com/dwit/api/pull/3  ",
+        "https://github.com/dwit/api/pull/3/files",
+        "https://github.com/dwit/api/pull/3#issuecomment-1",
+    ] {
+        assert!(is_pull_url(good), "{good}");
+    }
+    for bad in [
+        "",
+        "dwit/api#3",
+        "http://github.com/dwit/api/pull/3",
+        "https://github.com/dwit/api/issues/3",
+        "https://github.com/dwit/api/pull/",
+        "https://github.com/dwit/api/pull/abc",
+        "https://github.com/dwit//pull/3",
+        "https://github.com//api/pull/3",
+        "https://gitlab.com/dwit/api/pull/3",
+        "https://github.com/dwit/api",
+    ] {
+        assert!(!is_pull_url(bad), "{bad}");
+    }
+}
+
+/// Enlazar una PR manda su dirección limpia a la tarea abierta y vuelve a
+/// pedirla, que es donde sale lo enlazado.
+///
+/// Roturas que atrapa: mandarla a otra ruta o en otro campo, o con sus
+/// blancos; no volver a pedir la tarea (la PR no aparece hasta reabrirla).
+#[tokio::test]
+async fn linking_a_pull_request_sends_its_address_and_brings_the_task_again() {
+    let rig = rig().await;
+    Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(detail("t1", "Tarea", "pending", "", ""))).up_to_n_times(1).mount(&rig.server).await;
+    mount_columns(&rig.server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/tasks/t1/git/prs"))
+        .respond_with(ok(json!({ "id": "g1", "kind": "pr", "key": "3" })))
+        .mount(&rig.server)
+        .await;
+    rig.core.tasks().open("t1").await;
+    assert_eq!(open_task(&rig).git, None);
+    let mut linked = detail("t1", "Tarea", "pending", "", "");
+    linked["git"] = json!({ "summary": { "prs": 1 }, "branches": [], "commits": [], "prs": [{ "id": "g1", "kind": "pr", "key": "3" }] });
+    mount_task(&rig.server, "t1", linked).await;
+
+    rig.core.tasks().link_pr(" https://github.com/dwit/api/pull/3 ").await.expect("se enlazó");
+
+    assert_eq!(requests_to(&rig.server, "POST", "/tasks/t1/git/prs").await, [json!({ "url": "https://github.com/dwit/api/pull/3" })]);
+    assert_eq!(open_task(&rig).git.map(|git| git.prs.len()), Some(1));
+}
+
+/// Lo que no es la dirección de una PR no se manda; y si el servidor no la
+/// enlaza (el repo no es de la organización), se dice con su código.
+///
+/// Roturas que atrapa: un viaje al servidor para que diga lo que ya se
+/// sabe; dar por enlazada una PR que no lo está.
+#[tokio::test]
+async fn a_pull_request_that_is_not_one_or_is_refused_is_not_linked() {
+    let rig = rig().await;
+    mount_task(&rig.server, "t1", detail("t1", "Tarea", "pending", "", "")).await;
+    mount_columns(&rig.server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/tasks/t1/git/prs"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({ "success": false, "message": "No", "error": "repo-not-in-org" })))
+        .mount(&rig.server)
+        .await;
+    rig.core.tasks().open("t1").await;
+
+    assert_eq!(refusal(rig.core.tasks().link_pr("https://github.com/dwit/api/issues/3").await), "not-a-pull-url");
+    assert_eq!(requests_to(&rig.server, "POST", "/git/prs").await, Vec::<Value>::new());
+
+    assert_eq!(refusal(rig.core.tasks().link_pr("https://github.com/otra/cosa/pull/9").await), "repo-not-in-org");
+    assert_eq!(open_task(&rig).git, None);
+}

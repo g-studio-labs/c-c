@@ -159,6 +159,11 @@ pub struct TaskView {
     /// Ya se pidió crearla y el servidor aún no contesta: un segundo Enter
     /// no crea otra igual.
     creating_subtask: bool,
+    /// En qué tarea se está pegando la dirección de una PR para enlazarla,
+    /// y la dirección.
+    linking_pr: Option<String>,
+    pr_url: Entity<InputState>,
+    _pr_entered: Subscription,
     /// Hay ficheros subiendo para citarlos, y en cuál de las cajas: treinta
     /// megas tardan, y un clip quieto parece no haber hecho nada.
     citing: Option<Draft>,
@@ -286,6 +291,14 @@ impl TaskView {
                 this.create_subtask(window, cx);
             }
         });
+        // El ejemplo de `LinkPRForm` en `TaskGitPanel.tsx`.
+        let pr_url = cx.new(|cx| InputState::new(window, cx).placeholder("https://github.com/…/pull/123"));
+        // Enter en la dirección la enlaza, como «Enlazar».
+        let pr_entered = cx.subscribe_in(&pr_url, window, |this, _, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.link_pr(window, cx);
+            }
+        });
         let title_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, TITLE_ROWS));
         // Salir del campo guarda: el `onBlur={saveTitle}` de la app de
         // siempre. Enter y Escape salen de él, cada uno a su manera.
@@ -324,6 +337,9 @@ impl TaskView {
             subtask_title,
             _subtask_titled: subtask_titled,
             creating_subtask: false,
+            linking_pr: None,
+            pr_url,
+            _pr_entered: pr_entered,
             citing: None,
             thumbs: HashMap::new(),
             copied: None,
@@ -1095,6 +1111,85 @@ impl TaskView {
                     .icon(Icon::new(Lucide::X))
                     .tooltip(tr(cx, "work:task.cancel"))
                     .on_click(cx.listener(|this, _, window, cx| this.cancel_adding_subtask(window, cx))),
+            )
+            .test_support()
+    }
+
+    /// Pasa a pedir la dirección de una PR para enlazarla a la tarea
+    /// abierta: «Enlazar una PR» en `TaskGitPanel.tsx`, que cambia la línea
+    /// por un campo donde pegarla.
+    pub(crate) fn start_linking_pr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task_id) = Self::open_task_id(cx) else { return };
+        self.linking_pr = Some(task_id);
+        self.pr_url.update(cx, |url, cx| {
+            url.set_value("", window, cx);
+            url.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Deja de pedirla sin enlazar nada, y el foco vuelve a la página.
+    pub(crate) fn cancel_linking_pr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.linking_pr = None;
+        self.page_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Enlaza la PR de la dirección pegada. Lo que a simple vista no es una
+    /// PR no se manda: lo rechaza el core, y se dice por qué («Enlazar»
+    /// está apagado mientras, pero Enter llega igual; en la app de siempre
+    /// ese Enter no hace nada y no dice por qué). Si se enlazó, el campo se
+    /// cierra; si no, se dice con la frase del servidor y la dirección se
+    /// queda escrita.
+    pub(crate) fn link_pr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let url = self.pr_url.read(cx).value().to_string();
+        // Como al comentar: con nada escrito no hay nada que pedir ni que avisar.
+        if url.trim().is_empty() {
+            return;
+        }
+        self.save(
+            "work:task.git.errLink",
+            move |core| async move { core.tasks().link_pr(&url).await },
+            |this, window, cx| this.cancel_linking_pr(window, cx),
+            window,
+            cx,
+        );
+    }
+
+    /// El campo donde pegar la dirección de la PR, con «Enlazar» y
+    /// «Cancelar»: el `LinkPRForm` de `TaskGitPanel.tsx` (`flex items-center
+    /// gap-1.5`, todo a `h-7`). Escape lo cierra, y no la página.
+    fn render_pr_linking(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let valid = cac_core::task::is_pull_url(self.pr_url.read(cx).value().as_ref());
+        div()
+            .id("task-link-pr-form")
+            .flex()
+            .items_center()
+            .gap_1p5()
+            // Antes de que llegue al campo, que con Escape sólo suelta el foco.
+            .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                this.cancel_linking_pr(window, cx);
+                cx.stop_propagation();
+            }))
+            .child(div().id("task-link-pr-url").flex_1().min_w_0().child(Input::new(&self.pr_url).small()).test_support())
+            .child(
+                Button::new("task-link-pr-send")
+                    .primary()
+                    .xsmall()
+                    .h_7()
+                    .px_2p5()
+                    .label(tr(cx, "work:task.git.link"))
+                    .disabled(!valid)
+                    .on_click(cx.listener(|this, _, window, cx| this.link_pr(window, cx))),
+            )
+            .child(
+                Button::new("task-link-pr-cancel")
+                    .ghost()
+                    .xsmall()
+                    .h_7()
+                    .px_2p5()
+                    .label(tr(cx, "work:task.cancel"))
+                    .on_click(cx.listener(|this, _, window, cx| this.cancel_linking_pr(window, cx))),
             )
             .test_support()
     }
@@ -2367,8 +2462,10 @@ impl TaskView {
         // Enlazar una PR pegando su dirección: la línea discreta que
         // `TaskGitPanel.tsx` pinta bajo las subtareas cuando la tarea no
         // tiene código enlazado (`flex items-center gap-1.5 text-xs
-        // text-muted-foreground`, el icono `size-3.5`). Todavía no está aquí.
-        let link_pr = (!sheet.git_linked).then(|| {
+        // text-muted-foreground`, el icono `size-3.5`). Al pulsarla pasa a
+        // ser el campo donde pegar la dirección.
+        let linking_pr = self.linking_pr.as_deref() == Some(sheet.id.as_str());
+        let link_pr = (!sheet.git_linked && linking_pr).then(|| self.render_pr_linking(cx).into_any_element()).or_else(|| (!sheet.git_linked).then(|| {
             div().flex().child(
                 div()
                     .id("task-link-pr")
@@ -2381,10 +2478,12 @@ impl TaskView {
                     .hover(move |style| style.text_color(foreground))
                     .child(Icon::new(Lucide::GitPullRequest).size_3p5())
                     .child(tr(cx, "work:task.git.linkPR"))
-                    .tooltip(not_yet(cx))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, window, cx| this.start_linking_pr(window, cx)))
                     .test_support(),
             )
-        });
+            .into_any_element()
+        }));
 
         // Las subtareas: el rótulo con cuántas van hechas, cómo añadir otra
         // y, sin ninguna, para qué sirven.
@@ -2483,7 +2582,7 @@ impl TaskView {
             .flex_col()
             .gap_5()
             .child(title)
-            .children(problem.map(|phrase| div().id("task-problem").test_support().leading_sm().text_color(danger).child(phrase)))
+            .children(problem.map(|phrase| div().id("task-problem").aria_label(phrase.clone()).leading_sm().text_color(danger).child(phrase).test_support()))
             // «Dónde quedó» y la descripción van seguidas, sin el hueco de
             // las demás secciones: en `TaskDetailDrawer.tsx` las dos viven
             // dentro de la misma zona para soltar ficheros (`FileDropZone`),
@@ -4277,6 +4376,126 @@ mod tests {
 
         wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
         assert!(on_screen(window, "task-visible-to-client", cx));
+        stop(cx);
+    }
+
+    /// Los `POST` que enlazan una PR a la primera tarea.
+    fn linked(server: &FakeServer) -> Vec<serde_json::Value> {
+        asked(server, "POST", "/api/v1/tasks/t1/git/prs").iter().map(|request| serde_json::from_slice(&request.body).unwrap()).collect()
+    }
+
+    /// La primera tarea sin código enlazado, que es donde sale la línea.
+    fn server_without_code() -> FakeServer {
+        let server = server();
+        let mut bare = detail("t1");
+        bare["git"] = serde_json::Value::Null;
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(bare)).with_priority(2));
+        server
+    }
+
+    /// Lo que dice el campo de la dirección de la PR.
+    fn pr_typed(view: &Entity<TaskView>, cx: &mut TestAppContext) -> String {
+        cx.update(|cx| view.read(cx).pr_url.read(cx).value().to_string())
+    }
+
+    /// «Enlazar una PR» cambia la línea por un campo; lo que no es la
+    /// dirección de una PR no se manda (y «Enlazar» está apagado), y una
+    /// que lo es se enlaza con Enter: el campo se cierra y, con código ya
+    /// enlazado, la línea deja de salir.
+    ///
+    /// Roturas que atrapa: una línea que no hace nada (lo que había); mandar
+    /// cualquier texto; un Enter que no manda, o manda otra dirección;
+    /// seguir ofreciendo enlazar como si no hubiera pasado nada; un Enter
+    /// sobre algo que no es una PR que no dice por qué no hace nada.
+    #[gpui_kit::test]
+    fn a_pull_request_is_linked_by_pasting_its_address(cx: &mut TestAppContext) {
+        let server = server_without_code();
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/tasks/t1/git/prs")).respond_with(ok(json!({ "id": "g1", "kind": "pr", "key": "3" }))));
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+        assert!(on_screen(window, "task-link-pr", cx) && !on_screen(window, "task-link-pr-form", cx));
+
+        click(window, "task-link-pr", cx);
+        assert!(on_screen(window, "task-link-pr-url", cx) && !on_screen(window, "task-link-pr", cx));
+        // Con el campo en blanco, Enter ni manda ni avisa.
+        press(window, "enter", cx);
+        settle(cx);
+        assert!(!on_screen(window, "task-problem", cx), "avisó de un fallo por un Enter en blanco");
+        type_more(window, "https://github.com/dwit/api/issues/3", cx);
+        assert!(is_off(window, "task-link-pr-send", cx));
+        press(window, "enter", cx);
+        wait_until(cx, "dice que eso no es una PR", |cx| on_screen(window, "task-problem", cx));
+        assert!(label_of(window, "task-problem", cx).contains("PR de GitHub"));
+        assert!(linked(&server).is_empty(), "mandó lo que no es una PR: {:?}", linked(&server));
+
+        press(window, "secondary-a", cx);
+        type_more(window, "https://github.com/dwit/api/pull/3", cx);
+        assert!(!is_off(window, "task-link-pr-send", cx));
+        // Desde ahora el servidor cuenta la tarea con su código (la del contrato).
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(detail("t1"))).with_priority(1));
+        press(window, "enter", cx);
+
+        wait_until(cx, "se enlaza y la línea deja de salir", |cx| !linked(&server).is_empty() && !on_screen(window, "task-link-pr-form", cx));
+        assert_eq!(linked(&server), [json!({ "url": "https://github.com/dwit/api/pull/3" })]);
+        assert!(!on_screen(window, "task-link-pr", cx) && !on_screen(window, "task-problem", cx));
+        stop(cx);
+    }
+
+    /// Enlazada la PR, el campo se cierra aunque la tarea todavía no enseñe
+    /// su código (el servidor de mentira la sigue contestando sin él).
+    ///
+    /// Rotura que atrapa: un campo que se queda abierto con la dirección ya
+    /// enlazada, invitando a mandarla otra vez.
+    #[gpui_kit::test]
+    fn the_field_closes_once_the_pull_request_is_linked(cx: &mut TestAppContext) {
+        let server = server_without_code();
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/tasks/t1/git/prs")).respond_with(ok(json!({ "id": "g1", "kind": "pr", "key": "3" }))));
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+        click(window, "task-link-pr", cx);
+        type_more(window, "https://github.com/dwit/api/pull/3", cx);
+
+        click(window, "task-link-pr-send", cx);
+
+        wait_until(cx, "se enlaza y el campo se cierra", |cx| !linked(&server).is_empty() && !on_screen(window, "task-link-pr-form", cx));
+        assert!(on_screen(window, "task-link-pr", cx));
+        stop(cx);
+    }
+
+    /// Escape y «Cancelar» cierran el campo sin enlazar nada (y sin
+    /// llevarse la página); si el servidor no la enlaza, se dice y la
+    /// dirección se queda escrita.
+    ///
+    /// Roturas que atrapa: un Escape que cierra la tarea entera, o que
+    /// manda lo pegado; perder la dirección por un fallo; callar el fallo.
+    #[gpui_kit::test]
+    fn a_pull_request_that_is_not_linked_keeps_its_address(cx: &mut TestAppContext) {
+        // Sin `POST` montado: el servidor contesta 404.
+        let server = server_without_code();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+
+        click(window, "task-link-pr", cx);
+        type_more(window, "https://github.com/dwit/api/pull/3", cx);
+        press(window, "escape", cx);
+        settle(cx);
+        assert!(on_screen(window, "task-link-pr", cx) && !on_screen(window, "task-link-pr-form", cx), "Escape no cerró el campo");
+        assert_eq!(open_task_id(cx).as_deref(), Some("t1"), "Escape cerró la página a quien escribía");
+
+        click(window, "task-link-pr", cx);
+        assert_eq!(pr_typed(&view, cx), "", "el campo heredó lo que se descartó");
+        type_more(window, "https://github.com/dwit/api/pull/4", cx);
+        click(window, "task-link-pr-cancel", cx);
+        settle(cx);
+        assert!(!on_screen(window, "task-link-pr-form", cx));
+        assert!(linked(&server).is_empty(), "enlazó {:?}", linked(&server));
+
+        click(window, "task-link-pr", cx);
+        type_more(window, "https://github.com/dwit/api/pull/5", cx);
+        click(window, "task-link-pr-send", cx);
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+        assert!(on_screen(window, "task-link-pr-form", cx));
+        assert_eq!(pr_typed(&view, cx), "https://github.com/dwit/api/pull/5");
         stop(cx);
     }
 

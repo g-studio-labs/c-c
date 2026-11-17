@@ -1,15 +1,18 @@
 //! Lo que se le hace a una tarea entera desde su página: dejar escrito dónde
-//! quedó, llevarla a otra lista, borrarla y retirarla de la vista del cliente.
+//! quedó, llevarla a otra lista, borrarla, retirarla de la vista del cliente
+//! y enlazarle una PR.
 //!
 //! Vino de `app/src/components/TaskDetailDrawer.tsx` (`HandoffSection`,
-//! `MoveToList`, el pie con «Borrar la tarea» y «Retirar») y de
-//! `app/src/lib/move-targets.ts`.
+//! `MoveToList`, el pie con «Borrar la tarea» y «Retirar»), de
+//! `app/src/lib/move-targets.ts` y de `LinkPRForm` en `TaskGitPanel.tsx`.
 //!
-//! Todo lo de aquí mueve, borra o esconde algo que ve más gente, así que cada
-//! cosa trae **su pregunta** ([`Question`]): qué se va a hacer y a dónde va,
-//! con las frases de la app de siempre. La pantalla la enseña y sólo pide el
-//! cambio si contestan que sí; qué dice la pregunta se decide aquí, una vez,
-//! para todas las apps.
+//! Todo lo de aquí crea, mueve, borra o esconde algo que ve más gente, así
+//! que cada cosa trae **su pregunta** ([`Question`]): qué se va a hacer y a
+//! dónde va, con las frases de la app de siempre. La pantalla la enseña y
+//! sólo pide el cambio si contestan que sí; qué dice la pregunta se decide
+//! aquí, una vez, para todas las apps.
+
+use serde_json::json;
 
 use super::{client_reads, refused, TaskDetail, TaskPatch, Tasks};
 use crate::texts::{text, text_with, Locale};
@@ -165,6 +168,20 @@ pub fn move_question(locale: Locale, detail: &TaskDetail, groups: &[MoveGroup], 
     })
 }
 
+/// Si eso es, a simple vista, la dirección de una PR de GitHub: la cuenta de
+/// `LinkPRForm` (`/^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/`). El
+/// servidor comprueba lo demás (que exista, que el repo sea de la
+/// organización); esto sólo evita mandar lo que no lo es.
+pub fn is_pull_url(url: &str) -> bool {
+    let Some(rest) = url.trim().strip_prefix("https://github.com/") else { return false };
+    let mut parts = rest.splitn(4, '/');
+    let (owner, repo, pull, number) = (parts.next(), parts.next(), parts.next(), parts.next());
+    owner.is_some_and(|owner| !owner.is_empty())
+        && repo.is_some_and(|repo| !repo.is_empty())
+        && pull == Some("pull")
+        && number.is_some_and(|number| number.starts_with(|c: char| c.is_ascii_digit()))
+}
+
 impl Tasks {
     fn detail_or_refuse(&self) -> Result<TaskDetail, ApiError> {
         self.state().detail.ok_or_else(|| refused("no-task-open", "No task is open"))
@@ -292,5 +309,20 @@ impl Tasks {
             return Err(refused("not-on-client-board", "No client reads this task"));
         }
         self.update(TaskPatch { visibility: Some("internal".to_string()), ..TaskPatch::default() }).await
+    }
+
+    /// Enlaza a la tarea abierta una PR por su dirección: para la que no
+    /// nombra la tarea ni sale de una rama con su número. Lo que a simple
+    /// vista no es una PR de GitHub no se manda. Luego se vuelve a pedir la
+    /// tarea, que es donde sale lo enlazado.
+    pub async fn link_pr(&self, url: &str) -> Result<(), ApiError> {
+        let task_id = self.open_id()?;
+        let url = url.trim();
+        if !is_pull_url(url) {
+            return Err(refused("not-a-pull-url", "That is not a GitHub pull request URL"));
+        }
+        self.core.call_ok("POST", &format!("/api/v1/tasks/{task_id}/git/prs"), Some(json!({ "url": url }))).await?;
+        self.refresh().await;
+        Ok(())
     }
 }
