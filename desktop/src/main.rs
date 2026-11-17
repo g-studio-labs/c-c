@@ -18,6 +18,7 @@ mod board;
 mod brand;
 mod calendar;
 mod docs;
+mod editor;
 mod files;
 mod identity;
 mod lang;

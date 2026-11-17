@@ -164,7 +164,9 @@
     "removeLink": "Quitar",
     "sectionTitle": "Título de la sección",
     "fold": "Plegar la sección",
-    "unfold": "Desplegar la sección"
+    "unfold": "Desplegar la sección",
+    "hint": "markdown",
+    "hintFiles": "markdown · pega o suelta ficheros"
   },
   "palette": {
     "newTask": "Tarea nueva",

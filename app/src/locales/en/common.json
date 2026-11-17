@@ -164,7 +164,9 @@
     "removeLink": "Remove",
     "sectionTitle": "Section title",
     "fold": "Fold the section",
-    "unfold": "Unfold the section"
+    "unfold": "Unfold the section",
+    "hint": "markdown",
+    "hintFiles": "markdown · paste or drop files"
   },
   "palette": {
     "newTask": "New task",

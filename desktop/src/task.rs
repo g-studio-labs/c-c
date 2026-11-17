@@ -22,16 +22,17 @@ use cac_core::{
 use chrono::NaiveDate;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Enter, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Position, Textarea, TextareaState};
+use gpui_kit::component::input::{Enter, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Position, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
-use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
+use crate::editor::{Incoming, MarkdownEditor};
 use crate::files;
 use crate::lang::{error_text, locale, tr};
 
@@ -40,6 +41,24 @@ const RAIL_WIDTH: f32 = 288.;
 /// Por debajo de este ancho de ventana el riel va debajo de la lectura (el
 /// `lg` de la app de siempre).
 pub(crate) const STACK_BELOW: f32 = 1024.;
+
+/// Las líneas con que empieza cada caja de escribir, que luego crece con lo
+/// escrito: el `minHeight` de cada `MarkdownEditor` de `TaskDetailDrawer.tsx`
+/// (5rem la de comentar, 4rem la de corregir un comentario y 10rem la
+/// descripción) en líneas de `text-sm`, que miden 1.25rem.
+const COMMENT_ROWS: usize = 4;
+const COMMENT_EDIT_ROWS: usize = 3;
+const DESCRIPTION_ROWS: usize = 8;
+
+/// Una de las cajas en las que se escribe markdown en la página.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Draft {
+    /// El comentario nuevo.
+    Comment,
+    /// El comentario que se corrige.
+    CommentEdit,
+    Description,
+}
 
 /// Una imagen de la tarea, en lo que tarda en poder enseñarse.
 enum Thumb {
@@ -88,9 +107,6 @@ pub struct TaskView {
     /// está eligiendo.
     due_shown: Option<(String, Option<String>)>,
     _due_changed: Subscription,
-    /// Hay ficheros subiendo: treinta megas tardan, y un botón quieto parece
-    /// no haber hecho nada.
-    attaching: bool,
     /// Qué comentario se está editando, y lo que se escribe para él.
     editing_comment: Option<String>,
     comment_edit: Entity<TextareaState>,
@@ -113,8 +129,9 @@ pub struct TaskView {
     naming_tag: Option<String>,
     tag_name: Entity<InputState>,
     _tag_named: Subscription,
-    /// Hay ficheros subiendo para citarlos en el comentario.
-    citing: bool,
+    /// Hay ficheros subiendo para citarlos, y en cuál de las cajas: treinta
+    /// megas tardan, y un clip quieto parece no haber hecho nada.
+    citing: Option<Draft>,
     /// Las imágenes de la tarea abierta, por el id de su adjunto. Se bajan
     /// una vez, al verla, y se tiran al abrir otra.
     thumbs: HashMap<String, Thumb>,
@@ -127,17 +144,24 @@ pub struct TaskView {
 /// Sube esos ficheros a la tarea abierta, uno tras otro, y al primero que no
 /// se pueda se para. Dice cuáles quedaron subidos y, si lo hubo, cuál no y
 /// por qué (sin porqué si no se pudo ni leer del disco).
-async fn upload_all(core: cac_core::Core, paths: Vec<std::path::PathBuf>) -> (Vec<TaskAttachment>, Option<(String, Option<ApiError>)>) {
+async fn upload_all(core: cac_core::Core, files: Vec<Incoming>) -> (Vec<TaskAttachment>, Option<(String, Option<ApiError>)>) {
     let (mut attached, mut failed) = (Vec::new(), None);
-    for path in paths {
-        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-        // El tamaño se mira antes de leer: un fichero enorme no se carga en
-        // memoria para que digan que no. (Sin esto el core lo rechaza igual,
-        // ya leído: no hay prueba que lo distinga sin medir memoria.)
-        let read = std::fs::metadata(&path)
-            .map_err(|_| None)
-            .and_then(|file| cac_core::attachment_fits(file.len()).map_err(Some))
-            .and_then(|()| std::fs::read(&path).map_err(|_| None));
+    for file in files {
+        let (name, read) = match file {
+            Incoming::Path(path) => {
+                let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                // El tamaño se mira antes de leer: un fichero enorme no se carga en
+                // memoria para que digan que no. (Sin esto el core lo rechaza igual,
+                // ya leído: no hay prueba que lo distinga sin medir memoria.)
+                let read = std::fs::metadata(&path)
+                    .map_err(|_| None)
+                    .and_then(|file| cac_core::attachment_fits(file.len()).map_err(Some))
+                    .and_then(|()| std::fs::read(&path).map_err(|_| None));
+                (name, read)
+            }
+            // Una imagen pegada ya está en memoria.
+            Incoming::Picture { name, bytes } => (name, Ok(bytes)),
+        };
         let uploaded = match read {
             Ok(bytes) => core.tasks().attach(&name, bytes).await.map_err(Some),
             Err(error) => Err(error),
@@ -210,7 +234,7 @@ fn tag_tone(tag: &SheetTag) -> Hsla {
 impl TaskView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let placeholder = tr(cx, "work:task.writeComment");
-        let due = cx.new(|cx| DatePickerState::new(window, cx).date_format("%d/%m/%Y"));
+        let due = cx.new(|cx| DatePickerState::new(window, cx));
         // El selector avisa cuando alguien elige un día o lo quita; ponerle
         // desde aquí el de la tarea no avisa.
         let due_changed = cx.subscribe_in(&due, window, |this, _, event: &DatePickerEvent, window, cx| {
@@ -229,17 +253,16 @@ impl TaskView {
             thread: Thread::Talk,
             thread_of: None,
             problem: None,
-            comment: cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 8).placeholder(placeholder)),
+            comment: cx.new(|cx| TextareaState::new(window, cx).auto_grow(COMMENT_ROWS, 16).placeholder(placeholder)),
             internal: false,
             editing: None,
             title_input: cx.new(|cx| InputState::new(window, cx)),
-            body_input: cx.new(|cx| TextareaState::new(window, cx).auto_grow(6, 24)),
+            body_input: cx.new(|cx| TextareaState::new(window, cx).auto_grow(DESCRIPTION_ROWS, 30)),
             due,
             due_shown: None,
             _due_changed: due_changed,
-            attaching: false,
             editing_comment: None,
-            comment_edit: cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 12)),
+            comment_edit: cx.new(|cx| TextareaState::new(window, cx).auto_grow(COMMENT_EDIT_ROWS, 16)),
             comment_promise: "work:task.writeComment",
             page_focus: cx.focus_handle(),
             focused_for: None,
@@ -248,7 +271,7 @@ impl TaskView {
             naming_tag: None,
             tag_name,
             _tag_named: tag_named,
-            citing: false,
+            citing: None,
             thumbs: HashMap::new(),
             copied: None,
             // Cerrada la página ya no se pinta, así que no es al pintar
@@ -337,71 +360,73 @@ impl TaskView {
         self.say_problem(task_id, text, cx);
     }
 
-    /// Pregunta qué ficheros y los sube a la tarea abierta, uno tras otro. Al
-    /// primero que no se pueda se para y se dice cuál.
-    pub(crate) fn attach_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(task_id) = Self::open_task_id(cx) else { return };
-        self.problem = None;
-        cx.notify();
+    /// El campo de esa caja.
+    fn draft(&self, draft: Draft) -> &Entity<TextareaState> {
+        match draft {
+            Draft::Comment => &self.comment,
+            Draft::CommentEdit => &self.comment_edit,
+            Draft::Description => &self.body_input,
+        }
+    }
+
+    /// Qué es lo que esa caja escribe ahora mismo: el comentario que se
+    /// corrige, o la tarea. Si cambia mientras sube un fichero, lo escrito
+    /// ya es otra cosa y no se cita en ello.
+    fn draft_target(&self, draft: Draft, cx: &App) -> Option<String> {
+        let task = Self::open_task_id(cx)?;
+        match draft {
+            Draft::Comment => Some(task),
+            Draft::CommentEdit => self.editing_comment.clone(),
+            Draft::Description => self.editing.clone().filter(|editing| *editing == task),
+        }
+    }
+
+    /// Pregunta qué ficheros y los adjunta citándolos en esa caja: es el
+    /// clip de su barra.
+    pub(crate) fn attach_to(&mut self, draft: Draft, window: &mut Window, cx: &mut Context<Self>) {
         let chosen = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: None });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = chosen.await else { return };
-            let Ok(answer) = this.update(cx, |this, cx| {
-                this.attaching = true;
-                cx.notify();
-                Backend::ask(cx, move |core| upload_all(core, paths))
-            }) else {
-                return;
-            };
-            let result = answer.await;
-            this.update(cx, |this, cx| {
-                this.attaching = false;
-                if let Ok((_, Some((name, error)))) = result {
-                    this.say_not_attached(task_id, &name, error, cx);
-                }
-                cx.notify();
-            })
-            .ok();
+            this.update_in(cx, |this, window, cx| this.cite_files(draft, paths.into_iter().map(Incoming::Path).collect(), window, cx)).ok();
         })
         .detach();
     }
 
-    /// Pregunta qué ficheros, los sube a la tarea y los cita en el
-    /// comentario que se escribe, donde está el cursor. Como en la app de
-    /// siempre: un fichero que se adjunta al comentar es de la tarea, y el
-    /// comentario lo nombra. Cómo se cita y dónde lo dice el core.
-    pub(crate) fn attach_to_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Sube esos ficheros a la tarea (los que se eligieron con el clip, se
+    /// soltaron en la caja o se pegaron) y los cita en lo que esa caja
+    /// escribe, donde está el cursor. Como en la app de siempre: un fichero
+    /// que se adjunta al escribir es de la tarea, y lo escrito lo nombra.
+    /// Cómo se cita y dónde lo dice el core.
+    pub(crate) fn cite_files(&mut self, draft: Draft, files: Vec<Incoming>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(task_id) = Self::open_task_id(cx) else { return };
+        let target = self.draft_target(draft, cx);
         self.problem = None;
+        self.citing = Some(draft);
         cx.notify();
-        let chosen = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: None });
+        let answer = Backend::ask(cx, move |core| upload_all(core, files));
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = chosen.await else { return };
-            let Ok(answer) = this.update(cx, |this, cx| {
-                this.citing = true;
-                cx.notify();
-                Backend::ask(cx, move |core| upload_all(core, paths))
-            }) else {
-                return;
-            };
             let result = answer.await;
             this.update_in(cx, |this, window, cx| {
-                this.citing = false;
+                this.citing = None;
                 cx.notify();
                 let Ok((files, failed)) = result else { return };
-                // Lo escrito es para la tarea en la que se adjuntó: si ya
-                // se mira otra, los ficheros quedan en la suya y no se
-                // citan en un comentario de ésta.
-                if Self::open_task_id(cx).as_deref() == Some(task_id.as_str()) {
+                // Lo escrito es para lo que se escribía al adjuntar: si ya
+                // se mira otra tarea (o se corrige otro comentario), los
+                // ficheros quedan en su tarea y no se citan en esto.
+                if target.is_some() && this.draft_target(draft, cx) == target {
+                    let field = this.draft(draft).clone();
                     for file in &files {
                         // Con lo que la caja dice ahora, no con lo que
                         // decía al elegir: subir tarda, y se sigue escribiendo.
-                        let (text, cursor) = this.comment_cursor(cx);
+                        let (text, cursor) = {
+                            let field = field.read(cx);
+                            (field.value().to_string(), field.cursor())
+                        };
                         let Some(cited) = cac_core::with_citation(&text, cursor, file) else { continue };
                         let position = position_at(&cited.text, cited.cursor as usize);
-                        this.comment.update(cx, |comment, cx| {
-                            comment.set_value(cited.text, window, cx);
-                            comment.set_cursor_position(position, window, cx);
+                        field.update(cx, |field, cx| {
+                            field.set_value(cited.text, window, cx);
+                            field.set_cursor_position(position, window, cx);
                         });
                     }
                 }
@@ -412,6 +437,22 @@ impl TaskView {
             .ok();
         })
         .detach();
+    }
+
+    /// La caja de escribir de la página: el editor con su barra, con el clip
+    /// que adjunta citando en ella y lo que se le suelte o se le pegue.
+    fn render_draft(&self, prefix: &'static str, draft: Draft, cx: &mut Context<Self>) -> MarkdownEditor {
+        let (choose, take) = (cx.entity().downgrade(), cx.entity().downgrade());
+        MarkdownEditor::new(prefix, self.draft(draft))
+            .attaching(self.citing == Some(draft))
+            .attach(
+                move |window, cx| {
+                    let _ = choose.update(cx, |this, cx| this.attach_to(draft, window, cx));
+                },
+                move |files, window, cx| {
+                    let _ = take.update(cx, |this, cx| this.cite_files(draft, files, window, cx));
+                },
+            )
     }
 
     /// Sigue un enlace de lo que se lee en la tarea. El de un fichero suyo
@@ -993,14 +1034,16 @@ impl TaskView {
                 .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
                 .test_support()
         });
+        // Con la caja en blanco no hay nada que mandar: el botón sale apagado
+        // (`disabled={sending || !comment.trim()}`), y qué es «en blanco» lo
+        // dice el core.
+        let empty = !cac_core::says_something(self.comment.read(cx).value().as_ref());
         div()
             .flex()
             .flex_col()
             .gap_2()
             .child(
                 div()
-                    .id("comment-input")
-                    .test_support()
                     // Con la lista abierta, las flechas, Enter, Tab y Escape
                     // son suyas. Se cogen antes de que lleguen a la caja, y
                     // sólo entonces: sin lista siguen siendo de quien escribe.
@@ -1032,7 +1075,7 @@ impl TaskView {
                             }
                         }))
                     })
-                    .child(Textarea::new(&self.comment)),
+                    .child(self.render_draft("comment", Draft::Comment, cx)),
             )
             .children(self.render_mentions(cx))
             .child(
@@ -1046,6 +1089,7 @@ impl TaskView {
                             .small()
                             .icon(Icon::new(Lucide::Send))
                             .label(tr(cx, if internal { "work:task.commentInternally" } else { "work:task.comment" }))
+                            .disabled(empty)
                             .on_click(cx.listener(|this, _, window, cx| this.send_comment(window, cx))),
                     )
                     // Publicar y registrar en un gesto: todavía no está aquí.
@@ -1067,19 +1111,7 @@ impl TaskView {
                             .tooltip(not_yet(cx))
                             .test_support(),
                     )
-                    .children(audience)
-                    .child(div().flex_1())
-                    // En la app de siempre se adjunta desde la barra del
-                    // editor; aquí la caja es texto llano y el clip va al lado.
-                    .child(
-                        Button::new("comment-attach")
-                            .ghost()
-                            .small()
-                            .icon(Icon::new(Lucide::Paperclip))
-                            .tooltip(tr(cx, "common:editor.attachFile"))
-                            .loading(self.citing)
-                            .on_click(cx.listener(|this, _, window, cx| this.attach_to_comment(window, cx))),
-                    ),
+                    .children(audience),
             )
     }
 
@@ -1385,11 +1417,12 @@ impl TaskView {
                 )
         });
         let badges: Vec<_> = badges.collect();
-        // El campo de buscar a quién (`UserPicker`, `w-44`): aquí abre la
-        // lista del equipo.
+        // El campo de buscar a quién (`UserPicker`, `w-44`, con el `Input`
+        // de `ui/input.tsx`: `h-8 rounded-lg border-input px-2.5 text-sm`):
+        // aquí abre la lista del equipo.
         let assign = div()
             .w(rems(11.))
-            .h_7()
+            .h_8()
             .flex()
             .items_center()
             .px_2p5()
@@ -1425,12 +1458,73 @@ impl TaskView {
         // A quien está en otra hora que la organización se le dice de quién
         // es el día: aquí sí cabe escrito.
         let zone = Backend::core(cx).my_work().zone_hint(locale(cx));
+        // El botón de `DatePicker.tsx` (`flex items-center gap-1.5 rounded
+        // border px-2 py-1 text-xs`, el calendario `size-3.5` delante y el día
+        // con números, `30/10/26`; sin día, apagado). Lo que se abre al
+        // pulsarlo es el calendario del kit, que va encima y sin pintar: su
+        // campo es un `input` con el icono detrás, y aquí no se le ve más
+        // que el desplegable. El día lo dice el selector, que ya enseña el
+        // elegido mientras se guarda; cómo se escribe, el core.
+        let picked = match self.due.read(cx).date() {
+            Date::Single(day) => day,
+            _ => None,
+        };
+        let due_label = picked.map(|day| cac_core::short_date(locale(cx), day)).unwrap_or_else(|| tr(cx, "common:last.pickADate"));
+        let unseen = gpui_kit::transparent_black();
+        let due_button = div()
+            .id("task-due")
+            .relative()
+            .flex_none()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(border)
+                    .text_xs()
+                    .when(picked.is_none(), |this| this.text_color(muted))
+                    .child(Icon::new(Lucide::CalendarDays).size_3p5().flex_none())
+                    .child(
+                        div()
+                            .id("task-due-day")
+                            .aria_label(due_label.clone())
+                            .child(due_label)
+                            .test_support(),
+                    ),
+            )
+            // Más ancho que el botón y recortado a él: así el icono que el
+            // campo del kit lleva a la derecha cae fuera de lo que se ve.
+            .child(
+                div().absolute().top_0().left_0().size_full().overflow_hidden().child(
+                    div().w(px(480.)).h_full().child(DatePicker::new(&self.due).small().appearance(false).placeholder(" ").h_full().text_color(unseen)),
+                ),
+            )
+            .test_support();
+        // Quitar la fecha: en la app de siempre es un botón dentro del
+        // calendario («Sin fecha»); el del kit no lo tiene, así que va al lado.
+        let clear_due = picked.is_some().then(|| {
+            let hint = tr(cx, "common:last.clearDate");
+            div()
+                .id("task-due-clear")
+                .flex_none()
+                .p_1()
+                .rounded(px(4.))
+                .text_color(muted)
+                .cursor_pointer()
+                .hover(move |style| style.text_color(foreground))
+                .on_click(cx.listener(|this, _, window, cx| this.set_due(None, window, cx)))
+                .child(Icon::new(Lucide::X).size_3())
+                .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+                .test_support()
+        });
         let due = div()
             .flex()
             .flex_col()
-            .child(div().id("task-due").test_support().w(px(170.)).child(
-                DatePicker::new(&self.due).small().cleanable(true).placeholder(tr(cx, "common:last.pickADate")),
-            ))
+            .child(div().flex().items_center().gap_1().child(due_button).children(clear_due))
             .children(zone.map(|zone| div().id("task-due-zone").mt_1().text_size(px(11.)).text_color(muted).child(format!("({zone})"))));
 
         div()
@@ -1598,7 +1692,7 @@ impl TaskView {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(div().id("comment-edit-input").test_support().child(Textarea::new(&self.comment_edit)))
+                    .child(self.render_draft("comment-edit", Draft::CommentEdit, cx))
                     .child(
                         div()
                             .flex()
@@ -1608,6 +1702,8 @@ impl TaskView {
                                     .primary()
                                     .small()
                                     .label(tr(cx, "work:task.save"))
+                                    // `disabled={saving || !draft.trim()}`.
+                                    .disabled(!cac_core::says_something(self.comment_edit.read(cx).value().as_ref()))
                                     .on_click(cx.listener(|this, _, window, cx| this.save_comment_edit(window, cx))),
                             )
                             .child(
@@ -1701,7 +1797,7 @@ impl TaskView {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(div().id("task-description-input").test_support().child(Textarea::new(&self.body_input)))
+                    .child(self.render_draft("task-description", Draft::Description, cx))
                     .child(
                         div()
                             .flex()
@@ -1733,38 +1829,52 @@ impl TaskView {
                     .into_any_element()
             });
 
-        // Siempre a la vista, también sin ficheros: es donde se adjunta (en
-        // la app de siempre se adjunta soltando el fichero en el editor).
-        let attachments = div()
-            .id("task-attachments")
-            .test_support()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(
-                div().flex().items_center().gap_2().child(section_title(tr(cx, "work:task.attachments"), cx)).child(
-                    Button::new("task-attach")
-                        .ghost()
-                        .xsmall()
-                        .icon(Icon::new(Lucide::Paperclip))
-                        .label(tr(cx, "common:editor.attachFile"))
-                        .loading(self.attaching)
-                        .on_click(cx.listener(|this, _, window, cx| this.attach_files(window, cx))),
-                ),
+        // Sólo cuando hay alguno, como en la app de siempre (`detail.
+        // attachments.length > 0`): se adjunta desde el clip de cada editor.
+        let attachments = (!sheet.attachments.is_empty()).then(|| {
+            div()
+                .id("task-attachments")
+                .test_support()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(section_title(tr(cx, "work:task.attachments"), cx))
+                // Las imágenes se ven, no se listan; lo demás, debajo.
+                .when(sheet.attachments.iter().any(|file| file.image), |this| {
+                    this.child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .children(sheet.attachments.iter().filter(|file| file.image).map(|file| self.render_picture(file, cx))),
+                    )
+                })
+                .when(sheet.attachments.iter().any(|file| !file.image), |this| {
+                    this.child(div().flex().flex_col().gap_1().children(sheet.attachments.iter().filter(|file| !file.image).map(|file| self.render_file(file, cx))))
+                })
+        });
+
+        // Enlazar una PR pegando su dirección: la línea discreta que
+        // `TaskGitPanel.tsx` pinta bajo las subtareas cuando la tarea no
+        // tiene código enlazado (`flex items-center gap-1.5 text-xs
+        // text-muted-foreground`, el icono `size-3.5`). Todavía no está aquí.
+        let link_pr = (!sheet.git_linked).then(|| {
+            div().flex().child(
+                div()
+                    .id("task-link-pr")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_1p5()
+                    .text_xs()
+                    .text_color(muted)
+                    .hover(move |style| style.text_color(foreground))
+                    .child(Icon::new(Lucide::GitPullRequest).size_3p5())
+                    .child(tr(cx, "work:task.git.linkPR"))
+                    .tooltip(not_yet(cx))
+                    .test_support(),
             )
-            // Las imágenes se ven, no se listan; lo demás, debajo.
-            .when(sheet.attachments.iter().any(|file| file.image), |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .children(sheet.attachments.iter().filter(|file| file.image).map(|file| self.render_picture(file, cx))),
-                )
-            })
-            .when(sheet.attachments.iter().any(|file| !file.image), |this| {
-                this.child(div().flex().flex_col().gap_1().children(sheet.attachments.iter().filter(|file| !file.image).map(|file| self.render_file(file, cx))))
-            });
+        });
 
         // Las subtareas: el rótulo con cuántas van hechas, cómo añadir otra
         // y, sin ninguna, para qué sirven.
@@ -1860,8 +1970,9 @@ impl TaskView {
             .children(problem.map(|phrase| div().id("task-problem").test_support().text_sm().text_color(danger).child(phrase)))
             .child(handoff)
             .child(description)
-            .child(attachments)
+            .children(attachments)
             .child(subtasks)
+            .children(link_pr)
             .child(thread_section)
     }
 }
@@ -3191,48 +3302,6 @@ mod tests {
         stop(cx);
     }
 
-    /// «Adjuntar» pregunta qué ficheros y los sube a la tarea; uno que pasa
-    /// del tope se dice y no se manda.
-    ///
-    /// Roturas que atrapa: un botón que no pregunta; subir sólo el primero;
-    /// mandar otro contenido u otro nombre; cargar y mandar un fichero que
-    /// el servidor va a rechazar por grande; callar que uno no se subió.
-    #[gpui_kit::test]
-    fn attaching_uploads_what_was_chosen(cx: &mut TestAppContext) {
-        let server = server_with_a_file();
-        server.mount(
-            Mock::given(method("POST"))
-                .and(path("/api/v1/tasks/t1/attachments"))
-                .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": { "id": "a2" } }))),
-        );
-        let window = open(&server, cx);
-        open_first_task(window, cx);
-        let dir = scratch("attach");
-        let (notes, shot, huge) = (dir.join("notas.txt"), dir.join("captura.png"), dir.join("enorme.bin"));
-        std::fs::write(&notes, b"hola").unwrap();
-        std::fs::write(&shot, b"\x89PNG\x00\xff").unwrap();
-        // Un byte por encima del tope, sin ocupar disco.
-        std::fs::File::create(&huge).unwrap().set_len(cac_core::MAX_ATTACHMENT_BYTES as u64 + 1).unwrap();
-
-        click(window, "task-attach", cx);
-        assert!(cx.did_prompt_for_paths(), "no preguntó qué adjuntar");
-        let chosen = vec![notes.clone(), shot.clone()];
-        cx.simulate_path_prompt_response(move |_| Some(chosen));
-        wait_until(cx, "suben los dos", |_| asked(&server, "POST", "/api/v1/tasks/t1/attachments").len() == 2);
-
-        let sent = asked(&server, "POST", "/api/v1/tasks/t1/attachments");
-        assert_eq!(sent[0].body, cac_core::multipart("notas.txt", b"hola").1);
-        assert_eq!(sent[1].body, cac_core::multipart("captura.png", b"\x89PNG\x00\xff").1);
-        assert!(!on_screen(window, "task-problem", cx));
-
-        click(window, "task-attach", cx);
-        cx.simulate_path_prompt_response(move |_| Some(vec![huge]));
-        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
-        assert_eq!(asked(&server, "POST", "/api/v1/tasks/t1/attachments").len(), 2, "mandó el que pasa del tope");
-        let _ = std::fs::remove_dir_all(&dir);
-        stop(cx);
-    }
-
     /// Quitar un adjunto pregunta antes, diciendo cuál; «Cancelar» no quita
     /// nada y «Quitar» lo pide.
     ///
@@ -3879,4 +3948,322 @@ mod tests {
         stop(cx);
     }
 
+    /// Deja la caja de comentar con ese texto y esa selección (en bytes).
+    fn compose(window: AnyWindowHandle, view: &Entity<TaskView>, text: &str, chosen: std::ops::Range<usize>, cx: &mut TestAppContext) {
+        let text = text.to_string();
+        with_view(window, view, cx, |view, window, cx| {
+            view.comment.update(cx, |comment, cx| {
+                comment.set_value(text, window, cx);
+                comment.set_selected_range(chosen, cx);
+            });
+        });
+    }
+
+    fn chosen(view: &Entity<TaskView>, cx: &mut TestAppContext) -> std::ops::Range<usize> {
+        cx.update(|cx| view.read(cx).comment.read(cx).selected_range())
+    }
+
+    /// Cada botón de la barra le hace lo suyo a lo escrito, deja la
+    /// selección donde el core dice y devuelve el foco a la caja.
+    ///
+    /// Roturas que atrapa: un botón pintado que no hace nada; uno que hace
+    /// lo de otro; no pasarle al core lo seleccionado (envuelve en el cursor
+    /// y no la palabra); no poner de vuelta la selección, o quedarse el foco
+    /// en el botón, con lo que lo siguiente que se teclea no va a donde toca.
+    #[gpui_kit::test]
+    fn each_button_of_the_bar_does_its_thing_to_what_is_written(cx: &mut TestAppContext) {
+        let server = server();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        let table = "|   |   |   |\n| --- | --- | --- |\n|   |   |   |\n|   |   |   |";
+        let buttons = [
+            ("comment-bold", "****"),
+            ("comment-italic", "**"),
+            ("comment-code", "``"),
+            ("comment-heading", "## "),
+            ("comment-bullets", "- "),
+            ("comment-numbers", "1. "),
+            ("comment-checklist", "- [ ] "),
+            ("comment-quote", "> "),
+            ("comment-table", table),
+            ("comment-link", "[]()"),
+        ];
+        for (id, written) in buttons {
+            compose(window, &view, "", 0..0, cx);
+            click(window, id, cx);
+            assert_eq!(typed(&view, cx), written, "{id}");
+        }
+
+        compose(window, &view, "di hola ya", 3..7, cx);
+        click(window, "comment-bold", cx);
+        assert_eq!(typed(&view, cx), "di **hola** ya");
+        assert_eq!(chosen(&view, cx), 5..9);
+        type_more(window, "X", cx);
+        assert_eq!(typed(&view, cx), "di **X** ya", "lo tecleado tras el botón no fue a lo seleccionado");
+        stop(cx);
+    }
+
+    /// Los atajos de tiptap hacen lo que sus botones: Ctrl con B, I, E y K.
+    ///
+    /// Roturas que atrapa: un atajo que no hace nada, o que hace lo de otro;
+    /// que la letra además se escriba; coger la letra sin Ctrl, y no poder
+    /// escribir una «b».
+    #[gpui_kit::test]
+    fn the_shortcuts_do_what_their_buttons_do(cx: &mut TestAppContext) {
+        let server = server();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        write(window, "x", cx);
+        for (key, written) in [("secondary-b", "**hola**"), ("secondary-i", "*hola*"), ("secondary-e", "`hola`"), ("secondary-k", "[hola]()")] {
+            compose(window, &view, "hola", 0..4, cx);
+            press(window, key, cx);
+            assert_eq!(typed(&view, cx), written, "{key}");
+        }
+        compose(window, &view, "", 0..0, cx);
+        type_more(window, "bike", cx);
+        assert_eq!(typed(&view, cx), "bike");
+        stop(cx);
+    }
+
+    /// Enter dentro de una lista sigue con otro elemento, y en uno vacío sale
+    /// de ella; fuera de una lista, y con Mayúsculas, es un salto de línea.
+    ///
+    /// Roturas que atrapa: una lista que hay que seguir a mano; el elemento
+    /// nuevo **y además** el salto de línea del campo; quedarse con Enter
+    /// donde no hay lista, y no poder partir una línea.
+    #[gpui_kit::test]
+    fn enter_carries_a_list_on_in_the_editor(cx: &mut TestAppContext) {
+        let server = server();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        write(window, "- uno", cx);
+        press(window, "enter", cx);
+        assert_eq!(typed(&view, cx), "- uno\n- ");
+        type_more(window, "dos", cx);
+        press(window, "shift-enter", cx);
+        assert_eq!(typed(&view, cx), "- uno\n- dos\n");
+        press(window, "enter", cx);
+        assert_eq!(typed(&view, cx), "- uno\n- dos\n\n");
+
+        compose(window, &view, "- uno\n- ", 8..8, cx);
+        press(window, "enter", cx);
+        assert_eq!(typed(&view, cx), "- uno\n");
+        stop(cx);
+    }
+
+    fn is_off(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> bool {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.find(id).disabled() == Some(true)
+        })
+        .unwrap()
+    }
+
+    /// «Comentar» está apagado mientras no hay nada escrito, y «Guardar» al
+    /// corregir un comentario, lo mismo.
+    ///
+    /// Roturas que atrapa: un botón encendido que no hace nada al pulsarlo
+    /// (la caja está vacía, o sólo tiene espacios); uno que se queda apagado
+    /// con algo escrito.
+    #[gpui_kit::test]
+    fn the_send_button_is_off_while_nothing_is_written(cx: &mut TestAppContext) {
+        let server = server_with_two_voices();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        assert!(is_off(window, "comment-send", cx));
+        write(window, "  ", cx);
+        assert!(is_off(window, "comment-send", cx), "encendido con sólo espacios");
+        type_more(window, "hola", cx);
+        assert!(!is_off(window, "comment-send", cx), "apagado con algo escrito");
+
+        click(window, "comment-edit-said", cx);
+        assert!(!is_off(window, "comment-edit-save", cx));
+        retype(window, &view, " \n", cx);
+        assert!(is_off(window, "comment-edit-save", cx));
+        stop(cx);
+    }
+
+    /// La descripción y el comentario que se corrige se escriben en el mismo
+    /// editor que el comentario nuevo: con su barra, y con su clip.
+    ///
+    /// Roturas que atrapa: una caja de texto pelada donde la app de siempre
+    /// tiene el editor; una barra cuyos botones escriben en otra caja (la
+    /// del comentario nuevo).
+    #[gpui_kit::test]
+    fn the_description_and_an_edited_comment_use_the_same_editor(cx: &mut TestAppContext) {
+        let server = server_with_two_voices();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+
+        click(window, "task-edit", cx);
+        assert!(on_screen(window, "task-description-input", cx) && on_screen(window, "task-description-attach", cx));
+        rewrite(window, &view, "título", "cuerpo", cx);
+        click(window, "task-description-quote", cx);
+        assert_eq!(written(&view, cx).1, "> cuerpo");
+
+        click(window, "comment-edit-said", cx);
+        assert!(on_screen(window, "comment-edit-input", cx) && on_screen(window, "comment-edit-attach", cx));
+        retype(window, &view, "dicho", cx);
+        click(window, "comment-edit-heading", cx);
+        assert_eq!(edit_typed(&view, cx), "## dicho");
+        assert_eq!(typed(&view, cx), "", "la barra de otra caja escribió en la de comentar");
+        stop(cx);
+    }
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\xff";
+
+    /// Lo que se suelta o se pega en una caja se adjunta a la tarea y se
+    /// cita en **esa** caja; el texto que se pega sigue siendo texto.
+    ///
+    /// Roturas que atrapa: una barra que promete «pega o suelta ficheros» y
+    /// no hace nada con ellos; subir y no citar; citar en la caja de
+    /// comentar lo que se soltó en la descripción; una imagen pegada sin
+    /// nombre de imagen (se subiría como un fichero cualquiera y no se
+    /// vería); tragarse un texto pegado creyéndolo un fichero.
+    #[gpui_kit::test]
+    fn what_is_dropped_or_pasted_in_a_box_is_attached_and_cited_there(cx: &mut TestAppContext) {
+        use gpui_kit::{ClipboardItem, ExternalPaths, FileDropEvent, Image, ImageFormat, PlatformInput};
+        let server = server();
+        storing(&server, "a2", "pasted.png");
+        storing(&server, "a3", "notas.txt");
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        let uploads = |server: &FakeServer| asked(server, "POST", "/api/v1/tasks/t1/attachments");
+
+        // Un texto pegado es texto.
+        write(window, "a", cx);
+        cx.write_to_clipboard(ClipboardItem::new_string("b".into()));
+        cx.update_window(window, |_, window, cx| window.dispatch_action(Box::new(gpui_kit::component::input::Paste), cx)).unwrap();
+        settle(cx);
+        assert_eq!(typed(&view, cx), "ab");
+        assert!(uploads(&server).is_empty());
+
+        // Una imagen pegada en la caja de comentar.
+        cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, PNG.to_vec())));
+        cx.update_window(window, |_, window, cx| window.dispatch_action(Box::new(gpui_kit::component::input::Paste), cx)).unwrap();
+        wait_until(cx, "sube la imagen pegada y queda citada", |cx| {
+            typed(&view, cx) == "ab\n![pasted.png](/api/v1/tasks/t1/attachments/a2/raw)\n"
+        });
+        assert_eq!(uploads(&server)[0].body, cac_core::multipart("pasted.png", PNG).1);
+
+        // Un fichero soltado en la descripción, que se está editando.
+        let dir = scratch("drop");
+        let notes = dir.join("notas.txt");
+        std::fs::write(&notes, b"hola").unwrap();
+        click(window, "task-edit", cx);
+        rewrite(window, &view, "título", "", cx);
+        let before = typed(&view, cx);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let position = window.find("task-description-input").bounds().center();
+            let paths = ExternalPaths(vec![notes.clone()].into());
+            window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Entered { position, paths }), cx);
+            window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Submit { position }), cx);
+        })
+        .unwrap();
+        wait_until(cx, "sube lo soltado y queda citado en la descripción", |cx| {
+            written(&view, cx).1 == "[notas.txt](/api/v1/tasks/t1/attachments/a3/raw) "
+        });
+        assert_eq!(uploads(&server)[1].body, cac_core::multipart("notas.txt", b"hola").1);
+        assert_eq!(typed(&view, cx), before, "lo soltado en la descripción se citó en el comentario");
+        assert!(!on_screen(window, "task-problem", cx));
+        let _ = std::fs::remove_dir_all(&dir);
+        stop(cx);
+    }
+
+    fn label_of(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> String {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.find(id).label().unwrap_or_default().to_string()
+        })
+        .unwrap()
+    }
+
+    /// Cuántas piezas hay a la vista: sube cuando se abre un desplegable.
+    fn pieces(window: AnyWindowHandle, cx: &mut TestAppContext) -> usize {
+        use gpui_kit::test::TestQueryExt;
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.elements().len()
+        })
+        .unwrap()
+    }
+
+    /// El vencimiento es un botón con el día escrito con números, como en la
+    /// app de siempre; pulsarlo abre el calendario y su × quita la fecha.
+    ///
+    /// Roturas que atrapa: el día con el año entero o en otro orden; un botón
+    /// que enseña el día de la tarea y no el que se acaba de elegir; un
+    /// botón pintado que no abre nada (el calendario del kit tapado o
+    /// recortado); una × que no quita la fecha, o que sale sin fecha que quitar.
+    #[gpui_kit::test]
+    fn the_due_day_is_a_button_that_says_it_with_numbers(cx: &mut TestAppContext) {
+        let server = server_with_choices();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        assert_eq!(label_of(window, "task-due-day", cx), "30/9/26");
+
+        let closed = pieces(window, cx);
+        click(window, "task-due", cx);
+        cx.run_until_parked();
+        assert!(pieces(window, cx) > closed, "pulsar el botón no abrió el calendario");
+        press(window, "escape", cx);
+        cx.run_until_parked();
+        assert_eq!(pieces(window, cx), closed, "Escape no cerró el calendario");
+
+        pick(window, &view, day(2026, 10, 2), cx);
+        assert_eq!(label_of(window, "task-due-day", cx), "2/10/26", "no dice el día recién elegido");
+        wait_until(cx, "se guarda el día elegido", |_| patches(&server).len() == 1);
+
+        click(window, "task-due-clear", cx);
+        wait_until(cx, "se pide quitar la fecha", |_| patches(&server).len() == 2);
+        assert_eq!(patches(&server)[1], json!({ "clearDueAt": true }));
+        stop(cx);
+        cx.update_window(window, |_, window, _| window.remove_window()).unwrap();
+
+        let other = self::server();
+        let mut without = detail("t1");
+        without["task"]["dueAt"] = serde_json::Value::Null;
+        other.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(without)).with_priority(1));
+        let window = open(&other, cx);
+        open_first_task(window, cx);
+        assert!(on_screen(window, "task-due", cx) && !on_screen(window, "task-due-clear", cx));
+        stop(cx);
+    }
+
+    /// La sección de adjuntos sólo está cuando hay alguno, y «Enlazar una
+    /// PR» sólo donde no hay código enlazado.
+    ///
+    /// Roturas que atrapa: una sección «Adjuntos» vacía en cada tarea (se
+    /// adjunta desde el clip del editor); no enseñarla cuando sí hay; la
+    /// línea de enlazar una PR en una tarea que ya tiene la suya, o que
+    /// falte en la que no tiene nada.
+    #[gpui_kit::test]
+    fn attachments_and_the_pr_line_are_there_only_when_they_apply(cx: &mut TestAppContext) {
+        // La del contrato: sin ficheros suyos, con código enlazado.
+        let server = server();
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+        assert!(!on_screen(window, "task-attachments", cx));
+        assert!(!on_screen(window, "task-link-pr", cx));
+        stop(cx);
+        cx.update_window(window, |_, window, _| window.remove_window()).unwrap();
+
+        // Con un fichero y sin código.
+        let other = self::server();
+        let mut bare = detail("t1");
+        bare["git"] = serde_json::Value::Null;
+        bare["attachments"] = json!([{
+            "id": "a1", "itemId": "t1", "commentId": null, "url": RAW, "fileName": "plan.pdf",
+            "contentType": "application/pdf", "bytes": 12288,
+        }]);
+        other.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(bare)).with_priority(1));
+        let window = open(&other, cx);
+        open_first_task(window, cx);
+        assert!(on_screen(window, "task-attachments", cx) && on_screen(window, "task-file-a1", cx));
+        assert!(on_screen(window, "task-link-pr", cx));
+        stop(cx);
+    }
 }
