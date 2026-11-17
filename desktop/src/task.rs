@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use cac_core::{
-    ApiError, Choice, DueState, MentionMark, MentionMenu, MentionPerson, SheetComment, SheetFile, SheetSubtask, StatusOption, TaskAttachment, TaskSheet,
+    ApiError, Choice, MentionMark, MentionMenu, MentionPerson, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, StatusOption, TaskAttachment, TaskSheet,
     PRIORITIES,
 };
 use chrono::NaiveDate;
@@ -24,6 +24,7 @@ use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Enter, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Position, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
@@ -117,6 +118,9 @@ pub struct TaskView {
     /// Las imágenes de la tarea abierta, por el id de su adjunto. Se bajan
     /// una vez, al verla, y se tiran al abrir otra.
     thumbs: HashMap<String, Thumb>,
+    /// Qué identificador se acaba de copiar: su pastilla lo dice un momento
+    /// con una marca en vez del icono de copiar.
+    copied: Option<&'static str>,
     _task_closed: Subscription,
 }
 
@@ -158,15 +162,49 @@ fn position_at(text: &str, offset: usize) -> Position {
     Position::new(line, character)
 }
 
-/// Con qué tono se pinta una prioridad.
-fn priority_tone(priority: &str, cx: &App) -> Hsla {
-    let theme = cx.theme();
-    match priority {
-        "urgent" => theme.danger,
-        "high" => theme.warning,
-        "normal" => theme.info,
-        _ => theme.muted_foreground,
-    }
+/// El rótulo de una sección de la columna de lectura: el `<h3>` de
+/// `TaskDetailDrawer.tsx` (`text-xs font-medium uppercase`, apagado).
+fn section_title(title: String, cx: &App) -> Div {
+    div().flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(cx.theme().muted_foreground).child(title.to_uppercase())
+}
+
+/// El botón pequeño que acompaña al rótulo de una sección («Editar»,
+/// «+ Añadir»): el `Button size="sm" variant="ghost"` con `h-6 px-2
+/// text-xs` de la app de siempre.
+fn section_action(id: &'static str, label: String, cx: &App) -> Stateful<Div> {
+    let hover = cx.theme().muted;
+    div()
+        .id(id)
+        .h_6()
+        .px_2()
+        .flex()
+        .flex_none()
+        .items_center()
+        .rounded(px(8.))
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover))
+        .child(label)
+}
+
+/// El rótulo de una propiedad del riel, con su icono (`mb-1 flex
+/// items-center gap-1.5 text-xs text-muted-foreground`, icono `size-3.5`).
+fn rail_label(icon: impl Into<Icon>, text: String, cx: &App) -> Div {
+    div().flex().items_center().gap_1p5().text_xs().text_color(cx.theme().muted_foreground).child(icon.into().size_3p5().flex_none()).child(text)
+}
+
+/// Lo que dice al pasar el ratón una pieza que la app de siempre tiene y
+/// ésta todavía no: está en su sitio, y no calla.
+fn not_yet(cx: &App) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let phrase = tr(cx, "common:misc.notInThisApp");
+    move |window, cx| Tooltip::new(phrase.clone()).build(window, cx)
+}
+
+/// El color de una etiqueta: el suyo o, sin él, el violeta de `TagChip.tsx`.
+fn tag_tone(tag: &SheetTag) -> Hsla {
+    let own = tag.color.strip_prefix('#').filter(|hex| hex.len() == 6).and_then(|hex| u32::from_str_radix(hex, 16).ok());
+    Hsla::from(gpui_kit::rgb(own.unwrap_or(0x8B5CF6)))
 }
 
 impl TaskView {
@@ -212,6 +250,7 @@ impl TaskView {
             _tag_named: tag_named,
             citing: false,
             thumbs: HashMap::new(),
+            copied: None,
             // Cerrada la página ya no se pinta, así que no es al pintar
             // donde se tiran sus imágenes: una captura decodificada pesa.
             _task_closed: cx.observe(&Backend::snapshot(cx), |this, snapshot, cx| {
@@ -595,49 +634,58 @@ impl TaskView {
     }
 
     /// Un fichero de la tarea que no es una imagen: su nombre lo abre, y al
-    /// lado guardar una copia y quitarlo.
+    /// pasar el ratón salen guardar una copia y quitarlo. La fila es la de
+    /// «lo demás» en `TaskDetailDrawer.tsx` (`group flex items-center gap-2
+    /// text-xs`, el clip `size-3`, el nombre subrayado en el color de acción).
     fn render_file(&self, file: &SheetFile, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (muted, primary) = (theme.muted_foreground, theme.primary);
-        let icon = Lucide::Paperclip;
+        let (muted, primary, chip) = (theme.muted_foreground, theme.primary, theme.muted);
         let (open, save, remove) = (file.clone(), file.clone(), file.clone());
+        let group = SharedString::from(format!("task-file-row-{}", file.id));
         div()
+            .group(group.clone())
             .flex()
             .items_center()
             .gap_2()
-            .text_sm()
-            .child(Icon::new(icon).xsmall().text_color(muted))
+            .text_xs()
+            .child(Icon::new(Lucide::Paperclip).size_3().flex_none().text_color(muted))
             .child(
                 div()
                     .id(SharedString::from(format!("task-file-{}", file.id)))
                     .test_support()
                     .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
+                    .truncate()
                     .text_color(primary)
+                    .underline()
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, window, cx| this.open_file(open.id.clone(), open.name.clone(), window, cx)))
                     .child(file.name.clone()),
             )
-            .children(file.size.clone().map(|size| div().flex_none().text_xs().text_color(muted).child(size)))
-            .children(file.cited.then(|| div().flex_none().text_xs().text_color(muted).child(tr(cx, "work:task.citedHere"))))
-            .child(div().flex_1())
+            .children(file.size.clone().map(|size| div().flex_none().text_color(muted).child(size)))
+            .children(file.cited.then(|| div().flex_none().px_1().rounded(px(4.)).bg(chip).text_color(muted).child(tr(cx, "work:task.citedHere"))))
             .child(
-                Button::new(SharedString::from(format!("task-file-save-{}", file.id)))
-                    .ghost()
-                    .xsmall()
-                    .icon(Icon::new(Lucide::Download))
-                    .tooltip(tr(cx, "work:task.saveFile"))
-                    .on_click(cx.listener(move |this, _, window, cx| this.save_file(save.id.clone(), save.name.clone(), window, cx))),
-            )
-            .child(
-                Button::new(SharedString::from(format!("task-file-remove-{}", file.id)))
-                    .ghost()
-                    .xsmall()
-                    .icon(Icon::new(Lucide::Trash))
-                    .tooltip(tr(cx, "work:task.removeAttachment"))
-                    .on_click(cx.listener(move |this, _, window, cx| this.remove_file(remove.clone(), window, cx))),
+                div()
+                    .ml_auto()
+                    .flex()
+                    .flex_none()
+                    .opacity(0.)
+                    .group_hover(group, |style| style.opacity(1.))
+                    .child(
+                        Button::new(SharedString::from(format!("task-file-save-{}", file.id)))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(Lucide::Download))
+                            .tooltip(tr(cx, "work:task.saveFile"))
+                            .on_click(cx.listener(move |this, _, window, cx| this.save_file(save.id.clone(), save.name.clone(), window, cx))),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("task-file-remove-{}", file.id)))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(Lucide::Trash))
+                            .tooltip(tr(cx, "work:task.removeAttachment"))
+                            .on_click(cx.listener(move |this, _, window, cx| this.remove_file(remove.clone(), window, cx))),
+                    ),
             )
     }
 
@@ -917,16 +965,33 @@ impl TaskView {
     }
 
     /// La caja de comentar. Donde un cliente lee, dice quién va a leerlo y
-    /// deja cambiarlo antes de mandar.
+    /// deja cambiarlo antes de mandar. La fila de debajo es la de
+    /// `TaskDetailDrawer.tsx`: comentar (con su avión), registrar una
+    /// decisión y, donde un cliente lee, el interruptor de para quién es.
     fn render_composer(&self, client_reads: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let internal = client_reads && self.internal;
+        let theme = cx.theme();
+        let (muted, foreground, chip) = (theme.muted_foreground, theme.foreground, theme.muted);
         let audience = client_reads.then(|| {
-            Button::new("comment-audience")
-                .ghost()
-                .small()
-                .label(tr(cx, if internal { "work:task.internalNote" } else { "work:task.theClientReads" }))
-                .tooltip(tr(cx, if internal { "work:task.onlyTeamWillSee" } else { "work:task.clientReadsSwitch" }))
+            let hint = tr(cx, if internal { "work:task.onlyTeamWillSee" } else { "work:task.clientReadsSwitch" });
+            div()
+                .id("comment-audience")
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded(px(4.))
+                .text_xs()
+                .cursor_pointer()
+                .when(internal, |this| this.bg(chip).text_color(foreground))
+                .when(!internal, |this| this.text_color(muted).hover(move |style| style.text_color(foreground)))
                 .on_click(cx.listener(move |this, _, _, cx| this.set_internal(!internal, cx)))
+                .child(Icon::new(if internal { Lucide::EyeOff } else { Lucide::Eye }).size_3())
+                .child(tr(cx, if internal { "work:task.internalNote" } else { "work:task.theClientReads" }))
+                .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+                .test_support()
         });
         div()
             .flex()
@@ -976,6 +1041,37 @@ impl TaskView {
                     .items_center()
                     .gap_2()
                     .child(
+                        Button::new("comment-send")
+                            .primary()
+                            .small()
+                            .icon(Icon::new(Lucide::Send))
+                            .label(tr(cx, if internal { "work:task.commentInternally" } else { "work:task.comment" }))
+                            .on_click(cx.listener(|this, _, window, cx| this.send_comment(window, cx))),
+                    )
+                    // Publicar y registrar en un gesto: todavía no está aquí.
+                    .child(
+                        div()
+                            .id("comment-decision")
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap_1()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(4.))
+                            .text_xs()
+                            .text_color(muted)
+                            .hover(move |style| style.text_color(foreground))
+                            .child(Icon::new(Lucide::Gavel).size_3())
+                            .child(tr(cx, "work:decisions.record"))
+                            .tooltip(not_yet(cx))
+                            .test_support(),
+                    )
+                    .children(audience)
+                    .child(div().flex_1())
+                    // En la app de siempre se adjunta desde la barra del
+                    // editor; aquí la caja es texto llano y el clip va al lado.
+                    .child(
                         Button::new("comment-attach")
                             .ghost()
                             .small()
@@ -983,16 +1079,7 @@ impl TaskView {
                             .tooltip(tr(cx, "common:editor.attachFile"))
                             .loading(self.citing)
                             .on_click(cx.listener(|this, _, window, cx| this.attach_to_comment(window, cx))),
-                    )
-                    .child(div().flex_1())
-                    .children(audience)
-                    .child(
-                    Button::new("comment-send")
-                        .primary()
-                        .small()
-                        .label(tr(cx, if internal { "work:task.commentInternally" } else { "work:task.comment" }))
-                        .on_click(cx.listener(|this, _, window, cx| this.send_comment(window, cx))),
-                ),
+                    ),
             )
     }
 
@@ -1014,75 +1101,13 @@ impl TaskView {
         );
     }
 
-    fn section(&self, title: String, cx: &mut Context<Self>) -> Div {
-        let muted = cx.theme().muted_foreground;
-        div().text_xs().font_weight(FontWeight::MEDIUM).text_color(muted).child(title.to_uppercase())
-    }
-
-    fn render_chips(&self, sheet: &TaskSheet, statuses: Vec<StatusOption>, cx: &mut Context<Self>) -> impl IntoElement {
-        let view = cx.entity().downgrade();
-        let current = sheet.status_name.clone();
-        let theme = cx.theme();
-        let (muted, danger, warning, accent) = (theme.muted_foreground, theme.danger, theme.warning, theme.accent);
-        let chip = |tone: Hsla, label: String| div().flex_none().px_2().rounded_md().bg(tone.opacity(0.15)).text_xs().text_color(tone).child(label);
-        let status_tone = gpui_kit::rgb(u32::from_str_radix(sheet.status_color.trim_start_matches('#'), 16).unwrap_or(0x888888));
-        let due = sheet.due.clone().map(|due| {
-            let tone = match due.state {
-                DueState::Overdue | DueState::Yesterday => danger,
-                DueState::Today | DueState::Tomorrow => warning,
-                DueState::Later => muted,
-            };
-            chip(tone, due.text)
-        });
-
-        div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_1()
-                    .pl_2()
-                    .rounded_md()
-                    .bg(accent)
-                    .child(div().size(px(8.)).rounded_full().bg(status_tone))
-                    // Las columnas de su lista; la que su máquina no deja
-                    // sale apagada en vez de ser un botón que contesta 409.
-                    .child(
-                        Button::new("task-status")
-                            .ghost()
-                            .xsmall()
-                            .label(sheet.status_name.clone())
-                            .dropdown_caret(!statuses.is_empty())
-                            .dropdown_menu(move |mut menu, _, _| {
-                                for option in statuses.clone() {
-                                    let (view, id) = (view.clone(), option.status.id.clone());
-                                    menu = menu.item(
-                                        PopupMenuItem::new(option.status.name.clone())
-                                            .checked(option.status.name == current)
-                                            .disabled(!option.allowed)
-                                            .on_click(move |_, window, cx| {
-                                                let _ = view.update(cx, |this, cx| this.move_to(id.clone(), window, cx));
-                                            }),
-                                    );
-                                }
-                                menu
-                            }),
-                    ),
-            )
-            .children(due)
-    }
-
     /// Un desplegable de cosas que se ponen y se quitan: lo que la tarea
-    /// tiene, marcado. Sin nada puesto, el botón dice qué se puede hacer.
+    /// tiene, marcado. Lo que ya tiene se pinta al lado, cada cosa con su
+    /// forma; el botón sólo dice qué se puede hacer (`face`).
     fn render_choices(
         &self,
         id: &'static str,
-        empty_key: &str,
+        face: AnyElement,
         choices: Vec<Choice>,
         toggle: fn(&mut Self, String, &mut Window, &mut Context<Self>),
         // Lo último del desplegable, si lo hay: hacer uno nuevo (el
@@ -1091,10 +1116,7 @@ impl TaskView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let view = cx.entity().downgrade();
-        let chosen: Vec<String> = choices.iter().filter(|choice| choice.chosen).map(|choice| choice.name.clone()).collect();
-        let label = if chosen.is_empty() { tr(cx, empty_key) } else { chosen.join(", ") };
-        let opens = !choices.is_empty() || make.is_some();
-        Button::new(id).ghost().xsmall().label(label).dropdown_caret(opens).dropdown_menu(move |mut menu, _, _| {
+        Button::new(id).ghost().p_0().h_auto().child(face).dropdown_menu(move |mut menu, _, _| {
             for choice in choices.clone() {
                 let view = view.clone();
                 menu = menu.item(PopupMenuItem::new(choice.name).checked(choice.chosen).on_click(move |_, window, cx| {
@@ -1141,83 +1163,341 @@ impl TaskView {
             )
     }
 
-    /// Lo que se le cambia a la tarea de un toque, cada cosa en su fila.
-    fn render_fields(&self, sheet: &TaskSheet, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted = cx.theme().muted_foreground;
+    /// Copia un identificador y lo dice un momento en su pastilla.
+    pub(crate) fn copy_id(&mut self, chip: &'static str, value: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(value));
+        self.copied = Some(chip);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(1200)).await;
+            this.update(cx, |this, cx| {
+                if this.copied == Some(chip) {
+                    this.copied = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Un identificador que se copia de un clic, enseñado corto: el
+    /// `CopyId.tsx` de la app de siempre (`rounded bg-muted/60 px-1.5
+    /// py-0.5 font-mono text-xs`, icono `size-2.5`). Lo que se copia es el
+    /// identificador entero, que es lo que sale al pasar el ratón.
+    fn render_copy_chip(&self, id: &'static str, value: String, shown: String, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, foreground, chip, mono) = (theme.muted_foreground, theme.foreground, theme.muted, theme.mono_font_family.clone());
+        let (copied, hint) = (self.copied == Some(id), value.clone());
+        div()
+            .id(id)
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_1()
+            .px_1p5()
+            .py_0p5()
+            .rounded(px(4.))
+            .bg(chip.opacity(0.6))
+            .font_family(mono)
+            .text_xs()
+            .text_color(muted)
+            .cursor_pointer()
+            .hover(move |style| style.bg(chip).text_color(foreground))
+            .on_click(cx.listener(move |this, _, _, cx| this.copy_id(id, value.clone(), cx)))
+            .child(if copied { Icon::new(IconName::Check).size_2p5() } else { Icon::new(Lucide::Copy).size_2p5() })
+            .child(shown)
+            .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+            .test_support()
+    }
+
+    /// Abre otra tarea desde ésta: su madre, o una de la que depende.
+    fn open_task(id: String, cx: &App) {
+        Backend::run(cx, move |core| async move { core.tasks().open(&id).await });
+    }
+
+    /// Una tarea a la que ésta espera: su referencia en una pastilla con
+    /// borde (`rounded border px-1.5 py-0.5 text-xs`), tachada y apagada si
+    /// ya está hecha. Pulsarla la abre.
+    fn render_blocker(&self, blocker: &SheetBlocker, cx: &mut Context<Self>) -> impl IntoElement {
+        let border = cx.theme().border;
+        let (id, title) = (blocker.id.clone(), blocker.title.clone());
+        div()
+            .id(SharedString::from(format!("task-blocker-{}", blocker.id)))
+            .flex_none()
+            .px_1p5()
+            .py_0p5()
+            .rounded(px(4.))
+            .border_1()
+            .border_color(border)
+            .text_xs()
+            .cursor_pointer()
+            .when(blocker.done, |this| this.line_through().opacity(0.6))
+            .on_click(move |_, _, cx| Self::open_task(id.clone(), cx))
+            .child(blocker.label.clone())
+            .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx))
+            .test_support()
+    }
+
+    /// El riel de propiedades, con las medidas del `<aside>` de
+    /// `TaskDetailDrawer.tsx`: cada propiedad es su rótulo con icono y,
+    /// debajo, su control; apiladas, no en dos columnas (en 288 px una
+    /// etiqueta al lado deja al control sin sitio).
+    fn render_properties(&self, sheet: &TaskSheet, statuses: Vec<StatusOption>, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, foreground, border, secondary, on_secondary, unknown, input) =
+            (theme.muted_foreground, theme.foreground, theme.border, theme.secondary, theme.secondary_foreground, theme.muted, theme.input);
         let view = cx.entity().downgrade();
         let tasks = Backend::core(cx).tasks();
-        let current = sheet.priority.clone();
-        // Apiladas, no en dos columnas: en un riel de 288 px una etiqueta al
-        // lado deja al control sin sitio.
-        let row = |name: String, control: AnyElement| {
+        // El rótulo lleva `mb-1` y todo va a `space-y-3`: 4 px del rótulo a
+        // su control y 12 del control al rótulo siguiente.
+        let property = |label: Div, control: AnyElement| div().flex().flex_col().gap_1().child(label).child(div().min_w_0().flex().child(control));
+
+        // El estado: un chip del color de su estado (los `--status-*` del
+        // tema, no el hex del servidor), que abre las columnas de su lista.
+        let status_chip = {
+            let tone = sheet.status.map(|status| crate::board::status_tone(status, cx));
             div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(div().text_xs().text_color(muted).child(name))
-                .child(div().min_w_0().flex().child(control))
+                .px_2()
+                .py_0p5()
+                .rounded(px(4.))
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .map(|this| match tone {
+                    Some(tone) => this.bg(tone.opacity(0.15)).text_color(tone),
+                    None => this.bg(unknown).text_color(muted),
+                })
+                .child(sheet.status_name.clone())
         };
+        let current = sheet.status_name.clone();
+        let status = Button::new("task-status").ghost().p_0().h_auto().child(status_chip).dropdown_menu({
+            let view = view.clone();
+            move |mut menu, _, _| {
+                // Las columnas de su lista; la que su máquina no deja sale
+                // apagada en vez de ser un botón que contesta 409.
+                for option in statuses.clone() {
+                    let (view, id) = (view.clone(), option.status.id.clone());
+                    menu = menu.item(
+                        PopupMenuItem::new(option.status.name.clone())
+                            .checked(option.status.name == current)
+                            .disabled(!option.allowed)
+                            .on_click(move |_, window, cx| {
+                                let _ = view.update(cx, |this, cx| this.move_to(id.clone(), window, cx));
+                            }),
+                    );
+                }
+                menu
+            }
+        });
+
+        // Mover a otra lista: en la app de siempre es un desplegable con las
+        // listas agrupadas por espacio. Aquí todavía sólo dice en cuál vive.
+        let list = div()
+            .id("task-list")
+            .w_full()
+            .h_7()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_1p5()
+            .pl_2p5()
+            .pr_2()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(input)
+            .text_sm()
+            .child(div().min_w_0().truncate().child(sheet.list.clone()))
+            .child(Icon::new(IconName::ChevronDown).size_4().flex_none().text_color(muted))
+            .tooltip(not_yet(cx))
+            .test_support();
+
+        let current_priority = sheet.priority.clone();
         let priority = Button::new("task-priority")
             .ghost()
-            .xsmall()
-            .label(tr(cx, &format!("work:taskPriority.{current}")))
-            .text_color(priority_tone(&current, cx))
-            .dropdown_caret(true)
+            .p_0()
+            .h_auto()
+            .rounded_full()
+            .child(crate::mywork::priority_chip_shown(&sheet.priority, cx))
             .dropdown_menu({
+                let view = view.clone();
                 let names: Vec<(String, String)> =
                     PRIORITIES.iter().map(|priority| (priority.to_string(), tr(cx, &format!("work:taskPriority.{priority}")))).collect();
                 move |mut menu, _, _| {
                     for (priority, name) in names.clone() {
                         let view = view.clone();
-                        menu = menu.item(PopupMenuItem::new(name).checked(priority == current).on_click(move |_, window, cx| {
+                        menu = menu.item(PopupMenuItem::new(name).checked(priority == current_priority).on_click(move |_, window, cx| {
                             let _ = view.update(cx, |this, cx| this.set_priority(priority.clone(), window, cx));
                         }));
                     }
                     menu
                 }
             });
+
+        // Las etiquetas que tiene, cada una en su chip (`TagChip.tsx`: su
+        // color al 15% y su punto), y al final el «+» que abre las demás.
+        let tag_chips = sheet.tags.iter().map(|tag| {
+            let tone = tag_tone(tag);
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .px_1p5()
+                .py_0p5()
+                .rounded(px(4.))
+                .bg(tone.opacity(0.15))
+                .text_xs()
+                .text_color(foreground)
+                .child(div().size_2().flex_none().rounded_full().bg(tone))
+                .child(tag.name.clone())
+        });
+        let add_tag = div()
+            .px_1p5()
+            .py_0p5()
+            .rounded(px(4.))
+            .border_1()
+            .border_dashed()
+            .border_color(border)
+            .text_xs()
+            .text_color(muted)
+            .child(tr(cx, "work:task.addTagShort"))
+            .into_any_element();
         let new_tag: fn(&mut Self, &mut Window, &mut Context<Self>) = Self::start_naming_tag;
-        let tags = self.render_choices("task-tags", "work:task.addTags", tasks.tag_choices(), Self::toggle_tag, Some((tr(cx, "work:task.newTag"), new_tag)), cx);
+        let tag_menu = self.render_choices("task-tags", add_tag, tasks.tag_choices(), Self::toggle_tag, Some((tr(cx, "work:task.newTag"), new_tag)), cx);
         // El nombre se pide en la tarea donde se pidió, no en la que se abra después.
         let naming = (self.naming_tag.as_deref() == Some(sheet.id.as_str())).then(|| self.render_tag_naming(cx).into_any_element());
-        let tags = div().flex().flex_col().gap_1().w_full().child(div().flex().child(tags)).children(naming);
-        let assignees = self.render_choices("task-assignees", "work:task.assign", tasks.assignee_choices(), Self::toggle_assignee, None, cx);
-        let due = div().id("task-due").test_support().w(px(170.)).child(
-            DatePicker::new(&self.due).small().cleanable(true).placeholder(tr(cx, "common:last.clearDate")),
-        );
+        let tags = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .w_full()
+            .child(div().flex().flex_wrap().items_center().gap_1().children(tag_chips).child(tag_menu))
+            .children(naming);
+
+        // Quién la lleva: cada persona en su pastilla con su × (el `Badge`
+        // secundario de la app de siempre), y al lado a quién más dársela.
+        let people = tasks.assignee_choices();
+        let badges = people.iter().filter(|person| person.chosen).map(|person| {
+            let id = person.id.clone();
+            let remove = cac_core::text_with(locale(cx), "work:task.removeAssignee", &[("name", &person.name)]);
+            div()
+                .h_5()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .rounded_full()
+                .bg(secondary)
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(on_secondary)
+                .child(person.name.clone())
+                .child(
+                    div()
+                        .id(SharedString::from(format!("task-unassign-{}", person.id)))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, window, cx| this.toggle_assignee(id.clone(), window, cx)))
+                        .child(Icon::new(Lucide::X).size_3())
+                        .tooltip(move |window, cx| Tooltip::new(remove.clone()).build(window, cx))
+                        .test_support(),
+                )
+        });
+        let badges: Vec<_> = badges.collect();
+        // El campo de buscar a quién (`UserPicker`, `w-44`): aquí abre la
+        // lista del equipo.
+        let assign = div()
+            .w(rems(11.))
+            .h_7()
+            .flex()
+            .items_center()
+            .px_2p5()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(input)
+            .text_sm()
+            .text_color(muted)
+            .child(tr(cx, "work:task.assign"))
+            .into_any_element();
+        let assignees = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .children(badges)
+            .child(self.render_choices("task-assignees", assign, people, Self::toggle_assignee, None, cx));
+
+        let blockers = (!sheet.blockers.is_empty()).then(|| {
+            property(
+                rail_label(Lucide::Link2, tr(cx, "work:task.blockedBy"), cx),
+                div()
+                    .id("task-blockers")
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_1()
+                    .children(sheet.blockers.iter().map(|blocker| self.render_blocker(blocker, cx)))
+                    .into_any_element(),
+            )
+        });
+
+        // A quien está en otra hora que la organización se le dice de quién
+        // es el día: aquí sí cabe escrito.
+        let zone = Backend::core(cx).my_work().zone_hint(locale(cx));
+        let due = div()
+            .flex()
+            .flex_col()
+            .child(div().id("task-due").test_support().w(px(170.)).child(
+                DatePicker::new(&self.due).small().cleanable(true).placeholder(tr(cx, "common:last.pickADate")),
+            ))
+            .children(zone.map(|zone| div().id("task-due-zone").mt_1().text_size(px(11.)).text_color(muted).child(format!("({zone})"))));
 
         div()
+            .id("task-properties")
+            .test_support()
             .flex()
             .flex_col()
             .gap_3()
-            .child(row(tr(cx, "work:board.priority"), priority.into_any_element()))
-            .child(row(tr(cx, "work:task.tags"), tags.into_any_element()))
-            .child(row(tr(cx, "work:task.assignees"), assignees.into_any_element()))
-            .child(row(tr(cx, "work:task.due"), due.into_any_element()))
+            .text_sm()
+            .child(property(rail_label(IconName::Check, tr(cx, "work:task.status"), cx), status.into_any_element()))
+            // Una subtarea no se mueve de lista: vive en la de su madre.
+            .when(sheet.parent.is_none(), |this| this.child(property(rail_label(Lucide::FolderInput, tr(cx, "work:task.list"), cx), list.into_any_element())))
+            .child(property(rail_label(Lucide::Flag, tr(cx, "work:board.priority"), cx), priority.into_any_element()))
+            .child(property(rail_label(Lucide::Tag, tr(cx, "work:task.tags"), cx), tags.into_any_element()))
+            .child(property(rail_label(Lucide::Users, tr(cx, "work:task.assignees"), cx), assignees.into_any_element()))
+            .children(blockers)
+            .child(property(rail_label(Lucide::Calendar, tr(cx, "work:task.due"), cx), due.into_any_element()))
     }
 
-    fn render_subtask(&self, subtask: &SheetSubtask, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Una subtarea, con las medidas de su fila en `TaskDetailDrawer.tsx`
+    /// (`px-2 py-1.5 text-sm`, la casilla `size-4 rounded border`, en verde
+    /// al 20% cuando está hecha, y su folio en mono al final).
+    fn render_subtask(&self, subtask: &SheetSubtask, first: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (muted, border, success) = (theme.muted_foreground, theme.border, theme.success);
+        let (muted, border, success, mono) = (theme.muted_foreground, theme.border, theme.success, theme.mono_font_family.clone());
+        let hint = tr(cx, if subtask.done { "work:task.reopen" } else { "work:task.markComplete" });
         div()
             .id(SharedString::from(format!("subtask-{}", subtask.id)))
             .test_support()
             .flex()
             .items_center()
             .gap_2()
+            .px_2()
+            .py_1p5()
             .text_sm()
+            .when(!first, |this| this.border_t_1().border_color(border))
             .child(
                 div()
                     .id(SharedString::from(format!("subtask-tick-{}", subtask.id)))
-                    .test_support()
-                    .size(px(14.))
+                    .size_4()
                     .flex()
                     .flex_none()
                     .items_center()
                     .justify_center()
-                    .rounded_sm()
+                    .rounded(px(4.))
                     .border_1()
                     .border_color(if subtask.done { success } else { border })
+                    .when(subtask.done, |this| this.bg(success.opacity(0.2)))
                     .cursor_pointer()
                     .on_click({
                         let (id, done) = (subtask.id.clone(), subtask.done);
@@ -1227,63 +1507,91 @@ impl TaskView {
                         div()
                             .id(SharedString::from(format!("subtask-done-{}", subtask.id)))
                             .test_support()
-                            .child(Icon::new(IconName::Check).xsmall().text_color(success))
-                    })),
+                            .child(Icon::new(IconName::Check).size_3().text_color(success))
+                    }))
+                    .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+                    .test_support(),
             )
             .child(
                 div()
+                    .min_w_0()
                     .flex_1()
-                    .overflow_hidden()
-                    .text_ellipsis()
+                    .truncate()
                     .when(subtask.done, |this| this.text_color(muted).line_through())
                     .child(subtask.title.clone()),
             )
-            .child(div().flex_none().text_xs().text_color(muted).child(format!("#{}", subtask.seq)))
+            .child(div().flex_none().font_family(mono).text_xs().text_color(muted).child(format!("#{}", subtask.seq)))
     }
 
+    /// Un comentario: la tarjeta de `CommentItem` (`rounded-md border
+    /// p-2.5`; lo interno en una tarea que lee un cliente, con el borde a
+    /// trazos y el fondo apagado). Arriba quién, cuándo y para quién; lo de
+    /// editar y borrar sale al pasar el ratón.
     fn render_comment(&self, comment: &SheetComment, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (muted, border, accent) = (theme.muted_foreground, theme.border, theme.accent);
+        let (muted, foreground, border, primary, soft) = (theme.muted_foreground, theme.foreground, theme.border, theme.primary, theme.muted);
         let id = SharedString::from(format!("comment-{}", comment.id));
-        // Una línea del servidor es un apunte, no alguien hablando.
-        if comment.system {
-            return div()
-                .id(id)
-                .test_support()
-                .text_xs()
-                .text_color(muted)
-                .child(format!("{} · {}", comment.body, comment.when))
-                .into_any_element();
-        }
+        let group = SharedString::from(format!("comment-card-{}", comment.id));
         let editing = self.editing_comment.as_deref() == Some(comment.id.as_str());
+        let internal = comment.audience.as_deref() == Some("work:task.internal");
         let audience = comment.audience.as_ref().map(|key| {
-            div().flex_none().px_1().rounded_sm().bg(accent).text_xs().text_color(muted).child(tr(cx, key))
+            let hint = tr(cx, if internal { "work:task.onlyTeam" } else { "work:task.clientCanRead" });
+            div()
+                .id(SharedString::from(format!("comment-audience-{}", comment.id)))
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .text_color(if internal { muted } else { primary })
+                .child(Icon::new(if internal { Lucide::EyeOff } else { Lucide::Eye }).size_3())
+                .child(tr(cx, key))
+                .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
         });
         div()
             .id(id)
             .test_support()
+            .group(group.clone())
             .flex()
             .flex_col()
-            .gap_1()
-            .pb_3()
-            .border_b_1()
+            .p_2p5()
+            .rounded(px(8.))
+            .border_1()
             .border_color(border)
+            .when(internal, |this| this.border_dashed().bg(soft.opacity(0.4)))
             .child(
                 div()
+                    .mb_1()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(comment.author.clone()))
-                    .child(div().text_xs().text_color(muted).child(comment.when.clone()))
-                    .children(comment.edited.then(|| div().text_xs().text_color(muted).child(tr(cx, "work:task.edited"))))
+                    .text_xs()
+                    .text_color(muted)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap_1()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(foreground)
+                            // Lo anotó un agente: lleva su icono, y el
+                            // nombre ya dice de quién es.
+                            .when(comment.agent, |this| this.child(Icon::new(Lucide::Bot).size_3()))
+                            .child(comment.author.clone()),
+                    )
+                    .child(div().flex_none().child(comment.when.clone()))
+                    .children(comment.edited.then(|| div().flex_none().italic().child(tr(cx, "work:task.edited"))))
                     .children(audience)
-                    .child(div().flex_1())
                     // Sólo en lo que quien mira puede cambiar: el servidor
                     // rechazaría lo demás.
                     .children((comment.mine && !editing).then(|| {
                         let (edit_id, body, delete_id) = (comment.id.clone(), comment.body.clone(), comment.id.clone());
                         div()
+                            .ml_auto()
                             .flex()
+                            .flex_none()
+                            .opacity(0.)
+                            .group_hover(group, |style| style.opacity(1.))
                             .child(
                                 Button::new(SharedString::from(format!("comment-edit-{}", comment.id)))
                                     .ghost()
@@ -1314,49 +1622,40 @@ impl TaskView {
                         div()
                             .flex()
                             .gap_2()
-                            .child(div().flex_1())
-                            .child(
-                                Button::new("comment-edit-cancel")
-                                    .ghost()
-                                    .small()
-                                    .label(tr(cx, "work:task.cancel"))
-                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_editing_comment(cx))),
-                            )
                             .child(
                                 Button::new("comment-edit-save")
                                     .primary()
                                     .small()
                                     .label(tr(cx, "work:task.save"))
                                     .on_click(cx.listener(|this, _, window, cx| this.save_comment_edit(window, cx))),
+                            )
+                            .child(
+                                Button::new("comment-edit-cancel")
+                                    .outline()
+                                    .small()
+                                    .label(tr(cx, "work:task.cancel"))
+                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_editing_comment(cx))),
                             ),
                     )
                     .into_any_element()
             } else {
                 self.prose(format!("comment-body-{}", comment.id), comment.body.clone(), cx).into_any_element()
             })
-            .into_any_element()
     }
 
-    /// El riel: el estado y lo que se le cambia a la tarea de un toque.
-    fn render_properties(&self, sheet: &TaskSheet, statuses: Vec<StatusOption>, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("task-properties")
-            .test_support()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(self.render_chips(sheet, statuses, cx))
-            .child(self.render_fields(sheet, cx))
-    }
-
+    /// La columna de lectura, en el orden y con las medidas de
+    /// `TaskDetailDrawer.tsx` (`space-y-5`; cada sección, su rótulo y lo
+    /// suyo a `space-y-2`): título, dónde quedó, descripción, adjuntos,
+    /// subtareas y el hilo con su caja.
     fn render_sheet(&mut self, sheet: TaskSheet, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let danger = theme.danger;
         let problem = self.problem.as_ref().filter(|(task_id, _)| *task_id == sheet.id).map(|(_, phrase)| phrase.clone());
-        let (muted, border, primary, foreground, card, radius) =
-            (theme.muted_foreground, theme.border, theme.primary, theme.foreground, theme.group_box, theme.radius);
-        // La pestaña elegida era de otra tarea: en ésta se empieza por la conversación.
-        let thread = if self.thread_of.as_deref() == Some(sheet.id.as_str()) { self.thread } else { Thread::Talk };
+        let (muted, border, primary, foreground) = (theme.muted_foreground, theme.border, theme.primary, theme.foreground);
+        // La pestaña elegida era de otra tarea: en ésta se empieza por la
+        // conversación. Y sin notas de agentes no hay pestañas que elegir.
+        let chosen = if self.thread_of.as_deref() == Some(sheet.id.as_str()) { self.thread } else { Thread::Talk };
+        let thread = if sheet.notes.is_empty() { Thread::Talk } else { chosen };
         let editing = self.editing.as_deref() == Some(sheet.id.as_str());
         let done = sheet.subtasks.iter().filter(|subtask| subtask.done).count();
         let comments = match thread {
@@ -1368,146 +1667,221 @@ impl TaskView {
             (Thread::Notes, "thread-notes", "work:task.thread.agentNotes", sheet.notes.len()),
         ];
 
-        div()
+        let title = if editing {
+            div().id("task-title-input").test_support().child(Input::new(&self.title_input)).into_any_element()
+        } else {
+            // `text-lg font-semibold`: el título de una tarea no es el de
+            // una pantalla.
+            div().id("task-title").test_support().text_lg().font_weight(FontWeight::SEMIBOLD).child(sheet.title.clone()).into_any_element()
+        };
+
+        // Dónde quedó: siempre a la vista, también sin nada escrito, que es
+        // cuando hay que decir que falta.
+        let handoff = div()
+            .id("task-handoff")
+            .test_support()
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_2()
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(if editing {
-                        div().id("task-title-input").test_support().child(Input::new(&self.title_input)).into_any_element()
-                    } else {
-                        div().id("task-title").test_support().text_size(px(crate::theme::TITLE_SIZE)).font_weight(FontWeight::SEMIBOLD).child(sheet.title.clone()).into_any_element()
-                    })
-                    .child(div().text_xs().text_color(muted).child(sheet.place.clone()))
-                    .children(sheet.parent.clone().map(|parent| div().text_xs().text_color(muted).child(format!("› {parent}")))),
+                    .items_center()
+                    .gap_2()
+                    .child(section_title(tr(cx, "work:task.handoff"), cx))
+                    // Escribirlo o corregirlo desde aquí todavía no está.
+                    .child(
+                        section_action("task-handoff-edit", tr(cx, if sheet.handoff.is_some() { "work:task.edit" } else { "work:task.writeHandoff" }), cx)
+                            .tooltip(not_yet(cx))
+                            .test_support(),
+                    )
+                    .children(sheet.handoff_signature.clone().map(|signature| div().min_w_0().truncate().text_xs().text_color(muted).child(signature))),
             )
-            .children(problem.map(|phrase| div().id("task-problem").test_support().text_sm().text_color(danger).child(phrase)))
-            .children(sheet.handoff.clone().map(|handoff| {
-                let by = sheet.handoff_by.clone().map(|by| format!(" · {by}")).unwrap_or_default();
+            .child(match sheet.handoff.clone() {
+                Some(handoff) => self.prose(format!("handoff-{}", sheet.id), handoff, cx).into_any_element(),
+                None => div().id("task-no-handoff").test_support().text_sm().text_color(muted).child(tr(cx, "work:task.noHandoff")).into_any_element(),
+            });
+
+        let description = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div().flex().items_center().gap_2().child(section_title(tr(cx, "work:task.description"), cx)).when(!editing, |this| {
+                    this.child(
+                        section_action("task-edit", tr(cx, "work:task.edit"), cx)
+                            .on_click(cx.listener(|this, _, window, cx| this.start_editing(window, cx)))
+                            .test_support(),
+                    )
+                }),
+            )
+            .child(if editing {
                 div()
-                    .id("task-handoff")
-                    .test_support()
                     .flex()
                     .flex_col()
-                    .gap_1()
-                    .p_3()
-                    .rounded(radius)
-                    .border_1()
-                    .border_color(border)
-                    .bg(card)
-                    .child(self.section(format!("{}{by}", tr(cx, "work:task.handoff")), cx))
-                    .child(self.prose(format!("handoff-{}", sheet.id), handoff, cx))
-            }))
-            .child(
-                div().flex().flex_col().gap_1().child(self.section(tr(cx, "work:task.description"), cx)).child(
-                    if editing {
+                    .gap_2()
+                    .child(div().id("task-description-input").test_support().child(Textarea::new(&self.body_input)))
+                    .child(
                         div()
                             .flex()
-                            .flex_col()
+                            .items_center()
                             .gap_2()
-                            .child(div().id("task-description-input").test_support().child(Textarea::new(&self.body_input)))
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(div().flex_1())
-                                    .child(
-                                        Button::new("task-cancel")
-                                            .ghost()
-                                            .small()
-                                            .label(tr(cx, "work:task.cancel"))
-                                            .on_click(cx.listener(|this, _, _, cx| this.cancel_editing(cx))),
-                                    )
-                                    .child(
-                                        Button::new("task-save")
-                                            .primary()
-                                            .small()
-                                            .label(tr(cx, "work:task.save"))
-                                            .on_click(cx.listener(|this, _, window, cx| this.save_edit(window, cx))),
-                                    ),
+                                Button::new("task-save")
+                                    .primary()
+                                    .small()
+                                    .label(tr(cx, "work:task.save"))
+                                    .on_click(cx.listener(|this, _, window, cx| this.save_edit(window, cx))),
                             )
-                            .into_any_element()
-                    } else if sheet.description.is_empty() {
-                        div().id("task-no-description").test_support().text_sm().text_color(muted).child(tr(cx, "work:task.noDescription")).into_any_element()
-                    } else {
-                        div()
-                            .id("task-description")
-                            .test_support()
-                            .child(self.prose(format!("description-{}", sheet.id), sheet.description.clone(), cx))
-                            .into_any_element()
-                    },
+                            .child(
+                                Button::new("task-cancel")
+                                    .outline()
+                                    .small()
+                                    .label(tr(cx, "work:task.cancel"))
+                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_editing(cx))),
+                            ),
+                    )
+                    .into_any_element()
+            } else if sheet.description.is_empty() {
+                div().id("task-no-description").test_support().text_sm().text_color(muted).child(tr(cx, "work:task.noDescription")).into_any_element()
+            } else {
+                div()
+                    .id("task-description")
+                    .test_support()
+                    .child(self.prose(format!("description-{}", sheet.id), sheet.description.clone(), cx))
+                    .into_any_element()
+            });
+
+        // Siempre a la vista, también sin ficheros: es donde se adjunta (en
+        // la app de siempre se adjunta soltando el fichero en el editor).
+        let attachments = div()
+            .id("task-attachments")
+            .test_support()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div().flex().items_center().gap_2().child(section_title(tr(cx, "work:task.attachments"), cx)).child(
+                    Button::new("task-attach")
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::new(Lucide::Paperclip))
+                        .label(tr(cx, "common:editor.attachFile"))
+                        .loading(self.attaching)
+                        .on_click(cx.listener(|this, _, window, cx| this.attach_files(window, cx))),
                 ),
             )
-            .when(!sheet.subtasks.is_empty(), |this| {
+            // Las imágenes se ven, no se listan; lo demás, debajo.
+            .when(sheet.attachments.iter().any(|file| file.image), |this| {
                 this.child(
                     div()
                         .flex()
-                        .flex_col()
+                        .flex_wrap()
                         .gap_2()
-                        .child(self.section(format!("{} · {done}/{}", tr(cx, "work:task.subtasks"), sheet.subtasks.len()), cx))
-                        .children(sheet.subtasks.iter().map(|subtask| self.render_subtask(subtask, cx))),
+                        .children(sheet.attachments.iter().filter(|file| file.image).map(|file| self.render_picture(file, cx))),
                 )
             })
-            // Siempre a la vista, también sin ficheros: es donde se adjunta.
+            .when(sheet.attachments.iter().any(|file| !file.image), |this| {
+                this.child(div().flex().flex_col().gap_1().children(sheet.attachments.iter().filter(|file| !file.image).map(|file| self.render_file(file, cx))))
+            });
+
+        // Las subtareas: el rótulo con cuántas van hechas, cómo añadir otra
+        // y, sin ninguna, para qué sirven.
+        let count = (!sheet.subtasks.is_empty()).then(|| format!("({done}/{})", sheet.subtasks.len()));
+        let subtasks = div()
+            .id("task-subtasks")
+            .flex()
+            .flex_col()
+            .gap_2()
             .child(
                 div()
-                    .id("task-attachments")
-                    .test_support()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(section_title(tr(cx, "work:task.subtasks"), cx))
+                            .children(count.map(|count| div().text_xs().font_weight(FontWeight::MEDIUM).text_color(muted).child(count))),
+                    )
+                    // Añadir una desde aquí todavía no está.
+                    .child(section_action("task-add-subtask", tr(cx, "work:task.addSubtask"), cx).tooltip(not_yet(cx)).test_support()),
+            )
+            .child(if sheet.subtasks.is_empty() {
+                div().id("task-no-subtasks").test_support().text_xs().text_color(muted).child(tr(cx, "work:task.noSubtasks")).into_any_element()
+            } else {
+                div()
                     .flex()
                     .flex_col()
-                    .gap_1()
-                    .child(
-                        div().flex().items_center().gap_2().child(self.section(tr(cx, "work:task.attachments"), cx)).child(div().flex_1()).child(
-                            Button::new("task-attach")
-                                .ghost()
-                                .xsmall()
-                                .icon(Icon::new(Lucide::Paperclip))
-                                .label(tr(cx, "common:editor.attachFile"))
-                                .loading(self.attaching)
-                                .on_click(cx.listener(|this, _, window, cx| this.attach_files(window, cx))),
-                        ),
-                    )
-                    // Las imágenes se ven, no se listan; lo demás, debajo.
-                    .when(sheet.attachments.iter().any(|file| file.image), |this| {
-                        this.child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .gap_2()
-                                .children(sheet.attachments.iter().filter(|file| file.image).map(|file| self.render_picture(file, cx))),
-                        )
-                    })
-                    .children(sheet.attachments.iter().filter(|file| !file.image).map(|file| self.render_file(file, cx))),
-            )
-            .child(div().flex().items_center().gap_4().border_b_1().border_color(border).children(tabs.map(
-                |(tab, id, key, count)| {
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(border)
+                    .children(sheet.subtasks.iter().enumerate().map(|(index, subtask)| self.render_subtask(subtask, index == 0, cx)))
+                    .into_any_element()
+            })
+            .test_support();
+
+        // El hilo: sin notas de agentes es un rótulo con cuántos van; con
+        // ellas, dos pestañas (`gap-4 border-b`, cada una `border-b-2 pb-1.5
+        // text-xs font-medium uppercase`, la de notas con su robot).
+        let thread_head = if sheet.notes.is_empty() {
+            div().id("thread-title").test_support().child(section_title(format!("{} ({})", tr(cx, "work:task.thread.talk"), sheet.talk.len()), cx)).into_any_element()
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .gap_4()
+                .border_b_1()
+                .border_color(border)
+                .children(tabs.map(|(tab, id, key, count)| {
                     let active = thread == tab;
                     let task_id = sheet.id.clone();
                     div()
                         .id(id)
                         .test_support()
-                        .pb_2()
+                        .mb(px(-1.))
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .pb_1p5()
                         .border_b_2()
                         .border_color(if active { primary } else { primary.opacity(0.) })
-                        .text_sm()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
                         .text_color(if active { foreground } else { muted })
-                        .when(active, |this| this.font_weight(FontWeight::MEDIUM))
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _, _, cx| this.show_thread(tab, task_id.clone(), cx)))
-                        .child(format!("{} ({count})", tr(cx, key)))
-                },
-            )))
+                        .when(tab == Thread::Notes, |this| this.child(Icon::new(Lucide::Bot).size_3p5()))
+                        .child(format!("{} ({count})", tr(cx, key).to_uppercase()))
+                }))
+                .into_any_element()
+        };
+        let thread_section = div()
+            .id("comments")
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(thread_head)
             .when(thread == Thread::Notes, |this| {
                 this.child(div().text_xs().text_color(muted).child(tr(cx, "work:task.thread.agentNotesHint")))
             })
-            .child(div().flex().flex_col().gap_3().children(comments.iter().map(|comment| self.render_comment(comment, cx))))
+            .children(comments.iter().map(|comment| self.render_comment(comment, cx)))
             // Se comenta en la conversación; las notas de agentes son suyas.
-            .when(thread == Thread::Talk, |this| this.child(self.render_composer(sheet.client_reads, cx)))
+            .when(thread == Thread::Talk, |this| this.child(self.render_composer(sheet.client_reads, cx)));
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .child(title)
+            .children(problem.map(|phrase| div().id("task-problem").test_support().text_sm().text_color(danger).child(phrase)))
+            .child(handoff)
+            .child(description)
+            .child(attachments)
+            .child(subtasks)
+            .child(thread_section)
     }
 }
 
@@ -1542,24 +1916,102 @@ impl Render for TaskView {
             }
         }
         let theme = cx.theme();
-        let (background, foreground, muted, border) = (theme.background, theme.foreground, theme.muted_foreground, theme.border);
+        let (background, foreground, muted, border, primary, danger, hover) =
+            (theme.background, theme.foreground, theme.muted_foreground, theme.border, theme.primary, theme.danger, theme.muted);
         let waiting = state.waiting_reason().map(|key| tr(cx, key));
-        // Editar se ofrece con la tarea a la vista y mientras no se edita ya.
-        let can_edit = sheet.as_ref().is_some_and(|sheet| self.editing.as_deref() != Some(sheet.id.as_str()));
-        let edit = can_edit.then(|| {
-            Button::new("task-edit")
-                .ghost()
-                .small()
-                .label(tr(cx, "work:task.edit"))
-                .on_click(cx.listener(|this, _, window, cx| this.start_editing(window, cx)))
+
+        // La cabecera de `TaskDetailDrawer.tsx` (`h-12 gap-2 border-b
+        // px-4`): dónde vive (y de quién cuelga), su referencia para copiar,
+        // si un cliente la lee, su id para dárselo a un agente y la ×.
+        let head = sheet.as_ref().map(|sheet| {
+            let place = div()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_xs()
+                .text_color(muted)
+                .child(div().flex_none().child(sheet.place.clone()))
+                .children(sheet.parent.clone().zip(sheet.parent_id.clone()).map(|(parent, id)| {
+                    let hint = tr(cx, "work:task.openParent");
+                    div().flex().min_w_0().child(div().flex_none().child("\u{a0}/\u{a0}")).child(
+                        div()
+                            .id("task-parent")
+                            .min_w_0()
+                            .truncate()
+                            .underline()
+                            .cursor_pointer()
+                            .hover(move |style| style.text_color(foreground))
+                            .on_click(move |_, _, cx| Self::open_task(id.clone(), cx))
+                            .child(parent)
+                            .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+                            .test_support(),
+                    )
+                }))
+                // Sin referencia (un servidor de antes), el número a secas.
+                .when(sheet.reference.is_none(), |this| this.child(div().flex_none().child(format!("\u{a0}· #{}", sheet.seq))));
+            let reference = sheet.reference.clone().map(|reference| self.render_copy_chip("task-ref", reference.clone(), reference, cx).into_any_element());
+            // Que un cliente la lee se dice aquí arriba: quien va a escribir
+            // una nota franca tiene que saberlo antes de escribirla.
+            let visible = sheet.client_reads.then(|| {
+                div()
+                    .id("task-visible-to-client")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_1()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded(px(4.))
+                    .bg(primary.opacity(0.1))
+                    .text_xs()
+                    .text_color(primary)
+                    .child(Icon::new(Lucide::Eye).size_3())
+                    .child(tr(cx, "work:task.visibleToClient"))
+                    .test_support()
+            });
+            let short: String = sheet.id.chars().take(8).collect();
+            let task_id = self.render_copy_chip("task-id", sheet.id.clone(), short, cx).into_any_element();
+            (place, reference, visible, task_id)
         });
-        let name = sheet
-            .as_ref()
-            .map(|sheet| match &sheet.reference {
-                Some(reference) => format!("#{} · {reference}", sheet.seq),
-                None => format!("#{}", sheet.seq),
-            })
-            .unwrap_or_default();
+        // El pie (`border-t px-4 py-2`): borrar la tarea, retirarla de la
+        // vista del cliente y cuándo se tocó por última vez. Borrar y
+        // retirar todavía no están en esta app.
+        let foot = sheet.as_ref().map(|sheet| {
+            let action = |id: &'static str, icon: Lucide, label: String, tone: Hsla| {
+                div()
+                    .id(id)
+                    .h_7()
+                    .px_2p5()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_1()
+                    .rounded(px(8.))
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(tone)
+                    .hover(move |style| style.bg(hover))
+                    .child(Icon::new(icon).size_3())
+                    .child(label)
+                    .tooltip(not_yet(cx))
+                    .test_support()
+            };
+            div()
+                .id("task-foot")
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_2()
+                .px_4()
+                .py_2()
+                .border_t_1()
+                .border_color(border)
+                .child(action("task-delete", Lucide::Trash, tr(cx, "work:task.deleteTask"), danger))
+                .when(sheet.client_reads, |this| this.child(action("task-withdraw", Lucide::EyeOff, tr(cx, "work:task.withdraw"), foreground)))
+                .child(div().id("task-updated").ml_auto().text_xs().text_color(muted).child(sheet.updated.clone()).test_support())
+        });
 
         // Ancha, el riel al lado; estrecha, debajo de la lectura.
         let wide = window.viewport_size().width >= px(STACK_BELOW);
@@ -1576,6 +2028,7 @@ impl Render for TaskView {
                 .id("task-wide")
                 .test_support()
                 .flex_1()
+                .min_h_0()
                 .flex()
                 .overflow_hidden()
                 .child(div().id("task-scroll").flex_1().min_w_0().h_full().overflow_y_scroll().px_8().py_4().child(reading))
@@ -1596,6 +2049,7 @@ impl Render for TaskView {
             div()
                 .id("task-scroll")
                 .flex_1()
+                .min_h_0()
                 .overflow_y_scroll()
                 .flex()
                 .flex_col()
@@ -1604,6 +2058,10 @@ impl Render for TaskView {
                 .into_any_element()
         };
 
+        let (place, reference, visible, task_id) = match head {
+            Some((place, reference, visible, task_id)) => (Some(place), reference, visible, Some(task_id)),
+            None => (None, None, None, None),
+        };
         div()
             .id("task-page")
             .test_support()
@@ -1631,18 +2089,22 @@ impl Render for TaskView {
                     .px_4()
                     .border_b_1()
                     .border_color(border)
-                    .child(div().flex_1().text_xs().text_color(muted).child(name))
-                    .children(edit)
+                    .children(place)
+                    .children(reference)
+                    .children(visible)
+                    .children(task_id)
+                    .child(div().flex_1())
                     .child(
                         Button::new("task-close")
                             .ghost()
-                            .small()
+                            .xsmall()
                             .icon(Icon::new(Lucide::X))
                             .tooltip(tr(cx, "work:task.close"))
                             .on_click(|_, _, cx| Backend::core(cx).tasks().close()),
                     ),
             )
             .child(body)
+            .children(foot)
     }
 }
 
@@ -3333,6 +3795,107 @@ mod tests {
             stop(cx);
             cx.update_window(window, |_, window, _| window.remove_window()).unwrap();
         }
+    }
+
+    fn copied(cx: &mut TestAppContext) -> Option<String> {
+        cx.read_from_clipboard().and_then(|item| item.text())
+    }
+
+    /// La referencia y el id de la tarea se copian de un clic, cada uno el suyo.
+    ///
+    /// Roturas que atrapa: una pastilla que parece copiar y no copia nada;
+    /// copiar el id donde se pulsó la referencia (lo que se pega en un
+    /// commit), o al revés.
+    #[gpui_kit::test]
+    fn the_reference_and_the_id_are_copied_from_their_chips(cx: &mut TestAppContext) {
+        let server = server();
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+
+        click(window, "task-ref", cx);
+        assert_eq!(copied(cx).as_deref(), Some("acme-7"));
+        click(window, "task-id", cx);
+        assert_eq!(copied(cx).as_deref(), Some("t1"));
+        stop(cx);
+    }
+
+    fn open_task_id(cx: &mut TestAppContext) -> Option<String> {
+        cx.update(|cx| Backend::snapshot(cx).read(cx).task.task_id.clone())
+    }
+
+    /// La madre y las tareas a las que espera se abren desde su nombre.
+    ///
+    /// Roturas que atrapa: un nombre subrayado que no lleva a ningún sitio;
+    /// abrir la madre al pulsar una dependencia; no enseñar de qué depende.
+    #[gpui_kit::test]
+    fn the_parent_and_what_it_waits_for_open_from_their_names(cx: &mut TestAppContext) {
+        let server = server();
+        let mut first = detail("t1");
+        first["blockedBy"] = json!([{ "id": "t9", "ref": "acme-3", "title": "La API", "open": true }]);
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(first)).with_priority(1));
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+        assert!(on_screen(window, "task-parent", cx) && on_screen(window, "task-blocker-t9", cx));
+
+        click(window, "task-blocker-t9", cx);
+        wait_until(cx, "abre aquélla a la que espera", |cx| open_task_id(cx).as_deref() == Some("t9"));
+
+        cx.update(|cx| Backend::run(cx, |core| async move { core.tasks().open("t1").await }));
+        wait_until(cx, "vuelve la primera", |cx| on_screen(window, "task-parent", cx));
+        click(window, "task-parent", cx);
+        wait_until(cx, "abre la madre", |cx| open_task_id(cx).as_deref() == Some("t2"));
+        stop(cx);
+    }
+
+    /// La × de la pastilla de una persona le quita la tarea.
+    ///
+    /// Roturas que atrapa: una × que no pide nada; quitar a otra persona, o
+    /// añadirla otra vez en vez de quitarla.
+    #[gpui_kit::test]
+    fn the_cross_on_a_person_takes_the_task_from_them(cx: &mut TestAppContext) {
+        let server = server_with_choices();
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+        wait_until(cx, "sale quien la lleva", |cx| on_screen(window, "task-unassign-u1", cx));
+
+        click(window, "task-unassign-u1", cx);
+
+        wait_until(cx, "pide quitársela", |_| !patches(&server).is_empty());
+        assert_eq!(patches(&server), [json!({ "assigneeIds": [] })]);
+        stop(cx);
+    }
+
+    /// Lo que la app de siempre tiene en esta página y aquí todavía no se
+    /// hace está pintado en su sitio, y el pie dice cuándo se tocó.
+    ///
+    /// Roturas que atrapa: dejar fuera una pieza por no tener aún qué hacer
+    /// con ella (el ojo la echa en falta al comparar las dos apps); decir
+    /// que un cliente la lee en una tarea interna, o callarlo en una que lee.
+    #[gpui_kit::test]
+    fn what_is_not_here_yet_is_still_painted_in_its_place(cx: &mut TestAppContext) {
+        let server = server();
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+
+        for id in ["task-handoff-edit", "task-add-subtask", "comment-decision", "task-delete", "task-withdraw", "task-updated", "task-visible-to-client"] {
+            assert!(on_screen(window, id, cx), "falta {id}");
+        }
+        stop(cx);
+        cx.update_window(window, |_, window, _| window.remove_window()).unwrap();
+
+        // Una tarea del equipo, sin madre: nadie de fuera la lee, no hay de
+        // dónde retirarla, y sí tiene su lista en el riel.
+        let other = self::server();
+        let mut internal = detail("t1");
+        internal["task"]["projectId"] = json!("");
+        internal["parent"] = serde_json::Value::Null;
+        other.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(internal)).with_priority(1));
+        let window = open(&other, cx);
+        open_first_task(window, cx);
+        assert!(on_screen(window, "task-delete", cx) && on_screen(window, "task-list", cx));
+        assert!(!on_screen(window, "task-withdraw", cx) && !on_screen(window, "task-visible-to-client", cx));
+        assert!(!on_screen(window, "task-parent", cx));
+        stop(cx);
     }
 
 }

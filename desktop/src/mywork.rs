@@ -35,31 +35,37 @@ const LENSES: [(WorkLens, &str); 5] = [
 /// text-xs font-medium`, punto `size-1.5`): sólo texto de color, en una
 /// columna llena no se distinguía de los demás metadatos.
 pub(crate) fn priority_chip(priority: &str, cx: &App) -> Option<Div> {
+    (!matches!(priority, "none" | "")).then(|| priority_chip_shown(priority, cx))
+}
+
+/// El mismo chip, también para «ninguna» (`showNone`): en el detalle de una
+/// tarea el botón tiene que verse para poder ponerle una. Sin prioridad va
+/// sin fondo y con el punto hueco.
+pub(crate) fn priority_chip_shown(priority: &str, cx: &App) -> Div {
     let theme = cx.theme();
+    let none = matches!(priority, "none" | "");
     let tone = match priority {
-        "none" | "" => return None,
         "urgent" => theme.danger,
         "high" => theme.warning,
         // El `--info` del CSS, que el tema del kit no trae con ese valor.
         "normal" => crate::theme::css_color("info", cx),
         _ => theme.muted_foreground,
     };
-    Some(
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap_1()
-            .px_1p5()
-            .py(px(1.))
-            .rounded_full()
-            .bg(tone.opacity(0.15))
-            .text_xs()
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(tone)
-            .child(div().size_1p5().flex_none().rounded_full().bg(tone))
-            .child(tr(cx, &format!("work:taskPriority.{priority}"))),
-    )
+    let name = if none { "none" } else { priority };
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap_1()
+        .px_1p5()
+        .py(px(1.))
+        .rounded_full()
+        .when(!none, |this| this.bg(tone.opacity(0.15)))
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(tone)
+        .child(div().size_1p5().flex_none().rounded_full().map(|dot| if none { dot.border_1().border_color(tone) } else { dot.bg(tone) }))
+        .child(tr(cx, &format!("work:taskPriority.{name}")))
 }
 
 /// De qué color va un vencimiento y si pesa: rojo si ya pasó, ámbar si es

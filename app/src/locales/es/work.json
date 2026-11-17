@@ -179,6 +179,7 @@
     "assign": "Asignar…",
     "tags": "Etiquetas",
     "addTags": "Etiquetar…",
+    "addTagShort": "+ etiqueta",
     "due": "Para el",
     "deleteTaskTitle": "¿Borrar la tarea «{{name}}»?",
     "deleteTaskBody": "La quita con sus comentarios y sus adjuntos. No se puede deshacer.",

@@ -71,7 +71,7 @@ pub use task::{
     mention_closed, mention_highlighted, mention_mark_kept, mention_menu, mention_moved, MentionEdit, MentionMark, MentionMenu, MentionPerson, MentionQuery,
 };
 pub use task::{assignee_choices, shown_name, tag_choices, tag_color_for, Choice, MAX_TAG_NAME, TAG_PALETTE};
-pub use task::{can_change_comment, is_agent_note, task_sheet, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};
+pub use task::{can_change_comment, is_agent_note, task_sheet, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};
 pub use texts::{error_phrase, pick_locale, text, text_count, text_count_unit, text_with, Locale};
 pub use transport::Reply;
 

@@ -179,6 +179,7 @@
     "assign": "Assign…",
     "tags": "Tags",
     "addTags": "Tag…",
+    "addTagShort": "+ tag",
     "due": "Due",
     "deleteTaskTitle": "Delete task \"{{name}}\"?",
     "deleteTaskBody": "Removes it with its comments and attachments. This can't be undone.",

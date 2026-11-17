@@ -9,9 +9,9 @@ use chrono::{NaiveDate, Timelike, Utc};
 use super::files::{is_image, size_label};
 use super::{shown_name, StatusOption, TaskComment, TaskDetail, Tasks};
 use crate::dates::{due_day, today_in};
-use crate::mywork::{day_and_month, due_label, DueLabel};
+use crate::mywork::{day_and_month, due_label, BoardStatus, DueLabel};
 use crate::session::Session;
-use crate::texts::{text_with, Locale};
+use crate::texts::{text, text_with, Locale};
 
 /// Una nota de agente: lo que un agente anotó con el token de alguien. Va
 /// aparte de la conversación (command-and-control-359). Una que se publicó
@@ -40,6 +40,8 @@ pub struct SheetComment {
     pub mine: bool,
     /// Si se editó después de escribirse.
     pub edited: bool,
+    /// Si lo anotó un agente: lleva su icono delante del nombre.
+    pub agent: bool,
 }
 
 /// Si esa persona puede editar o borrar ese comentario: quien lo escribió, o
@@ -78,6 +80,19 @@ pub struct SheetTag {
     pub color: String,
 }
 
+/// Una tarea a la que ésta espera, como se lee en el riel: su referencia (o
+/// su título si no tiene) y, si ya está hecha, dicho. Una dependencia hecha
+/// sigue listada, tachada: dice que ya no para nada.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct SheetBlocker {
+    pub id: String,
+    /// «proteus-12», o «proteus-12 · hecha».
+    pub label: String,
+    pub title: String,
+    pub done: bool,
+}
+
 /// Un fichero de la tarea, dicho.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -102,12 +117,20 @@ pub struct TaskSheet {
     /// Cómo se nombra en un commit (`proteus-12`, o el folio de un cliente).
     pub reference: Option<String>,
     pub title: String,
-    /// «Espacio › Lista».
+    /// «Espacio / Lista», como encabeza la página en la app de siempre.
     pub place: String,
+    /// La lista en la que vive, sola: lo que dice su campo del riel.
+    pub list: String,
     /// «#7 La tarea madre», si es una subtarea.
     pub parent: Option<String>,
+    /// El id de la madre, para abrirla desde su nombre.
+    pub parent_id: Option<String>,
     pub status_name: String,
     pub status_color: String,
+    /// Cuál de los cuatro estados es su columna: de ahí sale el color del
+    /// chip (los `--status-*` del tema), no del hex que manda el servidor,
+    /// que no cambia con el tema. `None` si es uno que esta versión no conoce.
+    pub status: Option<BoardStatus>,
     /// Con su nombre de la API (`normal`, no `medium`). `none` es sin prioridad.
     pub priority: String,
     pub due: Option<DueLabel>,
@@ -123,6 +146,13 @@ pub struct TaskSheet {
     /// Dónde la dejó la última sesión, y quién lo escribió.
     pub handoff: Option<String>,
     pub handoff_by: Option<String>,
+    /// «Ana Pérez, 14 nov, 14:17»: de quién y de cuándo es el «dónde
+    /// quedó». Falta si no se sabe alguna de las dos cosas.
+    pub handoff_signature: Option<String>,
+    /// De qué depende; sólo se enseña.
+    pub blockers: Vec<SheetBlocker>,
+    /// «Actualizada el 14 nov, 14:17», al pie.
+    pub updated: String,
     pub subtasks: Vec<SheetSubtask>,
     /// La conversación, en el orden en que se escribió.
     pub talk: Vec<SheetComment>,
@@ -172,8 +202,10 @@ pub fn task_sheet(
         system: comment.kind == "system",
         mine: can_change_comment(comment, viewer),
         edited: was_edited(comment),
+        agent: is_agent_note(comment),
     };
     let (notes, talk): (Vec<&TaskComment>, Vec<&TaskComment>) = detail.comments.iter().partition(|c| is_agent_note(c));
+    let handoff = task.handoff.clone().filter(|handoff| !handoff.trim().is_empty());
     let done = |status_id: &str| statuses.iter().any(|option| option.status.id == status_id && option.status.kind == "done");
 
     TaskSheet {
@@ -181,18 +213,38 @@ pub fn task_sheet(
         seq: task.seq,
         reference: detail.reference.clone(),
         title: task.title.clone(),
-        place: format!("{} › {}", detail.space_name, detail.list_name),
+        place: format!("{} / {}", detail.space_name, detail.list_name),
+        list: detail.list_name.clone(),
         parent: detail.parent.as_ref().map(|parent| format!("#{} {}", parent.seq, parent.title)),
+        parent_id: detail.parent.as_ref().map(|parent| parent.id.clone()),
         status_name: detail.status.name.clone(),
         status_color: detail.status.color.clone(),
+        status: BoardStatus::of(&detail.status.status),
         priority: task.priority.clone(),
         due: due_label(locale, task.due_at.as_deref(), today),
         due_day: due_day(task.due_at.as_deref()).map(|day| day.to_string()),
         assignees: detail.assignees.iter().map(shown_name).collect(),
         tags: detail.tags.iter().map(|tag| SheetTag { name: tag.name.clone(), color: tag.color.clone() }).collect(),
         description: task.description.trim().to_string(),
-        handoff: task.handoff.clone().filter(|handoff| !handoff.trim().is_empty()),
+        handoff: handoff.clone(),
         handoff_by: detail.handoff_by.clone(),
+        handoff_signature: handoff.as_ref().and(detail.handoff_by.as_deref()).zip(task.handoff_at.as_deref()).map(|(who, when)| {
+            text_with(locale, "work:task.handoffBy", &[("who", who), ("when", &said_at(locale, when))])
+        }),
+        blockers: detail
+            .blocked_by
+            .iter()
+            .map(|blocker| {
+                let name = blocker.reference.clone().filter(|reference| !reference.is_empty()).unwrap_or_else(|| blocker.title.clone());
+                SheetBlocker {
+                    id: blocker.id.clone(),
+                    label: if blocker.open { name } else { format!("{name} · {}", text(locale, "work:task.blockerDone")) },
+                    title: blocker.title.clone(),
+                    done: !blocker.open,
+                }
+            })
+            .collect(),
+        updated: text_with(locale, "work:task.updated", &[("when", &said_at(locale, &task.updated_at))]),
         subtasks: detail
             .subtasks
             .iter()
@@ -299,7 +351,8 @@ mod tests {
 
         assert_eq!((sheet.seq, sheet.title.as_str()), (12, "Subir el backend"));
         assert_eq!(sheet.reference.as_deref(), Some("acme-7"));
-        assert_eq!(sheet.place, "Command and control › tasks");
+        assert_eq!(sheet.place, "Command and control / tasks");
+        assert_eq!(sheet.list, "tasks");
         assert_eq!(sheet.status_name, "In progress");
         assert_eq!(sheet.assignees, ["Ana Pérez"]);
         assert_eq!(sheet.tags, [SheetTag { name: "urgente".into(), color: "#f00".into() }]);
@@ -319,6 +372,61 @@ mod tests {
         let sheet = sheet_of(bare, json!([]));
         assert_eq!(sheet.assignees, ["luis"]);
         assert_eq!((sheet.handoff, sheet.parent), (None, None));
+    }
+
+    /// El color del estado sale de cuál de los cuatro es su columna, la
+    /// madre se puede abrir, y el pie y el «dónde quedó» dicen de cuándo son.
+    ///
+    /// Roturas que atrapa: pintar el chip con el hex del servidor (o gris)
+    /// por no saber qué estado es; una madre que se nombra y no se puede
+    /// abrir; un «dónde quedó» sin firma, o firmado sin que haya ninguno; un
+    /// pie que no dice cuándo se tocó por última vez.
+    #[test]
+    fn the_sheet_says_which_state_it_is_and_when_it_was_touched() {
+        let mut detail = contract();
+        detail["status"]["status"] = json!("in_progress");
+        detail["parent"]["id"] = json!("madre");
+        detail["task"]["updatedAt"] = json!("2026-11-14T20:17:40Z");
+        // Otro día que el de la última vez: el pie no dice cuándo se creó.
+        detail["task"]["createdAt"] = json!("2026-11-10T08:00:00Z");
+        let sheet = sheet_of(detail.clone(), json!([]));
+        let when = said_at(Locale::Es, "2026-11-14T20:17:40Z");
+
+        assert_eq!(sheet.status, Some(BoardStatus::InProgress));
+        assert_eq!(sheet.parent_id.as_deref(), Some("madre"));
+        assert_eq!(sheet.updated, format!("Actualizada el {when}"));
+        assert_eq!(sheet.handoff_signature, Some(format!("Ana Pérez, {when}")));
+
+        detail["status"]["status"] = json!("resolved");
+        detail["task"]["handoff"] = json!("  ");
+        let sheet = sheet_of(detail.clone(), json!([]));
+        assert_eq!(sheet.status, Some(BoardStatus::Done));
+        assert_eq!(sheet.handoff_signature, None);
+
+        detail["status"]["status"] = json!("inventado");
+        detail["parent"] = Value::Null;
+        let sheet = sheet_of(detail, json!([]));
+        assert_eq!((sheet.status, sheet.parent_id), (None, None));
+    }
+
+    /// De qué depende sale por su referencia, o por su título si no tiene, y
+    /// lo que ya está hecho lo dice.
+    ///
+    /// Roturas que atrapa: perder las dependencias; dar por pendiente una
+    /// que ya se hizo (o al revés); una dependencia sin referencia que sale
+    /// en blanco.
+    #[test]
+    fn what_the_task_waits_for_is_listed() {
+        let mut detail = contract();
+        detail["blockedBy"] = json!([
+            { "id": "b1", "ref": "proteus-12", "title": "La API", "open": true },
+            { "id": "b2", "title": "El diseño", "open": false },
+        ]);
+        let sheet = sheet_of(detail, json!([]));
+
+        let said: Vec<(&str, &str, bool)> = sheet.blockers.iter().map(|b| (b.id.as_str(), b.label.as_str(), b.done)).collect();
+        assert_eq!(said, [("b1", "proteus-12", false), ("b2", "El diseño · hecha", true)]);
+        assert_eq!(sheet.blockers[0].title, "La API");
     }
 
     /// Lo que anotó un agente va aparte de la conversación, y dice de quién
@@ -352,6 +460,9 @@ mod tests {
         assert_eq!(sheet.talk[0].author, "Ana Pérez");
         assert_eq!(sheet.talk[0].body, "hola");
         assert!(sheet.talk[2].system && !sheet.talk[0].system);
+        // La marca de agente (su icono) va con la nota y con nada más.
+        assert!(sheet.notes[0].agent, "la nota de un agente no lleva su marca");
+        assert!(sheet.talk.iter().all(|comment| !comment.agent), "algo de la conversación va marcado como de agente");
     }
 
     /// En una tarea que el cliente lee, cada comentario dice quién lo lee; en
