@@ -1181,32 +1181,13 @@ impl TaskView {
         .detach();
     }
 
-    /// Un identificador que se copia de un clic, enseñado corto: el
-    /// `CopyId.tsx` de la app de siempre (`rounded bg-muted/60 px-1.5
-    /// py-0.5 font-mono text-xs`, icono `size-2.5`). Lo que se copia es el
-    /// identificador entero, que es lo que sale al pasar el ratón.
+    /// Un identificador que se copia de un clic, enseñado corto (la pastilla
+    /// de `theme::id_chip`). Lo que se copia es el identificador entero, que
+    /// es lo que sale al pasar el ratón.
     fn render_copy_chip(&self, id: &'static str, value: String, shown: String, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (muted, foreground, chip, mono) = (theme.muted_foreground, theme.foreground, theme.muted, theme.mono_font_family.clone());
-        let (copied, hint) = (self.copied == Some(id), value.clone());
-        div()
-            .id(id)
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap_1()
-            .px_1p5()
-            .py_0p5()
-            .rounded(px(4.))
-            .bg(chip.opacity(0.6))
-            .font_family(mono)
-            .text_xs()
-            .text_color(muted)
-            .cursor_pointer()
-            .hover(move |style| style.bg(chip).text_color(foreground))
+        let hint = value.clone();
+        crate::theme::id_chip(id, shown, self.copied == Some(id), cx)
             .on_click(cx.listener(move |this, _, _, cx| this.copy_id(id, value.clone(), cx)))
-            .child(if copied { Icon::new(IconName::Check).size_2p5() } else { Icon::new(Lucide::Copy).size_2p5() })
-            .child(shown)
             .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
             .test_support()
     }

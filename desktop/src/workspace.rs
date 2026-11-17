@@ -965,12 +965,16 @@ mod tests {
     }
 
     fn open(cx: &mut TestAppContext) -> AnyWindowHandle {
+        open_sized(1100., cx)
+    }
+
+    fn open_sized(width: f32, cx: &mut TestAppContext) -> AnyWindowHandle {
         sign_in(cx);
         cx.update(|cx| {
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: Point::default(),
-                    size: size(px(1100.), px(760.)),
+                    size: size(px(width), px(760.)),
                 })),
                 ..WindowOptions::default()
             };
@@ -1087,7 +1091,7 @@ mod tests {
     }
 
     /// Pulsar una carpeta abre su documentación en el sitio de la vista, y
-    /// «Lista» devuelve a las tareas.
+    /// su × devuelve a las tareas.
     ///
     /// Roturas que atrapa: una carpeta cuyo clic no hace nada; abrir el
     /// documento en el core y seguir pintando la lista; no tener cómo volver.
@@ -1104,9 +1108,121 @@ mod tests {
         assert!(!on_screen(window, "view-title", cx), "la lista sigue pintada debajo del documento");
         assert_eq!(scope(cx), None, "una carpeta no acota");
 
-        click(window, "view-list", cx);
+        // Una carpeta no tiene tarjetas detrás: no ofrece vistas de lista.
+        assert!(!on_screen(window, "view-list", cx) && !on_screen(window, "view-board", cx), "ofrece el tablero de una carpeta");
+        click(window, "doc-close", cx);
         wait_until(cx, "vuelven las tareas", |cx| on_screen(window, "view-title", cx));
         assert!(!on_screen(window, "docs", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Abre la documentación de la lista `l-a`, como quien la pulsa en el
+    /// árbol leyendo la de su espacio.
+    fn open_list_docs(window: AnyWindowHandle, cx: &mut TestAppContext) {
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        click(window, "tree-a", cx);
+        wait_until(cx, "acotado al espacio, ofrece su documentación", |cx| on_screen(window, "open-docs", cx));
+        click(window, "open-docs", cx);
+        wait_until(cx, "llega la del espacio", |cx| on_screen(window, "doc-body", cx));
+        click(window, "tree-l-a", cx);
+        wait_until(cx, "abre la de la lista", |cx| doc_open(cx).as_deref() == Some("l-a") && on_screen(window, "doc-body", cx));
+    }
+
+    /// La documentación de una lista lleva sus vistas, y pulsar una
+    /// devuelve a sus tareas en esa vista.
+    ///
+    /// Roturas que atrapa: unas pestañas de vista que no llevan a ningún
+    /// sitio; volver siempre a la lista, se pulse «Tablero» o «Calendario».
+    #[gpui_kit::test]
+    fn the_views_of_a_list_bring_its_tasks_back_in_that_view(cx: &mut TestAppContext) {
+        let server = server_with_docs();
+        server.install(cx);
+        let window = open(cx);
+        open_list_docs(window, cx);
+        for view in ["view-board", "view-list", "view-calendar", "view-docs"] {
+            assert!(on_screen(window, view, cx), "falta {view}");
+        }
+        assert_eq!(cx.update(|cx| Backend::core(cx).work_layout()), cac_core::WorkLayout::List);
+
+        click(window, "view-board", cx);
+
+        wait_until(cx, "vuelven sus tareas", |cx| on_screen(window, "view-title", cx));
+        assert_eq!(cx.update(|cx| Backend::core(cx).work_layout()), cac_core::WorkLayout::Board);
+        assert_eq!(scope(cx), Some((ScopeKind::List, "l-a".to_string())));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    fn width_on_screen(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> f32 {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            f32::from(window.try_find(id).expect("no está a la vista").bounds().size.width)
+        })
+        .unwrap()
+    }
+
+    /// La medida de lectura es para la prosa: una tabla usa el ancho de la
+    /// página.
+    ///
+    /// Roturas que atrapa: la medida puesta al cuerpo entero (una tabla
+    /// ancha «cabe» partiendo las palabras y no se desliza nunca); un
+    /// párrafo que cruza la ventana de lado a lado.
+    #[gpui_kit::test]
+    fn the_reading_measure_is_for_prose_only(cx: &mut TestAppContext) {
+        let server = server();
+        let doc = json!({
+            "doc": null, "orgId": "o1", "attachments": [], "decisions": [],
+            "tabs": [{ "key": "overview", "body": "Un párrafo.\n\n| a | b |\n| - | - |\n| 1 | 2 |" }],
+        });
+        server.mount(
+            Mock::given(method("GET"))
+                .and(wiremock::matchers::path_regex("^/api/v1/docs/(space|folder|list)/[^/]+$"))
+                .respond_with(ok(doc)),
+        );
+        server.install(cx);
+        let window = open_sized(1500., cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-f-a", cx));
+        click(window, "tree-f-a", cx);
+        wait_until(cx, "llega su documentación", |cx| on_screen(window, "doc-wide-1", cx));
+
+        let (prose, table) = (width_on_screen(window, "doc-prose-0", cx), width_on_screen(window, "doc-wide-1", cx));
+        assert!((600. ..=680.).contains(&prose), "la prosa mide {prose} px");
+        assert!(table > prose + 150., "la tabla ({table} px) se quedó en la medida de la prosa ({prose} px)");
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    fn copied(cx: &mut TestAppContext) -> Option<String> {
+        cx.read_from_clipboard().and_then(|item| item.text())
+    }
+
+    /// El id del nodo se copia de un clic, y lo que la app de siempre tiene
+    /// en esta página y aquí todavía no se hace está pintado en su sitio.
+    ///
+    /// Roturas que atrapa: una pastilla que no copia; dejar fuera compartir,
+    /// las páginas, editar, «escribirlo» o registrar una decisión por no
+    /// tener aún qué hacer con ellos.
+    #[gpui_kit::test]
+    fn the_node_id_is_copied_and_what_is_not_here_yet_is_painted(cx: &mut TestAppContext) {
+        let server = server_with_docs();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-f-a", cx));
+        click(window, "tree-f-a", cx);
+        wait_until(cx, "llega su documentación", |cx| on_screen(window, "doc-body", cx));
+
+        click(window, "doc-id", cx);
+        assert_eq!(copied(cx).as_deref(), Some("f-a"));
+        for id in ["doc-pages", "doc-share", "doc-edit"] {
+            assert!(on_screen(window, id, cx), "falta {id}");
+        }
+        assert!(!on_screen(window, "doc-write", cx) && !on_screen(window, "doc-record-decision", cx));
+
+        click(window, "doc-tab-runbook", cx);
+        wait_until(cx, "el runbook vacío ofrece escribirlo", |cx| on_screen(window, "doc-write", cx));
+        assert!(!on_screen(window, "doc-edit", cx), "ofrece editar lo que no está escrito");
+
+        click(window, "doc-tab-decisions", cx);
+        wait_until(cx, "el registro ofrece apuntar una", |cx| on_screen(window, "doc-record-decision", cx));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 

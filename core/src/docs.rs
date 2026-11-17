@@ -57,6 +57,16 @@ pub struct DocDecision {
 }
 
 impl DocDecision {
+    /// De dónde salió, dicho: «De <la tarea>», o que se escribió en el
+    /// propio registro (`Procedencia` en `DecisionList.tsx`). El `bool` es si
+    /// salió de una tarea, que lleva su icono.
+    pub fn origin(&self, locale: Locale) -> (bool, String) {
+        match self.origin_title.as_deref().filter(|title| !title.trim().is_empty()) {
+            Some(title) => (true, crate::texts::text_with(locale, "work:decisions.fromTask", &[("what", title)])),
+            None => (false, crate::texts::text(locale, "work:decisions.writtenHere")),
+        }
+    }
+
     /// Cuándo se decidió, dicho: «30 sept 2026». Es un instante, así que el
     /// día es el de quien lo lee.
     pub fn decided_on(&self, locale: Locale) -> String {
@@ -104,7 +114,150 @@ impl Default for DocsState {
     }
 }
 
+/// Un trozo del texto de un documento, para pintarlo con su ancho.
+///
+/// La medida de lectura (68 letras) es para **la prosa**: puesta al cuerpo
+/// entero, una tabla ancha «cabe» partiendo las palabras a mitad y su propio
+/// deslizamiento no se activa nunca (ver `.prose-doc` en `app/src/index.css`).
+/// Lo ancho —tablas, bloques de código, una imagen sola— usa el ancho del panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DocBlock {
+    pub wide: bool,
+    /// Markdown.
+    pub text: String,
+}
+
+/// Parte un markdown en prosa y en lo ancho, en su orden.
+///
+/// Un bloque de código es lo que hay entre sus vallas (` ``` ` o `~~~`); una
+/// tabla, las líneas seguidas que empiezan por `|`. Lo que va sangrado dentro
+/// de una lista se queda con su lista: sacarlo de ella la rompería. Y lo que
+/// hay dentro de una valla es código, empiece por lo que empiece.
+pub fn doc_blocks(markdown: &str) -> Vec<DocBlock> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Kind {
+        Prose,
+        Table,
+        Code,
+        Image,
+    }
+    let mut blocks: Vec<DocBlock> = Vec::new();
+    let mut flush = |kind: Kind, lines: &mut Vec<&str>| {
+        let text = lines.join("\n");
+        lines.clear();
+        if !text.trim().is_empty() {
+            blocks.push(DocBlock { wide: kind != Kind::Prose, text: text.trim_matches('\n').to_string() });
+        }
+    };
+    let (mut kind, mut lines) = (Kind::Prose, Vec::new());
+    // La valla abierta: con qué letra y cuántas; se cierra con las mismas o más.
+    let mut fence: Option<(char, usize)> = None;
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+        if let Some((mark, length)) = fence {
+            lines.push(line);
+            let closing = trimmed.chars().take_while(|c| *c == mark).count();
+            if closing >= length && trimmed[closing..].trim().is_empty() {
+                fence = None;
+                flush(Kind::Code, &mut lines);
+                kind = Kind::Prose;
+            }
+            continue;
+        }
+        let opening = ['`', '~'].into_iter().find(|mark| trimmed.starts_with(&mark.to_string().repeat(3)));
+        let next = match opening {
+            Some(_) if indent < 2 => Kind::Code,
+            _ if indent < 2 && trimmed.starts_with('|') => Kind::Table,
+            _ if indent < 2 && trimmed.starts_with("![") && trimmed.trim_end().ends_with(')') => Kind::Image,
+            _ => Kind::Prose,
+        };
+        // Una tabla o un párrafo siguen mientras sigan sus líneas. Un bloque
+        // de código ya va solo: al cerrarse su valla se suelta.
+        if next != kind {
+            flush(kind, &mut lines);
+            kind = next;
+        }
+        lines.push(line);
+        if let (Kind::Code, Some(mark)) = (next, opening) {
+            fence = Some((mark, trimmed.chars().take_while(|c| *c == mark).count()));
+        }
+    }
+    flush(kind, &mut lines);
+    blocks
+}
+
+/// Una sección del texto, para el índice «En esta página».
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DocHeading {
+    /// 2 o 3: el índice no baja más.
+    pub level: u8,
+    pub text: String,
+}
+
+/// Las secciones de un markdown: sus títulos de segundo y tercer nivel, sin
+/// los signos de énfasis. Vino de `headingsOf` en `app/src/lib/headings.ts`.
+/// Un `# comentario` dentro de un bloque de código no es una sección.
+pub fn doc_headings(markdown: &str) -> Vec<DocHeading> {
+    let mut headings = Vec::new();
+    let mut in_code = false;
+    for line in markdown.lines() {
+        if line.trim_start().starts_with("```") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            continue;
+        }
+        let level = line.chars().take_while(|c| *c == '#').count();
+        let rest = &line[level..];
+        if !(2..=3).contains(&level) || !rest.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let text = rest.replace(['*', '_', '`'], "").trim().to_string();
+        if !text.is_empty() {
+            headings.push(DocHeading { level: level as u8, text });
+        }
+    }
+    headings
+}
+
+/// Las pestañas que llevan índice: en una lista de entradas repetiría lo
+/// que se ve (`WITH_TOC` en `DocTabs.tsx`).
+const TABS_WITH_CONTENTS: [&str; 2] = ["overview", "runbook"];
+
 impl DocsState {
+    /// El índice de lo que se lee: sólo donde aporta, y sólo si hay al menos
+    /// dos secciones entre las que saltar.
+    pub fn contents(&self) -> Vec<DocHeading> {
+        if !TABS_WITH_CONTENTS.contains(&self.tab.as_str()) {
+            return Vec::new();
+        }
+        let headings = doc_headings(self.body());
+        if headings.len() < 2 {
+            return Vec::new();
+        }
+        headings
+    }
+
+    /// Lo que se lee, partido en prosa y en lo ancho.
+    pub fn blocks(&self) -> Vec<DocBlock> {
+        doc_blocks(self.body())
+    }
+
+    /// Si esa pestaña no tiene nada: sale apagada, para saber dónde hay algo
+    /// escrito sin abrirlas una a una. La de decisiones no se mide por su
+    /// texto —no tiene—, sino por si hay entradas.
+    pub fn tab_is_empty(&self, key: &str) -> bool {
+        if key == "decisions" {
+            self.decisions.is_empty()
+        } else {
+            self.tabs.iter().find(|tab| tab.key == key).is_none_or(|tab| tab.body.trim().is_empty())
+        }
+    }
+
     /// El texto de la pestaña que se lee. Vacío si no tiene nada escrito, o
     /// si el nodo todavía no tiene documento.
     pub fn body(&self) -> &str {
@@ -292,5 +445,135 @@ mod tests {
         assert_eq!(decision.decided_on(Locale::Es), "30 sept 2026");
         assert_eq!(decision.decided_on(Locale::En), "Sep 30 2026");
         assert_eq!(DocDecision { decided_at: "ayer".into(), ..DocDecision::default() }.decided_on(Locale::Es), "");
+    }
+
+    fn shape(markdown: &str) -> Vec<(bool, String)> {
+        doc_blocks(markdown).into_iter().map(|block| (block.wide, block.text)).collect()
+    }
+
+    /// La prosa y lo ancho salen separados y en su orden, cada tabla y cada
+    /// bloque de código enteros.
+    ///
+    /// Roturas que atrapa: una tabla dentro de la medida de lectura (se
+    /// estruja y parte las palabras); un párrafo a todo el ancho del panel;
+    /// un bloque de código partido en dos; perder o desordenar texto.
+    #[test]
+    fn prose_and_what_is_wide_come_apart_in_order() {
+        let text = "# Título\n\nUn párrafo.\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\nOtro párrafo.\n\n```sh\ncargo test\n\n# no es un título\n```\nY el final.";
+        assert_eq!(
+            shape(text),
+            [
+                (false, "# Título\n\nUn párrafo.".to_string()),
+                (true, "| a | b |\n| - | - |\n| 1 | 2 |".to_string()),
+                (false, "Otro párrafo.".to_string()),
+                (true, "```sh\ncargo test\n\n# no es un título\n```".to_string()),
+                (false, "Y el final.".to_string()),
+            ]
+        );
+        assert_eq!(shape(""), []);
+        assert_eq!(shape("\n  \n"), []);
+    }
+
+    /// Lo que hay dentro de una valla es código, empiece por lo que empiece,
+    /// y la valla la cierra otra igual o más larga, no una más corta ni de
+    /// otra letra.
+    ///
+    /// Roturas que atrapa: una línea con `|` dentro de un bloque de código
+    /// tomada por una tabla (parte el bloque en tres); cerrar un bloque de
+    /// cuatro comillas con tres, o uno de `~~~` con comillas.
+    #[test]
+    fn what_is_inside_a_fence_is_code() {
+        let piped = "```\n| no | tabla |\n```";
+        assert_eq!(shape(piped), [(true, piped.to_string())]);
+
+        let nested = "````md\n```\ndentro\n```\n````\nfuera";
+        assert_eq!(shape(nested), [(true, "````md\n```\ndentro\n```\n````".to_string()), (false, "fuera".to_string())]);
+
+        let tildes = "~~~\n```\n~~~\nfuera";
+        assert_eq!(shape(tildes), [(true, "~~~\n```\n~~~".to_string()), (false, "fuera".to_string())]);
+
+        // Una valla sin cerrar se lleva lo que queda, como en markdown.
+        assert_eq!(shape("antes\n```\ncódigo"), [(false, "antes".to_string()), (true, "```\ncódigo".to_string())]);
+    }
+
+    /// Dos bloques de código seguidos son dos; una imagen sola en su línea
+    /// usa el ancho del panel; y lo sangrado dentro de una lista se queda
+    /// con su lista.
+    ///
+    /// Roturas que atrapa: fundir dos bloques en uno (el segundo se pinta
+    /// como texto del primero); sacar de su lista el código de un paso, que
+    /// la corta en dos listas que vuelven a numerar desde uno.
+    #[test]
+    fn each_wide_thing_stands_alone_and_a_list_keeps_what_is_its_own() {
+        let two = "```\na\n```\n```\nb\n```";
+        assert_eq!(shape(two), [(true, "```\na\n```".to_string()), (true, "```\nb\n```".to_string())]);
+
+        let picture = "Mira:\n![captura](https://example.com/a.png)\nY sigue.";
+        assert_eq!(
+            shape(picture),
+            [(false, "Mira:".to_string()), (true, "![captura](https://example.com/a.png)".to_string()), (false, "Y sigue.".to_string())]
+        );
+
+        let list = "1. Paso uno:\n   ```sh\n   make\n   ```\n2. Paso dos\n   | a | b |";
+        assert_eq!(shape(list), [(false, list.to_string())]);
+    }
+
+    /// Una pestaña sin nada escrito sale apagada; la de decisiones se mide
+    /// por sus entradas, no por su texto.
+    ///
+    /// Roturas que atrapa: todas las pestañas iguales, haya o no algo; la
+    /// de decisiones siempre apagada aunque el registro esté lleno.
+    #[test]
+    fn a_tab_with_nothing_written_is_empty() {
+        let docs = DocsState {
+            tabs: vec![
+                DocTab { key: "overview".into(), body: "qué es".into(), ..DocTab::default() },
+                DocTab { key: "runbook".into(), body: "  \n".into(), ..DocTab::default() },
+            ],
+            decisions: vec![DocDecision::default()],
+            ..DocsState::default()
+        };
+        assert!(!docs.tab_is_empty("overview"));
+        assert!(docs.tab_is_empty("runbook"));
+        assert!(docs.tab_is_empty("links"), "una pestaña que el documento no trae no está escrita");
+        assert!(!docs.tab_is_empty("decisions"));
+        assert!(DocsState::default().tab_is_empty("decisions"));
+    }
+
+    /// El índice son los títulos de segundo y tercer nivel, limpios, y sólo
+    /// donde hay entre qué saltar.
+    ///
+    /// Roturas que atrapa: el título del documento o uno de cuarto nivel en
+    /// el índice; un `## comentario` de un bloque de código tomado por
+    /// sección; los asteriscos del énfasis a la vista; un índice de una sola
+    /// entrada, o uno en la pestaña de enlaces.
+    #[test]
+    fn the_contents_are_the_second_and_third_level_headings() {
+        let text = "# Doc\n\n## Qué **es**\n\n```sh\n## no es sección\n```\n\n### Cómo `corre`\n\n#### Detalle\n\n##sin espacio\n\n## \n";
+        let said: Vec<(u8, String)> = doc_headings(text).into_iter().map(|heading| (heading.level, heading.text)).collect();
+        assert_eq!(said, [(2, "Qué es".to_string()), (3, "Cómo corre".to_string())]);
+
+        let with = |tab: &str, body: &str| DocsState {
+            tab: tab.into(),
+            tabs: vec![DocTab { key: tab.into(), body: body.into(), ..DocTab::default() }],
+            ..DocsState::default()
+        };
+        assert_eq!(with("overview", text).contents().len(), 2);
+        assert_eq!(with("runbook", text).contents().len(), 2);
+        assert!(with("links", text).contents().is_empty());
+        assert!(with("overview", "## Una sola\n\ntexto").contents().is_empty());
+    }
+
+    /// Una decisión dice de qué tarea salió, o que se escribió en el registro.
+    ///
+    /// Roturas que atrapa: «De » sin nombre cuando no salió de ninguna
+    /// tarea; decir «escrita aquí» de la que salió de una.
+    #[test]
+    fn a_decision_says_where_it_came_from() {
+        let from_task = DocDecision { origin_title: Some("Subir el backend".into()), ..DocDecision::default() };
+        assert_eq!(from_task.origin(Locale::Es), (true, "De Subir el backend".to_string()));
+        assert_eq!(DocDecision::default().origin(Locale::Es), (false, "Escrita aquí".to_string()));
+        let blank = DocDecision { origin_title: Some("  ".into()), ..DocDecision::default() };
+        assert_eq!(blank.origin(Locale::Es), (false, "Escrita aquí".to_string()));
     }
 }

@@ -189,17 +189,9 @@ pub fn apply(mode: ThemeMode, cx: &mut App) {
 
 /// Markdown para leer, al tamaño del cuerpo. Suelto, `TextView` hereda el
 /// `rem` entero y sale más grande que el texto de alrededor.
-pub fn prose(id: impl Into<gpui_kit::SharedString>, text: impl Into<gpui_kit::SharedString>) -> gpui_kit::Div {
-    prose_with_links(id, text, |url, _, cx| {
-        if leads_somewhere(url) {
-            cx.open_url(url);
-        }
-    })
-}
-
-/// Lo mismo, para quien sabe mejor adónde llevan sus enlaces: los de una
-/// tarea pueden ser a un fichero suyo, que pide sesión y no se le da al
-/// navegador.
+///
+/// Adónde llevan sus enlaces lo dice quien lo pone: los de una tarea pueden
+/// ser a un fichero suyo, que pide sesión y no se le da al navegador.
 pub fn prose_with_links(
     id: impl Into<gpui_kit::SharedString>,
     text: impl Into<gpui_kit::SharedString>,
@@ -216,6 +208,34 @@ pub fn prose_with_links(
 /// en un aviso de «no sé abrir cac:».
 pub fn leads_somewhere(url: &str) -> bool {
     cac_core::mentioned_user(url).is_none()
+}
+
+/// Un identificador que se copia de un clic, enseñado corto: la pastilla de
+/// `CopyId.tsx` (`rounded bg-muted/60 px-1.5 py-0.5 font-mono text-xs`, icono
+/// `size-2.5`). Aquí sólo se pinta; quien la pone le da el clic. `copied` es
+/// que se acaba de copiar: lo dice con una marca en vez del icono de copiar.
+pub fn id_chip(id: impl Into<gpui_kit::ElementId>, shown: impl Into<gpui_kit::SharedString>, copied: bool, cx: &App) -> gpui_kit::Stateful<gpui_kit::Div> {
+    use gpui_kit::component::{ActiveTheme as _, Icon, IconName};
+    use gpui_kit::{InteractiveElement as _, ParentElement as _, Styled as _};
+    let theme = cx.theme();
+    let (muted, foreground, chip, mono) = (theme.muted_foreground, theme.foreground, theme.muted, theme.mono_font_family.clone());
+    gpui_kit::div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap_1()
+        .px_1p5()
+        .py_0p5()
+        .rounded(px(4.))
+        .bg(chip.opacity(0.6))
+        .font_family(mono)
+        .text_xs()
+        .text_color(muted)
+        .cursor_pointer()
+        .hover(move |style| style.bg(chip).text_color(foreground))
+        .child(if copied { Icon::new(IconName::Check).size_2p5() } else { Icon::new(gpui_kit::assets::IconName::Copy).size_2p5() })
+        .child(shown.into())
 }
 
 /// El cuerpo de texto de macOS, que es la escala que sigue la app (jose,
