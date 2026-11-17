@@ -16,6 +16,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
+use crate::theme::Leading as _;
 use crate::docs::DocsView;
 use crate::lang::{locale, tr};
 use crate::mywork::MyWorkView;
@@ -25,13 +26,30 @@ use crate::task::TaskView;
 const RAIL_WIDTH: f32 = 48.;
 const PANEL_WIDTH: f32 = 256.;
 const ROW_HEIGHT: f32 = 28.;
+/// Una fila del panel (`PanelRow.tsx`: `text-sm` con `py-1.5`).
+const PANEL_ROW_HEIGHT: f32 = 32.;
 /// El lado de un botón del riel.
 const RAIL_BUTTON: f32 = 36.;
 /// El ancho del menú de la cuenta: el de la app de siempre (`w-64`).
 const ACCOUNT_MENU_WIDTH: f32 = 256.;
-/// Lo que entra una fila por cada nivel que cuelga: lo de dentro empieza
-/// bajo la marca de su padre (el hueco del chevrón más la separación).
-const INDENT: f32 = 22.;
+/// Lo que entra una fila por cada nivel que cuelga: el `ml-4` de
+/// `SpacesNavigator.tsx`.
+const INDENT: f32 = 16.;
+
+/// `capitalize` de CSS: cada palabra con su primera letra en mayúscula.
+fn capitalized(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut start = true;
+    for letter in text.chars() {
+        if start && letter.is_alphabetic() {
+            out.extend(letter.to_uppercase());
+        } else {
+            out.push(letter);
+        }
+        start = letter.is_whitespace();
+    }
+    out
+}
 
 /// El número que lleva un botón del riel: cuánto, y si es un «míralo cuando
 /// puedas» (ámbar) en vez de algo sin leer (el color de acento).
@@ -132,7 +150,7 @@ impl Workspace {
             .gap_1()
             .px_2()
             .py_1p5()
-            .child(div().flex().items_center().gap_2().text_xs().text_color(muted).child(Icon::new(icon).size_3p5()).child(label))
+            .child(div().flex().items_center().gap_2().leading_xs().text_color(muted).child(Icon::new(icon).size_3p5()).child(label))
             .child(div().flex().gap_0p5().children(options.into_iter().enumerate().map(|(at, (label, active, choose))| {
                 div()
                     .id(SharedString::from(format!("{id}-{at}")))
@@ -172,7 +190,7 @@ impl Workspace {
             .rounded(px(4.))
             .px_2()
             .py_1p5()
-            .text_xs()
+            .leading_xs()
             .text_color(muted)
             .hover(move |style| style.bg(hover).text_color(foreground))
             .child(icon.into().size_3p5().flex_none())
@@ -225,7 +243,7 @@ impl Workspace {
         };
         let in_menu = face.clone();
         let live_hint = tr(cx, if live { "common:misc.receivingLive" } else { "common:misc.notReceivingLive" });
-        let trigger = Button::new("account-menu").ghost().p_0().size(px(RAIL_BUTTON)).rounded_lg().tooltip(tr(cx, "nav:rail.account")).child(
+        let trigger = Button::new("account-menu").ghost().p_0().size(px(RAIL_BUTTON)).rounded(px(10.)).tooltip(tr(cx, "nav:rail.account")).child(
             div().relative().size(px(RAIL_BUTTON)).flex().items_center().justify_center().child(face(24.)).child(
                 // Pegado al avatar: es la señal de que la app sigue
                 // recibiendo. El borde del color del riel lo despega de él.
@@ -279,7 +297,7 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .p_1()
-                .rounded_md()
+                .rounded(px(8.))
                 .border_1()
                 .border_color(border)
                 .bg(popover)
@@ -288,7 +306,7 @@ impl Workspace {
                     div().flex().items_center().gap_2().px_2().py_1p5().child(in_menu(28.)).child(
                         div()
                             .min_w_0()
-                            .child(div().truncate().text_xs().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
+                            .child(div().truncate().leading_xs().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
                             .children(email.clone().map(|email| div().truncate().text_size(px(11.)).text_color(muted).child(email))),
                     ),
                 )
@@ -307,7 +325,7 @@ impl Workspace {
                         .gap_2()
                         .px_2()
                         .py_1p5()
-                        .text_xs()
+                        .leading_xs()
                         .text_color(muted)
                         .child(Icon::new(Lucide::CircleCheck).size_3p5().flex_none().text_color(success))
                         .child(div().font_family(mono.clone()).child(concat!("v", env!("CARGO_PKG_VERSION"))))
@@ -361,7 +379,7 @@ impl Workspace {
             .border_b_1()
             .border_color(danger.opacity(0.3))
             .bg(danger.opacity(0.1))
-            .text_sm()
+            .leading_sm()
             .child(Icon::new(Lucide::WifiOff).text_color(danger))
             .child(div().font_weight(FontWeight::MEDIUM).text_color(danger).child(tr(cx, "common:last.liveUpdatesStopped")))
             .child(div().flex_1())
@@ -388,7 +406,7 @@ impl Workspace {
             .flex_none()
             .items_center()
             .justify_center()
-            .rounded_lg()
+            .rounded(px(10.))
             .text_color(if active { primary } else { muted })
             .when(active, |this| {
                 this.bg(accent).child(div().absolute().left(px(-6.)).top_2().bottom_2().w(px(2.)).rounded_full().bg(primary))
@@ -450,18 +468,18 @@ impl Workspace {
         let not_yet = tr(cx, "common:misc.notInThisApp");
         div()
             .id(id)
-            .h(px(ROW_HEIGHT))
+            .h(px(PANEL_ROW_HEIGHT))
             .flex()
             .flex_none()
             .items_center()
             .gap_2()
-            .px_2()
+            .px_1()
             .mx_1()
-            .rounded_md()
-            .text_sm()
+            .rounded(px(8.))
+            .leading_sm()
             .text_color(muted)
             .hover(move |style| style.bg(hover).text_color(foreground))
-            .child(Icon::new(icon).small())
+            .child(Icon::new(icon).size_4())
             .child(tr(cx, label_key))
             .tooltip(move |window, cx| Tooltip::new(not_yet.clone()).build(window, cx))
             .test_support()
@@ -480,7 +498,7 @@ impl Workspace {
             .flex_none()
             .items_center()
             .justify_center()
-            .rounded_md()
+            .rounded(px(8.))
             .text_color(muted)
             .hover(move |style| style.bg(hover).text_color(foreground))
             .child(Icon::new(icon).size_3p5())
@@ -545,11 +563,11 @@ impl Workspace {
                     .gap_2()
                     .px_3()
                     .py_1p5()
-                    .rounded_md()
+                    .rounded(px(8.))
                     .border_1()
                     .border_color(border)
                     .bg(surface.opacity(0.3))
-                    .text_xs()
+                    .leading_xs()
                     .text_color(muted)
                     .hover(move |style| style.bg(surface.opacity(0.6)))
                     .child(Icon::new(IconName::Search).size_3p5().flex_none())
@@ -566,7 +584,7 @@ impl Workspace {
                     .ml_2()
                     .p_1p5()
                     .flex_none()
-                    .rounded_md()
+                    .rounded(px(8.))
                     .text_color(muted)
                     .hover(move |style| style.bg(hover).text_color(foreground))
                     .child(Icon::new(Lucide::Bell).small())
@@ -627,7 +645,6 @@ impl Workspace {
         let name = orgs.current().map(|org| org.name.clone()).unwrap_or_else(|| tr(cx, "nav:rail.organization"));
         let hint = orgs.current().map(|org| cac_core::org_hint(org, spaces, locale(cx))).filter(|hint| !hint.is_empty());
         let current = orgs.current_org_id.clone();
-        let several = orgs.orgs.len() > 1;
         let face = div()
             .w_full()
             .flex()
@@ -640,7 +657,7 @@ impl Workspace {
                     .flex_none()
                     .items_center()
                     .justify_center()
-                    .rounded_lg()
+                    .rounded(px(10.))
                     .bg(primary)
                     .child(crate::brand::brand_mark_in(16., on_primary, primary)),
             )
@@ -651,12 +668,21 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .items_start()
-                    .child(div().id("org-name").test_support().w_full().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
-                    .children(hint.map(|hint| div().id("org-hint").test_support().w_full().truncate().text_xs().text_color(muted).child(hint))),
+                    // `OrgSwitcher.tsx`: `gap-0.5 leading-none`, el nombre a
+                    // `text-[12.5px] font-semibold` y debajo, a
+                    // `text-[10.5px] capitalize`, quién eres y cómo es de grande.
+                    .gap_0p5()
+                    .child(
+                        div().id("org-name").test_support().w_full().truncate().text_size(px(12.5)).line_height(px(14.)).font_weight(FontWeight::SEMIBOLD).child(name.clone()),
+                    )
+                    .children(hint.map(|hint| {
+                        div().id("org-hint").test_support().w_full().truncate().text_size(px(10.5)).line_height(px(12.)).text_color(muted).child(capitalized(&hint))
+                    })),
             )
-            .when(several, |this| this.child(Icon::new(Lucide::ChevronsUpDown).xsmall().text_color(muted)));
+            // Siempre, también con una sola organización: desde aquí se crea otra.
+            .child(Icon::new(Lucide::ChevronsUpDown).size_3p5().flex_none().opacity(0.6));
         let label = tr(cx, "common:misc.organizations");
-        Button::new("org-switch").ghost().w_full().h(px(44.)).child(face).dropdown_menu(move |menu, _, _| {
+        Button::new("org-switch").ghost().w_full().h(px(48.)).p_2().child(face).dropdown_menu(move |menu, _, _| {
             let mut menu = menu.min_w(px(224.)).check_side(Side::Right).label(label.clone());
             for org in &orgs.orgs {
                 let id = org.id.clone();
@@ -684,7 +710,12 @@ impl Workspace {
         })
     }
 
-    fn render_row(&self, row: TreeRow, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Una fila del árbol, con las medidas de `SpacesNavigator.tsx`: dentro
+    /// del `p-2` del grupo, `px-2 py-1` y `ml-4` por nivel; el chevrón
+    /// (`size-3.5` en un espacio, `size-3` en una carpeta), la marca y el
+    /// nombre a `gap-1` (`gap-1.5` en una lista), y al final lo que la fila
+    /// tiene: el ojo, el documento, lo abierto y el «···», todo pequeño.
+    fn render_row(&self, row: TreeRow, first: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (hover, active_bg, muted, foreground, primary) =
             (theme.sidebar_accent.opacity(0.5), theme.sidebar_accent, theme.muted_foreground, theme.sidebar_foreground, theme.primary);
@@ -692,16 +723,17 @@ impl Workspace {
         let toggle_id = row.id.clone();
         let clicked = row.clone();
         let count = (row.kind == NodeKind::List && row.open_count > 0).then(|| row.open_count.to_string());
+        let (space, list) = (row.kind == NodeKind::Space, row.kind == NodeKind::List);
         // Qué es cada fila, a la vista: el color de su espacio, una carpeta
         // o una lista.
         let mark = match row.kind {
             NodeKind::Space => {
                 div().size(px(10.)).flex_none().rounded_full().bg(crate::theme::space_color(&row.color, row.hue, cx)).into_any_element()
             }
-            NodeKind::Folder => Icon::new(Lucide::Folder).xsmall().text_color(muted).into_any_element(),
-            NodeKind::List => Icon::new(Lucide::ListChecks).xsmall().text_color(muted).into_any_element(),
+            NodeKind::Folder => Icon::new(Lucide::Folder).size_3p5().flex_none().text_color(muted).into_any_element(),
+            NodeKind::List => Icon::new(Lucide::ListChecks).size_3p5().flex_none().text_color(muted).into_any_element(),
         };
-        let (space, list) = (row.kind == NodeKind::Space, row.kind == NodeKind::List);
+        let chevron_size = if space { 14. } else { 12. };
         let menu_label = tr(
             cx,
             match row.kind {
@@ -711,6 +743,12 @@ impl Workspace {
             },
         );
         let (menu_id, docs_label) = (row.id.clone(), tr(cx, "work:tree.openDocs"));
+        // Lo ve un cliente: es su canal. En un espacio va delante del nombre;
+        // en una lista, detrás.
+        let client = row.client.then(|| {
+            div().id(SharedString::from(format!("tree-client-{}", row.id))).test_support().flex_none().child(Icon::new(IconName::Eye).size_3().text_color(primary))
+        });
+        let (client_before, client_after) = if space { (client, None) } else { (None, client) };
 
         div()
             .id(SharedString::from(format!("tree-{}", row.id)))
@@ -719,19 +757,19 @@ impl Workspace {
             .flex()
             .flex_none()
             .items_center()
-            .gap_1p5()
-            // Una lista lleva margen para su fondo redondeado: se le
-            // descuenta, o su icono y su «···» no caen en la columna de los demás.
-            .pl(px(8. + INDENT * row.depth as f32 - if list { 4. } else { 0. }))
-            .when(!list, |this| this.pr_1())
-            .text_sm()
+            .map(|this| if list { this.gap_1p5().rounded(px(4.)) } else { this.gap_1() })
+            .mx_2()
+            .pl(px(8. + INDENT * row.depth as f32))
+            .pr_2()
+            // Cada espacio deja 2 px tras lo suyo (`mb-0.5`).
+            .when(space && !first, |this| this.mt(px(2.)))
+            .leading_sm()
             .text_color(foreground)
             .when(space, |this| this.font_weight(FontWeight::MEDIUM))
             // El espacio al que se acota se dice con su nombre en el color de
             // la marca; la lista, con la fila entera.
             .when(space && row.active, |this| this.text_color(primary))
-            .when(list, |this| this.mx_1().rounded_md())
-            .when(list && row.active, |this| this.bg(active_bg).font_weight(FontWeight::MEDIUM))
+            .when(list && row.active, |this| this.bg(active_bg))
             .hover(move |style| style.bg(hover))
             .cursor_pointer()
             .on_click(move |_, _, cx| Self::click_row(&clicked, cx))
@@ -741,13 +779,13 @@ impl Workspace {
                     div()
                         .id(SharedString::from(format!("tree-toggle-{}", row.id)))
                         .test_support()
-                        .size(px(16.))
+                        .size(px(chevron_size))
                         .flex()
                         .flex_none()
                         .items_center()
                         .justify_center()
                         .when(row.expandable, |this| {
-                            this.child(Icon::new(chevron).xsmall().text_color(muted)).on_click(move |_, _, cx| {
+                            this.child(Icon::new(chevron).size(px(chevron_size)).text_color(muted)).on_click(move |_, _, cx| {
                                 // El chevrón abre y cierra; no es un clic en la fila.
                                 cx.stop_propagation();
                                 Backend::core(cx).tree().toggle(&toggle_id);
@@ -756,27 +794,28 @@ impl Workspace {
                 )
             })
             .child(mark)
+            .children(client_before)
             .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(row.name))
-            // Lo ve un cliente: es su canal.
-            .when(row.client, |this| {
-                this.child(div().id(SharedString::from(format!("tree-client-{}", row.id))).test_support().flex_none().child(Icon::new(IconName::Eye).xsmall().text_color(primary)))
-            })
+            .children(client_after)
             // Tiene documentación escrita.
             .when(row.has_doc, |this| {
-                this.child(div().id(SharedString::from(format!("tree-doc-{}", row.id))).test_support().flex_none().child(Icon::new(Lucide::FileText).xsmall().text_color(muted)))
+                this.child(div().id(SharedString::from(format!("tree-doc-{}", row.id))).test_support().flex_none().child(Icon::new(Lucide::FileText).size_3().text_color(muted)))
             })
-            .children(count.map(|count| div().flex_none().text_xs().font_weight(FontWeight::NORMAL).text_color(muted).child(count)))
+            .children(count.map(|count| div().flex_none().leading_xs().font_weight(FontWeight::NORMAL).text_color(muted).child(count)))
             // El menú de la fila. Pulsar un espacio o una lista acota sus
             // tareas, así que su documentación se abre desde aquí
             // (command-and-control-372). Abrirlo no es un clic en la fila: el
             // desplegable del kit ya se queda con él (medido en
             // `popover.rs`); si deja de hacerlo, lo dice la prueba del menú.
+            // El «···» es sólo su icono (`size-3.5`), sin caja de botón.
             .child(
                 div().id(SharedString::from(format!("tree-menu-{}", row.id))).test_support().flex_none().child(
                     Button::new(SharedString::from(format!("tree-more-{}", row.id)))
                         .ghost()
                         .xsmall()
-                        .icon(Icon::new(IconName::Ellipsis).text_color(muted))
+                        .size(px(14.))
+                        .p_0()
+                        .child(Icon::new(IconName::Ellipsis).size_3p5().text_color(muted))
                         .tooltip(menu_label)
                         .dropdown_menu(move |menu, _, _| {
                             let id = menu_id.clone();
@@ -818,7 +857,7 @@ impl Workspace {
             .text_color(foreground)
             .border_r_1()
             .border_color(border)
-            .child(div().p_2().border_b_1().border_color(border).child(self.render_org(cx)))
+            .child(div().p_2().child(self.render_org(cx)))
             .child(
                 div()
                     .h(px(32.))
@@ -827,7 +866,7 @@ impl Workspace {
                     .items_center()
                     .pl_3()
                     .pr_1()
-                    .text_xs()
+                    .leading_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(muted)
                     .child(div().flex_1().child(tr(cx, "nav:module.work").to_uppercase()))
@@ -844,32 +883,36 @@ impl Workspace {
                 div()
                     .id("tree-everything")
                     .test_support()
-                    .h(px(ROW_HEIGHT))
+                    // `PanelRow.tsx`: activa, `bg-accent font-medium`; si
+                    // no, apagada hasta que pasa el ratón.
+                    .h(px(PANEL_ROW_HEIGHT))
                     .flex()
                     .flex_none()
                     .items_center()
                     .gap_2()
-                    .px_2()
+                    .px_1()
                     .mx_1()
-                    .rounded_md()
-                    .text_sm()
+                    .rounded(px(8.))
+                    .leading_sm()
                     .when(on_my_work, |this| this.bg(hover).font_weight(FontWeight::MEDIUM))
-                    .hover(move |style| style.bg(hover))
+                    .when(!on_my_work, |this| this.text_color(muted).hover(move |style| style.bg(hover.opacity(0.5)).text_color(foreground)))
                     .cursor_pointer()
                     .on_click(|_, _, cx| Backend::core(cx).show_all_work())
-                    .child(Icon::new(IconName::Inbox).small())
+                    .child(Icon::new(IconName::Inbox).size_4())
                     .child(tr(cx, "nav:item.myWork")),
             )
             .child(Self::pending_panel_row("panel-overview", Lucide::LayoutDashboard, "nav:item.overview", cx))
             .child(Self::pending_panel_row("panel-notes", Lucide::NotebookPen, "nav:item.notes", cx))
             // Filtra lo que ya está en el panel; no es el buscador.
             .child(
-                div().px_2().py_1().child(
+                div().mt_1().px_2().py_1().child(
                     Input::new(&self.tree_filter)
                         .id("tree-filter")
                         .small()
+                        // `PanelFilter.tsx`: `h-7`, y la lupa a `size-3.5`.
+                        .h_7()
                         .cleanable(true)
-                        .prefix(Icon::new(IconName::Search).xsmall().text_color(muted)),
+                        .prefix(Icon::new(IconName::Search).size_3p5().text_color(muted)),
                 ),
             )
             .child(
@@ -879,9 +922,9 @@ impl Workspace {
                     .flex_none()
                     .items_center()
                     .pl_4()
-                    .pr_1()
+                    .pr_4()
                     .mt_2()
-                    .text_xs()
+                    .leading_xs()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(foreground.opacity(0.7))
                     .child(div().flex_1().child(tr(cx, "nav:panel.spaces")))
@@ -891,7 +934,7 @@ impl Workspace {
                     .child(Self::pending_tool("spaces-new", Lucide::Plus, "work:tree.newSpace", cx)),
             )
             .when(nothing, |this| {
-                this.child(div().id("tree-no-matches").test_support().px_3().py_3().text_xs().text_color(muted).child(tr(cx, "nav:panel.noMatches")))
+                this.child(div().id("tree-no-matches").test_support().px_5().py_3().leading_xs().text_color(muted).child(tr(cx, "nav:panel.noMatches")))
             })
             .child(
                 div()
@@ -900,7 +943,7 @@ impl Workspace {
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .children(rows.into_iter().map(|row| self.render_row(row, cx))),
+                    .children(rows.into_iter().enumerate().map(|(index, row)| self.render_row(row, index == 0, cx))),
             )
     }
 }
