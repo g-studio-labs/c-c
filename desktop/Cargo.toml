@@ -20,6 +20,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 # Para oír a GPUI: qué tarjeta elige, con qué pinta. Sin un `log` instalado en
 # el proceso esas líneas se tiran.
 log = "0.4"
+# Los idiomas que el usuario eligió en macOS y en Windows, donde abrir la app
+# desde el Finder o el Explorador no deja ninguna variable `LANG` que leer.
+# Versión exacta, MIT o Apache-2.0, sin dependencias en ninguno de los tres
+# sistemas (habla con CoreFoundation y con Win32 por su cuenta). Ya estaba en
+# el `Cargo.lock`: la trae el motor de texto con el que GPUI pinta en Linux.
+sys-locale = "=0.3.2"
 # Sólo para darle un día al selector de fecha de GPUI Kit, que lo pide con
 # este tipo. Qué día es lo dice el core.
 chrono = { version = "0.4", default-features = false }

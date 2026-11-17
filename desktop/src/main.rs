@@ -91,7 +91,7 @@ fn main() {
     };
     let mut config = Config::new(platform::server_url(var));
     config.client = Some("desktop".to_string());
-    let system_language = platform::system_language(var);
+    let system_language = platform::system_language(platform::Os::current(), var, platform::preferred_languages);
 
     gpui_kit::application().with_assets(assets::Assets).run(move |cx| {
         gpui_kit::init(cx);

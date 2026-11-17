@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use cac_core::{
-    check_new_password, check_sign_in, error_phrase, folds_panel, gate, is_dark, shortcut_text, KeysHeld, pick_locale, text, text_count, text_with, ApiError, Config, Core,
+    check_new_password, check_sign_in, error_phrase, first_spoken, folds_panel, gate, is_dark, shortcut_text, KeysHeld, pick_locale, text, text_count, text_with, ApiError, Config, Core,
     FormCheck, Gate, Locale, ThemePreference, WorkLayout, NoListener, Session, Storage,
 };
 use wiremock::matchers::{body_json, header, method, path};
@@ -398,6 +398,24 @@ fn the_panel_folds_with_the_systems_shortcut_and_says_so() {
     assert_eq!(shortcut_text(&hint, true), "Plegar el panel (⌘B)");
     assert_eq!(shortcut_text(&hint, false), "Plegar el panel (Ctrl+B)");
     assert_eq!(shortcut_text(&text(Locale::En, "nav:rail.collapsePanel"), false), "Collapse the panel (Ctrl+B)");
+}
+
+/// De la lista de idiomas del sistema se toma el primero que cac habla.
+///
+/// Roturas que atrapa: quedarse con el primero a secas (quien prefiere
+/// francés y después castellano vería cac en inglés); inventar un idioma
+/// cuando el sistema no dice ninguno; callar lo que dijo el sistema cuando
+/// cac no habla ninguno de los suyos.
+#[test]
+fn of_the_systems_languages_the_first_one_cac_speaks_is_taken() {
+    let tags = |list: &[&str]| list.iter().map(|tag| tag.to_string()).collect::<Vec<_>>();
+    assert_eq!(first_spoken(&tags(&["fr-FR", "es-MX", "en-US"])).as_deref(), Some("es-MX"));
+    assert_eq!(first_spoken(&tags(&["en-GB", "es-ES"])).as_deref(), Some("en-GB"));
+    assert_eq!(first_spoken(&tags(&["fr-FR", "de-DE"])).as_deref(), Some("fr-FR"));
+    assert_eq!(first_spoken(&[]), None);
+    // Y con eso el core elige: castellano en el primer caso, inglés sin nada.
+    assert_eq!(pick_locale(None, first_spoken(&tags(&["fr-FR", "es-MX"])).as_deref()), Locale::Es);
+    assert_eq!(pick_locale(None, first_spoken(&tags(&["fr-FR"])).as_deref()), Locale::En);
 }
 
 /// El tema es oscuro hasta que alguien elige otro, y lo elegido se recuerda.

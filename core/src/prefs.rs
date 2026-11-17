@@ -59,6 +59,18 @@ pub fn shortcut_text(text: &str, mac: bool) -> String {
     }
 }
 
+/// De los idiomas que el sistema dice preferir, en su orden, cuál se toma:
+/// el primero en el que cac está escrito.
+///
+/// macOS y Windows no dan un idioma sino una lista («francés, y si no,
+/// castellano»). Quedarse con el primero a secas dejaría en inglés —el de
+/// reserva— a quien tiene el castellano de segundo y lo entiende mejor. Si
+/// cac no habla ninguno se devuelve el primero, que es lo que el sistema
+/// dijo: `pick_locale` acaba en inglés igual.
+pub fn first_spoken(preferred: &[String]) -> Option<String> {
+    preferred.iter().find(|tag| Locale::from_tag(tag).is_some()).or_else(|| preferred.first()).cloned()
+}
+
 /// Cómo se mira «Mi trabajo»: las tres leen las mismas tareas ya traídas,
 /// ninguna vuelve a pedirlas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

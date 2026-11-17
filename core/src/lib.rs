@@ -51,7 +51,7 @@ pub use mywork::{
 pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClick};
 pub use hue::{hue_index, HUES};
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
-pub use prefs::{folds_panel, is_dark, shortcut_text, KeysHeld, ThemePreference, WorkLayout};
+pub use prefs::{first_spoken, folds_panel, is_dark, shortcut_text, KeysHeld, ThemePreference, WorkLayout};
 pub use session::Session;
 pub use tree::{doc_key, find_folder, folder_list_ids, node_name, DocMark, FolderTree, ListSummary, SpacePerson, SpaceTree, Tree, TreeState};
 pub use tree_rows::{filter_tree, tree_rows, tree_rows_matching, TreeRow};
