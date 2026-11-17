@@ -310,8 +310,14 @@ func TestDraggingAClientsReportTellsThem(t *testing.T) {
 	}
 }
 
-// Moving an internal card leaves no such trace: there is nobody to tell.
-func TestDraggingAnInternalCardTellsNobody(t *testing.T) {
+// Moving an internal card leaves its trace too, and nobody outside reads it.
+//
+// Hasta el 17-nov-2026 esta prueba decía lo contrario («an internal card needs
+// no status note»). Lo cambió jose ese día: «creo que es lo correcto para que
+// quede a modo de logs» (command-and-control-383). Lo que sigue en pie de la
+// regla vieja es la mitad que importaba: de una tarea interna no sale nada.
+// El detalle de la línea (quién, qué texto) está en status_trace_test.go.
+func TestDraggingAnInternalCardLeavesALineOnlyTheTeamReads(t *testing.T) {
 	db, cleanup := visibilityDB(t)
 	defer cleanup()
 	repo := repository.NewTaskRepository(db)
@@ -335,8 +341,15 @@ func TestDraggingAnInternalCardTellsNobody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(notes) != 0 {
-		t.Errorf("an internal card needs no status note; got %d", len(notes))
+	if len(notes) != 1 || notes[0].Kind != domain.CommentKindSystem || notes[0].Visibility != string(domain.VisibilityInternal) {
+		t.Fatalf("an internal card leaves one internal system line; got %+v", notes)
+	}
+	outside, err := reports.ListComments(card.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outside) != 0 {
+		t.Errorf("nothing about an internal card leaves cac; got %+v", outside)
 	}
 }
 

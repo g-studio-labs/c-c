@@ -1282,7 +1282,13 @@ func (h *taskHandler) commentScope(w http.ResponseWriter, r *http.Request) (*dom
 	// A nil author is not a match for anybody. Editing someone else's words isn't
 	// a permission an org role should grant, and an unattributed comment has no
 	// owner to be — so it can only be touched by a superadmin.
-	mine := c.AuthorUserID != nil && *c.AuthorUserID == user.UserID
+	//
+	// Y una línea de sistema no es de nadie aunque lleve autor: desde el
+	// 17-nov-2026 «status: x → y» guarda a quien movió la tarea
+	// (command-and-control-383), y eso es el registro de lo que hizo, no un
+	// texto suyo que pueda reescribir o retirar. Lo que podía un superadmin
+	// antes de eso no cambia.
+	mine := c.Kind != domain.CommentKindSystem && c.AuthorUserID != nil && *c.AuthorUserID == user.UserID
 	if !mine && !user.Superadmin {
 		SendErrorResponse(w, http.StatusForbidden, "Forbidden", "not-the-author")
 		return nil, false

@@ -1160,11 +1160,18 @@ func (r *TaskRepository) Comments(taskID string) ([]domain.TaskCommentResponse, 
 		if row.AuthorUserID != nil {
 			userID = *row.AuthorUserID
 		}
+		// En una línea de sistema, quien hizo lo que cuenta (cambió el estado):
+		// sólo el nombre, y el de llamarle, no su usuario. Sin id a propósito:
+		// la línea no es suya para editarla, y `tagAuthor` ya lo quitó.
+		authorName := row.AuthorName
+		if row.Kind == domain.CommentKindSystem {
+			authorName = row.ActorName
+		}
 		out[i] = domain.TaskCommentResponse{
 			ID:           row.ID,
 			Author:       row.Author,
 			AuthorUserID: userID,
-			AuthorName:   row.AuthorName,
+			AuthorName:   authorName,
 			Visibility:   domain.ItemVisibility(row.Visibility),
 			Kind:         row.Kind,
 			Source:       row.Source,

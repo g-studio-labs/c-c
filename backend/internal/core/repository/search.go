@@ -21,6 +21,20 @@ func NewSearchRepository(db *gorm.DB) *SearchRepository { return &SearchReposito
 
 func like(q string) string { return "%" + strings.ToLower(strings.TrimSpace(q)) + "%" }
 
+// notServerChatter deja fuera de la búsqueda lo que el servidor anota por su
+// cuenta en un hilo: «status: pending → in_progress», «assigned to ana»,
+// «attached 2 image(s)». Va sobre `item_comments c`.
+//
+// Hace falta desde el 17-nov-2026, cuando un cambio de estado empezó a dejar
+// su línea también en las tareas internas (command-and-control-383): sin esto,
+// buscar «pending» o «closed» devuelve toda tarea que alguna vez pasó por ahí,
+// porque el nombre del estado está escrito en su hilo. Una línea de registro
+// dice qué le pasó a la tarea, no de qué trata.
+//
+// Las líneas que vienen de fuera (`source_key`: un commit, una PR) **sí** se
+// buscan: su texto es el mensaje del commit, y eso es contenido.
+const notServerChatter = "NOT (c.kind = 'system' AND COALESCE(c.source_key, '') = '')"
+
 // Tasks in one organization the caller belongs to. Client-facing items are
 // included: this is cac's own console, and a report is work like any other.
 // Tasks de la organización, con texto completo: título, descripción y
@@ -62,7 +76,7 @@ func (r *SearchRepository) TasksTS(query, tsq, orgID string, limit int) ([]domai
 			UNION ALL
 			SELECT t.id, ts_rank_cd(c.search, q.q) FROM item_comments c JOIN items t ON t.id = c.item_id, q
 			WHERE t.org_id = ? AND t.deleted_at IS NULL AND t.archived_at IS NULL
-			  AND c.deleted_at IS NULL AND c.search @@ q.q
+			  AND c.deleted_at IS NULL AND `+notServerChatter+` AND c.search @@ q.q
 		),
 		best AS (
 			SELECT h.id, max(h.score) AS score,
@@ -182,7 +196,7 @@ func (r *SearchRepository) tasksLike(query, orgID string, limit int) ([]domain.S
 		Where("t.org_id = ? AND t.deleted_at IS NULL AND t.archived_at IS NULL", orgID).
 		Where(`(LOWER(t.title) LIKE ? OR LOWER(t.description) LIKE ? OR EXISTS (
 			SELECT 1 FROM item_comments c
-			WHERE c.item_id = t.id AND c.deleted_at IS NULL AND LOWER(c.body) LIKE ?))`, q, q, q).
+			WHERE c.item_id = t.id AND c.deleted_at IS NULL AND `+notServerChatter+` AND LOWER(c.body) LIKE ?))`, q, q, q).
 		// Un solo `ORDER BY`, a propósito. Con dos llamadas a `Order` —la
 		// expresión y luego `t.updated_at DESC`— GORM **tira la primera sin
 		// decir nada**: el SQL salía sólo con la fecha, y el título nunca iba

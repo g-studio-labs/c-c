@@ -629,7 +629,14 @@ func (s *ReportService) Update(ctx context.Context, actor, actorUserID, reportID
 			now := time.Now()
 			report.ResolvedAt = &now
 		}
-		if err := s.systemComment(reportID, fmt.Sprintf("status: %s → %s", old, *req.Status)); err != nil {
+		// La misma línea que deja mover la tarjeta en el tablero (ver
+		// `newStatusTrace`). Quién lo hizo sólo cuenta si fue una persona: un
+		// tenant entra con la llave de su proyecto y no es nadie de cac.
+		person := ""
+		if actorIsPerson(actor) {
+			person = actorUserID
+		}
+		if err := s.repo.CreateComment(newStatusTrace(report, person, domain.ViaFrom(ctx), old, *req.Status)); err != nil {
 			return nil, err
 		}
 	}

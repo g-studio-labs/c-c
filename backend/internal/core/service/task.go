@@ -868,15 +868,19 @@ func (s *TaskService) MoveTask(ctx context.Context, id, userID string, req domai
 		return err
 	}
 
+	// Todo cambio de estado deja su línea en el hilo; reordenar dentro de la
+	// misma columna no es un cambio y no deja nada. Cuál línea, y si lleva a
+	// quien lo hizo, lo decide `newStatusTrace`.
+	if task.Status != next {
+		if err := s.reports.CreateComment(newStatusTrace(task, userID, domain.ViaFrom(ctx), task.Status, next)); err != nil {
+			return err
+		}
+	}
 	// Dragging a client's report across a column is the same act as triaging it
 	// from the reports page, so it has to leave the same trace: the note in the
 	// thread they can read, and the event their app is waiting for. A board that
 	// changed the state quietly would be a board that lies to the customer.
 	if task.IsVisibleToChannel() && task.Status != next {
-		if err := s.reports.CreateComment(newSystemComment(id,
-			fmt.Sprintf("status: %s → %s", task.Status, next))); err != nil {
-			return err
-		}
 		emitItemEvent(s.hub, s.reports, "report:status", id, "team", map[string]any{
 			"reportId": id, "status": string(next), "actorId": userID,
 		})

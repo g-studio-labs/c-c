@@ -378,6 +378,7 @@ func listItemComments(db *gorm.DB, itemID string, includeInternal, includeWithdr
 		       r.reporter_name, r.reporter_id, c.deleted_at, c.visibility,
 		       split_part(COALESCE(c.source_key, ''), ':', 1) AS source,
 		       COALESCE(c.via, '') AS via,
+		       COALESCE((SELECT `+nombreVisible+` FROM users WHERE id = c.author_user_id), '') AS actor_name,
 		       c.body, c.created_at, c.updated_at
 		FROM item_comments c
 		JOIN items r ON r.id = c.item_id
@@ -405,7 +406,18 @@ func listItemComments(db *gorm.DB, itemID string, includeInternal, includeWithdr
 func tagAuthor(c *domain.ReportCommentResponse) {
 	switch {
 	case c.Kind == domain.CommentKindSystem:
-		return // the comment's own kind already says it; no author to name
+		// The comment's own kind already says it; no author to name.
+		//
+		// Y se **borra** el que traiga la fila. Desde el 17-nov-2026 una línea
+		// de sistema puede llevar a quien cambió el estado
+		// (command-and-control-383), y esta forma es la que se manda al tenant
+		// y al reporter: sus campos planos (`authorUserId`, `authorName`) le
+		// dirían qué compañero fue. Quien sí puede saberlo —el tablero del
+		// equipo— lo lee de `ActorName`, que no viaja en este JSON. Además, con
+		// el id fuera, la app de siempre no le ofrece a nadie editar o borrar
+		// una línea que no es suya sino del servidor.
+		c.AuthorUserID, c.AuthorName = nil, ""
+		return
 	case c.AuthorUserID != nil && *c.AuthorUserID != "":
 		c.Author = &domain.CommentAuthor{
 			Kind: domain.AuthorKindUser, Name: c.AuthorName, UserID: *c.AuthorUserID,
@@ -479,6 +491,12 @@ func (r *ReportRepository) SpaceOfList(listID string) (string, error) {
 //
 // Los comentarios retirados no cuentan. Es lo que enseña el hilo, y avisar a
 // alguien por algo que borró sería tenerlo en cuenta justo cuando se salió.
+//
+// Las líneas de sistema tampoco, aunque lleven autor: desde el 17-nov-2026 un
+// cambio de estado en una tarea interna deja escrito quién lo hizo
+// (command-and-control-383), y mover una tarjeta no es haber hablado en su
+// hilo. Sin el filtro, quien arrastra una tarea ajena empezaría a recibir cada
+// comentario que se escriba en ella.
 func (r *ReportRepository) Involved(itemID string) ([]string, error) {
 	var ids []string
 	err := r.db.Raw(`
@@ -488,6 +506,7 @@ func (r *ReportRepository) Involved(itemID string) ([]string, error) {
 		UNION
 		SELECT author_user_id FROM item_comments
 		 WHERE item_id = ? AND author_user_id IS NOT NULL AND deleted_at IS NULL
+		   AND kind = 'user'
 	`, itemID, itemID, itemID).Scan(&ids).Error
 	return ids, err
 }

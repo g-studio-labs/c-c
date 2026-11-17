@@ -627,7 +627,13 @@ type ReportCommentResponse struct {
 	// tablero.
 	Source string `json:"-"`
 	// Via: por dónde entró (ItemComment.Via). Sólo para el tablero del equipo.
-	Via                string `json:"-"`
+	Via string `json:"-"`
+	// ActorName: en una línea de sistema, cómo se llama quien hizo lo que la
+	// línea cuenta (hoy, un cambio de estado en una tarea interna). Scan-only,
+	// como las de arriba y por la misma razón: sólo lo lee el tablero del
+	// equipo. Esta forma es también la que reciben el tenant y el reporter, y a
+	// ellos no se les dice qué compañero movió nada. Ver `tagAuthor`.
+	ActorName          string `json:"-"`
 	AuthorProjectID    string `json:"-"`
 	AuthorProjectName  string `json:"-"`
 	AuthorExternalID   string `json:"-"`
