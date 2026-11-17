@@ -8,6 +8,8 @@
 //! Lo que es de esta pantalla y de nadie más: si se mira el mes o la semana,
 //! si el carril está abierto y qué día tiene su detalle a la vista.
 
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::time::Duration;
 
 use cac_core::{
@@ -81,6 +83,13 @@ pub(crate) struct CalendarState {
     peek_wait: Option<Task<()>>,
     /// El foco del detalle: sin él, Esc no llega a nadie.
     focus: FocusHandle,
+    /// Dónde quedó pintado el día que tiene el detalle abierto. Se sabe al
+    /// pintar, no antes.
+    day_place: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Hacia dónde se abre el detalle de ese día, medido: `true` es hacia
+    /// arriba. Vacío hasta que se pinta una vez, que es cuando se sabe cuánto
+    /// mide y cuánto sitio tiene.
+    day_opens_up: Rc<RefCell<Option<(String, bool)>>>,
 }
 
 impl CalendarState {
@@ -102,7 +111,19 @@ impl CalendarState {
     }
 
     pub(crate) fn new(cx: &mut App) -> Self {
-        Self { cursor: None, lane_open: [None, None], lifted: None, error: None, day_open: None, day_peek: None, over_detail: false, peek_wait: None, focus: cx.focus_handle() }
+        Self {
+            cursor: None,
+            lane_open: [None, None],
+            lifted: None,
+            error: None,
+            day_open: None,
+            day_peek: None,
+            over_detail: false,
+            peek_wait: None,
+            focus: cx.focus_handle(),
+            day_place: Rc::default(),
+            day_opens_up: Rc::default(),
+        }
     }
 }
 
@@ -691,7 +712,15 @@ impl MyWorkView {
 
     /// El detalle de un día (`DayPopover`), anclado a su celda: hacia la
     /// derecha de lunes a jueves y hacia la izquierda de viernes a domingo;
-    /// en las dos últimas filas, hacia arriba.
+    /// y hacia abajo, salvo que ahí no quepa en lo que se ve y hacia arriba
+    /// se esconda menos de la ventana (lo decide el core).
+    ///
+    /// En la app de siempre va por filas: hacia arriba en las dos últimas
+    /// del mes. Decidido con jose (17-nov-2026): en una ventana baja el de
+    /// un día de en medio se salía por abajo y no se alcanzaba. Cuánto mide
+    /// y cuánto sitio tiene sólo se sabe al pintarlo, así que la primera
+    /// pintada de cada día lo mide sin enseñarlo (transparente, donde iría
+    /// por filas) y la siguiente lo pone en su sitio: un fotograma.
     ///
     /// Se asoma con el ratón un rato encima de su día y se va al salir; un
     /// clic lo fija (y entonces lleva la ×). Fijado se cierra con la ×, con
@@ -706,6 +735,37 @@ impl MyWorkView {
         let iso = day.day.clone();
         let pinned = self.calendar.day_open.as_deref() == Some(day.day.as_str());
         let pin = day.day.clone();
+        let measured = self.calendar.day_opens_up.borrow().as_ref().filter(|(of, _)| *of == day.day).map(|(_, up)| *up);
+        let up = measured.unwrap_or(row + 2 >= rows);
+        // Mide el detalle ya pintado y decide con el sitio que tiene. Si la
+        // respuesta cambia (la primera vez, o al deslizar el mes o cambiar
+        // de tamaño la ventana), se vuelve a pintar.
+        let measure = {
+            let (place, decided, of, view) = (self.calendar.day_place.clone(), self.calendar.day_opens_up.clone(), day.day.clone(), cx.entity_id());
+            canvas(
+                move |detail: Bounds<Pixels>, window, cx| {
+                    let Some(cell) = place.get() else { return };
+                    let up = cac_core::day_detail_opens_up(
+                        f32::from(cell.top()) + POPOVER_OVERHANG,
+                        f32::from(cell.bottom()) - POPOVER_OVERHANG,
+                        f32::from(detail.size.height),
+                        // Lo que se ve es la ventana entera: el detalle
+                        // se pinta encima de todo, también de la cabecera
+                        // y los filtros, y el hueco del mes no lo recorta.
+                        0.,
+                        f32::from(window.viewport_size().height),
+                    );
+                    let now = Some((of, up));
+                    if *decided.borrow() != now {
+                        decided.replace(now);
+                        cx.defer(move |cx| cx.notify(view));
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        };
 
         let tallies = (!day.tones.is_empty()).then(|| {
             div().flex().flex_wrap().gap(px(6.)).children(day.tones.iter().map(|segment| {
@@ -734,8 +794,10 @@ impl MyWorkView {
             .absolute()
             .when(column >= 4, |this| this.right(px(POPOVER_OVERHANG)))
             .when(column < 4, |this| this.left(px(POPOVER_OVERHANG)))
-            .when(row + 2 >= rows, |this| this.bottom(px(POPOVER_OVERHANG)))
-            .when(row + 2 < rows, |this| this.top(px(POPOVER_OVERHANG)))
+            .when(up, |this| this.bottom(px(POPOVER_OVERHANG)))
+            .when(!up, |this| this.top(px(POPOVER_OVERHANG)))
+            .when(measured.is_none(), |this| this.opacity(0.))
+            .child(measure)
             .w(px(POPOVER_WIDTH))
             .flex()
             .flex_col()
@@ -899,7 +961,15 @@ impl MyWorkView {
                         )
                     }),
             )
-            .when(open, |this| this.child(self.render_day_popover(day, column, row, rows, paint, cx)))
+            .when(open, |this| {
+                // Dónde está este día: lo que el detalle necesita, con el
+                // alto de la ventana, para saber hacia dónde abrirse.
+                // Con sus cuatro lados puestos: sin ellos una pieza absoluta
+                // se queda donde le tocaría en el flujo, debajo del número.
+                let place = self.calendar.day_place.clone();
+                this.child(canvas(move |cell: Bounds<Pixels>, _, _| place.set(Some(cell)), |_, _, _, _| {}).absolute().inset_0())
+                    .child(self.render_day_popover(day, column, row, rows, paint, cx))
+            })
             .test_support()
     }
 
@@ -1554,6 +1624,126 @@ mod tests {
         // llevan además su relleno y su borde, que no se reparten).
         let share = (last.1 - last.0) / (first.1 - first.0);
         assert!((0.6..0.7).contains(&share), "el domingo mide {share} de lo que mide el lunes");
+        stop(cx);
+    }
+
+    /// Abre el detalle de ese día y dice hacia dónde quedó: `true`, hacia
+    /// arriba (acaba ocho píxeles por debajo de su día); `false`, hacia
+    /// abajo (empieza ocho por encima).
+    fn detail_opens_up(window: AnyWindowHandle, day: NaiveDate, cx: &mut TestAppContext) -> bool {
+        click(window, &Days2::cell(day), cx);
+        // La primera pintada lo mide; la siguiente lo pone en su sitio.
+        for _ in 0..3 {
+            on_screen(window, "cal-day-popover", cx);
+            cx.run_until_parked();
+        }
+        let (cell, detail) = (edges(window, &Days2::cell(day), cx), edges(window, "cal-day-popover", cx));
+        let (down, up) = ((detail.2 - (cell.2 - 8.)).abs() < 1., (detail.3 - (cell.3 + 8.)).abs() < 1.);
+        assert!(down != up, "el detalle va de {} a {} y su día de {} a {}: no está anclado a él", detail.2, detail.3, cell.2, cell.3);
+        up
+    }
+
+    /// Cuatro tareas que vencen cada uno de esos días de este mes: con ellas
+    /// el detalle del día mide unos 315 px de alto.
+    fn four_due_on(numbers: &[u32]) -> Vec<Value> {
+        due_on(numbers, 4)
+    }
+
+    /// Tantas tareas que vencen cada uno de esos días de este mes.
+    fn due_on(numbers: &[u32], each: usize) -> Vec<Value> {
+        let today = chrono::Local::now().date_naive();
+        let mut tasks = Vec::new();
+        for number in numbers {
+            let day = today.with_day(*number).unwrap();
+            for n in 0..each {
+                tasks.push(contract_task(&format!("d{number}-{n}"), "a", |task| {
+                    task["title"] = json!(format!("Vence el {number}, {n}"));
+                    task["dueAt"] = json!(format!("{day}T00:00:00Z"));
+                }));
+            }
+        }
+        tasks
+    }
+
+    /// En una ventana baja, el detalle de un día de en medio del mes se abre
+    /// hacia arriba, que es donde cabe.
+    ///
+    /// Rotura que atrapa: decidirlo por la fila del mes (hacia arriba sólo
+    /// en las dos últimas), que en una ventana baja deja el detalle de un
+    /// día de en medio saliéndose por abajo, donde no se alcanza.
+    #[gpui_kit::test]
+    fn in_a_short_window_the_detail_of_a_middle_day_opens_upward(cx: &mut TestAppContext) {
+        let (_server, window, days) = show_calendar_sized(four_due_on(&[8]), 1700., 470., cx);
+        // El día 8 cae siempre en la segunda fila del mes.
+        let day = days.today.with_day(8).unwrap();
+        let (cell, body) = (edges(window, &Days2::cell(day), cx), edges(window, "cal-body", cx));
+        assert!(cell.2 > body.2 && cell.3 < body.3, "la ventana de la prueba no deja ver entero el día 8: va de {} a {} y lo que se ve de {} a {}", cell.2, cell.3, body.2, body.3);
+
+        assert!(detail_opens_up(window, day, cx), "se abre hacia abajo sin caber");
+        let detail = edges(window, "cal-day-popover", cx);
+        assert!(detail.2 >= 0. && detail.3 <= 470., "el detalle va de {} a {} y la ventana mide 470 de alto", detail.2, detail.3);
+        stop(cx);
+    }
+
+    /// Fila a fila del mes, el detalle de un día se abre hacia donde el core
+    /// dice con lo que de verdad miden su día, él y la ventana.
+    ///
+    /// Roturas que atrapa: medir mal dónde está el día (noventa píxeles más
+    /// abajo, que es donde cae una pieza de medir sin sus cuatro lados
+    /// puestos: pasó al escribirlo), o cuánto mide el detalle, y abrirlo
+    /// hacia arriba cuando aún cabía abajo.
+    #[gpui_kit::test]
+    fn the_detail_of_each_row_opens_where_its_real_measures_say(cx: &mut TestAppContext) {
+        const HEIGHT: f32 = 680.;
+        let (_server, window, days) = show_calendar_sized(four_due_on(&[1, 8, 15, 22]), 1700., HEIGHT, cx);
+        let mut seen = Vec::new();
+        // Los días 1, 8, 15 y 22 caen siempre en las cuatro primeras filas.
+        for number in [1, 8, 15, 22] {
+            let day = days.today.with_day(number).unwrap();
+            let up = detail_opens_up(window, day, cx);
+            let (cell, detail) = (edges(window, &Days2::cell(day), cx), edges(window, "cal-day-popover", cx));
+            let expected = cac_core::day_detail_opens_up(cell.2 - 8., cell.3 + 8., detail.3 - detail.2, 0., HEIGHT);
+            assert_eq!(up, expected, "el día {number} va de {} a {} y su detalle mide {}", cell.2, cell.3, detail.3 - detail.2);
+            seen.push((number, up, cell.2));
+            click(window, "cal-day-close", cx);
+        }
+        assert!(seen.iter().any(|(_, up, _)| *up) && seen.iter().any(|(_, up, _)| !*up), "la ventana de la prueba no pone los dos casos: {seen:?}");
+        stop(cx);
+    }
+
+    /// Un detalle que no cabe ni hacia abajo ni hacia arriba se abre hacia
+    /// donde menos se le esconde, contando desde donde de verdad acabaría.
+    ///
+    /// Rotura que atrapa: medir «hacia arriba» desde el borde de arriba del
+    /// día y no desde el de abajo, que es donde acaba el detalle: se le
+    /// calculan cien píxeles escondidos de más y se queda hacia abajo,
+    /// tapando más de lo necesario.
+    #[gpui_kit::test]
+    fn a_detail_that_fits_nowhere_opens_where_less_of_it_is_hidden(cx: &mut TestAppContext) {
+        const HEIGHT: f32 = 540.;
+        let (_server, window, days) = show_calendar_sized(due_on(&[1], 6), 1700., HEIGHT, cx);
+        let day = days.today.with_day(1).unwrap();
+
+        let up = detail_opens_up(window, day, cx);
+        let (cell, detail) = (edges(window, &Days2::cell(day), cx), edges(window, "cal-day-popover", cx));
+        let height = detail.3 - detail.2;
+        let (down_hidden, up_hidden) = (cell.2 - 8. + height - HEIGHT, height - (cell.3 + 8.));
+        assert!(up_hidden > 0. && down_hidden > up_hidden && down_hidden < up_hidden + 90., "la ventana de la prueba ya no pone el caso: hacia abajo se esconden {down_hidden} y hacia arriba {up_hidden}");
+        assert!(up, "se abre hacia abajo, donde se le esconde más");
+        stop(cx);
+    }
+
+    /// En una ventana alta, el detalle de un día de la última fila se abre
+    /// hacia abajo: cabe.
+    ///
+    /// Rotura que atrapa: abrirlo hacia arriba sin necesidad (por la fila, o
+    /// por medir mal el sitio), tapando las semanas de encima.
+    #[gpui_kit::test]
+    fn in_a_tall_window_the_detail_of_a_day_of_the_last_row_opens_downward(cx: &mut TestAppContext) {
+        let (_server, window, days) = show_calendar_sized(vec![], 1700., 1400., cx);
+        let last = days.today.with_day(1).unwrap() + Months::new(1) - Days::new(1);
+
+        assert!(!detail_opens_up(window, last, cx), "se abre hacia arriba cabiendo hacia abajo");
         stop(cx);
     }
 

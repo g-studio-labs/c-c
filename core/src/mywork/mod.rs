@@ -25,7 +25,7 @@ pub use board::{
     can_drop, work_board, BoardAssignee, BoardCard, BoardColumn, BoardStatus, DropVerdict, BAD_TRANSITION, COLUMN_MISSING,
 };
 pub use calendar::{
-    calendar_chips, calendar_tone, day_title, lane_open_by_default, month_start, month_title, month_view, tone_is_high, unscheduled,
+    calendar_chips, calendar_tone, day_detail_opens_up, day_title, lane_open_by_default, month_start, month_title, month_view, tone_is_high, unscheduled,
     week_start, week_title, week_view, weekday_name, CalendarChip, CalendarCursor, CalendarDay, CalendarView, CalendarWeek, MonthView,
     ToneCount, WeekSummary, WeekView, CALENDAR_TONES,
 };

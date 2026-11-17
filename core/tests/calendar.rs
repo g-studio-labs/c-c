@@ -759,3 +759,31 @@ async fn the_open_task_learns_its_new_day() {
     rig.core.my_work().set_due_day("a", Some("2026-10-02")).await.expect("se guardó");
     assert_eq!(bodies(&rig.server, "GET", "/api/v1/tasks/a").await.len(), 2);
 }
+
+/// El detalle de un día del mes se abre hacia donde menos se esconde: hacia
+/// abajo mientras quepa, hacia arriba cuando no cabe y arriba hay más sitio.
+///
+/// Roturas que atrapa: un detalle que se sale por abajo de una ventana baja
+/// teniendo sitio arriba (lo que había: se decidía por la fila del mes, no
+/// por el sitio); uno que se abre hacia arriba y se sale por arriba, o cuyo
+/// día asoma a medias por abajo y se sale igual; que salte hacia arriba
+/// cabiendo abajo.
+#[test]
+fn the_day_detail_opens_where_less_of_it_is_hidden() {
+    use cac_core::day_detail_opens_up as up;
+    // Lo que se ve va de 100 a 500, y el detalle mide 200. El día va de
+    // `top` a `top + 96`; el detalle se le sale 8 por arriba o por abajo.
+    let opens_up = |top: f32, height: f32| up(top - 8., top + 96. + 8., height, 100., 500.);
+    assert!(!opens_up(150., 200.), "cabe hacia abajo y se abre hacia arriba");
+    assert!(!opens_up(308., 200.), "cabe justo hacia abajo y se abre hacia arriba");
+    assert!(opens_up(350., 200.), "no cabe hacia abajo, cabe hacia arriba y se abre hacia abajo");
+    // Arriba del todo no hay sitio hacia arriba, aunque tampoco quepa abajo.
+    assert!(!opens_up(110., 450.), "se abre hacia arriba y se sale por arriba");
+    // No cabe de ninguna manera, pero hacia arriba se esconde menos.
+    assert!(opens_up(380., 420.));
+    // El día asoma a medias por abajo: hacia arriba se saldría por abajo
+    // tanto como hacia abajo, y entonces no se mueve.
+    assert!(!opens_up(480., 30.), "se abre hacia arriba para salirse igual");
+    // Lo mismo de lado a lado: no depende de dónde empiece lo que se ve.
+    assert!(up(-8., 104., 200., -300., 100.) && !up(-8., 104., 200., -300., 200.));
+}

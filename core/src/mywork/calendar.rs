@@ -53,6 +53,27 @@ pub fn lane_open_by_default(view: CalendarView) -> bool {
     view == CalendarView::Week
 }
 
+/// Cuánto de un trozo (de `top` a `bottom`) se sale de lo que se ve.
+fn hidden(top: f32, bottom: f32, visible_top: f32, visible_bottom: f32) -> f32 {
+    (visible_top - top).max(0.) + (bottom - visible_bottom).max(0.)
+}
+
+/// Si el detalle de un día del mes se abre hacia arriba: cuando hacia abajo
+/// no cabe en lo que se ve y hacia arriba se le esconde menos. `down_top` es
+/// dónde empezaría abriéndose hacia abajo y `up_bottom` dónde acabaría
+/// abriéndose hacia arriba; `height`, lo que mide.
+///
+/// Decidido con jose (17-nov-2026). Antes iba por filas (hacia arriba en las
+/// dos últimas del mes, como el `DayPopover` de la app de siempre), y en una
+/// ventana baja el detalle de un día de en medio se salía por abajo, donde
+/// no se alcanza. Si no cabe de ninguna de las dos maneras, hacia abajo: lo
+/// que se pierde es el final, y su cabecera se sigue leyendo.
+pub fn day_detail_opens_up(down_top: f32, up_bottom: f32, height: f32, visible_top: f32, visible_bottom: f32) -> bool {
+    let down = hidden(down_top, down_top + height, visible_top, visible_bottom);
+    let up = hidden(up_bottom - height, up_bottom, visible_top, visible_bottom);
+    up < down
+}
+
 /// Una tarea como se enseña en el calendario: en la fila del popover del día,
 /// en la tarjeta de la semana y en la del carril.
 #[derive(Debug, Clone, PartialEq, Eq)]
