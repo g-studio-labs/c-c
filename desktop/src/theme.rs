@@ -122,6 +122,7 @@ pub fn apply_preference(cx: &mut App) {
 
 /// Viste el tema de GPUI Kit de cac.
 pub fn apply(mode: ThemeMode, cx: &mut App) {
+    install_fonts(cx);
     Theme::change(mode, None, cx);
     let palette = palette(CSS, selector(mode));
     // Un color que faltara se queda con el de GPUI Kit: una pantalla con un
@@ -183,6 +184,7 @@ pub fn apply(mode: ThemeMode, cx: &mut App) {
         // él salen todos los textos, también los de sus componentes. Ver
         // `BASE_FONT_SIZE`.
         theme.font_size = px(BASE_FONT_SIZE);
+        theme.font_family = FONT_FAMILY.into();
         theme.radius = px(8.);
     });
 }
@@ -238,19 +240,47 @@ pub fn id_chip(id: impl Into<gpui_kit::ElementId>, shown: impl Into<gpui_kit::Sh
         .child(shown.into())
 }
 
-/// El cuerpo de texto de macOS, que es la escala que sigue la app (jose,
-/// 16-nov-2026): 13 de cuerpo y 11 de secundario. Los títulos de pantalla
-/// van a 18, como el `text-lg` de la app de siempre.
-pub const BODY_SIZE: f32 = 13.;
+/// La letra de la app de siempre (`'Inter Variable'` en `index.css`).
+const FONT_FAMILY: &str = "Inter";
 
-/// El `rem` con el que el texto normal (`text_sm`, 0.875rem) sale al cuerpo
-/// de macOS. De él salen solos los demás: `text_xs` (0.75rem) a 11 y
-/// `text_lg` (1.125rem) a 17, que son su secundario y su título de sección; y
-/// los botones, campos y menús de GPUI Kit, que se miden en `rem`, quedan a
-/// la misma escala sin tocarlos uno por uno.
-///
-/// No es 14 «porque la base de cac son 14»: así estuvo, y el texto normal
-/// salía a 12 px.
+/// Marca de que esta app ya tiene sus tipografías cargadas.
+struct FontsInstalled;
+impl gpui_kit::Global for FontsInstalled {}
+
+/// Carga Inter en la app, una vez. Va dentro del binario y no se le pide al
+/// sistema: con la del sistema, en una máquina sin Inter el texto salía en
+/// otra letra y sin negritas (jose, 17-nov-2026: el título de una tarea y lo
+/// marcado en negrita en una descripción salían en peso normal). Son los
+/// cuatro pesos fijos que usa la app y la cursiva: el fichero variable de la
+/// app de siempre no vale aquí, que el motor de texto elige cara por peso.
+fn install_fonts(cx: &mut App) {
+    if cx.has_global::<FontsInstalled>() {
+        return;
+    }
+    cx.set_global(FontsInstalled);
+    let faces: [&'static [u8]; 5] = [
+        include_bytes!("../assets/fonts/Inter-Regular.ttf"),
+        include_bytes!("../assets/fonts/Inter-Medium.ttf"),
+        include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
+        include_bytes!("../assets/fonts/Inter-Bold.ttf"),
+        include_bytes!("../assets/fonts/Inter-Italic.ttf"),
+    ];
+    // Si no se pudieran cargar, el texto sale con la letra del sistema: se
+    // lee igual.
+    let _ = cx.text_system().add_fonts(faces.into_iter().map(std::borrow::Cow::Borrowed).collect());
+}
+
+/// El cuerpo de texto de la app de siempre: su `text-sm`, 14 px. Hasta el
+/// 17-nov-2026 fue 13, el de macOS (jose lo eligió el 16); al poner las dos
+/// apps una junto a otra todo salía más pequeño en ésta y ninguna página
+/// cuadraba, y jose lo subió: «sí, sube el texto a 14».
+pub const BODY_SIZE: f32 = 14.;
+
+/// El `rem` con el que el texto normal (`text_sm`, 0.875rem) sale a ese
+/// cuerpo: 16, el del navegador. De él salen solos los demás (`text_xs` a
+/// 12, `text_lg` a 18), y los botones, campos y menús de GPUI Kit, que se
+/// miden en `rem`, quedan a la misma escala que las clases de Tailwind de la
+/// app de siempre sin tocarlos uno por uno.
 pub const BASE_FONT_SIZE: f32 = BODY_SIZE / 0.875;
 
 #[cfg(test)]
@@ -352,12 +382,24 @@ mod tests {
             assert_eq!(theme.muted_foreground, Hsla::from(rgb(0x676767)));
         });
     }
-    /// Los textos siguen la escala de macOS: 13 de cuerpo, 11 de secundario
-    /// y 17 de título de sección.
+    /// La app trae su letra, con sus negritas, y no depende de la que haya
+    /// en la máquina.
     ///
-    /// GPUI Kit le pone al `rem` de la ventana el tamaño del tema. Roturas
-    /// que atrapa: dejar el `rem` del kit (16: cuerpo a 14); bajarlo a 14
-    /// «porque la base de cac son 14», con lo que el cuerpo sale a 12.
+    /// Rotura que atrapa: dejar la letra del sistema. Que cada peso tenga
+    /// su cara no se puede preguntar aquí (el motor de texto de las pruebas
+    /// no carga tipografías): eso se mira en una captura.
+    #[gpui_kit::test]
+    fn the_app_brings_its_own_typeface_with_its_bold(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::component::ActiveTheme;
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            super::apply(gpui_kit::component::ThemeMode::Dark, cx);
+            assert_eq!(cx.theme().font_family.as_ref(), "Inter");
+        });
+    }
+
+    /// El texto normal mide lo que en la app de siempre: 14 de cuerpo, 12 de
+    /// secundario y 18 de título.
     #[gpui_kit::test]
     fn normal_text_is_as_big_as_in_the_other_app(cx: &mut gpui_kit::TestAppContext) {
         use gpui_kit::component::ActiveTheme;
@@ -366,7 +408,7 @@ mod tests {
             super::apply(gpui_kit::component::ThemeMode::Dark, cx);
             let rem = f32::from(cx.theme().font_size);
             let sizes = [0.875, 0.75, 1.125].map(|rems: f32| (rem * rems).round());
-            assert_eq!(sizes, [13., 11., 17.]);
+            assert_eq!(sizes, [14., 12., 18.]);
         });
     }
 
