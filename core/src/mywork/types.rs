@@ -90,7 +90,25 @@ impl WorkLens {
 #[serde(rename_all = "lowercase")]
 pub enum ScopeKind {
     Space,
+    /// Una carpeta: las tareas de todas las listas que cuelgan de ella, a
+    /// cualquier profundidad. Ninguna tarea lleva el id de su carpeta, así
+    /// que cuáles son esas listas se le pregunta al árbol cargado cada vez
+    /// (`tree::folder_list_ids`), no se guarda aquí: una copia se quedaría
+    /// vieja en cuanto alguien crea o mueve una lista.
+    Folder,
     List,
+}
+
+impl ScopeKind {
+    /// Cómo se llama esta clase de nodo en la pastilla del ámbito
+    /// («Carpeta: nombre»), como clave del catálogo.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            ScopeKind::Space => "work:myWork.scopeSpace",
+            ScopeKind::Folder => "work:myWork.scopeFolder",
+            ScopeKind::List => "work:myWork.scopeList",
+        }
+    }
 }
 
 /// A qué ha acotado el árbol esta vista, si a algo.
@@ -101,7 +119,7 @@ pub struct WorkScope {
     pub kind: ScopeKind,
     pub id: String,
     pub name: String,
-    /// De qué organización es esta lista o espacio. Viaja con el filtro
+    /// De qué organización es esta lista, carpeta o espacio. Viaja con el filtro
     /// porque la pregunta al cargar es «¿lo que hay puesto es de aquí?», y
     /// sin sello un ámbito no se tiraría nunca al cambiar de organización.
     pub org_id: Option<String>,

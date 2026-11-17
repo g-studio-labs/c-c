@@ -5,7 +5,7 @@
 //! cada lente lo decide el core. Aquí está el buscador, que es lo único que
 //! esta pantalla tiene propio, y la pintura.
 
-use cac_core::{DueState, ScopeKind, TaskFilter, WorkGroup, WorkLayout, WorkLens, WorkRow, NOBODY};
+use cac_core::{DueState, TaskFilter, WorkGroup, WorkLayout, WorkLens, WorkRow, NOBODY};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::Button;
@@ -295,16 +295,11 @@ impl MyWorkView {
         let my_work = Backend::snapshot(cx).read(cx).my_work.clone();
         let here = locale(cx);
         let count = if my_work.loading { "…".to_string() } else { cac_core::text_count(here, "work:myWork.visible", shown as i64) };
-        // A qué está acotado: «Lista: nombre» o «Espacio: nombre».
+        // A qué está acotado: «Lista: nombre», «Carpeta: nombre» o «Espacio:
+        // nombre». Cómo se llama cada clase lo dice el core.
         let scope_id = my_work.scope.as_ref().map(|scope| scope.id.clone());
         let surface = theme.muted;
-        let scope = my_work.scope.as_ref().map(|scope| {
-            let kind = match scope.kind {
-                ScopeKind::Space => tr(cx, "work:myWork.scopeSpace"),
-                ScopeKind::List => tr(cx, "work:myWork.scopeList"),
-            };
-            format!("{kind}: {}", scope.name)
-        });
+        let scope = my_work.scope.as_ref().map(|scope| format!("{}: {}", tr(cx, scope.kind.label_key()), scope.name));
         let closed = my_work.include_closed;
         let docs = cac_core::docs_reachable_from_scope(my_work.scope.as_ref().map(|scope| scope.kind));
         let docs_hint = tr(cx, "work:board.view.docs");
@@ -457,7 +452,7 @@ impl MyWorkView {
                     })))
                     // Las vistas y, detrás de un divisor (`mx-0.5 h-4 w-px
                     // bg-border`), la documentación del nodo: a un clic con
-                    // cualquier ámbito, sea lista o espacio
+                    // cualquier ámbito, sea lista, carpeta o espacio
                     // (command-and-control-372).
                     .child(
                         div().ml_auto().flex().flex_none().items_center().gap_0p5().pb_1p5().child(Self::render_layouts(cx)).when(docs, |this| {

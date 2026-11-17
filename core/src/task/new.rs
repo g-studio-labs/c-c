@@ -8,7 +8,7 @@
 use super::edit::shown_name;
 use super::{Choice, NewTask, Task, Tasks, UserSummary};
 use crate::mywork::{ScopeKind, WorkScope};
-use crate::tree::{FolderTree, SpaceTree};
+use crate::tree::{find_folder, FolderTree, SpaceTree};
 use crate::ApiError;
 
 /// Una lista donde puede nacer una tarea.
@@ -43,25 +43,37 @@ impl Destinations {
     }
 }
 
-fn folder_lists(folders: &[FolderTree], prefix: &str, out: &mut Vec<Destination>) {
+/// `only` es la carpeta a la vista, si la hay: hasta llegar a ella no se
+/// ofrece nada, y de ella para abajo todo. El camino se sigue llevando desde
+/// el espacio, se ofrezca o no lo de en medio.
+fn folder_lists(folders: &[FolderTree], prefix: &str, only: Option<&str>, out: &mut Vec<Destination>) {
     for folder in folders {
         let here = format!("{prefix} / {}", folder.name);
-        for list in &folder.lists {
-            out.push(Destination {
-                list_id: list.id.clone(),
-                label: format!("{here} / {}", list.name),
-                client: list.project_id.is_some(),
-            });
+        let only = only.filter(|only| *only != folder.id);
+        if only.is_none() {
+            for list in &folder.lists {
+                out.push(Destination {
+                    list_id: list.id.clone(),
+                    label: format!("{here} / {}", list.name),
+                    client: list.project_id.is_some(),
+                });
+            }
         }
-        folder_lists(&folder.folders, &here, out);
+        folder_lists(&folder.folders, &here, only, out);
     }
 }
 
 /// Las listas de esa organización donde puede nacer una tarea.
 ///
-/// Con una lista a la vista, sólo ésa; con un espacio, las suyas. Si la lista
-/// a la vista no está en el árbol, se ofrecen todas: no hay a cuál fijarla.
+/// Con una lista a la vista, sólo ésa; con un espacio, las suyas; con una
+/// carpeta, las que cuelgan de ella a cualquier profundidad (una carpeta sin
+/// listas no ofrece ninguna: lo que se crease en otra no saldría en lo que
+/// se está mirando). Si la lista o la carpeta a la vista no está en el
+/// árbol, se ofrecen todas: no hay a cuál fijarla.
 pub fn destinations(spaces: &[SpaceTree], org_id: Option<&str>, scope: Option<&WorkScope>) -> Destinations {
+    let folder = scope
+        .filter(|scope| scope.kind == ScopeKind::Folder && find_folder(spaces, &scope.id).is_some())
+        .map(|scope| scope.id.as_str());
     let mut options = Vec::new();
     for space in spaces {
         if org_id.is_some_and(|org_id| space.org_id != org_id) {
@@ -70,18 +82,22 @@ pub fn destinations(spaces: &[SpaceTree], org_id: Option<&str>, scope: Option<&W
         if scope.is_some_and(|scope| scope.kind == ScopeKind::Space && scope.id != space.id) {
             continue;
         }
-        for list in &space.lists {
-            options.push(Destination {
-                list_id: list.id.clone(),
-                label: format!("{} / {}", space.name, list.name),
-                client: list.project_id.is_some(),
-            });
+        // Las listas sueltas del espacio no cuelgan de ninguna carpeta.
+        if folder.is_none() {
+            for list in &space.lists {
+                options.push(Destination {
+                    list_id: list.id.clone(),
+                    label: format!("{} / {}", space.name, list.name),
+                    client: list.project_id.is_some(),
+                });
+            }
         }
-        folder_lists(&space.folders, &space.name, &mut options);
+        folder_lists(&space.folders, &space.name, folder, &mut options);
     }
     // Sin mirar si lo acotado es una lista: con un espacio a la vista sólo
-    // quedan sus listas, y ninguna lleva el id de su espacio.
-    if let Some(at) = scope.and_then(|scope| options.iter().position(|option| option.list_id == scope.id)) {
+    // quedan sus listas, y ninguna lleva el id de su espacio. Con una carpeta
+    // sí se mira: no se fija a una lista por compartir id con su carpeta.
+    if let Some(at) = scope.filter(|scope| scope.kind != ScopeKind::Folder).and_then(|scope| options.iter().position(|option| option.list_id == scope.id)) {
         return Destinations { options: vec![options.swap_remove(at)], fixed: true };
     }
     Destinations { options, fixed: false }

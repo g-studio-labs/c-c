@@ -724,6 +724,7 @@ impl Workspace {
         let clicked = row.clone();
         let count = (row.kind == NodeKind::List && row.open_count > 0).then(|| row.open_count.to_string());
         let (space, list) = (row.kind == NodeKind::Space, row.kind == NodeKind::List);
+        let folder = row.kind == NodeKind::Folder;
         // Qué es cada fila, a la vista: el color de su espacio, una carpeta
         // o una lista.
         let mark = match row.kind {
@@ -767,9 +768,12 @@ impl Workspace {
             .text_color(foreground)
             .when(space, |this| this.font_weight(FontWeight::MEDIUM))
             // El espacio al que se acota se dice con su nombre en el color de
-            // la marca; la lista, con la fila entera.
+            // la marca; la lista, con la fila entera, y la carpeta igual que
+            // la lista (command-and-control-382): no tiene marca de color
+            // propia con la que decirlo.
             .when(space && row.active, |this| this.text_color(primary))
             .when(list && row.active, |this| this.bg(active_bg))
+            .when(folder && row.active, |this| this.rounded(px(4.)).bg(active_bg))
             .hover(move |style| style.bg(hover))
             .cursor_pointer()
             .on_click(move |_, _, cx| Self::click_row(&clicked, cx))
@@ -802,8 +806,8 @@ impl Workspace {
                 this.child(div().id(SharedString::from(format!("tree-doc-{}", row.id))).test_support().flex_none().child(Icon::new(Lucide::FileText).size_3().text_color(muted)))
             })
             .children(count.map(|count| div().flex_none().leading_xs().font_weight(FontWeight::NORMAL).text_color(muted).child(count)))
-            // El menú de la fila. Pulsar un espacio o una lista acota sus
-            // tareas, así que su documentación se abre desde aquí
+            // El menú de la fila. Pulsar un nodo —espacio, carpeta o lista—
+            // acota sus tareas, así que su documentación se abre desde aquí
             // (command-and-control-372). Abrirlo no es un clic en la fila: el
             // desplegable del kit ya se queda con él (medido en
             // `popover.rs`); si deja de hacerlo, lo dice la prueba del menú.
@@ -1215,40 +1219,108 @@ mod tests {
         cx.update(|cx| Backend::snapshot(cx).read(cx).docs.target.as_ref().map(|target| target.id.clone()))
     }
 
-    /// Pulsar una carpeta abre su documentación en el sitio de la vista; su
-    /// × devuelve a las tareas, y sus vistas también, en la que se pulse.
+    /// Las tareas a la vista, por su id.
+    fn visible(cx: &mut TestAppContext) -> Vec<String> {
+        cx.update(|cx| Backend::core(cx).my_work().visible().into_iter().map(|task| task.id).collect())
+    }
+
+    /// Pulsar una carpeta mirando el calendario deja en el calendario, con
+    /// sólo las tareas de esa carpeta, y la cabecera lo dice y lo quita.
     ///
-    /// Roturas que atrapa: una carpeta cuyo clic no hace nada; abrir el
-    /// documento en el core y seguir pintando la lista; no tener cómo volver;
-    /// una documentación sin vistas, de la que sólo se sale cerrándola.
+    /// Hasta el 17-nov-2026 esta prueba pedía lo contrario
+    /// (`a_folder_opens_its_docs_and_the_list_brings_the_tasks_back`): una
+    /// carpeta abría siempre su documentación. Jose, ese día: «si estabas
+    /// viendo el calendario, que te deje el calendario filtrando según lo que
+    /// se clique en el árbol» (command-and-control-382).
+    ///
+    /// Roturas que atrapa: una carpeta que saca del calendario a quien la
+    /// pulsa (abre su documentación, o vuelve a la lista); acotar y seguir
+    /// enseñando las tareas de fuera de la carpeta; acotar sin decirlo ni
+    /// dejar quitarlo en la cabecera; una carpeta acotada sin camino a su
+    /// documentación.
     #[gpui_kit::test]
-    fn a_folder_opens_its_docs_and_the_list_brings_the_tasks_back(cx: &mut TestAppContext) {
+    fn a_folder_clicked_from_the_calendar_keeps_the_calendar_with_its_tasks(cx: &mut TestAppContext) {
         let server = server_with_docs();
         server.install(cx);
         let window = open(cx);
         wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-f-a", cx));
-        assert!(on_screen(window, "view-title", cx) && !on_screen(window, "docs", cx));
+        wait_until(cx, "llegan las tareas", |cx| visible(cx).len() == 2);
+        click(window, "layout-calendar", cx);
+        wait_until(cx, "pasa al calendario", |cx| on_screen(window, "work-calendar", cx));
 
         click(window, "tree-f-a", cx);
-        wait_until(cx, "llega su documentación", |cx| on_screen(window, "doc-body", cx));
+        wait_until(cx, "acota a la carpeta", |cx| scope(cx) == Some((ScopeKind::Folder, "f-a".into())));
+        settle_frames(window, cx);
+        assert!(on_screen(window, "work-calendar", cx), "la carpeta sacó del calendario");
+        assert!(!on_screen(window, "docs", cx), "la carpeta abrió su documentación a quien miraba tareas");
+        assert_eq!(visible(cx), ["2"], "no son sólo las tareas de la carpeta");
+        assert!(on_screen(window, "scope-clear", cx) && on_screen(window, "scope-copy-id", cx), "la cabecera no dice que está acotado");
+        assert!(on_screen(window, "open-docs", cx), "una carpeta acotada no ofrece su documentación");
+        // Y en la lista se ve lo mismo: la tarea de la carpeta, y no la otra.
+        click(window, "layout-list", cx);
+        wait_until(cx, "pasa a la lista", |cx| on_screen(window, "work-row-2", cx));
+        assert!(!on_screen(window, "work-row-1", cx), "se pinta una tarea de fuera de la carpeta");
+
+        click(window, "scope-clear", cx);
+        wait_until(cx, "vuelven todas", |cx| scope(cx).is_none() && on_screen(window, "work-row-1", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Leyendo documentación, pulsar una carpeta abre la suya; su × devuelve
+    /// a las tareas de la carpeta, y sus vistas también, en la que se pulse.
+    ///
+    /// Antes del 17-nov-2026 de la documentación de una carpeta se volvía a
+    /// las tareas que hubiera, porque una carpeta no acotaba
+    /// (command-and-control-382).
+    ///
+    /// Roturas que atrapa: que un clic en una carpeta saque de la
+    /// documentación a quien la lee; abrir el documento en el core y seguir
+    /// pintando la lista; no tener cómo volver; una documentación sin vistas,
+    /// de la que sólo se sale cerrándola; volver de la de una carpeta a las
+    /// tareas de otro nodo.
+    #[gpui_kit::test]
+    fn a_folder_clicked_while_reading_opens_its_docs_and_back_brings_its_tasks(cx: &mut TestAppContext) {
+        let server = server_with_docs();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        assert!(on_screen(window, "view-title", cx) && !on_screen(window, "docs", cx));
+        click(window, "tree-a", cx);
+        wait_until(cx, "acotado al espacio, ofrece su documentación", |cx| on_screen(window, "open-docs", cx));
+        click(window, "open-docs", cx);
+        wait_until(cx, "llega la del espacio", |cx| doc_open(cx).as_deref() == Some("a") && on_screen(window, "doc-body", cx));
+
+        click(window, "tree-f-a", cx);
+        wait_until(cx, "abre la de la carpeta", |cx| doc_open(cx).as_deref() == Some("f-a") && on_screen(window, "doc-body", cx));
         assert!(!on_screen(window, "view-title", cx), "la lista sigue pintada debajo del documento");
-        assert_eq!(scope(cx), None, "una carpeta no acota");
+        assert_eq!(scope(cx), Some((ScopeKind::Space, "a".into())), "leer la documentación de una carpeta cambió el ámbito");
 
         click(window, "doc-close", cx);
         wait_until(cx, "vuelven las tareas", |cx| on_screen(window, "view-title", cx));
         assert!(!on_screen(window, "docs", cx));
+        assert_eq!(scope(cx), Some((ScopeKind::Folder, "f-a".into())), "no volvió a las tareas de la carpeta");
 
         // También lleva las vistas, para no tener que cerrarla: pulsar una
-        // vuelve a las tareas en esa vista. Una carpeta no acota, así que
-        // son las que hubiera.
-        click(window, "tree-f-a", cx);
-        wait_until(cx, "llega otra vez", |cx| on_screen(window, "doc-body", cx));
+        // vuelve a las tareas de la carpeta en esa vista.
+        click(window, "open-docs", cx);
+        wait_until(cx, "llega otra vez", |cx| doc_open(cx).as_deref() == Some("f-a") && on_screen(window, "doc-body", cx));
         assert!(on_screen(window, "view-list", cx) && on_screen(window, "view-docs", cx), "la documentación de una carpeta no deja cambiar de vista");
         click(window, "view-board", cx);
         wait_until(cx, "vuelve a las tareas, en tablero", |cx| on_screen(window, "work-board", cx));
         assert!(!on_screen(window, "docs", cx));
-        assert_eq!(scope(cx), None, "volver desde una carpeta acotó la vista");
+        assert_eq!(scope(cx), Some((ScopeKind::Folder, "f-a".into())));
+        assert_eq!(visible(cx), ["2"]);
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Abre la documentación de la carpeta `f-a`, como quien la pulsa en el
+    /// árbol y luego el botón de documentación.
+    fn open_folder_docs(window: AnyWindowHandle, cx: &mut TestAppContext) {
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-f-a", cx));
+        click(window, "tree-f-a", cx);
+        wait_until(cx, "acotado a la carpeta, ofrece su documentación", |cx| on_screen(window, "open-docs", cx));
+        click(window, "open-docs", cx);
+        wait_until(cx, "abre la de la carpeta", |cx| doc_open(cx).as_deref() == Some("f-a"));
     }
 
     /// Abre la documentación de la lista `l-a`, como quien la pulsa en el
@@ -1316,8 +1388,7 @@ mod tests {
         );
         server.install(cx);
         let window = open_sized(1500., cx);
-        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-f-a", cx));
-        click(window, "tree-f-a", cx);
+        open_folder_docs(window, cx);
         wait_until(cx, "llega su documentación", |cx| on_screen(window, "doc-wide-1", cx));
 
         let (prose, table) = (width_on_screen(window, "doc-prose-0", cx), width_on_screen(window, "doc-wide-1", cx));
@@ -1341,8 +1412,7 @@ mod tests {
         let server = server_with_docs();
         server.install(cx);
         let window = open(cx);
-        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-f-a", cx));
-        click(window, "tree-f-a", cx);
+        open_folder_docs(window, cx);
         wait_until(cx, "llega su documentación", |cx| on_screen(window, "doc-body", cx));
 
         click(window, "doc-id", cx);
@@ -1403,8 +1473,7 @@ mod tests {
         let server = server_with_docs();
         server.install(cx);
         let window = open(cx);
-        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-f-a", cx));
-        click(window, "tree-f-a", cx);
+        open_folder_docs(window, cx);
         wait_until(cx, "llega su documentación", |cx| on_screen(window, "doc-body", cx));
         assert!(!on_screen(window, "doc-empty", cx) && !on_screen(window, "doc-decision-d1", cx));
 

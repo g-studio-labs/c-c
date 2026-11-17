@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dates::due_day;
 use crate::error::ApiError;
+use crate::tree::{find_folder, folder_list_ids, SpaceTree};
 use crate::Core;
 
 pub use board::{
@@ -66,6 +67,23 @@ struct Envelope {
 /// Qué pregunta responde una carga.
 fn key_of(org_id: Option<&str>, lens: WorkLens, include_closed: bool) -> String {
     format!("{}|{:?}|{}", org_id.unwrap_or(""), lens, include_closed)
+}
+
+/// Las tareas que caen dentro de un ámbito.
+///
+/// Una lista y un espacio se leen de la propia tarea. Una carpeta no: la
+/// tarea no sabe de qué carpeta cuelga su lista, así que se le pregunta al
+/// árbol qué listas hay bajo ella, subcarpetas incluidas. Una carpeta que no
+/// está en el árbol no tiene ninguna.
+pub fn in_scope(tasks: Vec<OpenTask>, scope: &WorkScope, spaces: &[SpaceTree]) -> Vec<OpenTask> {
+    match scope.kind {
+        ScopeKind::List => tasks.into_iter().filter(|task| task.list_id == scope.id).collect(),
+        ScopeKind::Space => tasks.into_iter().filter(|task| task.space_id == scope.id).collect(),
+        ScopeKind::Folder => {
+            let lists = folder_list_ids(spaces, &scope.id).unwrap_or_default();
+            tasks.into_iter().filter(|task| lists.contains(&task.list_id)).collect()
+        }
+    }
 }
 
 /// «Mi trabajo» de este core. Barato de pedir: es el mismo cada vez.
@@ -120,10 +138,40 @@ impl MyWork {
         self.save_preferences();
     }
 
-    /// Acota a una lista o a un espacio, sellado con la organización desde la
-    /// que se eligió. `None` quita el filtro.
+    /// Acota a una lista, a una carpeta o a un espacio, sellado con la
+    /// organización desde la que se eligió. `None` quita el filtro.
     pub fn set_scope(&self, scope: Option<WorkScope>) {
         self.update(|state| state.scope = scope);
+    }
+
+    /// El árbol se volvió a cargar, y el ámbito de una carpeta vive de él.
+    ///
+    /// Si la carpeta ya no está (la borraron, o el árbol es de otra
+    /// organización), el ámbito se tira, igual que se tira el de otra
+    /// organización al cargar: quedarse filtrando por una carpeta que no
+    /// existe es una pantalla vacía que parece que no hay trabajo. Si sigue,
+    /// se avisa a quien pinta —lo que hay dentro pudo cambiar: una lista
+    /// creada o movida a ella trae sus tareas— y se le pone el nombre que
+    /// tenga ahora. Una lista o un espacio se leen de la tarea, no del árbol,
+    /// y no les toca.
+    pub(crate) fn tree_reloaded(&self) {
+        let on_a_folder = |state: &MyWorkState| state.scope.as_ref().is_some_and(|scope| scope.kind == ScopeKind::Folder);
+        // Sin una carpeta acotada no cambia nada, y no se avisa: el árbol se
+        // recarga a menudo y cada aviso repinta la pantalla.
+        if !on_a_folder(&self.state()) {
+            return;
+        }
+        let spaces = self.core.tree().state().spaces;
+        self.update(|state| {
+            if !on_a_folder(state) {
+                return;
+            }
+            let Some(scope) = state.scope.as_mut() else { return };
+            match find_folder(&spaces, &scope.id) {
+                Some(folder) => scope.name = folder.name.clone(),
+                None => state.scope = None,
+            }
+        });
     }
 
     /// Lo que hay que pintar: las tareas cargadas, dentro del ámbito puesto.
@@ -131,14 +179,7 @@ impl MyWork {
         let state = self.state();
         match &state.scope {
             None => state.tasks,
-            Some(scope) => state
-                .tasks
-                .into_iter()
-                .filter(|task| match scope.kind {
-                    ScopeKind::List => task.list_id == scope.id,
-                    ScopeKind::Space => task.space_id == scope.id,
-                })
-                .collect(),
+            Some(scope) => in_scope(state.tasks, scope, &self.core.tree().state().spaces),
         }
     }
 

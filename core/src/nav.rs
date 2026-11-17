@@ -41,22 +41,30 @@ pub enum TreeClick {
     OpenDocs,
 }
 
-/// La regla.
+/// La regla, la misma para las tres clases de nodo.
 ///
-/// Una carpeta no acota: «Mi trabajo» se acota a un espacio o a una lista, y
-/// una carpeta no es ninguna de las dos. Su clic abre siempre su
-/// documentación, que es lo único que una carpeta tiene propio.
+/// Hasta el 17-nov-2026 una carpeta no acotaba: su clic abría siempre su
+/// documentación, se estuviera mirando lo que se estuviera mirando, porque
+/// «Mi trabajo» sólo sabía acotarse a un espacio o a una lista. Era la única
+/// excepción a la regla de arriba, y sacaba del calendario a quien sólo quería
+/// ver otra rama (jose, 17-nov-2026: «es natural que sea como un filtro o
+/// como un explorador, o te debería dejar en la pestaña: si estabas viendo la
+/// docu de otro proyecto, te deje en la pestaña de docu, y si estabas viendo
+/// el calendario, que te deje el calendario filtrando según lo que se clique
+/// en el árbol»). Ahora una carpeta acota a las tareas de todas las listas
+/// que cuelgan de ella, a cualquier profundidad (command-and-control-382).
 pub fn tree_click(looking: Looking, node: NodeKind) -> TreeClick {
     match (looking, node) {
-        (Looking::Docs, _) | (_, NodeKind::Folder) => TreeClick::OpenDocs,
+        (Looking::Docs, _) => TreeClick::OpenDocs,
         (Looking::Tasks, NodeKind::Space) => TreeClick::ScopeTasks { kind: ScopeKind::Space },
+        (Looking::Tasks, NodeKind::Folder) => TreeClick::ScopeTasks { kind: ScopeKind::Folder },
         (Looking::Tasks, NodeKind::List) => TreeClick::ScopeTasks { kind: ScopeKind::List },
     }
 }
 
 /// Si con este ámbito hay documentación a un clic.
 ///
-/// La hay con cualquier nodo delante, sea lista o espacio (372): la
+/// La hay con cualquier nodo delante, sea lista, carpeta o espacio (372): la
 /// documentación cuelga de un nodo. Sin acotar no, porque «Mi trabajo» entero
 /// cruza todos los nodos y no hay uno del que colgar.
 pub fn docs_reachable_from_scope(scope: Option<ScopeKind>) -> bool {
@@ -92,11 +100,22 @@ mod tests {
         );
     }
 
-    /// Rotura que atrapa: intentar acotar a una carpeta, que dejaría la
-    /// pantalla filtrando por algo que ninguna tarea tiene.
+    /// Hasta el 17-nov-2026 esta prueba decía lo contrario
+    /// (`a_folder_always_opens_its_docs`): una carpeta no acotaba, porque
+    /// ninguna tarea lleva el id de su carpeta. Jose pidió ese día que el
+    /// árbol sea «como un filtro o como un explorador» y que el clic deje en
+    /// la vista en la que se esté; el ámbito de una carpeta se resuelve con
+    /// las listas que cuelgan de ella (command-and-control-382).
+    ///
+    /// Rotura que atrapa: que una carpeta saque de las tareas —del
+    /// calendario, del tablero— a quien la pulsa, abriendo su documentación;
+    /// o acotarla como si fuera una lista o un espacio.
     #[test]
-    fn a_folder_always_opens_its_docs() {
-        assert_eq!(tree_click(Looking::Tasks, NodeKind::Folder), TreeClick::OpenDocs);
+    fn from_tasks_a_folder_scopes_like_any_other_node() {
+        assert_eq!(
+            tree_click(Looking::Tasks, NodeKind::Folder),
+            TreeClick::ScopeTasks { kind: ScopeKind::Folder }
+        );
     }
 
     /// El requisito de command-and-control-372. Rotura que atrapa: ofrecer la
@@ -104,6 +123,7 @@ mod tests {
     #[test]
     fn docs_are_one_click_away_from_any_scoped_node() {
         assert!(docs_reachable_from_scope(Some(ScopeKind::Space)));
+        assert!(docs_reachable_from_scope(Some(ScopeKind::Folder)));
         assert!(docs_reachable_from_scope(Some(ScopeKind::List)));
         assert!(!docs_reachable_from_scope(None));
     }

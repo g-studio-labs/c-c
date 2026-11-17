@@ -271,7 +271,8 @@ impl Render for DocsView {
         // o de una carpeta no tenía cómo cambiar de vista más que cerrándola
         // (jose, 17-nov-2026: «nos abre la doc sin opciones de cambiar»).
         // A dónde vuelve cada una lo dice el core (`back_to_tasks`): a las
-        // tareas de ese nodo, o a las que hubiera si es una carpeta.
+        // tareas de ese nodo, también si es una carpeta
+        // (command-and-control-382).
         let views = Some({
             div().id("doc-views").h_9().flex().flex_none().items_stretch().gap_4().px_4().border_b_1().border_color(border).children(VIEWS.map(|(view, layout)| {
                 let active = layout.is_none();

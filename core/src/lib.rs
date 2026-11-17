@@ -40,7 +40,7 @@ pub use error::ApiError;
 pub use events::{Listener, NoListener};
 pub use mywork::{
     can_drop, work_board, BoardAssignee, BoardCard, BoardColumn, BoardStatus, DropVerdict, BAD_TRANSITION, COLUMN_MISSING,
-    day_and_month, due_label, empty_reason, filter_options, work_groups, DueLabel, FilterOptions, MyWork, MyWorkState, OpenTask,
+    day_and_month, due_label, empty_reason, filter_options, in_scope, work_groups, DueLabel, FilterOptions, MyWork, MyWorkState, OpenTask,
     ScopeKind, TaskFilter, WorkGroup, WorkLens, WorkRow, WorkScope, NOBODY, PRIORITIES,
 };
 pub use mywork::{
@@ -53,7 +53,7 @@ pub use hue::{hue_index, HUES};
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
 pub use prefs::{is_dark, ThemePreference, WorkLayout};
 pub use session::Session;
-pub use tree::{doc_key, DocMark, FolderTree, ListSummary, SpacePerson, SpaceTree, Tree, TreeState};
+pub use tree::{doc_key, find_folder, folder_list_ids, DocMark, FolderTree, ListSummary, SpacePerson, SpaceTree, Tree, TreeState};
 pub use tree_rows::{filter_tree, tree_rows, tree_rows_matching, TreeRow};
 pub use storage::{FileStorage, Storage};
 pub use stream::{backoff, parse_frame, Connection, ConnectionState, FrameBuffer, ServerEvent, Stream};

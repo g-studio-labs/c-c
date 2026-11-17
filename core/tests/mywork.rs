@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cac_core::{
-    day_and_month, due_label, empty_reason, text, work_groups, Config, Core, DueState, Listener, Locale, MyWorkState, OpenTask, ScopeKind,
-    Session, Storage, TaskFilter, WorkLens, WorkScope,
+    day_and_month, due_label, empty_reason, in_scope, text, work_groups, Config, Core, DueState, Listener, Locale, Looking, MyWorkState, OpenTask,
+    ScopeKind, Session, SpaceTree, Storage, TaskFilter, WorkLens, WorkScope,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -564,4 +564,132 @@ fn an_empty_list_says_why() {
     for key in ["work:myWork.nothingHere", "work:myWork.nothingFollowed", "work:board.filter.noMatch", "common:last.requestsFailing", "work:tree.loading"] {
         assert_ne!(text(Locale::En, key), key);
     }
+}
+
+// ── Acotar a una carpeta (command-and-control-382) ──────────────────────
+
+/// Un espacio con una lista suelta, una carpeta con una lista y una
+/// subcarpeta con otra, y una carpeta de al lado.
+fn foldered_space(folder_name: &str, moved_in: bool) -> serde_json::Value {
+    let mut inner_lists = vec![serde_json::json!({ "id": "l-deep", "name": "Honda" })];
+    let mut loose = vec![serde_json::json!({ "id": "l-loose", "name": "Suelta" })];
+    let moved = serde_json::json!({ "id": "l-moved", "name": "Movida" });
+    if moved_in { inner_lists.push(moved) } else { loose.push(moved) }
+    serde_json::json!({
+        "id": "s1", "orgId": "o1", "name": "Espacio", "color": "", "people": [],
+        "lists": loose,
+        "folders": [
+            {
+                "id": "f1", "name": folder_name,
+                "lists": [{ "id": "l-in", "name": "Dentro" }],
+                "folders": [{ "id": "f2", "name": "Sub", "folders": [], "lists": inner_lists }],
+            },
+            { "id": "f9", "name": "De al lado", "folders": [], "lists": [{ "id": "l-side", "name": "Otra" }] },
+        ],
+    })
+}
+
+fn open_tasks(tasks: Vec<serde_json::Value>) -> Vec<OpenTask> {
+    serde_json::from_value(serde_json::Value::Array(tasks)).unwrap()
+}
+
+fn ids(tasks: &[OpenTask]) -> Vec<&str> {
+    tasks.iter().map(|task| task.id.as_str()).collect()
+}
+
+/// Una carpeta acota a las tareas de todas las listas que cuelgan de ella,
+/// también las de sus subcarpetas (jose, 17-nov-2026: el árbol es «como un
+/// filtro o como un explorador»).
+///
+/// Roturas que atrapa: filtrar por el id de la carpeta como si fuera el de
+/// una lista (ninguna tarea lo lleva: pantalla vacía); quedarse en las listas
+/// directas y perder las de una subcarpeta; colar las de la carpeta de al
+/// lado o las listas sueltas del espacio; que una carpeta que no está en el
+/// árbol lo enseñe todo.
+#[test]
+fn a_folder_scope_takes_every_list_under_it_at_any_depth() {
+    let spaces: Vec<SpaceTree> = serde_json::from_value(serde_json::json!([foldered_space("Carpeta", false)])).unwrap();
+    let tasks = || {
+        open_tasks(vec![
+            task("t-loose", "l-loose", "s1"),
+            task("t-in", "l-in", "s1"),
+            task("t-deep", "l-deep", "s1"),
+            task("t-side", "l-side", "s1"),
+            // Una lista que comparte id con la carpeta: son de tablas
+            // distintas, y sus tareas no son de la carpeta.
+            task("t-twin", "f1", "s1"),
+        ])
+    };
+
+    assert_eq!(ids(&in_scope(tasks(), &scope(ScopeKind::Folder, "f1", "o1"), &spaces)), ["t-in", "t-deep"]);
+    assert_eq!(ids(&in_scope(tasks(), &scope(ScopeKind::Folder, "f2", "o1"), &spaces)), ["t-deep"]);
+    assert!(in_scope(tasks(), &scope(ScopeKind::Folder, "no-existe", "o1"), &spaces).is_empty());
+    // Y las otras dos clases siguen leyéndose de la propia tarea.
+    assert_eq!(ids(&in_scope(tasks(), &scope(ScopeKind::List, "l-side", "o1"), &spaces)), ["t-side"]);
+    assert_eq!(in_scope(tasks(), &scope(ScopeKind::Space, "s1", "o1"), &spaces).len(), 5);
+}
+
+/// El ámbito de una carpeta sigue al árbol: lo que entra en ella al
+/// recargarlo aparece, y si la carpeta desaparece el ámbito se tira.
+///
+/// Roturas que atrapa: no volver a mirar el ámbito cuando llega un árbol
+/// nuevo; no avisar a quien pinta de que lo visible cambió; seguir llamándola
+/// por el nombre que tenía; quedarse filtrando por una carpeta borrada
+/// (pantalla vacía que parece que no hay trabajo); tirar con el árbol el
+/// ámbito de una lista, que no se lee de él, o repintar por él en cada
+/// recarga.
+#[tokio::test]
+async fn a_folder_scope_follows_the_tree_when_it_reloads() {
+    let rig = rig(vec![task("t-in", "l-in", "s1"), task("t-moved", "l-moved", "s1"), task("t-loose", "l-loose", "s1")]).await;
+    let tree_once = |body: serde_json::Value| {
+        Mock::given(method("GET"))
+            .and(path("/api/v1/task-spaces/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": body })))
+            .up_to_n_times(1)
+    };
+    // En orden: como está, con la lista movida dentro y otro nombre, y sin
+    // la carpeta.
+    tree_once(serde_json::json!([foldered_space("Carpeta", false)])).mount(&rig.server).await;
+    tree_once(serde_json::json!([foldered_space("Plataforma", true)])).mount(&rig.server).await;
+    let mut without = foldered_space("Plataforma", true);
+    without["folders"].as_array_mut().unwrap().remove(0);
+    tree_once(serde_json::json!([without.clone()])).mount(&rig.server).await;
+    tree_once(serde_json::json!([without])).mount(&rig.server).await;
+
+    let (work, tree) = (rig.core.my_work(), rig.core.tree());
+    work.load(Some("o1".into())).await;
+    tree.load("o1").await;
+    tree.click("f1", Looking::Tasks).unwrap();
+    assert_eq!(ids(&work.visible()), ["t-in"]);
+
+    let notices = rig.recorder.0.lock().unwrap().len();
+    tree.load("o1").await;
+    assert_eq!(ids(&work.visible()), ["t-in", "t-moved"], "la lista movida a la carpeta no trajo sus tareas");
+    assert_eq!(work.state().scope.unwrap().name, "Plataforma");
+    assert!(rig.recorder.0.lock().unwrap().len() > notices, "quien pinta no se enteró de que lo visible cambió");
+
+    tree.load("o1").await;
+    assert_eq!(work.state().scope, None, "sigue acotado a una carpeta que ya no existe");
+    assert_eq!(work.visible().len(), 3);
+
+    // Una lista no se lee del árbol: esté o no en él, su ámbito se queda.
+    work.set_scope(Some(scope(ScopeKind::List, "l-in", "o1")));
+    let notices = rig.recorder.0.lock().unwrap().len();
+    tree.load("o1").await;
+    assert_eq!(work.state().scope.map(|scope| scope.id).as_deref(), Some("l-in"));
+    assert_eq!(rig.recorder.0.lock().unwrap().len(), notices, "se repintó «Mi trabajo» por un árbol que no le toca");
+}
+
+/// La pastilla del ámbito dice qué clase de nodo es, en el idioma de quien
+/// mira.
+///
+/// Roturas que atrapa: llamar «Lista» o «Espacio» a una carpeta; una clave
+/// que no está en el catálogo (la pastilla enseñaría la clave).
+#[test]
+fn the_scope_pill_names_each_kind_of_node() {
+    let said = |kind: ScopeKind, locale| text(locale, kind.label_key());
+    assert_eq!(said(ScopeKind::Folder, Locale::Es), "Carpeta");
+    assert_eq!(said(ScopeKind::Folder, Locale::En), "Folder");
+    assert_eq!(said(ScopeKind::Space, Locale::Es), "Espacio");
+    assert_eq!(said(ScopeKind::List, Locale::Es), "Lista");
 }

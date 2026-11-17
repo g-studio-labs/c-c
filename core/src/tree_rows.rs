@@ -56,11 +56,16 @@ pub struct TreeRow {
 /// nada acotado o no es de este árbol.
 fn active_path(spaces: &[SpaceTree], scope: Option<&WorkScope>) -> Option<HashSet<String>> {
     let scope = scope?;
-    fn in_folder(folder: &FolderTree, list_id: &str, path: &mut Vec<String>) -> bool {
+    /// Si lo acotado —una lista, o una carpeta— es esta carpeta o está
+    /// dentro de ella. Se mira la clase además del id: son de tablas
+    /// distintas y nada impide que una lista y una carpeta lo compartan.
+    fn in_folder(folder: &FolderTree, scope: &WorkScope, path: &mut Vec<String>) -> bool {
         path.push(folder.id.clone());
-        if folder.lists.iter().any(|list| list.id == list_id)
-            || folder.folders.iter().any(|inner| in_folder(inner, list_id, path))
-        {
+        let here = match scope.kind {
+            ScopeKind::Folder => folder.id == scope.id,
+            _ => folder.lists.iter().any(|list| list.id == scope.id),
+        };
+        if here || folder.folders.iter().any(|inner| in_folder(inner, scope, path)) {
             return true;
         }
         path.pop();
@@ -70,9 +75,10 @@ fn active_path(spaces: &[SpaceTree], scope: Option<&WorkScope>) -> Option<HashSe
         let mut path = vec![space.id.clone()];
         let found = match scope.kind {
             ScopeKind::Space => space.id == scope.id,
+            ScopeKind::Folder => space.folders.iter().any(|folder| in_folder(folder, scope, &mut path)),
             ScopeKind::List => {
                 space.lists.iter().any(|list| list.id == scope.id)
-                    || space.folders.iter().any(|folder| in_folder(folder, &scope.id, &mut path))
+                    || space.folders.iter().any(|folder| in_folder(folder, scope, &mut path))
             }
         };
         if found {
@@ -199,7 +205,7 @@ impl Walk<'_> {
             depth,
             expandable: self.can_fold() && (!folder.folders.is_empty() || !folder.lists.is_empty()),
             open,
-            active: false,
+            active: self.is_active(&folder.id, ScopeKind::Folder),
             has_doc: self.state.written_doc(NodeKind::Folder, &folder.id).is_some(),
             open_count: folder_open_count(folder),
             client: false,

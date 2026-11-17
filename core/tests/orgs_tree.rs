@@ -482,6 +482,42 @@ async fn only_the_path_to_what_is_looked_at_opens() {
     assert_eq!(active, [NodeKind::List]);
 }
 
+/// Una carpeta acotada es el nodo activo, y la rama abierta es su camino y
+/// ella misma, para que se vea lo que tiene dentro (command-and-control-382).
+///
+/// Roturas que atrapa: acotar a una carpeta y que el árbol no diga cuál (se
+/// filtra sin saber por qué); dejarla plegada, o abrir todos los espacios
+/// como si no hubiera nada acotado; dar por activa una lista que comparte id
+/// con la carpeta, o buscar la carpeta entre las listas.
+#[tokio::test]
+async fn a_scoped_folder_is_the_active_row_and_its_branch_opens() {
+    // Una lista con el mismo id que la carpeta honda, a su lado: los ids son
+    // de tablas distintas y nada impide que coincidan.
+    let mut space = nested_space("a");
+    space["folders"][0]["lists"][0]["id"] = serde_json::json!("ff-a");
+    let rig = loaded_tree(vec![nested_space("b"), space]).await;
+    let tree = rig.core.tree();
+
+    assert_eq!(tree.click("f-a", Looking::Tasks), Some(TreeClick::ScopeTasks { kind: ScopeKind::Folder }));
+    let rows = tree.rows();
+    let open: Vec<&str> = rows.iter().filter(|row| row.open).map(|row| row.id.as_str()).collect();
+    assert_eq!(open, ["a", "f-a"]);
+    let active: Vec<(NodeKind, &str)> = rows.iter().filter(|row| row.active).map(|row| (row.kind, row.id.as_str())).collect();
+    assert_eq!(active, [(NodeKind::Folder, "f-a")]);
+
+    rig.core.my_work().set_scope(Some(cac_core::WorkScope {
+        kind: ScopeKind::Folder,
+        id: "ff-a".into(),
+        name: "Dentro".into(),
+        org_id: Some("o1".into()),
+    }));
+    let rows = tree.rows();
+    let open: Vec<&str> = rows.iter().filter(|row| row.open).map(|row| row.id.as_str()).collect();
+    assert_eq!(open, ["a", "f-a", "ff-a"]);
+    let active: Vec<(NodeKind, &str)> = rows.iter().filter(|row| row.active).map(|row| (row.kind, row.id.as_str())).collect();
+    assert_eq!(active, [(NodeKind::Folder, "ff-a")]);
+}
+
 /// Lo que se abre o se cierra a mano manda sobre la regla, y se recuerda por
 /// organización.
 ///
@@ -523,10 +559,15 @@ async fn what_is_opened_or_closed_by_hand_wins_and_is_remembered() {
 /// Un clic acota «Mi trabajo» a ese nodo, con su nombre y su organización, y
 /// el árbol avisa para que se pinte cuál está activo.
 ///
+/// Hasta el 17-nov-2026 esta prueba pedía que una carpeta **no** acotase;
+/// desde ese día acota como un espacio o una lista (jose: el árbol es «como
+/// un filtro o como un explorador», command-and-control-382).
+///
 /// Roturas que atrapa: acotar sin sello de organización (el ámbito no se
-/// tiraría al cambiar de organización); acotar a una carpeta; no encontrar un
-/// nodo que está bajo una rama plegada; que quien pinta el árbol no se entere
-/// de que cambió el nodo activo.
+/// tiraría al cambiar de organización); una carpeta que no acota, o que acota
+/// con la clase de otro nodo; no encontrar un nodo que está bajo una rama
+/// plegada; que quien pinta el árbol no se entere de que cambió el nodo
+/// activo.
 #[tokio::test]
 async fn a_click_scopes_my_work_to_that_node() {
     let rig = loaded_tree(vec![nested_space("a")]).await;
@@ -540,9 +581,13 @@ async fn a_click_scopes_my_work_to_that_node() {
     assert_eq!(scope.org_id.as_deref(), Some("o1"));
     assert!(rig.recorder.trees.lock().unwrap().len() > notices, "el árbol no avisó");
 
-    assert_eq!(tree.click("f-a", Looking::Tasks), Some(TreeClick::OpenDocs));
-    assert_eq!(rig.core.my_work().state().scope.unwrap().id, "deep-a", "una carpeta no acota");
+    assert_eq!(tree.click("f-a", Looking::Tasks), Some(TreeClick::ScopeTasks { kind: ScopeKind::Folder }));
+    let scope = rig.core.my_work().state().scope.unwrap();
+    assert_eq!((scope.kind, scope.id.as_str(), scope.name.as_str()), (ScopeKind::Folder, "f-a", "Carpeta"));
+    assert_eq!(scope.org_id.as_deref(), Some("o1"));
+    // Leyendo documentación no se acota: el ámbito que había se queda.
     assert_eq!(tree.click("a", Looking::Docs), Some(TreeClick::OpenDocs));
+    assert_eq!(rig.core.my_work().state().scope.unwrap().id, "f-a");
     assert_eq!(tree.click("no-existe", Looking::Tasks), None);
 }
 
@@ -788,11 +833,15 @@ async fn another_nodes_docs_are_not_shown_under_this_ones_name() {
     assert_eq!(state.tab, "overview", "la pestaña elegida en otro documento no se hereda");
 }
 
-/// Desde las tareas, un espacio o una lista acotan y una carpeta abre su
-/// documentación; con documentación abierta, cualquier nodo abre la suya.
+/// Desde las tareas, cualquier nodo acota —también una carpeta, desde el
+/// 17-nov-2026: antes abría siempre su documentación y sacaba de las tareas a
+/// quien la pulsaba (jose: «si estabas viendo el calendario, que te deje el
+/// calendario filtrando según lo que se clique en el árbol»,
+/// command-and-control-382)—; con documentación abierta, cualquier nodo abre
+/// la suya.
 ///
 /// Roturas que atrapa: sacar de la documentación a quien la lee; una carpeta
-/// cuyo clic no hace nada; abrir documentación al acotar.
+/// que saca de las tareas a quien las mira; abrir documentación al acotar.
 #[tokio::test]
 async fn a_click_follows_what_is_being_looked_at() {
     let rig = loaded_tree(vec![nested_space("a")]).await;
@@ -803,21 +852,33 @@ async fn a_click_follows_what_is_being_looked_at() {
     assert_eq!(rig.core.click_node("l-a").await, Some(TreeClick::ScopeTasks { kind: ScopeKind::List }));
     assert!(rig.core.docs().state().target.is_none(), "acotar abrió documentación");
 
-    assert_eq!(rig.core.click_node("f-a").await, Some(TreeClick::OpenDocs));
+    assert_eq!(rig.core.click_node("f-a").await, Some(TreeClick::ScopeTasks { kind: ScopeKind::Folder }));
+    assert_eq!(rig.core.looking(), Looking::Tasks, "una carpeta sacó de las tareas a quien las miraba");
+    assert!(rig.core.docs().state().target.is_none());
+
+    // Su documentación está a un clic, como la de cualquier nodo acotado.
+    rig.core.open_scope_docs().await;
     assert_eq!(rig.core.looking(), Looking::Docs);
     assert_eq!(rig.core.docs().state().body(), "carpeta");
 
     // Ya leyendo documentación, la lista abre la suya en vez de acotar.
     assert_eq!(rig.core.click_node("l-a").await, Some(TreeClick::OpenDocs));
     assert_eq!(rig.core.docs().state().body(), "lista");
+    assert_eq!(rig.core.my_work().state().scope.unwrap().id, "f-a", "leer la documentación de otro nodo cambió el ámbito");
+    // Y la carpeta, la suya.
+    assert_eq!(rig.core.click_node("f-a").await, Some(TreeClick::OpenDocs));
+    assert_eq!(rig.core.docs().state().body(), "carpeta");
 }
 
-/// El botón de documentación abre la del nodo acotado, sea espacio o lista, y
-/// volver deja en las tareas de ese mismo nodo (command-and-control-372).
+/// El botón de documentación abre la del nodo acotado, sea espacio, carpeta o
+/// lista, y volver deja en las tareas de ese mismo nodo
+/// (command-and-control-372). También desde la de una carpeta: hasta el
+/// 17-nov-2026 no acotaba y se volvía a lo que hubiera puesto
+/// (command-and-control-382).
 ///
 /// Roturas que atrapa: ofrecer la documentación sólo con una lista delante;
-/// volver de la documentación de un nodo a las tareas de otro; que una
-/// carpeta, que no acota, se lleve el ámbito que había.
+/// volver de la documentación de un nodo a las tareas de otro; volver de la
+/// de una carpeta a las tareas del nodo que se miraba antes.
 #[tokio::test]
 async fn the_docs_button_opens_the_scoped_nodes_docs_and_back_returns_to_its_tasks() {
     let rig = loaded_tree(vec![nested_space("a"), nested_space("b")]).await;
@@ -839,10 +900,16 @@ async fn the_docs_button_opens_the_scoped_nodes_docs_and_back_returns_to_its_tas
     assert!(rig.core.docs().state().target.is_none());
     assert_eq!(rig.core.my_work().state().scope.unwrap().id, "b");
 
+    // Leyendo la de `b` se pasa a la de su carpeta, y al volver las tareas
+    // son las de la carpeta.
+    rig.core.open_scope_docs().await;
     rig.core.click_node("f-b").await;
+    assert_eq!(rig.core.docs().state().body(), "f-b");
+    assert_eq!(rig.core.my_work().state().scope.unwrap().id, "b", "leer no acota");
     rig.core.back_to_tasks();
     assert_eq!(rig.core.looking(), Looking::Tasks);
-    assert_eq!(rig.core.my_work().state().scope.unwrap().id, "b", "una carpeta no acota");
+    let scope = rig.core.my_work().state().scope.unwrap();
+    assert_eq!((scope.kind, scope.id.as_str()), (ScopeKind::Folder, "f-b"));
 }
 
 /// «Mi trabajo» entero quita el ámbito y cierra el documento, y cambiar de

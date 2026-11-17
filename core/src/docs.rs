@@ -327,7 +327,7 @@ impl Core {
     }
 
     /// El botón de documentación de «Mi trabajo»: abre la del nodo al que
-    /// está acotado, sea lista o espacio (command-and-control-372). Sin acotar
+    /// está acotado, sea lista, carpeta o espacio (command-and-control-372). Sin acotar
     /// no hay nodo del que colgar, y no hace nada.
     pub async fn open_scope_docs(&self) {
         let Some(scope) = self.my_work().state().scope else { return };
@@ -337,8 +337,9 @@ impl Core {
     }
 
     /// De la documentación a las tareas **del mismo nodo**: cambiar de vista
-    /// no cambia de qué nodo se habla. Una carpeta no acota (lo dice
-    /// `tree_click`), así que desde la suya se vuelve a lo que hubiera.
+    /// no cambia de qué nodo se habla. También desde la de una carpeta, que
+    /// desde el 17-nov-2026 acota como las demás (command-and-control-382):
+    /// antes se volvía a lo que hubiera puesto, fuera de quien fuera.
     pub fn back_to_tasks(&self) {
         let Some(target) = self.docs().state().target else { return };
         self.docs().close();

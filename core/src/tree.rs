@@ -3,7 +3,7 @@
 //! Vino de `fetchTree` en `app/src/store/tasks.store.ts` y de los tipos de
 //! `app/src/types/task.ts`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -111,6 +111,38 @@ pub struct DocMark {
     pub pages: Option<i64>,
 }
 
+/// Una carpeta del árbol, cuelgue de donde cuelgue.
+pub fn find_folder<'a>(spaces: &'a [SpaceTree], folder_id: &str) -> Option<&'a FolderTree> {
+    fn within<'a>(folders: &'a [FolderTree], folder_id: &str) -> Option<&'a FolderTree> {
+        folders.iter().find_map(|folder| {
+            if folder.id == folder_id {
+                return Some(folder);
+            }
+            within(&folder.folders, folder_id)
+        })
+    }
+    spaces.iter().find_map(|space| within(&space.folders, folder_id))
+}
+
+/// Las listas que cuelgan de una carpeta, también las de sus subcarpetas a
+/// cualquier profundidad. `None` si la carpeta no está en el árbol, que no es
+/// lo mismo que estar vacía.
+///
+/// Es lo que quiere decir «las tareas de una carpeta»: una tarea sabe su
+/// lista y su espacio, no su carpeta.
+pub fn folder_list_ids(spaces: &[SpaceTree], folder_id: &str) -> Option<HashSet<String>> {
+    fn collect(folder: &FolderTree, out: &mut HashSet<String>) {
+        out.extend(folder.lists.iter().map(|list| list.id.clone()));
+        for inner in &folder.folders {
+            collect(inner, out);
+        }
+    }
+    let folder = find_folder(spaces, folder_id)?;
+    let mut ids = HashSet::new();
+    collect(folder, &mut ids);
+    Some(ids)
+}
+
 /// Con qué clave nombra el servidor el documento de un nodo: `list:<id>`.
 pub fn doc_key(kind: NodeKind, id: &str) -> String {
     let kind = match kind {
@@ -196,7 +228,10 @@ impl Tree {
                 self.update(|state| {
                     state.spaces = spaces.into_iter().filter(|space| !space.is_general()).collect();
                     state.loading = false;
-                })
+                });
+                // Un ámbito de carpeta se lee de este árbol: con uno nuevo
+                // hay que volver a mirarlo.
+                self.core.my_work().tree_reloaded();
             }
             Err(error) => self.update(|state| {
                 state.error = Some(error.to_string());

@@ -97,6 +97,44 @@ fn what_is_looked_at_narrows_where_it_goes() {
     assert_eq!(gone.options.len(), 4);
 }
 
+/// Con una carpeta a la vista se ofrecen las listas que cuelgan de ella, a
+/// cualquier profundidad, con su camino entero, y se pregunta cuál
+/// (command-and-control-382).
+///
+/// Roturas que atrapa: ofrecer el árbol entero con una carpeta delante (la
+/// tarea nacería donde no se está mirando y no saldría en pantalla); perder
+/// las de una subcarpeta; colar las listas sueltas de su espacio; contar el
+/// camino desde la carpeta y no desde el espacio; quedarse sin dónde crear
+/// porque la carpeta ya no está; fijar una lista por compartir id con su
+/// carpeta.
+#[test]
+fn a_folder_in_sight_offers_only_the_lists_under_it() {
+    let in_folder = destinations(&spaces(), Some("o1"), Some(&scope(ScopeKind::Folder, "f1")));
+    assert!(!in_folder.fixed);
+    assert_eq!(
+        said(&in_folder),
+        [("l-f1", "Proteus / Plataforma / tasks", false), ("l-f2", "Proteus / Plataforma / Infra / ops", false)]
+    );
+
+    let in_subfolder = destinations(&spaces(), Some("o1"), Some(&scope(ScopeKind::Folder, "f2")));
+    assert_eq!(said(&in_subfolder), [("l-f2", "Proteus / Plataforma / Infra / ops", false)]);
+    assert!(!in_subfolder.fixed, "una carpeta con una sola lista no es una lista a la vista");
+
+    let gone = destinations(&spaces(), Some("o1"), Some(&scope(ScopeKind::Folder, "no-existe")));
+    assert_eq!(gone.options.len(), 4);
+
+    // Una carpeta y una de sus listas con el mismo id: son de tablas
+    // distintas y nada impide que coincidan.
+    let twins: Vec<SpaceTree> = serde_json::from_value(json!([{
+        "id": "a", "orgId": "o1", "name": "Uno", "lists": [],
+        "folders": [{ "id": "x", "name": "Carpeta", "folders": [], "lists": [{ "id": "x", "name": "gemela" }, { "id": "y", "name": "otra" }] }],
+    }]))
+    .unwrap();
+    let offered = destinations(&twins, Some("o1"), Some(&scope(ScopeKind::Folder, "x")));
+    assert!(!offered.fixed);
+    assert_eq!(offered.options.len(), 2);
+}
+
 /// Nace en la lista pedida si se ofrece, y si no en la primera.
 ///
 /// Roturas que atrapa: seguir con la lista de la vista anterior, que ya no se
@@ -266,4 +304,7 @@ async fn where_it_can_go_follows_what_is_on_screen() {
     let offered = core.tasks().destinations();
     assert!(offered.fixed);
     assert_eq!(said(&offered), [("l-b", "Proteus / tasks", true)]);
+
+    core.my_work().set_scope(Some(scope(ScopeKind::Folder, "f2")));
+    assert_eq!(said(&core.tasks().destinations()), [("l-f2", "Proteus / Plataforma / Infra / ops", false)]);
 }
