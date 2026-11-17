@@ -22,7 +22,7 @@ use cac_core::{
 use chrono::NaiveDate;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Enter, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Position, TextareaState};
+use gpui_kit::component::input::{Enter, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Position, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::calendar::Date;
@@ -50,6 +50,10 @@ pub(crate) const STACK_BELOW: f32 = 1024.;
 const COMMENT_ROWS: usize = 4;
 const COMMENT_EDIT_ROWS: usize = 3;
 const DESCRIPTION_ROWS: usize = 8;
+/// Hasta cuántos renglones crece el título antes de deslizarse por dentro.
+/// El `<textarea>` de la app de siempre no tiene tope; el campo del kit pide
+/// uno, y con éste no lo alcanza ningún título que quepa en el servidor.
+const TITLE_ROWS: usize = 40;
 
 /// Una de las cajas en las que se escribe markdown en la página.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,10 +100,16 @@ pub struct TaskView {
     comment: Entity<TextareaState>,
     /// Que el cliente no lo lea. Sólo cuenta donde un cliente podría leerlo.
     internal: bool,
-    /// De qué tarea se están editando el título y la descripción. Al abrir
-    /// otra no se sigue editando: lo escrito era de aquélla.
+    /// De qué tarea se está editando la descripción. Al abrir otra no se
+    /// sigue editando: lo escrito era de aquélla.
     editing: Option<String>,
-    title_input: Entity<InputState>,
+    /// El título, que es siempre un campo: se escribe donde se lee.
+    title_input: Entity<TextareaState>,
+    /// De qué tarea y qué título es lo que se le puso al campo: se le pone
+    /// el de la tarea cuando cambia, y no en cada pintada, que le pisaría a
+    /// quien está escribiendo (o lo que no se pudo guardar).
+    title_shown: Option<(String, String)>,
+    _title_left: Subscription,
     body_input: Entity<TextareaState>,
     /// El selector del vencimiento.
     due: Entity<DatePickerState>,
@@ -249,6 +259,14 @@ impl TaskView {
                 this.create_tag(window, cx);
             }
         });
+        let title_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, TITLE_ROWS));
+        // Salir del campo guarda: el `onBlur={saveTitle}` de la app de
+        // siempre. Enter y Escape salen de él, cada uno a su manera.
+        let title_left = cx.subscribe_in(&title_input, window, |this, _, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::Blur) {
+                this.save_title(window, cx);
+            }
+        });
         Self {
             thread: Thread::Talk,
             thread_of: None,
@@ -256,7 +274,9 @@ impl TaskView {
             comment: cx.new(|cx| TextareaState::new(window, cx).auto_grow(COMMENT_ROWS, 16)),
             internal: false,
             editing: None,
-            title_input: cx.new(|cx| InputState::new(window, cx)),
+            title_input,
+            title_shown: None,
+            _title_left: title_left,
             body_input: cx.new(|cx| TextareaState::new(window, cx).auto_grow(DESCRIPTION_ROWS, 30)),
             due,
             due_shown: None,
@@ -735,10 +755,55 @@ impl TaskView {
             )
     }
 
-    /// Pasa a editar el título y la descripción, con lo que la tarea dice.
+    /// Le pone al campo del título el de la tarea, cuando es otra tarea u
+    /// otro título que el que se le puso. A quien está escribiendo en él no
+    /// se le pisa por un refresco de la misma tarea (en la app de siempre
+    /// tampoco: sólo se vuelve a poner al cambiar de tarea); al abrir otra
+    /// sí, que lo escrito era de la anterior.
+    fn show_title(&mut self, sheet: &TaskSheet, window: &mut Window, cx: &mut Context<Self>) {
+        let same_task = self.title_shown.as_ref().is_some_and(|(id, _)| *id == sheet.id);
+        if same_task && self.title_shown.as_ref().is_some_and(|(_, title)| *title == sheet.title) {
+            return;
+        }
+        if same_task && self.title_input.focus_handle(cx).is_focused(window) {
+            return;
+        }
+        self.title_input.update(cx, |input, cx| input.set_value(sheet.title.clone(), window, cx));
+        self.title_shown = Some((sheet.id.clone(), sheet.title.clone()));
+    }
+
+    /// El título de la tarea abierta, tal como está guardado.
+    fn saved_title(cx: &App) -> Option<String> {
+        Backend::snapshot(cx).read(cx).task.detail.as_ref().map(|detail| detail.task.title.clone())
+    }
+
+    /// El campo vuelve a decir el título guardado: lo escrito se tira.
+    fn restore_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(saved) = Self::saved_title(cx) else { return };
+        self.title_input.update(cx, |input, cx| input.set_value(saved, window, cx));
+    }
+
+    /// Guarda el título escrito, al salir de su campo. Qué se guarda lo dice
+    /// el core: en blanco o el mismo, nada, y el campo vuelve a decir el de
+    /// la tarea. Si el servidor no lo acepta se dice, y lo escrito se queda
+    /// en el campo para corregirlo.
+    ///
+    /// Llega siempre después de pintar: al abrirse otra tarea el campo ya
+    /// dice el título de ésa cuando pierde el foco, y no hay nada que
+    /// guardarle con lo escrito para la anterior.
+    fn save_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(saved) = Self::saved_title(cx) else { return };
+        let typed = self.title_input.read(cx).value().to_string();
+        match cac_core::retitled(&typed, &saved) {
+            Some(title) => self.change(move |core| async move { core.tasks().set_title(&title).await }, window, cx),
+            None => self.restore_title(window, cx),
+        }
+    }
+
+    /// Pasa a editar la descripción, con lo que la tarea dice. El título no
+    /// entra aquí: se edita en su sitio, siempre.
     pub(crate) fn start_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(sheet) = Backend::core(cx).tasks().sheet(locale(cx)) else { return };
-        self.title_input.update(cx, |input, cx| input.set_value(sheet.title, window, cx));
         self.body_input.update(cx, |input, cx| input.set_value(sheet.description, window, cx));
         self.editing = Some(sheet.id);
         cx.notify();
@@ -750,17 +815,13 @@ impl TaskView {
         cx.notify();
     }
 
-    /// Guarda el título y la descripción escritos y, si se guardaron, deja de
-    /// editar. Si no, se sigue editando con lo escrito.
+    /// Guarda la descripción escrita y, si se guardó, deja de editar. Si no,
+    /// se sigue editando con lo escrito.
     pub(crate) fn save_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let title = self.title_input.read(cx).value().to_string();
         let body = self.body_input.read(cx).value().to_string();
         self.save(
             "common:misc.errSave",
-            move |core| async move {
-                core.tasks().set_title(&title).await?;
-                core.tasks().set_description(&body).await
-            },
+            move |core| async move { core.tasks().set_description(&body).await },
             |this, _, _| this.editing = None,
             window,
             cx,
@@ -1766,25 +1827,58 @@ impl TaskView {
             (Thread::Notes, "thread-notes", "work:task.thread.agentNotes", sheet.notes.len()),
         ];
 
-        let title = if editing {
-            div().id("task-title-input").test_support().child(Input::new(&self.title_input)).into_any_element()
-        } else {
-            // `text-lg font-semibold`: el título de una tarea no es el de
-            // una pantalla.
-            div()
-                .id("task-title")
-                .test_support()
-                // El `textarea` del título: `text-lg` con su interlínea de
-                // 28 px, 2 px de relleno arriba y abajo, y el hueco que una
-                // caja en línea deja bajo su renglón.
-                .pt(px(2.))
-                .pb(px(5.))
-                .leading_lg()
-                .line_height(px(28.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(sheet.title.clone())
-                .into_any_element()
-        };
+        // El título es siempre un campo, y se escribe donde se lee: el
+        // `<textarea>` de `TaskDetailDrawer.tsx`, sin borde ni fondo, que
+        // crece con lo escrito por los renglones que haga falta. jose
+        // (17-nov-2026): «si es muy largo no fluye a la siguiente línea, y
+        // no lo pude editar»: sólo se volvía campo al pulsar el «Editar» de
+        // la descripción, y era de un renglón.
+        let for_paste = self.title_input.clone();
+        let title = div()
+            .id("task-title")
+            // `text-lg` con su interlínea de 28 px, 2 px de relleno arriba y
+            // abajo, y el hueco que una caja en línea deja bajo su renglón.
+            .pt(px(2.))
+            .pb(px(5.))
+            // El campo del kit trae 4 px de margen a cada lado en su talla
+            // más pequeña, y a la derecha se guarda 10 más para el cursor;
+            // el `<textarea>` va a `px-0`, a ras de la columna. Sin quitarlos
+            // el título parte el renglón una palabra antes que cuando sólo
+            // se leía.
+            .ml(px(-4.))
+            .mr(px(-14.))
+            // Antes de que lleguen al campo. Enter no pone un salto (un
+            // título no los lleva): sale del campo, y salir guarda. Con
+            // Mayúsculas o Ctrl también, como allí.
+            .capture_action(cx.listener(|this, _: &Enter, window, cx| {
+                this.page_focus.focus(window, cx);
+                cx.stop_propagation();
+            }))
+            // Escape tira lo escrito y devuelve el foco a la página, sin
+            // cerrarla: la cierra el siguiente, ya con el foco en ella.
+            .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                this.restore_title(window, cx);
+                this.page_focus.focus(window, cx);
+                cx.stop_propagation();
+            }))
+            .child(
+                Textarea::new(&self.title_input)
+                    .appearance(false)
+                    .bordered(false)
+                    .xsmall()
+                    // `text-lg font-semibold`: el título de una tarea no es
+                    // el de una pantalla.
+                    .leading_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    // Lo pegado con saltos de línea entra en un renglón.
+                    // Cómo, lo dice el core.
+                    .on_paste(move |item, window, cx| {
+                        let Some(text) = item.text().filter(|text| text.contains(['\n', '\r'])) else { return false };
+                        for_paste.update(cx, |input, cx| input.replace(cac_core::title_line(&text), window, cx));
+                        true
+                    }),
+            )
+            .test_support();
 
         // Dónde quedó: siempre a la vista, también sin nada escrito, que es
         // cuando hay que decir que falta.
@@ -2032,6 +2126,7 @@ impl Render for TaskView {
         let sheet = Backend::core(cx).tasks().sheet(locale(cx));
         if let Some(sheet) = &sheet {
             self.show_due(sheet, window, cx);
+            self.show_title(sheet, window, cx);
             self.show_thumbs(sheet, window, cx);
             // La caja promete el `@` sólo donde nombra a alguien: en lo que
             // lee un cliente dice quién lo lee.
@@ -2440,8 +2535,9 @@ mod tests {
         assert_eq!(open_task(cx).as_deref(), Some("t1"), "Escape cerró la página a quien escribía");
         assert_eq!(typed(&view, cx), "a medias");
 
-        // Fuera del campo: el foco vuelve a la página.
-        click(window, "task-title", cx);
+        // Fuera del campo: el foco vuelve a la página. (El título no sirve
+        // para esto: es un campo.)
+        click(window, "task-handoff", cx);
         press(cx);
         wait_until(cx, "se cierra", |cx| !on_screen(window, "task-page", cx));
         stop(cx);
@@ -2713,6 +2809,7 @@ mod tests {
         stop(cx);
     }
 
+    /// Lo que dicen el campo del título y el de la descripción.
     fn written(view: &Entity<TaskView>, cx: &mut TestAppContext) -> (String, String) {
         cx.update(|cx| {
             let view = view.read(cx);
@@ -2720,45 +2817,311 @@ mod tests {
         })
     }
 
-    fn rewrite(window: AnyWindowHandle, view: &Entity<TaskView>, title: &str, body: &str, cx: &mut TestAppContext) {
-        let (title, body) = (title.to_string(), body.to_string());
+    /// Escribe eso en la descripción que se está editando.
+    fn rewrite(window: AnyWindowHandle, view: &Entity<TaskView>, body: &str, cx: &mut TestAppContext) {
+        let body = body.to_string();
         with_view(window, view, cx, |view, window, cx| {
-            view.title_input.update(cx, |input, cx| input.set_value(title, window, cx));
             view.body_input.update(cx, |input, cx| input.set_value(body, window, cx));
         });
     }
 
-    /// «Editar» pone el título y la descripción en sus cajas con lo que la
-    /// tarea dice, y «Guardar» manda lo escrito y vuelve a la lectura.
+    /// Pulsa en el título, con la ventana en primer plano: a una ventana que
+    /// no lo está nadie le avisa de que un campo perdió el foco, y salir del
+    /// título es lo que lo guarda.
+    fn focus_title(window: AnyWindowHandle, cx: &mut TestAppContext) {
+        cx.update_window(window, |_, window, _| window.activate_window()).unwrap();
+        cx.run_until_parked();
+        click(window, "task-title", cx);
+    }
+
+    /// Si ya se mandó algún cambio de la primera tarea. Pinta antes de
+    /// mirar: el aviso de que un campo perdió el foco sale al pintar.
+    fn saved(window: AnyWindowHandle, server: &FakeServer, cx: &mut TestAppContext) -> bool {
+        on_screen(window, "task-page", cx);
+        !patches(server).is_empty()
+    }
+
+    /// Pulsa en el título y cambia todo lo que dice por eso, tecla a tecla
+    /// como quien escribe: el foco queda en el campo.
+    fn retitle(window: AnyWindowHandle, title: &str, cx: &mut TestAppContext) {
+        focus_title(window, cx);
+        press(window, "secondary-a", cx);
+        type_more(window, title, cx);
+    }
+
+    /// Los `PATCH` a la segunda tarea.
+    fn patches_to_other(server: &FakeServer) -> usize {
+        server.requests().iter().filter(|request| request.method.as_str() == "PATCH" && request.url.path() == "/api/v1/tasks/t2").count()
+    }
+
+    /// El título se escribe donde se lee, sin pulsar «Editar», y Enter lo
+    /// guarda: un solo `PATCH`, con lo escrito, y sin salto de línea.
     ///
-    /// Roturas que atrapa: unas cajas vacías sobre una tarea con texto (y
-    /// guardar la borra); un «Guardar» que no manda, o que manda sólo el
+    /// Roturas que atrapa: un título que sólo se lee (lo que jose encontró el
+    /// 17-nov-2026); un Enter que parte el título en dos renglones, que no
+    /// guarda, o que guarda dos veces (al pulsarlo y al salir del campo).
+    #[gpui_kit::test]
+    fn the_title_is_typed_in_place_and_enter_saves_it_once(cx: &mut TestAppContext) {
+        let server = server_with_choices();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        assert_eq!(written(&view, cx).0, "Subir el backend");
+
+        retitle(window, "Otro título", cx);
+        assert!(patches(&server).is_empty(), "guarda mientras se escribe");
+        press(window, "enter", cx);
+        wait_until(cx, "se guarda", |cx| saved(window, &server, cx));
+        settle(cx);
+
+        assert_eq!(patches(&server), [json!({ "title": "Otro título" })]);
+        assert_eq!(written(&view, cx).0, "Otro título", "Enter metió un salto de línea");
+        assert!(!on_screen(window, "task-problem", cx));
+        // El foco quedó en la página: lo siguiente que se teclea no va al título.
+        type_more(window, "x", cx);
+        assert_eq!(written(&view, cx).0, "Otro título");
+        stop(cx);
+    }
+
+    /// Salir del campo del título guarda lo escrito.
+    ///
+    /// Rotura que atrapa: perder el título escrito por pulsar en otro sitio
+    /// en vez de Enter.
+    #[gpui_kit::test]
+    fn leaving_the_title_saves_it(cx: &mut TestAppContext) {
+        let server = server_with_choices();
+        let (window, _view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+
+        retitle(window, "Otro título", cx);
+        click(window, "task-handoff", cx);
+        wait_until(cx, "se guarda", |cx| saved(window, &server, cx));
+        settle(cx);
+
+        assert_eq!(patches(&server), [json!({ "title": "Otro título" })]);
+        stop(cx);
+    }
+
+    /// Escape en el título tira lo escrito y deja el foco en la página, sin
+    /// cerrarla; el siguiente Escape sí la cierra.
+    ///
+    /// Roturas que atrapa: un Escape que se lleva la página con el título a
+    /// medio escribir; que guarde lo que se quiso tirar; que deje lo escrito
+    /// en el campo; que no suelte el foco (y la página ya no se cierre con
+    /// Escape).
+    #[gpui_kit::test]
+    fn escape_in_the_title_restores_it_and_keeps_the_page(cx: &mut TestAppContext) {
+        let server = server_with_choices();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+
+        retitle(window, "A medias", cx);
+        press(window, "escape", cx);
+        settle(cx);
+
+        assert!(on_screen(window, "task-page", cx), "Escape cerró la página desde el título");
+        assert_eq!(written(&view, cx).0, "Subir el backend");
+        assert!(patches(&server).is_empty(), "Escape guardó {:?}", patches(&server));
+
+        press(window, "escape", cx);
+        wait_until(cx, "el segundo la cierra", |cx| !on_screen(window, "task-page", cx));
+        stop(cx);
+    }
+
+    /// Un título en blanco no se manda, y vuelve el que había; el mismo
+    /// título tampoco se manda.
+    ///
+    /// Roturas que atrapa: dejar una tarea sin título; un campo que se queda
+    /// vacío (o con espacios de más) sobre una tarea que sí tiene título; un
+    /// `PATCH` cada vez que se entra y se sale del campo sin cambiar nada.
+    #[gpui_kit::test]
+    fn an_empty_title_or_the_same_one_sends_nothing(cx: &mut TestAppContext) {
+        let server = server_with_choices();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+
+        retitle(window, "   ", cx);
+        press(window, "enter", cx);
+        wait_until(cx, "vuelve el que había", |cx| on_screen(window, "task-page", cx) && written(&view, cx).0 == "Subir el backend");
+
+        retitle(window, " Subir el backend ", cx);
+        press(window, "enter", cx);
+        wait_until(cx, "vuelve el que había, sin espacios", |cx| on_screen(window, "task-page", cx) && written(&view, cx).0 == "Subir el backend");
+        settle(cx);
+
+        assert!(patches(&server).is_empty(), "se mandó {:?}", patches(&server));
+        assert!(!on_screen(window, "task-problem", cx), "avisa de un fallo por un título que no cambió");
+        stop(cx);
+    }
+
+    /// Un título pegado con saltos de línea entra en el campo, y se guarda,
+    /// en un solo renglón.
+    ///
+    /// Rotura que atrapa: un título partido en renglones por pegarlo de un
+    /// correo.
+    #[gpui_kit::test]
+    fn a_pasted_title_with_line_breaks_is_saved_on_one_line(cx: &mut TestAppContext) {
+        let server = server_with_choices();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+
+        focus_title(window, cx);
+        press(window, "secondary-a", cx);
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("Pegado de\nun correo\r\ncon saltos".to_string()));
+        press(window, "secondary-v", cx);
+        assert_eq!(written(&view, cx).0, "Pegado de un correo con saltos");
+        press(window, "enter", cx);
+        wait_until(cx, "se guarda", |cx| saved(window, &server, cx));
+
+        assert_eq!(patches(&server), [json!({ "title": "Pegado de un correo con saltos" })]);
+        stop(cx);
+    }
+
+    /// Si el servidor no acepta el título, se dice y lo escrito se queda en
+    /// el campo.
+    ///
+    /// Rotura que atrapa: un título que parece guardado y no lo está; perder
+    /// lo escrito por un fallo de red.
+    #[gpui_kit::test]
+    fn a_title_that_is_refused_says_so_and_keeps_what_was_typed(cx: &mut TestAppContext) {
+        // Sin `PATCH` montado: el servidor contesta 404.
+        let server = server();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+
+        retitle(window, "Otro título", cx);
+        press(window, "enter", cx);
+
+        wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
+        assert_eq!(written(&view, cx).0, "Otro título");
+        stop(cx);
+    }
+
+    /// Al abrir otra tarea con el título de la primera a medio escribir, el
+    /// campo dice el de la otra y no se guarda nada en ninguna de las dos.
+    ///
+    /// Roturas que atrapa: guardar en una tarea el título que se escribía
+    /// para otra; ver en una tarea el título a medias de la anterior.
+    #[gpui_kit::test]
+    fn another_task_opened_mid_edit_shows_its_own_title(cx: &mut TestAppContext) {
+        let server = server_with_choices();
+        let mut other = detail("t2");
+        other["task"]["title"] = json!("La otra tarea");
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t2")).respond_with(ok(other.clone())));
+        server.mount(Mock::given(method("PATCH")).and(path("/api/v1/tasks/t2")).respond_with(ok(other)));
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        retitle(window, "A medias, para la primera", cx);
+
+        open_other_task(cx);
+        wait_until(cx, "llega la otra", |cx| {
+            cx.update(|cx| Backend::snapshot(cx).read(cx).task.detail.as_ref().is_some_and(|detail| detail.task.id == "t2"))
+                && on_screen(window, "task-title", cx)
+        });
+        settle(cx);
+
+        assert_eq!(written(&view, cx).0, "La otra tarea");
+        assert_eq!(patches_to_other(&server), 0, "se guardó en la otra tarea lo escrito para la primera");
+        assert!(patches(&server).is_empty(), "se guardó {:?} sin salir del campo", patches(&server));
+        stop(cx);
+    }
+
+    /// Un título largo sigue en el renglón de abajo, los que haga falta, y
+    /// uno corto ocupa uno solo.
+    ///
+    /// Rotura que atrapa: lo que jose encontró el 17-nov-2026 («si es muy
+    /// largo no fluye a la siguiente línea»): un título de un renglón que se
+    /// corta o se desliza de lado.
+    #[gpui_kit::test]
+    fn a_long_title_flows_onto_as_many_lines_as_it_needs(cx: &mut TestAppContext) {
+        let server = server_with_tasks(vec![contract_task("t1", "a", |_| {}), contract_task("t2", "a", |_| {})]);
+        let mut long = detail("t1");
+        long["task"]["title"] = json!("palabra ".repeat(60));
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(long)));
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t2")).respond_with(ok(detail("t2"))));
+        let (window, _view) = open_sized(&server, 900., cx);
+        let title_height = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                f32::from(window.find("task-title").bounds().size.height)
+            })
+            .unwrap()
+        };
+        wait_until(cx, "las tareas llegan", |cx| on_screen(window, "work-row-t1", cx));
+        click(window, "work-row-t1", cx);
+        wait_until(cx, "llega el detalle", |cx| on_screen(window, "task-title", cx));
+        settle(cx);
+        // 60 palabras de 8 letras a 18 px no caben en menos de tres
+        // renglones de 28 en una ventana de 900.
+        let long = title_height(cx);
+        assert!(long >= 3. * 28., "el título largo mide {long} de alto: no sigue en el renglón de abajo");
+
+        open_other_task(cx);
+        wait_until(cx, "llega la otra", |cx| {
+            cx.update(|cx| Backend::snapshot(cx).read(cx).task.detail.as_ref().is_some_and(|detail| detail.task.id == "t2"))
+                && on_screen(window, "task-title", cx)
+        });
+        settle(cx);
+        let short = title_height(cx);
+        assert_eq!(short, 28. + 2. + 5., "el título corto no mide un renglón con su relleno");
+        stop(cx);
+    }
+
+    /// Un refresco de la misma tarea no le pisa el título a quien lo está
+    /// escribiendo, aunque traiga otro: como en la app de siempre, que sólo
+    /// vuelve a ponerlo al cambiar de tarea.
+    ///
+    /// Rotura que atrapa: perder lo escrito porque alguien comentó, o
+    /// renombró la tarea, a media frase.
+    #[gpui_kit::test]
+    fn a_refresh_of_the_same_task_does_not_overwrite_what_is_being_typed(cx: &mut TestAppContext) {
+        let server = server_with_choices();
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        retitle(window, "A medias", cx);
+
+        let mut renamed = detail("t1");
+        renamed["task"]["title"] = json!("Renombrada por otro");
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(renamed)).with_priority(1));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.tasks().refresh().await }));
+        wait_until(cx, "llega el refresco", |cx| {
+            on_screen(window, "task-page", cx)
+                && cx.update(|cx| Backend::snapshot(cx).read(cx).task.detail.as_ref().is_some_and(|detail| detail.task.title == "Renombrada por otro"))
+        });
+
+        assert_eq!(written(&view, cx).0, "A medias");
+        stop(cx);
+    }
+
+    /// «Editar» pone la descripción en su caja con lo que la tarea dice, y
+    /// «Guardar» manda lo escrito y vuelve a la lectura. El título no cambia
+    /// de modo con ella: se edita en su sitio.
+    ///
+    /// Roturas que atrapa: una caja vacía sobre una tarea con texto (y
+    /// guardar la borra); un «Guardar» que no manda, o que manda también el
     /// título; quedarse editando después de guardar.
     #[gpui_kit::test]
     fn editing_starts_from_what_the_task_says_and_saves_what_was_written(cx: &mut TestAppContext) {
         let server = server_with_choices();
         let (window, view) = open_with_view(&server, cx);
         open_first_task(window, cx);
-        assert!(!on_screen(window, "task-title-input", cx) && !on_screen(window, "task-save", cx));
+        assert!(!on_screen(window, "task-description-input", cx) && !on_screen(window, "task-save", cx));
 
         click(window, "task-edit", cx);
-        assert!(on_screen(window, "task-title-input", cx) && on_screen(window, "task-description-input", cx));
-        assert!(!on_screen(window, "task-title", cx) && !on_screen(window, "task-edit", cx));
+        assert!(on_screen(window, "task-title", cx) && on_screen(window, "task-description-input", cx));
+        assert!(!on_screen(window, "task-edit", cx));
         assert_eq!(written(&view, cx), ("Subir el backend".to_string(), "Con **markdown**.".to_string()));
 
-        rewrite(window, &view, "Otro título", "Otra descripción", cx);
+        rewrite(window, &view, "Otra descripción", cx);
         click(window, "task-save", cx);
-        wait_until(cx, "se guardan los dos y vuelve a la lectura", |cx| {
-            patches(&server).len() == 2 && on_screen(window, "task-title", cx)
-        });
+        wait_until(cx, "se guarda y vuelve a la lectura", |cx| !patches(&server).is_empty() && on_screen(window, "task-edit", cx));
 
-        assert_eq!(patches(&server), [json!({ "title": "Otro título" }), json!({ "description": "Otra descripción" })]);
-        assert!(!on_screen(window, "task-title-input", cx) && !on_screen(window, "task-problem", cx));
+        assert_eq!(patches(&server), [json!({ "description": "Otra descripción" })]);
+        assert!(!on_screen(window, "task-description-input", cx) && !on_screen(window, "task-problem", cx));
         stop(cx);
     }
 
-    /// «Cancelar» tira lo escrito: no se manda, y al volver a editar las
-    /// cajas dicen otra vez lo que dice la tarea.
+    /// «Cancelar» tira lo escrito: no se manda, y al volver a editar la
+    /// caja dice otra vez lo que dice la tarea.
     ///
     /// Roturas que atrapa: un «Cancelar» que guarda; volver a editar y
     /// encontrarse lo que se había descartado.
@@ -2768,15 +3131,15 @@ mod tests {
         let (window, view) = open_with_view(&server, cx);
         open_first_task(window, cx);
         click(window, "task-edit", cx);
-        rewrite(window, &view, "No", "Tampoco", cx);
+        rewrite(window, &view, "Tampoco", cx);
 
         click(window, "task-cancel", cx);
         cx.run_until_parked();
-        assert!(on_screen(window, "task-title", cx) && !on_screen(window, "task-title-input", cx));
+        assert!(on_screen(window, "task-edit", cx) && !on_screen(window, "task-description-input", cx));
         assert!(patches(&server).is_empty(), "cancelar guardó {:?}", patches(&server));
 
         click(window, "task-edit", cx);
-        assert_eq!(written(&view, cx).0, "Subir el backend");
+        assert_eq!(written(&view, cx).1, "Con **markdown**.");
         stop(cx);
     }
 
@@ -2790,20 +3153,20 @@ mod tests {
         let (window, view) = open_with_view(&server, cx);
         open_first_task(window, cx);
         click(window, "task-edit", cx);
-        rewrite(window, &view, "Otro título", "Mucho texto", cx);
+        rewrite(window, &view, "Mucho texto", cx);
 
         click(window, "task-save", cx);
 
         wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "task-problem", cx));
-        assert!(on_screen(window, "task-title-input", cx));
-        assert_eq!(written(&view, cx), ("Otro título".to_string(), "Mucho texto".to_string()));
+        assert!(on_screen(window, "task-description-input", cx));
+        assert_eq!(written(&view, cx).1, "Mucho texto");
         stop(cx);
     }
 
     /// Al abrir otra tarea no se sigue editando: lo escrito era de la anterior.
     ///
-    /// Rotura que atrapa: guardar en una tarea el título que se escribía
-    /// para otra.
+    /// Rotura que atrapa: guardar en una tarea la descripción que se
+    /// escribía para otra.
     #[gpui_kit::test]
     fn another_task_is_not_opened_in_edit_mode(cx: &mut TestAppContext) {
         let server = server();
@@ -2811,15 +3174,14 @@ mod tests {
         let (window, _view) = open_with_view(&server, cx);
         open_first_task(window, cx);
         click(window, "task-edit", cx);
-        assert!(on_screen(window, "task-title-input", cx));
+        assert!(on_screen(window, "task-description-input", cx));
 
         open_other_task(cx);
         wait_until(cx, "llega la otra", |cx| {
             cx.update(|cx| Backend::snapshot(cx).read(cx).task.detail.as_ref().is_some_and(|detail| detail.task.id == "t2"))
         });
 
-        assert!(on_screen(window, "task-title", cx) && !on_screen(window, "task-title-input", cx));
-        assert!(on_screen(window, "task-edit", cx));
+        assert!(on_screen(window, "task-edit", cx) && !on_screen(window, "task-description-input", cx));
         stop(cx);
     }
 
@@ -4143,7 +4505,7 @@ mod tests {
 
         click(window, "task-edit", cx);
         assert!(on_screen(window, "task-description-input", cx) && on_screen(window, "task-description-attach", cx));
-        rewrite(window, &view, "título", "cuerpo", cx);
+        rewrite(window, &view, "cuerpo", cx);
         click(window, "task-description-quote", cx);
         assert_eq!(written(&view, cx).1, "> cuerpo");
 
@@ -4197,7 +4559,7 @@ mod tests {
         let notes = dir.join("notas.txt");
         std::fs::write(&notes, b"hola").unwrap();
         click(window, "task-edit", cx);
-        rewrite(window, &view, "título", "", cx);
+        rewrite(window, &view, "", cx);
         let before = typed(&view, cx);
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);

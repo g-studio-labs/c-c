@@ -35,6 +35,24 @@ pub fn tag_color_for(name: &str) -> &'static str {
     TAG_PALETTE[(hash as i64).unsigned_abs() as usize % TAG_PALETTE.len()]
 }
 
+/// Un título en un solo renglón: cada salto de línea, un espacio. Es lo que
+/// hace el `onChange` del título en `TaskDetailDrawer.tsx` con lo que se pega
+/// (`replace(/\r?\n/g, " ")`): un título no lleva saltos, y uno pegado de un
+/// correo con tres renglones no se guarda partido.
+pub fn title_line(text: &str) -> String {
+    text.replace("\r\n", " ").replace(['\n', '\r'], " ")
+}
+
+/// El título que hay que guardar de lo que se escribió en su campo, o `None`
+/// si no hay nada que guardar: en blanco (una tarea sin título no se
+/// encuentra en ninguna lista) o el que ya tiene. Es el `saveTitle` de
+/// `TaskDetailDrawer.tsx`; con `None` el campo vuelve a decir el de la tarea.
+pub fn retitled(typed: &str, current: &str) -> Option<String> {
+    let line = title_line(typed);
+    let title = line.trim();
+    (!title.is_empty() && title != current).then(|| title.to_string())
+}
+
 /// Algo que se puede poner o quitar en la tarea abierta.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -136,17 +154,17 @@ impl Tasks {
         state.detail.as_ref().map(|detail| assignee_choices(detail, &state.team)).unwrap_or_default()
     }
 
-    /// Le cambia el título. Uno en blanco no se manda: una tarea sin título
-    /// no se encuentra en ninguna lista. Si es el que tiene, no se pide nada.
+    /// Le cambia el título, en un solo renglón (los saltos, espacios). Uno en
+    /// blanco no se manda: una tarea sin título no se encuentra en ninguna
+    /// lista. Si es el que tiene, no se pide nada.
     pub async fn set_title(&self, title: &str) -> Result<(), ApiError> {
-        let title = title.trim();
-        if title.is_empty() {
+        if title.trim().is_empty() {
             return Err(super::refused("empty-title", "A task needs a title"));
         }
-        if self.open_detail()?.task.title == title {
-            return Ok(());
+        match retitled(title, &self.open_detail()?.task.title) {
+            Some(title) => self.update(TaskPatch { title: Some(title), ..TaskPatch::default() }).await,
+            None => Ok(()),
         }
-        self.update(TaskPatch { title: Some(title.to_string()), ..TaskPatch::default() }).await
     }
 
     /// Le cambia la descripción (markdown); vacía se la quita. Si es la que

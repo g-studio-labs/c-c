@@ -741,11 +741,33 @@ async fn title_and_description_are_sent_clean_and_only_when_they_change() {
     tasks.set_title("  Otra  ").await.expect("se guardó");
     tasks.set_description(" Nueva\n").await.expect("se guardó");
     tasks.set_description("  ").await.expect("se quitó");
+    // Un título pegado con saltos de línea se guarda en un renglón; y uno
+    // que sólo son saltos está en blanco.
+    assert!(tasks.set_title("\n\r\n").await.is_err());
+    tasks.set_title("Pegado de\nun correo\r\ncon saltos\n").await.expect("se guardó");
 
     assert_eq!(
         requests_to(&rig.server, "PATCH", "/tasks/t1").await,
-        [json!({ "title": "Otra" }), json!({ "description": "Nueva" }), json!({ "description": "" })]
+        [
+            json!({ "title": "Otra" }),
+            json!({ "description": "Nueva" }),
+            json!({ "description": "" }),
+            json!({ "title": "Pegado de un correo con saltos" })
+        ]
     );
+}
+
+/// Lo escrito en el campo del título: qué se guarda y qué no.
+///
+/// Roturas que atrapa: guardar un título partido en renglones; mandar el
+/// que ya tiene (o uno en blanco) cada vez que se sale del campo; que un
+/// retorno de carro de Windows deje dos espacios.
+#[test]
+fn what_was_typed_in_the_title_is_saved_on_one_line_or_not_at_all() {
+    assert_eq!(cac_core::title_line("uno\ndos\r\ntres\rcuatro"), "uno dos tres cuatro");
+    assert_eq!(cac_core::retitled("  Otra\ncosa \n", "Tarea").as_deref(), Some("Otra cosa"));
+    assert_eq!(cac_core::retitled(" Tarea ", "Tarea"), None);
+    assert_eq!(cac_core::retitled(" \n ", "Tarea"), None);
 }
 
 /// Editar un comentario manda lo escrito, limpio, y vuelve a pedir la tarea;
