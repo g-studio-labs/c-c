@@ -297,6 +297,7 @@
     "errCreate": "No se pudo crear",
     "whatNeedsDoing": "¿Qué hay que hacer?",
     "taskTitle": "Título de la tarea",
+    "composerKeys": "↵ crea y sigue · esc cierra",
     "closeComposer": "Cerrar el compositor",
     "whereItGoes": "Dónde va",
     "priority": "Prioridad",

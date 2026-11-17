@@ -297,6 +297,7 @@
     "errCreate": "Could not create it",
     "whatNeedsDoing": "What needs doing?",
     "taskTitle": "Task title",
+    "composerKeys": "↵ creates and stays · esc closes",
     "closeComposer": "Close the composer",
     "whereItGoes": "Where it goes",
     "priority": "Priority",

@@ -9,7 +9,10 @@
 
 use cac_core::{Choice, Destination, TaskDraft, PRIORITIES};
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -167,7 +170,9 @@ impl NewTaskRow {
     ) -> impl IntoElement {
         let view = cx.entity().downgrade();
         let label = choices.iter().find(|(value, _)| *value == chosen).map(|(_, label)| label.clone()).unwrap_or_default();
-        Button::new(id).ghost().xsmall().label(label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+        // El `Picker` de la app de siempre en su tamaño `sm`: con borde y
+        // su chevrón, no un texto suelto.
+        Button::new(id).outline().small().label(label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
             for (value, label) in choices.clone() {
                 let view = view.clone();
                 menu = menu.item(PopupMenuItem::new(label).checked(value == chosen).on_click(move |_, _, cx| {
@@ -182,15 +187,16 @@ impl NewTaskRow {
 impl Render for NewTaskRow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (muted, primary, card, radius, danger) =
-            (theme.muted_foreground, theme.primary, theme.group_box, theme.radius, theme.danger);
+        let (muted, foreground, primary, card, danger, mono) =
+            (theme.muted_foreground, theme.foreground, theme.primary, theme.group_box, theme.danger, theme.mono_font_family.clone());
+        let close_hint = tr(cx, "work:board.closeComposer");
         let destinations = Backend::core(cx).tasks().destinations();
         let destination = destinations.chosen(&self.list_id).cloned();
 
         let place = destination.as_ref().map(|destination| {
             if destinations.fixed {
                 // Ya se sabe dónde va: se dice, no se pregunta.
-                div().id("new-task-list").test_support().px_1().text_xs().text_color(muted).child(destination.label.clone()).into_any_element()
+                div().id("new-task-list").test_support().max_w(px(256.)).truncate().px_1().text_color(muted).child(destination.label.clone()).into_any_element()
             } else {
                 let choices = destinations.options.iter().map(|option| (option.list_id.clone(), option.label.clone())).collect();
                 self.render_picker("new-task-list", destination.list_id.clone(), choices, Self::choose_list, cx).into_any_element()
@@ -203,22 +209,21 @@ impl Render for NewTaskRow {
         let assignee = self.render_picker("new-task-assignee", self.assignee.clone(), people, Self::choose_assignee, cx);
         // Quién la ve sólo se pregunta donde un cliente podría leerla.
         let audience = destination.as_ref().filter(|destination| destination.client).map(|_| {
-            let internal = self.internal;
-            Button::new("new-task-audience")
-                .ghost()
-                .xsmall()
-                .label(tr(cx, if internal { "work:board.internalOnly" } else { "work:board.clientSeesIt" }))
-                .on_click(cx.listener(move |this, _, _, cx| this.set_internal(!internal, cx)))
+            let choices = vec![(false, tr(cx, "work:board.clientSeesIt")), (true, tr(cx, "work:board.internalOnly"))];
+            self.render_picker("new-task-audience", self.internal, choices, Self::set_internal, cx)
         });
 
+        // Las medidas son las de `app/src/components/tasks/NewTaskRow.tsx`:
+        // `rounded-md border border-primary/40 bg-card p-2`, el título solo
+        // con su × (crear es Enter, y lo dice la esquina), y debajo lo
+        // elegido a `gap-1.5` en letra pequeña.
         div()
             .id("new-task-row")
             .test_support()
             .flex()
             .flex_col()
-            .gap_2()
             .p_2()
-            .rounded(radius)
+            .rounded(px(8.))
             .border_1()
             .border_color(primary.opacity(0.4))
             .bg(card)
@@ -232,39 +237,39 @@ impl Render for NewTaskRow {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.title).id("new-task-title").small().appearance(false)))
+                    .child(div().flex_1().child(Input::new(&self.title).id("new-task-title").appearance(false)))
+                    .when(self.busy, |this| this.child(div().id("new-task-busy").flex_none().child(Spinner::new().color(muted)).test_support()))
                     .child(
-                        Button::new("new-task-create")
-                            .primary()
-                            .small()
-                            .loading(self.busy)
-                            .label(tr(cx, "work:board.addTask"))
-                            .on_click(cx.listener(|this, _, window, cx| this.create(window, cx))),
-                    )
-                    .child(
-                        Button::new("new-task-close")
-                            .ghost()
-                            .small()
-                            .icon(Icon::new(Lucide::X))
-                            .tooltip(tr(cx, "work:board.closeComposer"))
-                            .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                        div()
+                            .id("new-task-close")
+                            .flex_none()
+                            .text_color(muted)
+                            .cursor_pointer()
+                            .hover(move |style| style.text_color(foreground))
+                            .on_click(cx.listener(|this, _, _, cx| this.close(cx)))
+                            .child(Icon::new(Lucide::X).size_4())
+                            .tooltip(move |window, cx| Tooltip::new(close_hint.clone()).build(window, cx))
+                            .test_support(),
                     ),
             )
             .child(
                 div()
+                    .mt_2()
                     .flex()
                     .flex_wrap()
                     .items_center()
-                    .gap_1()
+                    .gap_1p5()
+                    .text_xs()
                     .children(place)
                     .child(priority)
                     .child(div().id("new-task-due").test_support().w(px(150.)).child(
                         DatePicker::new(&self.due).small().cleanable(true).placeholder(tr(cx, "work:board.dueDate")),
                     ))
                     .child(assignee)
-                    .children(audience),
+                    .children(audience)
+                    .child(div().ml_auto().font_family(mono).text_size(px(10.)).text_color(muted).child(tr(cx, "work:board.composerKeys"))),
             )
-            .children(self.problem.clone().map(|problem| div().id("new-task-problem").test_support().text_xs().text_color(danger).child(problem)))
+            .children(self.problem.clone().map(|problem| div().id("new-task-problem").test_support().mt_2().text_xs().text_color(danger).child(problem)))
     }
 }
 
@@ -476,7 +481,7 @@ mod tests {
 
         cx.update(|cx| row.update(cx, |row, cx| row.choose_list("l-b".into(), cx)));
         write(window, "Una", cx);
-        click(window, "new-task-create", cx);
+        press(window, "enter", cx);
         wait_until(cx, "se crea la primera", |cx| created(&server).len() == 1 && titled(&view, cx).is_empty());
 
         cx.update(|cx| {
@@ -516,7 +521,7 @@ mod tests {
         press(window, "enter", cx);
         wait_until(cx, "se crea a la vista del cliente", |cx| created(&server).len() == 1 && titled(&view, cx).is_empty());
 
-        click(window, "new-task-audience", cx);
+        cx.update(|cx| row.update(cx, |row, cx| row.set_internal(true, cx)));
         write(window, "Interna", cx);
         press(window, "enter", cx);
         wait_until(cx, "se crea interna", |cx| created(&server).len() == 2 && titled(&view, cx).is_empty());

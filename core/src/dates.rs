@@ -6,7 +6,7 @@
 //! Desde aquí salen como **días** (`NaiveDate`): un día no tiene zona, así que
 //! no hay captador local con el que equivocarse.
 
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, Offset, TimeZone, Utc};
 
 /// El día que alguien eligió como vencimiento, leído tal cual.
 ///
@@ -33,6 +33,24 @@ pub fn today_in<Viewer: TimeZone>(zone: Option<&str>, now: DateTime<Utc>, viewer
         Some(zone) => now.with_timezone(&zone).date_naive(),
         None => now.with_timezone(viewer).date_naive(),
     }
+}
+
+/// «hora de Mexico City», sólo para quien **no** está en la hora de la
+/// organización: a los demás no hay nada que aclararles. Es lo que sale al
+/// pasar el cursor por un vencimiento (`zoneHint` en `app/src/lib/due.ts`).
+///
+/// Se compara el desfase de ahora y no el nombre: Mérida y Ciudad de México
+/// son la misma hora. Sin zona, o con una que no existe, no hay aviso.
+pub fn zone_hint<Viewer: TimeZone>(locale: crate::texts::Locale, zone: Option<&str>, now: DateTime<Utc>, viewer: &Viewer) -> Option<String> {
+    let name = zone?;
+    let zone = name.parse::<chrono_tz::Tz>().ok()?;
+    let offset = |seconds: chrono::FixedOffset| seconds.local_minus_utc();
+    if offset(now.with_timezone(&zone).offset().fix()) == offset(now.with_timezone(viewer).offset().fix()) {
+        return None;
+    }
+    // La ciudad es el último tramo del nombre, con espacios.
+    let city = name.rsplit('/').next().unwrap_or(name).replace('_', " ");
+    Some(crate::texts::text_with(locale, "work:due.zone", &[("city", &city)]))
 }
 
 /// Cómo está un vencimiento respecto a hoy.
@@ -166,5 +184,24 @@ mod tests {
 
         assert_eq!(due_state(due, mexico), Some(DueState::Today));
         assert_eq!(due_state(due, auckland), Some(DueState::Yesterday));
+    }
+
+    /// El aviso de zona sólo sale para quien no está en la hora de la
+    /// organización, y nombra su ciudad.
+    ///
+    /// Roturas que atrapa: avisar a quien ya está en esa hora (también desde
+    /// otra ciudad con el mismo desfase); callar ante quien está en otra;
+    /// enseñar «America/Mexico_City» en vez de la ciudad; inventar un aviso
+    /// sin zona o con una que no existe.
+    #[test]
+    fn the_zone_hint_is_only_for_who_is_in_another_hour() {
+        use crate::texts::Locale;
+        let now = Utc.with_ymd_and_hms(2026, 11, 13, 3, 0, 0).unwrap();
+        let merida = FixedOffset::west_opt(6 * 3600).unwrap();
+        let madrid = FixedOffset::east_opt(3600).unwrap();
+        assert_eq!(zone_hint(Locale::Es, Some("America/Mexico_City"), now, &merida), None);
+        assert_eq!(zone_hint(Locale::Es, Some("America/Mexico_City"), now, &madrid).as_deref(), Some("hora de Mexico City"));
+        assert_eq!(zone_hint(Locale::Es, None, now, &madrid), None);
+        assert_eq!(zone_hint(Locale::Es, Some("Marte/Olympus"), now, &madrid), None);
     }
 }

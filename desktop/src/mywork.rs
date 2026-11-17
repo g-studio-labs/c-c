@@ -11,6 +11,7 @@ use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -28,17 +29,37 @@ const LENSES: [(WorkLens, &str); 5] = [
     (WorkLens::All, "all"),
 ];
 
-/// La prioridad de una tarea, en su color; sin prioridad no se pinta nada.
+/// La prioridad de una tarea como chip: punto y nombre sobre su color al
+/// 15%; sin prioridad no se pinta nada. Las medidas y los tonos son los de
+/// `app/src/components/tasks/PriorityChip.tsx` (`rounded-full px-1.5 py-px
+/// text-xs font-medium`, punto `size-1.5`): sólo texto de color, en una
+/// columna llena no se distinguía de los demás metadatos.
 pub(crate) fn priority_chip(priority: &str, cx: &App) -> Option<Div> {
     let theme = cx.theme();
     let tone = match priority {
         "none" | "" => return None,
         "urgent" => theme.danger,
         "high" => theme.warning,
-        "normal" => theme.info,
+        // El `--info` del CSS, que el tema del kit no trae con ese valor.
+        "normal" => crate::theme::css_color("info", cx),
         _ => theme.muted_foreground,
     };
-    Some(div().flex_none().px_2().rounded_md().bg(tone.opacity(0.15)).text_xs().text_color(tone).child(tr(cx, &format!("work:taskPriority.{priority}"))))
+    Some(
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_1()
+            .px_1p5()
+            .py(px(1.))
+            .rounded_full()
+            .bg(tone.opacity(0.15))
+            .text_xs()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(tone)
+            .child(div().size_1p5().flex_none().rounded_full().bg(tone))
+            .child(tr(cx, &format!("work:taskPriority.{priority}"))),
+    )
 }
 
 /// De qué color va un vencimiento y si pesa: rojo si ya pasó, ámbar si es
@@ -427,20 +448,29 @@ impl MyWorkView {
         }))
     }
 
-    fn render_row(&self, row: WorkRow, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Una fila de la lista, con las medidas del `<li>` de `MyWork.tsx`:
+    /// folio en mono (`w-10`), título con la miga de su madre, el chip de
+    /// prioridad, el vencimiento (`w-20`) y, cerrando, su lista (`w-28`).
+    /// `first` es que no lleva raya encima: las filas se separan entre sí
+    /// (`divide-y`), no del borde de la tarjeta.
+    fn render_row(&self, row: WorkRow, first: bool, zone_hint: Option<String>, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (muted, hover, border) = (theme.muted_foreground, theme.accent, theme.border);
+        let (muted, hover, border, mono) = (theme.muted_foreground, theme.accent, theme.border, theme.mono_font_family.clone());
         let priority = priority_chip(&row.priority, cx);
         let due = row.due.map(|due| {
             let (tone, strong) = due_tone(due.state, cx);
             div()
-                .w(px(72.))
+                .id(SharedString::from(format!("work-due-{}", row.id)))
+                .w_20()
                 .flex_none()
                 .text_xs()
                 .text_right()
                 .text_color(tone)
                 .when(strong, |this| this.font_weight(FontWeight::MEDIUM))
                 .child(due.text)
+                // Para quien no está en la hora de la organización: en qué
+                // hora se acaba ese día (`dueTitle` en `TaskCardMini.tsx`).
+                .when_some(zone_hint, |this, hint| this.tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx)))
         });
 
         div()
@@ -451,8 +481,7 @@ impl MyWorkView {
             .gap_2()
             .px_3()
             .py_2()
-            .border_b_1()
-            .border_color(border)
+            .when(!first, |this| this.border_t_1().border_color(border))
             .hover(move |style| style.bg(hover.opacity(0.4)))
             .cursor_pointer()
             .on_click({
@@ -462,32 +491,36 @@ impl MyWorkView {
                     Backend::run(cx, move |core| async move { core.tasks().open(&id).await });
                 }
             })
-            .child(div().w(px(44.)).flex_none().text_xs().text_color(muted).child(format!("#{}", row.seq)))
+            .child(div().w_10().flex_none().font_family(mono).text_xs().text_color(muted).child(format!("#{}", row.seq)))
             .child(
                 div()
+                    .min_w_0()
                     .flex_1()
                     .flex()
                     .items_baseline()
                     .gap_1()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
                     .text_sm()
-                    .child(div().overflow_hidden().text_ellipsis().child(row.title))
-                    .children(row.parent.map(|parent| div().flex_none().text_xs().text_color(muted).child(parent))),
+                    // El título entero primero; lo que se recorta es la miga.
+                    .child(div().flex_shrink_0().max_w_full().truncate().child(row.title))
+                    .children(row.parent.map(|parent| div().min_w_0().truncate().text_xs().text_color(muted).child(parent))),
             )
             .children(priority)
             .children(due)
+            .child(div().id(SharedString::from(format!("work-list-{}", row.id))).w(rems(7.)).flex_none().truncate().text_xs().text_right().text_color(muted).child(row.list).test_support())
     }
 
-    fn render_group(&self, group: WorkGroup, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Un espacio y sus tareas: el rótulo (`mb-1 text-xs font-medium
+    /// uppercase`) y la tarjeta (`rounded-xl border bg-card`, que con el
+    /// `--radius` de `index.css` son 14 px).
+    fn render_group(&self, group: WorkGroup, zone_hint: &Option<String>, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (muted, border, card, radius) = (theme.muted_foreground, theme.border, theme.group_box, theme.radius);
+        let (muted, border, card) = (theme.muted_foreground, theme.border, theme.group_box);
         div()
             .flex()
             .flex_col()
-            .gap_1()
             .child(
                 div()
+                    .mb_1()
                     .text_xs()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(muted)
@@ -497,13 +530,36 @@ impl MyWorkView {
                 div()
                     .flex()
                     .flex_col()
-                    .rounded(radius)
+                    .rounded(px(14.))
                     .border_1()
                     .border_color(border)
                     .bg(card)
                     .overflow_hidden()
-                    .children(group.rows.into_iter().map(|row| self.render_row(row, cx))),
+                    .children(group.rows.into_iter().enumerate().map(|(index, row)| self.render_row(row, index == 0, zone_hint.clone(), cx))),
             )
+    }
+
+    /// Mientras llega la lista, su forma: dos grupos de tres filas
+    /// (`WorkSkeleton` en `MyWork.tsx`). Un «cargando…» no dice nada de lo
+    /// que viene, y la pantalla da un salto cuando aparecen las filas.
+    fn render_skeleton(cx: &App) -> impl IntoElement {
+        let border = cx.theme().border;
+        div().id("work-skeleton").flex().flex_col().gap_5().children((0..2).map(|_| {
+            div().flex().flex_col().gap_2().child(Skeleton::new().h_3().w(rems(7.)).rounded_md()).children((0..3).map(|_| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .p_2()
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(border)
+                    .child(Skeleton::new().size_4().flex_none().rounded_full())
+                    .child(Skeleton::new().h_3().flex_1().rounded_md())
+                    .child(Skeleton::new().h_3().w_16().flex_none().rounded_md())
+            }))
+        }))
+        .test_support()
     }
 }
 
@@ -514,26 +570,49 @@ impl Render for MyWorkView {
         let filter = self.filter(cx);
         let groups = Backend::core(cx).my_work().groups(&filter, locale(cx));
         let shown: usize = groups.iter().map(|group| group.rows.len()).sum();
+        let state = Backend::snapshot(cx).read(cx).my_work.clone();
+        // Mientras llega y no hay nada que enseñar, la forma de lo que viene.
+        let arriving = state.loading && shown == 0;
         // Por qué está vacía lo dice el core; aquí sólo se enseña.
-        let empty = (shown == 0).then(|| tr(cx, Backend::core(cx).my_work().empty_reason()));
+        let empty = (shown == 0 && !arriving).then(|| tr(cx, Backend::core(cx).my_work().empty_reason()));
+        let zone_hint = Backend::core(cx).my_work().zone_hint(locale(cx));
+        let danger = theme.danger;
 
         let layout = Backend::core(cx).work_layout();
         let header = self.render_header(shown, &filter, cx);
         let body = match layout {
             WorkLayout::Board => self.render_board(&filter, cx).into_any_element(),
             WorkLayout::Calendar => self.render_calendar(&filter, cx).into_any_element(),
+            // El cuerpo de la lista de `MyWork.tsx`: `p-4`, la fila de «tarea
+            // nueva» dentro de lo que se desliza (`mb-3`), el fallo en su
+            // línea y los grupos separados `space-y-5`.
             WorkLayout::List => div()
                 .id("work-list")
                 .flex_1()
+                .min_h_0()
                 .overflow_y_scroll()
                 .flex()
                 .flex_col()
-                .gap_5()
                 .p_4()
+                .children(self.new_task.clone().map(|row| div().mb_3().child(row)))
+                .children(state.error.clone().map(|error| {
+                    div()
+                        .id("work-error")
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .text_xs()
+                        .text_color(danger)
+                        .child(Icon::new(Lucide::CircleAlert).size_3())
+                        .child(error)
+                        .test_support()
+                }))
+                .when(arriving, |this| this.child(Self::render_skeleton(cx)))
                 .children(empty.map(|phrase| div().id("work-empty").test_support().text_sm().text_color(muted).child(phrase)))
-                .children(groups.into_iter().map(|group| self.render_group(group, cx)))
+                .child(div().flex().flex_col().gap_5().children(groups.into_iter().map(|group| self.render_group(group, &zone_hint, cx))))
                 .into_any_element(),
         };
+        let list = layout == WorkLayout::List;
         div()
             .size_full()
             .flex()
@@ -541,8 +620,9 @@ impl Render for MyWorkView {
             .bg(background)
             .text_color(foreground)
             .child(header)
-            // La fila de «tarea nueva» va sobre cualquiera de las vistas.
-            .children(self.new_task.clone().map(|row| div().px_4().pt_4().child(row)))
+            // La fila de «tarea nueva» va sobre cualquiera de las vistas; en
+            // la lista, dentro de lo que se desliza.
+            .children(self.new_task.clone().filter(|_| !list).map(|row| div().px_4().pt_4().child(row)))
             .child(body)
     }
 }
@@ -622,6 +702,8 @@ mod tests {
 
         assert!(on_screen(window, "work-row-t2", cx));
         assert!(!on_screen(window, "work-empty", cx), "dice que no hay nada con dos tareas en pantalla");
+        assert!(on_screen(window, "work-list-t1", cx), "la fila no dice en qué lista vive");
+        assert!(!on_screen(window, "work-skeleton", cx));
         stop(cx);
     }
 
@@ -642,6 +724,7 @@ mod tests {
         });
 
         assert!(on_screen(window, "work-empty", cx));
+        assert!(!on_screen(window, "work-skeleton", cx), "sigue pintando la forma de lo que viene con la respuesta ya aquí");
         stop(cx);
     }
 

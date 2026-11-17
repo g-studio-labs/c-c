@@ -35,6 +35,9 @@ pub struct WorkRow {
     /// Con el nombre de la API (`normal`, no `medium`).
     pub priority: String,
     pub due: Option<DueLabel>,
+    /// En qué lista vive, al final de la fila: dentro de un espacio es lo
+    /// que distingue una tarea de otra (`t.listName` en `MyWork.tsx`).
+    pub list: String,
 }
 
 /// Las tareas de un espacio.
@@ -87,6 +90,7 @@ fn row(task: &OpenTask, locale: Locale, today: NaiveDate) -> WorkRow {
         parent: parent_crumb(task),
         priority: canonical_priority(&task.priority).to_string(),
         due: due_label(locale, task.due_at.as_deref(), today),
+        list: task.list_name.clone(),
     }
 }
 
@@ -155,5 +159,11 @@ impl MyWork {
         let today = today_in(orgs.current_zone(), Utc::now(), &chrono::Local);
         let order: Vec<String> = self.core.tree().state().spaces.into_iter().map(|space| space.id).collect();
         work_groups(&self.filtered(filter), &order, locale, today)
+    }
+
+    /// El aviso de zona de un vencimiento, para quien no está en la hora de
+    /// la organización que mira.
+    pub fn zone_hint(&self, locale: Locale) -> Option<String> {
+        crate::dates::zone_hint(locale, self.core.orgs().state().current_zone(), Utc::now(), &chrono::Local)
     }
 }

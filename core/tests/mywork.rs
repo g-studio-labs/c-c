@@ -420,12 +420,14 @@ fn the_list_is_grouped_by_space_in_the_trees_order() {
 ///
 /// Roturas que atrapa: «medium» donde la pantalla espera «normal» (la
 /// etiqueta de prioridad saldría vacía); una subtarea que parece una tarea
-/// suelta; decir «30 sept» de lo que vence hoy.
+/// suelta; decir «30 sept» de lo que vence hoy; una fila sin su lista, o
+/// con el nombre del espacio en su sitio.
 #[test]
 fn a_row_says_its_due_date_priority_and_parent() {
     let tasks = vec![
-        open_task("hoy", "a", |_| {}),
+        open_task("hoy", "a", |raw| raw["listName"] = serde_json::json!("Lista de hoy")),
         open_task("sub", "a", |raw| {
+            raw["listName"] = serde_json::json!("Incidencias");
             raw["parentSeq"] = serde_json::json!(289);
             raw["parentTitle"] = serde_json::json!("La madre");
             raw["dueAt"] = serde_json::Value::Null;
@@ -445,6 +447,9 @@ fn a_row_says_its_due_date_priority_and_parent() {
     assert_eq!(rows[1].parent.as_deref(), Some("› #289 La madre"));
     assert_eq!(rows[1].due, None);
     assert_eq!(rows[2].parent.as_deref(), Some("› #7"));
+    // Y en qué lista vive, que es lo que cierra la fila.
+    assert_eq!(rows[0].list, "Lista de hoy");
+    assert_eq!(rows[1].list, "Incidencias");
 }
 
 /// Un vencimiento se dice con una palabra cuando está cerca y con su día y
