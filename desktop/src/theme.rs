@@ -185,6 +185,7 @@ pub fn apply(mode: ThemeMode, cx: &mut App) {
         // `BASE_FONT_SIZE`.
         theme.font_size = px(BASE_FONT_SIZE);
         theme.font_family = FONT_FAMILY.into();
+        theme.mono_font_family = MONO_FONT_FAMILY.into();
         theme.radius = px(8.);
     });
 }
@@ -243,6 +244,10 @@ pub fn id_chip(id: impl Into<gpui_kit::ElementId>, shown: impl Into<gpui_kit::Sh
 /// La letra de la app de siempre (`'Inter Variable'` en `index.css`).
 const FONT_FAMILY: &str = "Inter";
 
+/// La letra de ancho fijo de la app de siempre (`--font-mono` en
+/// `index.css`): la de los identificadores, las referencias y el código.
+const MONO_FONT_FAMILY: &str = "Iosevka Term Slab";
+
 /// Marca de que esta app ya tiene sus tipografías cargadas.
 struct FontsInstalled;
 impl gpui_kit::Global for FontsInstalled {}
@@ -253,17 +258,25 @@ impl gpui_kit::Global for FontsInstalled {}
 /// marcado en negrita en una descripción salían en peso normal). Son los
 /// cuatro pesos fijos que usa la app y la cursiva: el fichero variable de la
 /// app de siempre no vale aquí, que el motor de texto elige cara por peso.
+///
+/// Y la de ancho fijo, Iosevka Term Slab, en normal y negrita: sin ella los
+/// identificadores y el código salían con la que tuviera cada máquina. Son
+/// los TTF de la release oficial (be5invis/Iosevka v34.9.1,
+/// `PkgTTF-IosevkaTermSlab`), recortados a latín como los `woff2` de la app
+/// de siempre: enteros pesan 11 MB cada uno.
 fn install_fonts(cx: &mut App) {
     if cx.has_global::<FontsInstalled>() {
         return;
     }
     cx.set_global(FontsInstalled);
-    let faces: [&'static [u8]; 5] = [
+    let faces: [&'static [u8]; 7] = [
         include_bytes!("../assets/fonts/Inter-Regular.ttf"),
         include_bytes!("../assets/fonts/Inter-Medium.ttf"),
         include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
         include_bytes!("../assets/fonts/Inter-Bold.ttf"),
         include_bytes!("../assets/fonts/Inter-Italic.ttf"),
+        include_bytes!("../assets/fonts/IosevkaTermSlab-Regular.ttf"),
+        include_bytes!("../assets/fonts/IosevkaTermSlab-Bold.ttf"),
     ];
     // Si no se pudieran cargar, el texto sale con la letra del sistema: se
     // lee igual.
@@ -395,6 +408,7 @@ mod tests {
             gpui_kit::init(cx);
             super::apply(gpui_kit::component::ThemeMode::Dark, cx);
             assert_eq!(cx.theme().font_family.as_ref(), "Inter");
+            assert_eq!(cx.theme().mono_font_family.as_ref(), "Iosevka Term Slab");
         });
     }
 
