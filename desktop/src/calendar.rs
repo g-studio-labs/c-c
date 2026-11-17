@@ -26,6 +26,21 @@ use crate::mywork::{Leading, MyWorkView};
 /// El ancho del carril y el de la tarjeta que va en el aire.
 const LANE_WIDTH: f32 = 220.;
 const LIFTED_WIDTH: f32 = 200.;
+/// Lo menos que mide de ancho un día de la semana de lunes a viernes: lo que
+/// una tarjeta pide para llevar en un renglón su `#número`, «Vencida» y el
+/// avatar, y dos palabras de título por renglón. Decidido con jose
+/// (17-nov-2026): a 900 px con el carril y el panel abiertos las siete
+/// columnas quedaban en 47 px y no se leía nada (el CSS de la app de siempre
+/// da lo mismo); un día no se estrecha más que esto, y si los siete no caben
+/// la semana se desliza de lado dentro de su hueco.
+const DAY_MIN_WIDTH: f32 = 150.;
+/// Lo que mide el fin de semana frente a un día de diario: de lunes a
+/// viernes `1fr`, sábado y domingo `.62fr`. También en su mínimo.
+const WEEKEND_SHARE: f32 = 0.62;
+/// El hueco entre dos días de la semana (`gap-2`).
+const WEEK_GAP: f32 = 8.;
+/// Lo menos que mide la semana entera: sus siete mínimos y los seis huecos.
+const WEEK_MIN_WIDTH: f32 = 5. * DAY_MIN_WIDTH + 2. * DAY_MIN_WIDTH * WEEKEND_SHARE + 6. * WEEK_GAP;
 /// El detalle de un día (`w-[340px]`), y cuánto se sale de su celda para
 /// taparle el borde.
 const POPOVER_WIDTH: f32 = 340.;
@@ -1056,7 +1071,7 @@ impl MyWorkView {
         let drop_day = day.day.clone();
         // El fin de semana, angosto: de lunes a viernes 1fr, sábado y
         // domingo .62fr.
-        let share = if day.weekday >= 5 { 0.62 } else { 1. };
+        let share = if day.weekday >= 5 { WEEKEND_SHARE } else { 1. };
         let empty = day.chips.is_empty().then(|| {
             div()
                 .min_h(px(80.))
@@ -1077,7 +1092,9 @@ impl MyWorkView {
             .flex_grow(share)
             .flex_shrink(1.)
             .flex_basis(relative(0.))
-            .min_w_0()
+            // Con sitio, se reparten el ancho; sin él, ninguno baja de su
+            // mínimo y la semana se desliza.
+            .min_w(px(DAY_MIN_WIDTH * share))
             .min_h(px(480.))
             .flex()
             .flex_col()
@@ -1148,7 +1165,9 @@ impl MyWorkView {
     /// La semana (`WeekView`): una columna por día.
     fn render_week(&self, week: &WeekView, paint: &Paint, cx: &mut Context<Self>) -> impl IntoElement {
         // Sin `items_start`: las siete columnas llegan a la misma altura.
-        div().id("cal-week").flex().gap_2().children(week.days.iter().map(|day| self.render_week_column(day, paint, cx))).test_support()
+        // El mínimo va también en la fila: es lo que le dice a quien la
+        // desliza hasta dónde llega, que los días se salgan no basta.
+        div().id("cal-week").min_w(px(WEEK_MIN_WIDTH)).flex().gap(px(WEEK_GAP)).children(week.days.iter().map(|day| self.render_week_column(day, paint, cx))).test_support()
     }
 
     /// «Por programar» (`ScheduleLane`): lo que no tiene fecha, a un lado,
@@ -1274,6 +1293,7 @@ impl MyWorkView {
                 (week.title.clone(), Some(summary), self.render_week(&week, &paint, cx).into_any_element())
             }
         };
+        let week = cursor.view == CalendarView::Week;
         let header = self.render_calendar_header(&cursor, title, unscheduled.len(), &paint, cx);
         let lane = lane_open.then(|| self.render_lane(cursor.view, &unscheduled, &paint, cx));
 
@@ -1290,10 +1310,21 @@ impl MyWorkView {
             .child(header)
             .children(summary)
             // El carril y el calendario se deslizan cada uno por su lado,
-            // dentro de lo que queda de pantalla.
+            // dentro de lo que queda de pantalla. La semana, además, de
+            // lado cuando sus siete días no caben: el resumen de encima y
+            // el carril se quedan donde están, y la cabecera de cada día
+            // va con su columna.
             .child(
                 div().flex_1().min_h_0().flex().items_start().gap_3().min_w_0().children(lane).child(
-                    div().id("cal-body").flex_1().min_w_0().h_full().overflow_y_scroll().child(body).test_support(),
+                    div()
+                        .id("cal-body")
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .overflow_y_scroll()
+                        .when(week, |this| this.overflow_x_scroll())
+                        .child(body)
+                        .test_support(),
                 ),
             )
             .test_support()
@@ -1417,6 +1448,11 @@ mod tests {
 
     /// Lo mismo, con más tareas además de las dos de siempre.
     fn show_calendar_with(more: Vec<Value>, cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle, Days2) {
+        show_calendar_sized(more, 1700., 1000., cx)
+    }
+
+    /// Lo mismo, en una ventana de esa medida.
+    fn show_calendar_sized(more: Vec<Value>, width: f32, height: f32, cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle, Days2) {
         let server = server_with_tasks(vec![]);
         server.install(cx);
         let today = cx.update(|cx| Backend::core(cx).my_work().today());
@@ -1438,7 +1474,7 @@ mod tests {
         sign_in(cx);
         let window = cx.update(|cx| {
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds { origin: Point::default(), size: size(px(1700.), px(1000.)) })),
+                window_bounds: Some(WindowBounds::Windowed(Bounds { origin: Point::default(), size: size(px(width), px(height)) })),
                 ..WindowOptions::default()
             };
             gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx))).expect("open test window").0
@@ -1454,6 +1490,71 @@ mod tests {
         click(shown.1, "cal-view-week", cx);
         assert!(on_screen(shown.1, "cal-week", cx));
         shown
+    }
+
+    /// Dónde está pintado eso: izquierda, derecha, arriba y abajo.
+    fn edges(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> (f32, f32, f32, f32) {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let bounds = window.find(id).bounds();
+            (f32::from(bounds.left()), f32::from(bounds.right()), f32::from(bounds.top()), f32::from(bounds.bottom()))
+        })
+        .unwrap()
+    }
+
+    /// En una ventana estrecha los días de la semana no bajan de su mínimo:
+    /// la semana se desliza de lado dentro de su hueco, hasta el domingo. En
+    /// una ancha se reparten el ancho entero, como siempre.
+    ///
+    /// Roturas que atrapa: siete columnas de 47 px en las que no se lee nada
+    /// (lo que jose encontró el 17-nov-2026); una semana que se sale por la
+    /// derecha sin forma de llegar al domingo; unas columnas que, con sitio
+    /// de sobra, se quedan en su mínimo y dejan media pantalla vacía.
+    #[gpui_kit::test]
+    fn a_day_of_the_week_is_never_narrower_than_it_can_be_read(cx: &mut TestAppContext) {
+        let (_server, window, days) = show_calendar_sized(vec![], 900., 800., cx);
+        click(window, "cal-view-week", cx);
+        let monday = cac_core::week_start(days.today);
+        let (first, saturday, last) = (Days2::col(monday), Days2::col(monday + Days::new(5)), Days2::col(monday + Days::new(6)));
+        let width = |id: &str, cx: &mut TestAppContext| {
+            let (left, right, ..) = edges(window, id, cx);
+            right - left
+        };
+
+        assert!(width(&first, cx) >= 150., "el lunes mide {} de ancho", width(&first, cx));
+        assert!(width(&saturday, cx) >= 93., "el sábado mide {} de ancho", width(&saturday, cx));
+        let (body_left, body_right, ..) = edges(window, "cal-body", cx);
+        assert!(body_right - body_left < 984., "la ventana de la prueba no es estrecha: la semana cabe");
+        assert!(edges(window, &last, cx).1 > body_right, "el domingo cabe sin deslizar");
+        // El resumen y el carril no se van con ella.
+        let (summary, lane) = (edges(window, "cal-week-summary", cx), edges(window, "cal-lane", cx));
+
+        cx.update_window(window, |_, window, cx| {
+            window.scroll("cal-body", gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(-2000.), px(0.))), cx);
+        })
+        .unwrap();
+        let sunday = edges(window, &last, cx);
+        assert!((sunday.1 - body_right).abs() < 1., "deslizando hasta el final el domingo acaba en {} y el hueco en {body_right}", sunday.1);
+        assert_eq!((edges(window, "cal-week-summary", cx), edges(window, "cal-lane", cx)), (summary, lane), "el resumen o el carril se deslizaron con la semana");
+        stop(cx);
+    }
+
+    /// Ver el comentario de la prueba anterior: ésta es la mitad ancha.
+    #[gpui_kit::test]
+    fn with_room_the_days_of_the_week_share_the_whole_width(cx: &mut TestAppContext) {
+        let (_server, window, days) = show_week(cx);
+        let monday = cac_core::week_start(days.today);
+        let (first, last) = (edges(window, &Days2::col(monday), cx), edges(window, &Days2::col(monday + Days::new(6)), cx));
+        let body = edges(window, "cal-body", cx);
+
+        assert!((first.0 - body.0).abs() < 1. && (last.1 - body.1).abs() < 1., "la semana va de {} a {} y su hueco de {} a {}", first.0, last.1, body.0, body.1);
+        assert!(first.1 - first.0 > 150., "con sitio, el lunes se queda en su mínimo");
+        // El fin de semana, angosto: 0,62 de un día de diario (los dos
+        // llevan además su relleno y su borde, que no se reparten).
+        let share = (last.1 - last.0) / (first.1 - first.0);
+        assert!((0.6..0.7).contains(&share), "el domingo mide {share} de lo que mide el lunes");
+        stop(cx);
     }
 
     /// Elegir «Calendario» cambia la lista por el mes, con cada tarea
