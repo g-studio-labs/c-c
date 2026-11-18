@@ -29,6 +29,7 @@ mod identity;
 mod lang;
 mod mentions;
 mod mywork;
+mod picture_viewer;
 mod newtask;
 mod platform;
 mod prompt;

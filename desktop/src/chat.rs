@@ -39,6 +39,7 @@ use gpui_kit::*;
 
 use crate::backend::Backend;
 use crate::composer::Composer;
+use crate::picture_viewer::PictureViewer;
 use crate::files;
 use crate::lang::{error_text, locale, tr};
 use crate::theme::Leading as _;
@@ -95,7 +96,9 @@ pub struct ChatView {
     /// Lo que se le dijo al core que hay delante la última vez.
     front: Option<(bool, Option<Conversation>)>,
     /// Las imágenes de los mensajes, por su ruta.
-    thumbs: Thumbs,
+    pub(crate) thumbs: Thumbs,
+    /// El visor de imágenes, si hay una abierta.
+    pub(crate) viewer: Option<PictureViewer>,
     /// Algo que decir un momento, y cuál de los avisos es (para que el que
     /// lo quita no quite otro posterior).
     notice: Option<(u64, String)>,
@@ -137,6 +140,7 @@ impl ChatView {
             at_tail: true,
             front: None,
             thumbs: Thumbs::default(),
+            viewer: None,
             notice: None,
             notices: 0,
             flash: None,
@@ -179,6 +183,7 @@ impl ChatView {
             self.at_tail = true;
             self.bodies.clear();
             self.pictured_in.clear();
+            self.viewer = None;
             self.thumbs.clear();
             self.notice = None;
             self.flash = None;
@@ -464,7 +469,7 @@ impl ChatView {
         let (muted, border, background) = (theme.muted_foreground, theme.border, theme.background);
         let (open, save) = (picture.clone(), picture.clone());
         let name = if picture.name.trim().is_empty() { tr(cx, "chat:picture") } else { picture.name.clone() };
-        let (open_name, save_name) = (name.clone(), name.clone());
+        let save_name = name.clone();
         let group = SharedString::from(format!("thread-picture-{}", picture.path));
         let body = match self.thumbs.get(&picture.path) {
             Some(Thumb::Ready(image)) => {
@@ -508,7 +513,8 @@ impl ChatView {
                     .border_color(border)
                     .overflow_hidden()
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_file(open.path.clone(), open_name.clone(), window, cx)))
+                    // Se abre en el visor, que pasa por las demás del chat.
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_viewer(open.path.clone(), window, cx)))
                     .aria_label(name)
                     .child(body)
                     .test_support(),
@@ -948,6 +954,7 @@ impl Render for ChatView {
                     }),
             )
             .child(self.render_composer(window, cx))
+            .children(self.render_viewer(window, cx))
             .test_support()
     }
 }
@@ -1582,8 +1589,15 @@ mod tests {
         assert_eq!(label(window, "thread-bubble-pic", cx), "así queda:");
         assert!(server.requests().iter().filter(|request| request.url.path() == SHOT).all(|request| request.headers.get("Authorization").is_some()), "se pidió la imagen sin la sesión");
 
+        // Pulsarla la abre en el visor, y desde él, con el programa del
+        // sistema.
         click(window, &format!("thread-picture-{SHOT}"), cx);
+        wait_until(cx, "se abre el visor", |cx| on_screen(window, "picture-viewer-image", cx));
+        assert!(opened.lock().unwrap().is_empty(), "la miniatura se abrió fuera de la app");
+        click(window, "picture-viewer-open", cx);
         wait_until(cx, "la imagen se abre", |_| opened.lock().unwrap().len() == 1);
+        click(window, "picture-viewer-close", cx);
+        assert!(!on_screen(window, "picture-viewer", cx));
         click(window, &format!("thread-file-{NOTES}"), cx);
         wait_until(cx, "el fichero se abre", |_| opened.lock().unwrap().len() == 2);
         let opened = opened.lock().unwrap().clone();
@@ -2024,6 +2038,66 @@ mod tests {
         wait_until(cx, "se dice que no se pudo", |cx| on_screen(window, "thread-send-failed", cx));
         assert_eq!(label(window, "thread-send-failed", cx), "No se pudo adjuntar pasted.png: Ese fichero es demasiado grande.");
         assert_eq!(written(&view, cx), "x");
+        stop(cx);
+    }
+
+    // ── El visor de imágenes ────────────────────────────────────────────
+
+    /// Una imagen del chat se abre en un visor sobre la ventana, y con las
+    /// flechas se pasa por todas las de la conversación, en el orden en que
+    /// se leen, sin dar la vuelta; Escape lo cierra.
+    ///
+    /// Roturas que atrapa: abrir la imagen con el programa del sistema en
+    /// vez de en la app; un visor que sólo enseña la que se pulsó; flechas
+    /// al revés; dar la vuelta de la última a la primera; un visor que no se
+    /// cierra con Escape; la imagen pedida sin la sesión.
+    #[gpui_kit::test]
+    fn a_picture_opens_in_a_viewer_and_the_arrows_go_through_the_chat(cx: &mut TestAppContext) {
+        let server = server();
+        let png = include_bytes!("../../core/tests/fixtures/gray_600x200.png").to_vec();
+        let raw = |id: &str| format!("/api/v1/task-spaces/a/chat/attachments/{id}/raw");
+        for id in ["p1", "p2", "p3"] {
+            server.mount(get(&raw(id)).and(header("Authorization", "Bearer access")).respond_with(ResponseTemplate::new(200).set_body_raw(png.clone(), "image/png")));
+        }
+        let messages = vec![
+            line("m1", "u2", "Luis Mora", &format!("![uno.png]({})", raw("p1")), 5, 1),
+            line("m2", "u3", "Bea Soto", "sin imagen", 5, 2),
+            line("m3", "u2", "Luis Mora", &format!("dos:\n\n![dos.png]({})\n\n![tres.png]({})", raw("p2"), raw("p3")), 5, 3),
+        ];
+        mount_history(&server, CHAT_A, &history(messages), Duration::ZERO);
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let seen = opened.clone();
+        cx.update(|cx| cx.set_global(crate::files::Opener(Arc::new(move |path| seen.lock().unwrap().push(path.to_path_buf())))));
+        let (window, _) = open(&server, cx);
+        enter(window, channel("a"), cx);
+        wait_until(cx, "se pintan las miniaturas", |cx| on_screen(window, &format!("thread-thumb-{}", raw("p2")), cx));
+
+        click(window, &format!("thread-picture-{}", raw("p2")), cx);
+        wait_until(cx, "se abre el visor", |cx| on_screen(window, "picture-viewer-image", cx));
+        assert!(opened.lock().unwrap().is_empty(), "se abrió fuera de la app");
+        assert_eq!(label(window, "picture-viewer-count", cx), "2 de 3");
+        assert_eq!(label(window, "picture-viewer-image", cx), "dos.png");
+
+        press(window, "right", cx);
+        assert_eq!(label(window, "picture-viewer-count", cx), "3 de 3");
+        assert_eq!(label(window, "picture-viewer-image", cx), "tres.png");
+        assert!(!on_screen(window, "picture-viewer-next", cx), "hay flecha más allá de la última");
+        press(window, "right", cx);
+        assert_eq!(label(window, "picture-viewer-count", cx), "3 de 3", "se dio la vuelta");
+
+        press(window, "left", cx);
+        press(window, "left", cx);
+        assert_eq!(label(window, "picture-viewer-count", cx), "1 de 3");
+        assert_eq!(label(window, "picture-viewer-image", cx), "uno.png");
+        press(window, "left", cx);
+        assert_eq!(label(window, "picture-viewer-count", cx), "1 de 3", "se dio la vuelta");
+        // Con los botones, igual.
+        click(window, "picture-viewer-next", cx);
+        assert_eq!(label(window, "picture-viewer-count", cx), "2 de 3");
+
+        press(window, "escape", cx);
+        assert!(!on_screen(window, "picture-viewer", cx), "Escape no cerró el visor");
+        assert!(server.requests().iter().filter(|request| request.url.path().ends_with("/raw")).all(|request| request.headers.get("Authorization").is_some()), "una imagen se pidió sin la sesión");
         stop(cx);
     }
 }
