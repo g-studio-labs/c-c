@@ -54,10 +54,17 @@ pub fn safe_file_name(name: &str) -> String {
 /// Si se puede enseñar como imagen. Por el tipo y, si no lo trae, por el
 /// nombre: el tipo es opcional y hay filas sin él.
 pub fn is_image(file: &TaskAttachment) -> bool {
-    if file.content_type.as_deref().is_some_and(|kind| kind.starts_with("image/")) {
+    named_image(file.content_type.as_deref(), &file.file_name)
+}
+
+/// Si un fichero subido es una imagen, por el tipo que dijo el servidor o,
+/// sin él, por su nombre. Lo mismo para un fichero de una tarea que de una
+/// conversación.
+pub fn named_image(content_type: Option<&str>, file_name: &str) -> bool {
+    if content_type.is_some_and(|kind| kind.starts_with("image/")) {
         return true;
     }
-    let name = file.file_name.to_lowercase();
+    let name = file_name.to_lowercase();
     ["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp"].iter().any(|ext| name.ends_with(&format!(".{ext}")))
 }
 
@@ -130,11 +137,16 @@ pub struct Cited {
 /// un servidor se lee en otro, y un token no acaba guardado en un texto.
 /// `None` si el fichero no vive en este servidor: no hay con qué citarlo.
 pub fn file_citation(file: &TaskAttachment) -> Option<String> {
-    let path = attachment_path(&file.url)?;
+    citation(&file.url, &file.file_name, is_image(file))
+}
+
+/// La cita de un fichero subido, de una tarea o de una conversación: una
+/// imagen como imagen y lo demás como enlace, por la ruta del servidor.
+pub fn citation(url: &str, file_name: &str, image: bool) -> Option<String> {
+    let path = attachment_path(url)?;
     // El nombre lo puso quien subió el fichero: un corchete suyo no cierra
     // el enlace, ni un salto de línea lo parte.
-    let name: String = file
-        .file_name
+    let name: String = file_name
         .chars()
         .flat_map(|c| match c {
             '[' | ']' | '\\' => vec!['\\', c],
@@ -142,7 +154,7 @@ pub fn file_citation(file: &TaskAttachment) -> Option<String> {
             c => vec![c],
         })
         .collect();
-    Some(if is_image(file) { format!("![{name}]({path})") } else { format!("[{name}]({path})") })
+    Some(if image { format!("![{name}]({path})") } else { format!("[{name}]({path})") })
 }
 
 /// El texto con ese fichero citado donde está el cursor, y el cursor detrás

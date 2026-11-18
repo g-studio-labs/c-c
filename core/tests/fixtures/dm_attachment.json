@@ -1,0 +1,11 @@
+{
+  "id": "f2",
+  "createdAt": "2026-09-30T00:00:00Z",
+  "updatedAt": "2026-09-30T00:00:00Z",
+  "conversationId": "c1",
+  "url": "/api/v1/dm/c1/attachments/f2/raw",
+  "fileName": "acta.pdf",
+  "contentType": "application/pdf",
+  "bytes": 4096,
+  "uploadedBy": "u1"
+}

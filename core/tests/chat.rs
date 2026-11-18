@@ -1246,6 +1246,10 @@ async fn a_viewer_writes_in_a_direct_but_not_in_a_channel() {
     assert!(matches!(refused, Err(cac_core::ApiError::Server { ref code, .. }) if code == "viewer-read-only"), "{refused:?}");
     assert_eq!(hits(&rig.server, "POST", CHAT_A).await, 0);
 
+    let refused = rig.core.chat().attach(channel("a"), "nota.txt".into(), b"hola".to_vec()).await;
+    assert!(matches!(refused, Err(cac_core::ApiError::Server { ref code, .. }) if code == "viewer-read-only"), "{refused:?}");
+    assert_eq!(hits(&rig.server, "POST", "/api/v1/task-spaces/a/chat/attachments").await, 0);
+
     assert!(rig.core.comms().select(direct("c1")));
     rig.core.chat().follow().await;
     assert!(rig.core.chat().state().can_write);
@@ -1283,5 +1287,51 @@ async fn naming_someone_puts_a_token_that_is_the_link_the_server_reads() {
     assert_eq!(token.id, luis);
 
     assert!(rig.core.chat().mention_menu(&direct("c1"), "hola @lu", 8, None).is_none(), "se ofrecieron menciones en un directo");
+    rig.core.stream().stop();
+}
+
+/// Un fichero se sube por la ruta de su conversación, entero y con su
+/// nombre, y su ficha lo cita como lo lee quien recibe el mensaje: una
+/// imagen como imagen, lo demás como enlace, por la ruta del servidor y con
+/// el nombre a salvo. Lo que no cabe no se sube.
+///
+/// Roturas que atrapa: subir a un directo por la ruta de un canal; el
+/// fichero sin su nombre; una captura citada como enlace (no se vería); un
+/// corchete del nombre que cierra el enlace; la cita con el dominio del
+/// servidor (no se leería contra otro); subir treinta megas para que el
+/// servidor los rechace.
+#[tokio::test]
+async fn a_file_goes_by_its_conversation_route_and_its_token_cites_it() {
+    let rig = rig().await;
+    let shot: Value = serde_json::from_str(include_str!("fixtures/chat_attachment.json")).unwrap();
+    let notes: Value = serde_json::from_str(include_str!("fixtures/dm_attachment.json")).unwrap();
+    post("/api/v1/task-spaces/a/chat/attachments").respond_with(ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": shot }))).mount(&rig.server).await;
+    post("/api/v1/dm/c1/attachments").respond_with(ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": notes }))).mount(&rig.server).await;
+    rig.core.open_workspace().await;
+
+    let png = include_bytes!("fixtures/gray_600x200.png").to_vec();
+    let file = rig.core.chat().attach(channel("a"), "captura [final].png".into(), png.clone()).await.unwrap();
+    let asked = requests(&rig.server, "POST", "/api/v1/task-spaces/a/chat/attachments").await;
+    assert_eq!(asked.len(), 1);
+    let kind = asked[0].headers.get("content-type").unwrap().to_str().unwrap().to_string();
+    assert!(kind.starts_with("multipart/form-data; boundary="), "{kind}");
+    let sent = &asked[0].body;
+    assert!(sent.windows(png.len()).any(|window| window == png.as_slice()), "el fichero no fue entero");
+    assert!(String::from_utf8_lossy(sent).contains("filename=\"captura [final].png\""));
+    let token = cac_core::file_token(&file).unwrap();
+    assert_eq!(token.text, "![captura \\[final\\].png](/api/v1/task-spaces/e8bd6d46-a9ab-494e-ac29-de84d80a55f4/chat/attachments/f1/raw)");
+    assert_eq!((token.label.as_str(), token.id.as_str()), ("captura [final].png", "f1"));
+
+    let file = rig.core.chat().attach(direct("c1"), "acta.pdf".into(), b"%PDF-1.4".to_vec()).await.unwrap();
+    assert_eq!(hits(&rig.server, "POST", "/api/v1/dm/c1/attachments").await, 1);
+    assert_eq!(cac_core::file_token(&file).unwrap().text, "[acta.pdf](/api/v1/dm/c1/attachments/f2/raw)");
+
+    // Lo que no cabe no se pide.
+    let too_big = rig.core.chat().attach(channel("a"), "grande.zip".into(), vec![0; (30 << 20) + 1]).await;
+    assert!(matches!(too_big, Err(cac_core::ApiError::Server { ref code, .. }) if code == "too-large"), "{too_big:?}");
+    assert_eq!(hits(&rig.server, "POST", "/api/v1/task-spaces/a/chat/attachments").await, 1);
+    // Un fichero que el servidor dice que vive en otro sitio no se cita.
+    let elsewhere = cac_core::ChatFile { id: "x".into(), url: "https://otro.example/f.png".into(), file_name: "f.png".into(), ..Default::default() };
+    assert!(cac_core::file_token(&elsewhere).is_none());
     rig.core.stream().stop();
 }

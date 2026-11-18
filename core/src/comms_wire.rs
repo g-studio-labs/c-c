@@ -197,6 +197,31 @@ impl Person {
     }
 }
 
+/// Lo que contesta el servidor al subir un fichero a un canal
+/// (`domain.ChatAttachment`) o a un directo (`domain.DMAttachment`). La
+/// `url` es relativa: se cita tal cual en el mensaje, que es lo único que
+/// une el fichero al mensaje.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChatFile {
+    pub id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub space_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub conversation_id: String,
+    pub url: String,
+    pub file_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uploaded_by: Option<String>,
+}
+
 /// Para nombrar a alguien de comunicación con las reglas de las menciones,
 /// que se escribieron con la gente de una tarea.
 impl From<Person> for crate::task::UserSummary {

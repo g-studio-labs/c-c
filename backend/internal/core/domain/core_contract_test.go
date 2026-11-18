@@ -303,6 +303,26 @@ func TestTheCoreReadsWhatTheServerWrites(t *testing.T) {
 			AgentSeenAt:       &day,
 			AgentVersion:      2,
 		},
+		// Lo que contesta subir un fichero a un canal o a un directo: la
+		// caja de escribir lo cita por su `url` (relativa) y su nombre.
+		"chat_attachment.json": ChatAttachment{
+			BaseModel:   BaseModel{ID: "f1", CreatedAt: day, UpdatedAt: day},
+			SpaceID:     "e8bd6d46-a9ab-494e-ac29-de84d80a55f4",
+			URL:         "/api/v1/task-spaces/e8bd6d46-a9ab-494e-ac29-de84d80a55f4/chat/attachments/f1/raw",
+			FileName:    "captura [final].png",
+			ContentType: "image/png",
+			Bytes:       2048,
+			UploadedBy:  "u1",
+		},
+		"dm_attachment.json": DMAttachment{
+			BaseModel:      BaseModel{ID: "f2", CreatedAt: day, UpdatedAt: day},
+			ConversationID: "c1",
+			URL:            "/api/v1/dm/c1/attachments/f2/raw",
+			FileName:       "acta.pdf",
+			ContentType:    "application/pdf",
+			Bytes:          4096,
+			UploadedBy:     "u1",
+		},
 		"task_detail.json":    fullTaskDetail(day),
 		"state_machines.json": stateMachines(),
 	}

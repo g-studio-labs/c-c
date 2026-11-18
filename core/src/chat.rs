@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::comms::Conversation;
 use crate::comms_text::{instant, quote_text, was_read};
-use crate::comms_wire::{ChatMessage, DmMessage, MessageQuote, ReactionSummary};
+use crate::comms_wire::{ChatFile, ChatMessage, DmMessage, MessageQuote, ReactionSummary};
 use crate::doc_links::{doc_link, DocLink};
 use crate::error::ApiError;
 use crate::stream::ServerEvent;
@@ -779,6 +779,18 @@ impl Chat {
         result
     }
 
+    /// Sube un fichero a esa conversación. Lo que no cabe no se sube
+    /// (`too-large`). Lo que contesta el servidor se cita en el mensaje
+    /// (`file_token`): es lo único que une el fichero al mensaje.
+    pub async fn attach(&self, conversation: Conversation, file_name: String, bytes: Vec<u8>) -> Result<ChatFile, ApiError> {
+        crate::task::attachment_fits(bytes.len() as u64)?;
+        if !self.can_write(&conversation) {
+            return Err(local("viewer-read-only", "Viewers can look, but not write"));
+        }
+        let (content_type, body) = crate::task::multipart(&file_name, &bytes);
+        self.core.upload(&upload_path(&conversation), &content_type, body).await
+    }
+
     /// La lista de a quién nombrar con ese texto y el cursor ahí, si se está
     /// escribiendo un `@algo` donde se puede nombrar. Con la gente de la
     /// organización que ya trajo comunicación (`Comms::load_people`).
@@ -887,21 +899,39 @@ pub fn enter_sends(text: &str, cursor: u32) -> bool {
     before.lines().filter(|line| line.trim_start().starts_with("```")).count() % 2 == 0
 }
 
-/// Una mención como ficha dentro de la caja de escribir: lo que vale
-/// (`text`, el enlace que el servidor busca para avisar) y lo que se ve
-/// (`label`, el nombre).
+/// Una ficha dentro de la caja de escribir: lo que vale (`text`, el
+/// markdown que se manda) y lo que se ve (`label`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct MentionToken {
-    /// A quién nombra.
+pub struct ComposerToken {
+    /// A qué se refiere: la persona o el fichero.
     pub id: String,
     pub text: String,
     pub label: String,
 }
 
-/// La ficha de nombrar a esa persona.
-pub fn mention_token(person: &MentionPerson) -> MentionToken {
-    MentionToken { id: person.id.clone(), text: crate::task::mention_link(person), label: format!("@{}", person.name) }
+/// La ficha de nombrar a esa persona: vale el enlace que el servidor busca
+/// para avisar, y enseña su nombre.
+pub fn mention_token(person: &MentionPerson) -> ComposerToken {
+    ComposerToken { id: person.id.clone(), text: crate::task::mention_link(person), label: format!("@{}", person.name) }
+}
+
+/// La ficha de un fichero subido: vale su cita (una imagen como imagen, lo
+/// demás como enlace) y enseña su nombre. `None` si no vive en este
+/// servidor: no hay con qué citarlo.
+pub fn file_token(file: &ChatFile) -> Option<ComposerToken> {
+    let image = crate::task::named_image(file.content_type.as_deref(), &file.file_name);
+    let text = crate::task::citation(&file.url, &file.file_name, image)?;
+    let label = file.file_name.replace(['\n', '\r'], " ");
+    Some(ComposerToken { id: file.id.clone(), text, label })
+}
+
+/// La ruta por la que se sube un fichero a esa conversación.
+fn upload_path(conversation: &Conversation) -> String {
+    match conversation {
+        Conversation::Channel { space_id } => format!("/api/v1/task-spaces/{space_id}/chat/attachments"),
+        Conversation::Direct { conversation_id } => format!("/api/v1/dm/{conversation_id}/attachments"),
+    }
 }
 
 // ── Cómo se lee cada línea ──────────────────────────────────────────────

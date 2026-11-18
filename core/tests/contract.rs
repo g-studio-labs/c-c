@@ -423,3 +423,19 @@ fn what_the_conversation_list_paints_is_read_whole() {
     let read: DmReadEvent = reads_every_field(&fixture("dm_read_event.json"));
     assert_eq!((read.conversation_id.as_str(), read.user_id.as_str(), read.at.as_str()), ("c1", "u2", "2026-09-30T00:00:00Z"));
 }
+
+/// Lo que contesta subir un fichero a un canal o a un directo se lee entero:
+/// su ruta es la que se cita en el mensaje, y su nombre y su tipo dicen
+/// cómo.
+///
+/// Roturas que atrapa: `url` o `fileName` renombrados en Go (el fichero se
+/// subiría y el mensaje saldría sin él); `contentType` renombrado (una
+/// captura citada como enlace en vez de como imagen).
+#[test]
+fn a_file_uploaded_to_a_conversation_is_read_whole() {
+    let shot: cac_core::ChatFile = reads_every_field(&fixture("chat_attachment.json"));
+    assert_eq!((shot.id.as_str(), shot.file_name.as_str(), shot.content_type.as_deref()), ("f1", "captura [final].png", Some("image/png")));
+    assert_eq!(shot.url, "/api/v1/task-spaces/e8bd6d46-a9ab-494e-ac29-de84d80a55f4/chat/attachments/f1/raw");
+    let notes: cac_core::ChatFile = reads_every_field(&fixture("dm_attachment.json"));
+    assert_eq!((notes.conversation_id.as_str(), notes.url.as_str(), notes.bytes), ("c1", "/api/v1/dm/c1/attachments/f2/raw", Some(4096)));
+}

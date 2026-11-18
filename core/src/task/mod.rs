@@ -27,7 +27,7 @@ pub use mention::{
     mention_closed, mention_highlighted, mention_mark_kept, mention_menu, mention_moved, MentionEdit, MentionMark, MentionMenu, MentionPerson, MentionQuery,
 };
 pub use new::{destinations, drafted, Destination, Destinations, TaskDraft};
-pub use files::{attachment_fits, attachment_path, file_citation, image_type, is_image, multipart, safe_file_name, size_label, thumbnail_size,
+pub use files::{attachment_fits, attachment_path, citation, file_citation, image_type, is_image, multipart, named_image, safe_file_name, size_label, thumbnail_size,
     with_citation, Cited, Picture,
     MAX_ATTACHMENT_BYTES, THUMBNAIL_MAX_HEIGHT, THUMBNAIL_MAX_WIDTH,
 };

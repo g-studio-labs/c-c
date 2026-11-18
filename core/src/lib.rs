@@ -44,7 +44,7 @@ use std::time::Duration;
 
 pub use account::{check_new_password, check_sign_in, gate, FormCheck, Gate, MIN_PASSWORD};
 pub use chat::{
-    around_label, enter_sends, mention_token, message_body, message_to_send, thread_lines, thread_splice, BodyFile, Chat, MentionToken, MessageBody,
+    around_label, enter_sends, file_token, mention_token, message_body, message_to_send, thread_lines, thread_splice, BodyFile, Chat, ComposerToken, MessageBody,
     ThreadLine, ThreadLink, ThreadMessage, ThreadQuote, ThreadSplice, ThreadState, MESSAGE_MAX_CHARS, THREAD_PAGE,
 };
 pub use comms::{
@@ -53,7 +53,7 @@ pub use comms::{
 };
 pub use comms_text::{list_time, mentions_a_call, preview_line, quote_text, seen_recently, was_read, LastLine};
 pub use comms_wire::{
-    ChatLatest, ChatMessage, ChatMessageEvent, ChatUnread, DmMessage, DmMessageEvent, DmReadEvent, DmSummary, MessageQuote, Person, ReactionSummary,
+    ChatFile, ChatLatest, ChatMessage, ChatMessageEvent, ChatUnread, DmMessage, DmMessageEvent, DmReadEvent, DmSummary, MessageQuote, Person, ReactionSummary,
     REACTION_EMOJIS, SYSTEM_KIND,
 };
 pub use counters::{count_badge, counted_label, rings_bell, Counters, CountersState, BELL_CAP, RAIL_CAP};
@@ -96,7 +96,7 @@ pub use task::{
     TaskAttachment, TaskBlocker, TaskCard, TaskComment, TaskDetail, TaskGitLink, TaskGitLinks, TaskPatch,
     TaskState, TaskStatus, TaskTag, Tasks, UserSummary,
 };
-pub use task::{attachment_fits, attachment_path, file_citation, image_type, is_image, multipart, safe_file_name, size_label, thumbnail_size,
+pub use task::{attachment_fits, attachment_path, citation, file_citation, image_type, is_image, multipart, named_image, safe_file_name, size_label, thumbnail_size,
     with_citation, Cited, Picture,
     MAX_ATTACHMENT_BYTES, THUMBNAIL_MAX_HEIGHT, THUMBNAIL_MAX_WIDTH,
 };

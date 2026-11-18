@@ -1,0 +1,11 @@
+{
+  "id": "f1",
+  "createdAt": "2026-09-30T00:00:00Z",
+  "updatedAt": "2026-09-30T00:00:00Z",
+  "spaceId": "e8bd6d46-a9ab-494e-ac29-de84d80a55f4",
+  "url": "/api/v1/task-spaces/e8bd6d46-a9ab-494e-ac29-de84d80a55f4/chat/attachments/f1/raw",
+  "fileName": "captura [final].png",
+  "contentType": "image/png",
+  "bytes": 2048,
+  "uploadedBy": "u1"
+}
