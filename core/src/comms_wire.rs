@@ -197,6 +197,14 @@ impl Person {
     }
 }
 
+/// Para nombrar a alguien de comunicación con las reglas de las menciones,
+/// que se escribieron con la gente de una tarea.
+impl From<Person> for crate::task::UserSummary {
+    fn from(person: Person) -> Self {
+        Self { id: person.id, username: person.username, name: person.name }
+    }
+}
+
 /// El evento `dm:read`: alguien leyó una conversación hasta `at`. Llega sólo
 /// al otro. Espejo de `domain.DMReadEvent`, el único de los tres eventos de
 /// aquí que el servidor escribe con un struct.

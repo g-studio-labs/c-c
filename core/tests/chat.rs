@@ -76,8 +76,8 @@ fn post(route: &str) -> wiremock::MockBuilder {
     Mock::given(method("POST")).and(path(route.to_string()))
 }
 
-fn org(id: &str) -> Value {
-    json!({ "id": id, "name": format!("Org {id}"), "slug": id, "role": "member", "memberCount": 2, "createdAt": "2026-06-09T12:00:00Z" })
+fn org(id: &str, role: &str) -> Value {
+    json!({ "id": id, "name": format!("Org {id}"), "slug": id, "role": role, "memberCount": 2, "createdAt": "2026-06-09T12:00:00Z" })
 }
 
 fn space(id: &str, org_id: &str, name: &str, kind: Option<&str>) -> Value {
@@ -95,6 +95,11 @@ async fn rig() -> Rig {
 /// Lo mismo, con un servidor que tarda eso en contestar cuánto hay sin leer
 /// en los canales: lo cuenta al recibir la pregunta y lo dice después.
 async fn rig_counting_slowly(unread_delay: Duration) -> Rig {
+    rig_with(unread_delay, "member").await
+}
+
+/// Lo mismo, con ese papel en las dos organizaciones.
+async fn rig_with(unread_delay: Duration, role: &str) -> Rig {
     let server = MockServer::start().await;
     let recorder = Arc::new(Recorder::default());
     let mut config = Config::new(server.uri());
@@ -103,7 +108,7 @@ async fn rig_counting_slowly(unread_delay: Duration) -> Rig {
     let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana", "name": "Ana Ruiz" })).unwrap();
     core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
 
-    get("/api/v1/organizations/").respond_with(ok(json!([org("o1"), org("o2")]))).mount(&server).await;
+    get("/api/v1/organizations/").respond_with(ok(json!([org("o1", role), org("o2", role)]))).mount(&server).await;
     let o1 = json!([space("a", "o1", "Producto", None), space("b", "o1", "Diseño", None), space("g", "o1", "General", Some("general"))]);
     get("/api/v1/task-spaces/").and(query_param("orgId", "o1")).respond_with(ok(o1)).mount(&server).await;
     get("/api/v1/task-spaces/").and(query_param("orgId", "o2")).respond_with(ok(json!([space("z", "o2", "Soporte", None)]))).mount(&server).await;
@@ -1047,5 +1052,236 @@ async fn what_arrives_while_reading_above_is_marked_only_on_reaching_the_end() {
     talk.lock().unwrap().push(line("m061", "u2", "otro", 61));
     rig.core.chat().refresh().await;
     assert_eq!(hits(&rig.server, "POST", READ_A).await, 3);
+    rig.core.stream().stop();
+}
+
+
+// ── Escribir ────────────────────────────────────────────────────────────
+
+/// Un servidor que, al recibir un mensaje en esa ruta, lo guarda en la
+/// conversación (como hace el de verdad) y contesta con el mensaje en bruto:
+/// sin el nombre de quien escribe ni la cita.
+async fn mount_writes(server: &MockServer, route: &str, talk: &History, delay: Duration) {
+    let talk = talk.clone();
+    let direct = route.starts_with("/api/v1/dm/");
+    post(route)
+        .respond_with(move |request: &Request| {
+            let sent: Value = serde_json::from_slice(&request.body).unwrap();
+            let mut talk = talk.lock().unwrap();
+            let next = talk.len() as i64 + 100;
+            let mut written = if direct { private_line(&format!("w{next}"), "u1", sent["body"].as_str().unwrap(), next) } else { line(&format!("w{next}"), "u1", sent["body"].as_str().unwrap(), next) };
+            written["authorName"] = json!("Ana Ruiz");
+            talk.push(written.clone());
+            let raw = json!({ "id": written["id"], "body": written["body"], "authorUserId": "u1", "createdAt": written["createdAt"], "updatedAt": written["updatedAt"], "replyToId": sent.get("replyToId") });
+            ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": raw })).set_delay(delay)
+        })
+        .mount(server)
+        .await;
+}
+
+fn sent_bodies(requests: &[Request]) -> Vec<Value> {
+    requests.iter().map(|request| serde_json::from_slice(&request.body).unwrap()).collect()
+}
+
+/// Escribir en un canal manda lo escrito, sin espacios alrededor y con la
+/// cita, por la ruta del canal; y el mensaje aparece en la conversación con
+/// el nombre de quien lo escribió, sin esperar a ningún evento.
+///
+/// Roturas que atrapa: otra ruta; lo escrito con los espacios o saltos de
+/// alrededor; la respuesta sin su `replyToId`; dar por buena la respuesta
+/// del servidor (sin nombre ni cita) en vez de releer; no releer y esperar
+/// al eco, que puede no llegar.
+#[tokio::test(flavor = "multi_thread")]
+async fn writing_in_a_channel_sends_the_text_and_the_reply_and_shows_it() {
+    let rig = rig().await;
+    let talk = history(vec![line("m1", "u2", "¿sale hoy?", 1)]);
+    mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
+    mount_writes(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
+    rig.core.open_workspace().await;
+    open(&rig, channel("a")).await;
+    assert!(rig.core.chat().state().can_write && rig.core.chat().state().mentions_allowed);
+
+    rig.core.chat().send(channel("a"), "\n  sí, **hoy**  \n".into(), Some("m1".into())).await.unwrap();
+    let sent = sent_bodies(&requests(&rig.server, "POST", CHAT_A).await);
+    assert_eq!(sent, [json!({ "body": "sí, **hoy**", "replyToId": "m1" })]);
+    let state = rig.core.chat().state();
+    let written = state.messages.last().expect("el mensaje no apareció");
+    assert_eq!((written.body.as_str(), written.author_name.as_str()), ("sí, **hoy**", "Ana Ruiz"));
+    assert!(!state.sending);
+
+    // Sin respuesta, el cuerpo va solo.
+    rig.core.chat().send(channel("a"), "otro".into(), None).await.unwrap();
+    assert_eq!(sent_bodies(&requests(&rig.server, "POST", CHAT_A).await)[1], json!({ "body": "otro" }));
+    rig.core.stream().stop();
+}
+
+/// Escribir en un directo va por su ruta, y lo escrito aparece aunque a
+/// quien escribe no le llegue evento de lo suyo; la lista de directos se
+/// vuelve a pedir, que es donde va su última línea. Ahí no se nombra a
+/// nadie.
+///
+/// Roturas que atrapa: escribir un directo por la ruta de un canal; que lo
+/// propio no se vea hasta que el otro conteste; la última línea del
+/// directo, en la lista, sin lo que se acaba de decir; ofrecer menciones en
+/// un directo.
+#[tokio::test(flavor = "multi_thread")]
+async fn writing_in_a_direct_goes_by_its_route_and_shows_without_an_event() {
+    let rig = rig().await;
+    let talk = history(vec![private_line("d1", "u2", "¿vienes?", 1)]);
+    mount_history(&rig.server, DM_C1, &talk, Duration::ZERO).await;
+    mount_writes(&rig.server, DM_C1, &talk, Duration::ZERO).await;
+    rig.core.open_workspace().await;
+    open(&rig, direct("c1")).await;
+    let state = rig.core.chat().state();
+    assert!(state.can_write && !state.mentions_allowed);
+    let lists = hits(&rig.server, "GET", "/api/v1/dm/").await;
+
+    rig.core.chat().send(direct("c1"), "voy".into(), Some("d1".into())).await.unwrap();
+    assert_eq!(sent_bodies(&requests(&rig.server, "POST", DM_C1).await), [json!({ "body": "voy", "replyToId": "d1" })]);
+    assert_eq!(rig.core.chat().state().messages.last().map(|message| message.body.as_str()), Some("voy"));
+    assert!(hits(&rig.server, "GET", "/api/v1/dm/").await > lists, "no se volvió a pedir la lista de directos");
+    rig.core.stream().stop();
+}
+
+/// Lo que no se puede mandar no se pide: en blanco, o más largo de lo que
+/// acepta el servidor, que cuenta caracteres y no bytes.
+///
+/// Roturas que atrapa: mandar un mensaje en blanco (el servidor lo
+/// aceptaría: no recorta); contar bytes, que deja sin mandar un mensaje con
+/// acentos que sí cabe; dejar pasar uno que el servidor rechaza con una
+/// frase que nadie entiende.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_cannot_be_sent_is_not_asked_for() {
+    let rig = rig().await;
+    let talk = history(Vec::new());
+    mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
+    mount_writes(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
+    rig.core.open_workspace().await;
+    open(&rig, channel("a")).await;
+
+    let code = |result: Result<(), cac_core::ApiError>| match result {
+        Err(cac_core::ApiError::Server { code, .. }) => code,
+        other => panic!("se esperaba un rechazo: {other:?}"),
+    };
+    assert_eq!(code(rig.core.chat().send(channel("a"), "  \n\t ".into(), None).await), "empty-body");
+    assert_eq!(code(rig.core.chat().send(channel("a"), "a".repeat(8001), None).await), "too-long");
+    assert_eq!(hits(&rig.server, "POST", CHAT_A).await, 0);
+    // Ocho mil letras con acento son dieciséis mil bytes, y caben.
+    rig.core.chat().send(channel("a"), "é".repeat(8000), None).await.unwrap();
+    assert_eq!(hits(&rig.server, "POST", CHAT_A).await, 1);
+    rig.core.stream().stop();
+}
+
+/// Mientras un mensaje va de camino no se manda otro en esa conversación:
+/// el servidor no reconoce un envío repetido y lo publicaría dos veces. En
+/// otra conversación, sí se puede.
+///
+/// Roturas que atrapa: el mismo mensaje dos veces por un Enter doble con la
+/// red lenta; no decir que se está enviando (el botón no se apagaría); que
+/// un envío en un canal bloquee los demás.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_on_its_way_is_not_sent_twice() {
+    let rig = rig().await;
+    let talk = history(Vec::new());
+    mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
+    mount_writes(&rig.server, CHAT_A, &talk, Duration::from_millis(400)).await;
+    mount_writes(&rig.server, CHAT_B, &history(Vec::new()), Duration::ZERO).await;
+    rig.core.open_workspace().await;
+    open(&rig, channel("a")).await;
+
+    let first = tokio::spawn({
+        let core = rig.core.clone();
+        async move { core.chat().send(channel("a"), "hola".into(), None).await }
+    });
+    until("se dice que se está enviando", || rig.core.chat().state().sending).await;
+    let again = rig.core.chat().send(channel("a"), "hola".into(), None).await;
+    assert!(matches!(again, Err(cac_core::ApiError::Server { ref code, .. }) if code == "already-sending"), "{again:?}");
+    rig.core.chat().send(channel("b"), "en otro canal".into(), None).await.unwrap();
+    first.await.unwrap().unwrap();
+    assert_eq!(hits(&rig.server, "POST", CHAT_A).await, 1);
+    assert!(!rig.core.chat().state().sending);
+    rig.core.stream().stop();
+}
+
+/// Un envío que falla devuelve por qué, y no toca la conversación.
+///
+/// Roturas que atrapa: tragarse el error (lo escrito se borraría de la caja
+/// como si hubiera salido); quedarse «enviando» para siempre; releer por un
+/// mensaje que no se publicó.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_send_says_why_and_leaves_the_conversation_alone() {
+    let rig = rig().await;
+    mount_history(&rig.server, CHAT_A, &history(vec![line("m1", "u2", "hola", 1)]), Duration::ZERO).await;
+    post(CHAT_A)
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({ "success": false, "error": "reply-elsewhere", "message": "The message you reply to is not in this channel" })))
+        .mount(&rig.server)
+        .await;
+    rig.core.open_workspace().await;
+    open(&rig, channel("a")).await;
+    let reads = hits(&rig.server, "GET", CHAT_A).await;
+
+    let failed = rig.core.chat().send(channel("a"), "a eso".into(), Some("retirado".into())).await;
+    assert!(matches!(failed, Err(cac_core::ApiError::Server { ref code, .. }) if code == "reply-elsewhere"), "{failed:?}");
+    assert!(!rig.core.chat().state().sending);
+    assert_eq!(hits(&rig.server, "GET", CHAT_A).await, reads, "se releyó por un mensaje que no salió");
+    rig.core.stream().stop();
+}
+
+/// Quien sólo mira la organización no escribe en un canal, y no se le deja
+/// intentarlo; en un directo, sí (el servidor no mira el papel ahí).
+///
+/// Roturas que atrapa: una caja abierta que acaba en «Forbidden» al
+/// enviar; cerrarle también los directos.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_viewer_writes_in_a_direct_but_not_in_a_channel() {
+    let rig = rig_with(Duration::ZERO, "viewer").await;
+    mount_history(&rig.server, CHAT_A, &history(Vec::new()), Duration::ZERO).await;
+    let talk = history(Vec::new());
+    mount_history(&rig.server, DM_C1, &talk, Duration::ZERO).await;
+    mount_writes(&rig.server, DM_C1, &talk, Duration::ZERO).await;
+    rig.core.open_workspace().await;
+    open(&rig, channel("a")).await;
+    assert!(!rig.core.chat().state().can_write);
+    let refused = rig.core.chat().send(channel("a"), "hola".into(), None).await;
+    assert!(matches!(refused, Err(cac_core::ApiError::Server { ref code, .. }) if code == "viewer-read-only"), "{refused:?}");
+    assert_eq!(hits(&rig.server, "POST", CHAT_A).await, 0);
+
+    assert!(rig.core.comms().select(direct("c1")));
+    rig.core.chat().follow().await;
+    assert!(rig.core.chat().state().can_write);
+    rig.core.chat().send(direct("c1"), "hola".into(), None).await.unwrap();
+    assert_eq!(hits(&rig.server, "POST", DM_C1).await, 1);
+    rig.core.stream().stop();
+}
+
+/// En un canal, `@` ofrece a la gente de la organización (sin quien
+/// escribe), y la ficha que se pone vale el enlace que el servidor busca
+/// para avisar y enseña el nombre. En un directo no se ofrece.
+///
+/// Roturas que atrapa: una ficha cuyo valor no es el enlace (el servidor
+/// no avisaría a nadie); enseñar el usuario en vez del nombre; ofrecerse a
+/// uno mismo; ofrecer menciones en un directo, donde no avisan.
+#[tokio::test(flavor = "multi_thread")]
+async fn naming_someone_puts_a_token_that_is_the_link_the_server_reads() {
+    let rig = rig().await;
+    let luis = "22222222-2222-4222-8222-222222222222";
+    get("/api/v1/users/search")
+        .respond_with(ok(json!([{ "id": "u1", "username": "ana", "name": "Ana Ruiz" }, { "id": luis, "username": "luis", "name": "Luis Mora" }, { "id": "u3", "username": "bea" }])))
+        .mount(&rig.server)
+        .await;
+    rig.core.open_workspace().await;
+    rig.core.comms().load_people().await;
+
+    let menu = rig.core.chat().mention_menu(&channel("a"), "hola @lu", 8, None).expect("no se ofreció a nadie");
+    assert_eq!(menu.people.iter().map(|person| person.username.as_str()).collect::<Vec<_>>(), ["luis"]);
+    let everyone = rig.core.chat().mention_menu(&channel("a"), "@", 1, None).unwrap();
+    assert!(!everyone.people.iter().any(|person| person.username == "ana"), "se ofreció a quien escribe");
+    let token = cac_core::mention_token(&menu.people[0]);
+    assert_eq!(token.label, "@Luis Mora");
+    assert_eq!(token.text, format!("[@luis](cac:user/{luis})"));
+    assert_eq!(cac_core::mentioned_user(&format!("cac:user/{luis}")), Some(luis));
+    assert_eq!(token.id, luis);
+
+    assert!(rig.core.chat().mention_menu(&direct("c1"), "hola @lu", 8, None).is_none(), "se ofrecieron menciones en un directo");
     rig.core.stream().stop();
 }

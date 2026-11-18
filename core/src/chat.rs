@@ -40,7 +40,7 @@ use crate::comms_wire::{ChatMessage, DmMessage, MessageQuote, ReactionSummary};
 use crate::doc_links::{doc_link, DocLink};
 use crate::error::ApiError;
 use crate::stream::ServerEvent;
-use crate::task::{attachment_path, image_type, Picture};
+use crate::task::{attachment_path, image_type, MentionMark, MentionMenu, MentionPerson, Picture, UserSummary};
 use crate::texts::{text, Locale};
 use crate::Core;
 
@@ -138,6 +138,14 @@ pub struct ThreadState {
     pub arrivals: u64,
     /// En un directo, hasta dónde leyó el otro.
     pub other_read_at: Option<String>,
+    /// Quien mira puede escribir aquí. En un canal, no quien sólo mira la
+    /// organización (`viewer`); en un directo, siempre.
+    pub can_write: bool,
+    /// Se puede nombrar a alguien con `@`: en un canal, que es donde el
+    /// servidor avisa a quien se nombra. En un directo sólo hay dos.
+    pub mentions_allowed: bool,
+    /// Lo escrito en esta conversación está de camino al servidor.
+    pub sending: bool,
 }
 
 /// La conversación abierta, por dentro.
@@ -175,6 +183,8 @@ struct Open {
 #[derive(Default)]
 pub(crate) struct ChatData {
     open: Option<Open>,
+    /// Las conversaciones con un mensaje de camino: una vez cada una.
+    sending: Vec<Conversation>,
     /// Lo último que se avisó, para no avisar de lo mismo.
     published: ThreadState,
 }
@@ -315,7 +325,10 @@ impl Chat {
             }
             Conversation::Channel { .. } => None,
         };
+        let can_write = self.can_write(&selected);
+        let mentions_allowed = matches!(selected, Conversation::Channel { .. });
         let data = self.data();
+        let sending = data.sending.contains(&selected);
         // Lo marcado es siempre de la organización que se mira (lo dice la
         // lista): con comparar la conversación, un directo de otra no pasa.
         match data.open.as_ref().filter(|open| open.conversation == selected) {
@@ -329,8 +342,36 @@ impl Chat {
                 older_failed: open.older_failed,
                 arrivals: open.arrivals,
                 other_read_at,
+                can_write,
+                mentions_allowed,
+                sending,
             },
-            None => ThreadState { conversation: Some(selected), loading: true, has_more: true, other_read_at, ..ThreadState::default() },
+            None => ThreadState {
+                conversation: Some(selected),
+                loading: true,
+                has_more: true,
+                other_read_at,
+                can_write,
+                mentions_allowed,
+                sending,
+                ..ThreadState::default()
+            },
+        }
+    }
+
+    /// Si quien mira puede escribir en esa conversación.
+    ///
+    /// En un canal manda el papel en la organización, como en el árbol
+    /// (`OrgRole.CanWrite`; el servidor contesta 403 `viewer-read-only`). En
+    /// un directo el servidor no mira el papel: quien está en él, escribe.
+    fn can_write(&self, conversation: &Conversation) -> bool {
+        match conversation {
+            Conversation::Direct { .. } => true,
+            Conversation::Channel { .. } => {
+                let role = self.core.orgs().state().current().map(|org| org.role.clone()).unwrap_or_default();
+                let superadmin = self.core.session().is_some_and(|session| session.superadmin);
+                crate::tree::can_edit_tree(&role, superadmin)
+            }
         }
     }
 
@@ -691,6 +732,62 @@ impl Chat {
         }
     }
 
+    // ── Escribir ─────────────────────────────────────────────────────────
+
+    /// Manda un mensaje a esa conversación, como respuesta a `reply_to` si
+    /// lo hay.
+    ///
+    /// Lo que no se puede mandar no se pide (en blanco: `empty-body`; más
+    /// largo de lo que acepta el servidor: `too-long`), y un mensaje de
+    /// camino en esa conversación no deja mandar otro (`already-sending`):
+    /// el servidor no reconoce un envío repetido y lo publicaría dos veces.
+    ///
+    /// Al salir bien se relee la conversación, si es la que se tiene
+    /// delante: lo que contesta el servidor no trae el nombre de quien
+    /// escribe ni la cita, y en un directo a quien escribe no le llega
+    /// evento de lo suyo. En un directo, además, se vuelve a pedir la lista,
+    /// que es donde va su última línea. Si falla, no se toca nada: lo
+    /// escrito sigue en la caja de quien llama.
+    pub async fn send(&self, conversation: Conversation, body: String, reply_to: Option<String>) -> Result<(), ApiError> {
+        let body = message_to_send(&body)?;
+        if !self.can_write(&conversation) {
+            return Err(local("viewer-read-only", "Viewers can look, but not write"));
+        }
+        {
+            let mut data = self.data();
+            if data.sending.contains(&conversation) {
+                return Err(local("already-sending", "A message is already on its way here"));
+            }
+            data.sending.push(conversation.clone());
+        }
+        self.publish();
+        let mut payload = serde_json::json!({ "body": body });
+        if let Some(reply_to) = reply_to.filter(|id| !id.is_empty()) {
+            payload["replyToId"] = serde_json::Value::String(reply_to);
+        }
+        let result = self.core.call_ok("POST", &send_path(&conversation), Some(payload)).await;
+        self.data().sending.retain(|sending| sending != &conversation);
+        self.publish();
+        if result.is_ok() {
+            if self.data().open.as_ref().is_some_and(|open| open.conversation == conversation) {
+                self.refresh().await;
+            }
+            if matches!(conversation, Conversation::Direct { .. }) {
+                self.core.counters().reload_directs().await;
+            }
+        }
+        result
+    }
+
+    /// La lista de a quién nombrar con ese texto y el cursor ahí, si se está
+    /// escribiendo un `@algo` donde se puede nombrar. Con la gente de la
+    /// organización que ya trajo comunicación (`Comms::load_people`).
+    pub fn mention_menu(&self, conversation: &Conversation, text: &str, cursor: u32, mark: Option<MentionMark>) -> Option<MentionMenu> {
+        let allowed = matches!(conversation, Conversation::Channel { .. });
+        let team: Vec<UserSummary> = self.core.comms().people("").into_iter().map(UserSummary::from).collect();
+        crate::task::mention_menu(&team, text, cursor as usize, allowed, mark.as_ref())
+    }
+
     // ── Lo que hay dentro de un mensaje ─────────────────────────────────
 
     /// A qué lleva un enlace de un mensaje.
@@ -742,6 +839,69 @@ impl Chat {
         let mime = image_type(&bytes).ok_or_else(|| ApiError::Server { status: 400, code: "not-an-image".into(), message: "That file is not an image".into() })?;
         Ok(Picture { mime: mime.to_string(), bytes })
     }
+}
+
+// ── Escribir ────────────────────────────────────────────────────────────
+
+/// Lo más largo que acepta el servidor, en caracteres: el `max=8000` de
+/// `domain.ChatMessageRequest` y `domain.DMMessageRequest`, que en un texto
+/// cuenta runas, no bytes.
+pub const MESSAGE_MAX_CHARS: u32 = 8000;
+
+/// Un rechazo de aquí, antes de pedir nada: con su código, como los del
+/// servidor, para que quien pinta lo diga con la misma frase.
+fn local(code: &str, message: &str) -> ApiError {
+    ApiError::Server { status: 0, code: code.to_string(), message: message.to_string() }
+}
+
+/// Lo que se manda de lo escrito: sin espacios alrededor, y sólo si dice
+/// algo y cabe.
+pub fn message_to_send(written: &str) -> Result<String, ApiError> {
+    let body = written.trim();
+    if body.is_empty() {
+        return Err(local("empty-body", "The message is empty"));
+    }
+    if body.chars().count() > MESSAGE_MAX_CHARS as usize {
+        return Err(local("too-long", "The message is longer than the server accepts"));
+    }
+    Ok(body.to_string())
+}
+
+/// La ruta por la que se escribe en esa conversación.
+fn send_path(conversation: &Conversation) -> String {
+    match conversation {
+        Conversation::Channel { space_id } => format!("/api/v1/task-spaces/{space_id}/chat"),
+        Conversation::Direct { conversation_id } => format!("/api/v1/dm/{conversation_id}/messages"),
+    }
+}
+
+/// Si Enter, con lo escrito y el cursor ahí, manda el mensaje.
+///
+/// Dentro de un bloque de código abierto (una valla ```` ``` ```` sin cerrar
+/// antes del cursor) no: ahí se está escribiendo código, y Enter es otra
+/// línea. En lo demás sí, también en una lista: es un chat, no un documento
+/// (Mayús+Enter salta de línea siempre).
+pub fn enter_sends(text: &str, cursor: u32) -> bool {
+    let cursor = (cursor as usize).min(text.len());
+    let Some(before) = text.get(..cursor) else { return true };
+    before.lines().filter(|line| line.trim_start().starts_with("```")).count() % 2 == 0
+}
+
+/// Una mención como ficha dentro de la caja de escribir: lo que vale
+/// (`text`, el enlace que el servidor busca para avisar) y lo que se ve
+/// (`label`, el nombre).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct MentionToken {
+    /// A quién nombra.
+    pub id: String,
+    pub text: String,
+    pub label: String,
+}
+
+/// La ficha de nombrar a esa persona.
+pub fn mention_token(person: &MentionPerson) -> MentionToken {
+    MentionToken { id: person.id.clone(), text: crate::task::mention_link(person), label: format!("@{}", person.name) }
 }
 
 // ── Cómo se lee cada línea ──────────────────────────────────────────────
@@ -1097,6 +1257,28 @@ pub fn around_label(names: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Enter manda, salvo dentro de un bloque de código abierto antes del
+    /// cursor; uno ya cerrado no cuenta, ni las comillas sueltas de una
+    /// línea.
+    ///
+    /// Roturas que atrapa: mandar a medio escribir un bloque de código;
+    /// no mandar nunca después de haber cerrado uno; no mandar en una
+    /// lista (aquí es un chat).
+    #[test]
+    fn enter_sends_except_inside_an_open_code_block() {
+        assert!(enter_sends("hola", 4));
+        assert!(enter_sends("- uno\n- dos", 11));
+        let open = "mira:\n```rust\nfn main() {";
+        assert!(!enter_sends(open, open.len() as u32));
+        let closed = "```\nx\n```\ny ya";
+        assert!(enter_sends(closed, closed.len() as u32));
+        assert!(enter_sends("con `código` suelto", 19));
+        // El cursor antes de la valla manda; después, no.
+        let fence = "antes\n```\ndentro";
+        assert!(enter_sends(fence, 5));
+        assert!(!enter_sends(fence, fence.len() as u32));
+    }
     use chrono::FixedOffset;
 
     fn message(id: &str, author: &str, at: &str) -> ThreadMessage {

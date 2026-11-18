@@ -193,6 +193,8 @@
   "migrate-needs-a-person": "El comando de migraciones corre en el servidor: se cambia desde la app, no con un token.",
   "guest-not-admitted": "Todavía no estás dentro de la llamada: espera a que te dejen pasar.",
   "empty-body": "El mensaje está vacío.",
+  "too-long": "El mensaje es demasiado largo: caben 8.000 caracteres.",
+  "already-sending": "Todavía se está enviando el mensaje anterior.",
   "repo-docs-off": "Este repo no enseña sus docs. Enciéndelos en la configuración de GitHub de la organización.",
   "github-unreachable": "GitHub no contestó. Prueba otra vez en un momento.",
   "not-a-repo-image": "Eso no es una imagen de este repo.",

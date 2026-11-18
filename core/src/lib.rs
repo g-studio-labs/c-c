@@ -44,8 +44,8 @@ use std::time::Duration;
 
 pub use account::{check_new_password, check_sign_in, gate, FormCheck, Gate, MIN_PASSWORD};
 pub use chat::{
-    around_label, message_body, thread_lines, thread_splice, BodyFile, Chat, MessageBody,
-    ThreadLine, ThreadLink, ThreadMessage, ThreadQuote, ThreadSplice, ThreadState, THREAD_PAGE,
+    around_label, enter_sends, mention_token, message_body, message_to_send, thread_lines, thread_splice, BodyFile, Chat, MentionToken, MessageBody,
+    ThreadLine, ThreadLink, ThreadMessage, ThreadQuote, ThreadSplice, ThreadState, MESSAGE_MAX_CHARS, THREAD_PAGE,
 };
 pub use comms::{
     comms_panel, conversation_title, people_matching, resolve_conversation, Channel, Comms, CommsPanel, CommsRow, CommsRows, CommsSection, CommsState,
