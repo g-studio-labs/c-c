@@ -1,0 +1,15 @@
+[package]
+name = "zorite-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "¿Compila y sirve zorite-editor contra el GPUI de desktop/? (command-and-control-391)"
+
+[workspace]
+
+[dependencies]
+gpui-kit = "=0.9.1"
+zorite-editor = "=0.11.3"
+
+[dev-dependencies]
+gpui-kit = { version = "=0.9.1", features = ["test-support"] }
