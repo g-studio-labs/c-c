@@ -244,6 +244,34 @@ impl Counters {
         });
     }
 
+    /// Esa conversación se acaba de marcar leída: su contador se quita ya,
+    /// sin volver a contar todos los canales por un cambio que se sabe
+    /// (`markRead` en `chat.store.ts` y `dm.store.ts`), y luego se le
+    /// pregunta al servidor. Lo segundo no es de adorno: un mensaje que
+    /// llega hace que se vuelva a contar, y esa cuenta puede haberse pedido
+    /// antes de marcar y llegar después, con el número viejo.
+    pub(crate) fn conversation_read(&self, conversation: &crate::comms::Conversation) {
+        use crate::comms::Conversation;
+        match conversation {
+            Conversation::Channel { space_id } => {
+                self.update(|data| {
+                    if let Some(rows) = data.chat.as_mut() {
+                        rows.retain(|row| &row.space_id != space_id);
+                    }
+                });
+                self.reload_soon(Source::Channels);
+            }
+            Conversation::Direct { conversation_id } => {
+                self.update(|data| {
+                    if let Some(direct) = data.dms.iter_mut().flatten().find(|direct| &direct.conversation_id == conversation_id) {
+                        direct.unread = 0;
+                    }
+                });
+                self.reload_soon(Source::Dms);
+            }
+        }
+    }
+
     /// Vuelve a pedir las conversaciones privadas ya, sin respiro: tras
     /// abrir una, que tiene que estar en la lista para poder elegirla.
     pub(crate) async fn reload_directs(&self) {

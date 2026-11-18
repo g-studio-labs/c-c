@@ -219,7 +219,7 @@ pub fn preview_line(last: LastLine, with_author: bool, locale: Locale) -> String
 }
 
 /// Un instante del servidor (`2026-10-15T10:00:00Z`).
-fn instant(iso: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn instant(iso: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(iso).ok().map(|at| at.with_timezone(&Utc))
 }
 

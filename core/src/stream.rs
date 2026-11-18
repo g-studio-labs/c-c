@@ -298,6 +298,10 @@ impl Stream {
         // corte no llegó por evento.
         let core = self.core.clone();
         tokio::spawn(async move { core.comms().load().await });
+        // Y la conversación que se tiene delante: el stream no repite lo que
+        // se dijo mientras no estaba.
+        let core = self.core.clone();
+        tokio::spawn(async move { core.chat().refresh().await });
     }
 
     fn dispatch(&self, event: ServerEvent) {
@@ -319,6 +323,8 @@ impl Stream {
         }
         self.core.counters().server_event(&event);
         self.core.comms().server_event(&event);
+        // Después de la lista: es ella quien apunta hasta dónde leyó el otro.
+        self.core.chat().server_event(&event);
         self.core.inner.listener.server_event(event);
     }
 }

@@ -3,6 +3,7 @@
 //! El core no sabe qué pinta: avisa por este trait, y cada plataforma lo
 //! convierte en lo suyo (un evento de Tauri, un `StateFlow`, un `@Published`).
 
+use crate::chat::ThreadState;
 use crate::comms::CommsState;
 use crate::counters::CountersState;
 use crate::docs::DocsState;
@@ -44,6 +45,10 @@ pub trait Listener: Send + Sync {
     /// movió una fila, se eligió una conversación, o se cambió de
     /// organización y hay que dejar de pintar la de la anterior.
     fn comms_changed(&self, _state: CommsState) {}
+
+    /// La conversación que se tiene delante cambió: se eligió otra, llegó
+    /// su página, llegó un mensaje, o el otro leyó.
+    fn thread_changed(&self, _state: ThreadState) {}
 
     /// La conexión con el servidor cambió: para el aviso de «sin conexión».
     fn connection_changed(&self, _state: ConnectionState) {}

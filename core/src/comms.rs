@@ -244,6 +244,9 @@ impl Comms {
             data.published = state.clone();
         }
         self.core.inner.listener.comms_changed(state);
+        // La conversación que se pinta depende de cuál marca la lista y de
+        // hasta dónde leyó el otro: se mueve con ella.
+        self.core.chat().publish();
     }
 
     /// Lo que se eligió y lo que se plegó la última vez, para arrancar con ello.
@@ -432,6 +435,19 @@ impl Comms {
         let path = format!("/api/v1/users/search?q=&orgId={org_id}&limit={PEOPLE_LIMIT}");
         let Ok(people) = self.core.get_list::<Person>(&path).await else { return };
         self.data().people.insert(org_id, people);
+    }
+
+    /// Si ya se trajo la gente de la organización que se mira.
+    pub(crate) fn has_people(&self) -> bool {
+        let Some(org_id) = self.core.orgs().state().current_org_id else { return true };
+        self.data().people.contains_key(&org_id)
+    }
+
+    /// Quién de la organización que se mira anda por aquí, sin contar a
+    /// quien mira (`QuienAnda` en `ChannelView.tsx`): sus nombres, de la
+    /// gente ya traída.
+    pub fn around(&self, now: DateTime<Utc>) -> Vec<String> {
+        self.people("").into_iter().filter(|person| seen_recently(person.last_seen_at.as_deref(), now)).map(|person| person.shown_name().to_string()).collect()
     }
 
     /// A quién se le puede escribir en la organización que se mira, de la

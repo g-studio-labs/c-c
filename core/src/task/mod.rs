@@ -252,6 +252,32 @@ impl Core {
     }
 }
 
+/// Si eso es el id de una tarea y no su nombre de fuera: un uuid.
+pub(crate) fn is_task_id(written: &str) -> bool {
+    written.len() == 36 && written.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+impl Tasks {
+    /// Abre la tarea que nombra un enlace: por su id, o por como se la
+    /// nombra fuera (`proteus-12`), que el servidor dice cuál es. `false`
+    /// si con ese nombre no hay ninguna. Lo usan los enlaces de un documento
+    /// y los de un mensaje.
+    pub(crate) async fn open_written(&self, written: &str) -> bool {
+        if is_task_id(written) {
+            self.open(written).await;
+            return true;
+        }
+        let named: String = written.bytes().map(|byte| if byte.is_ascii_alphanumeric() || byte == b'-' { (byte as char).to_string() } else { format!("%{byte:02X}") }).collect();
+        match self.core.get::<TaskDetail>(&format!("/api/v1/tasks/by-ref/{named}")).await {
+            Ok(detail) => {
+                self.open(&detail.task.id).await;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
 impl Tasks {
     pub fn state(&self) -> TaskState {
         self.core.inner.task.lock().expect("task lock").clone()

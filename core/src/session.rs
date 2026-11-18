@@ -158,6 +158,7 @@ impl Core {
         self.stream().stop();
         self.counters().clear();
         self.comms().clear();
+        self.chat().clear();
         self.inner.listener.session_changed(None);
     }
 

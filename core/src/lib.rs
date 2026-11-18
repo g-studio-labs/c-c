@@ -9,6 +9,7 @@
 uniffi::setup_scaffolding!();
 
 pub mod account;
+pub mod chat;
 pub mod comms;
 pub mod comms_text;
 pub mod comms_wire;
@@ -42,6 +43,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use account::{check_new_password, check_sign_in, gate, FormCheck, Gate, MIN_PASSWORD};
+pub use chat::{
+    around_label, message_body, thread_lines, thread_splice, BodyFile, Chat, MessageBody,
+    ThreadLine, ThreadLink, ThreadMessage, ThreadQuote, ThreadSplice, ThreadState, THREAD_PAGE,
+};
 pub use comms::{
     comms_panel, conversation_title, people_matching, resolve_conversation, Channel, Comms, CommsPanel, CommsRow, CommsRows, CommsSection, CommsState,
     CommsViewer, Conversation, ConversationTitle,
@@ -178,6 +183,16 @@ pub(crate) struct Inner {
     /// Cuántas veces se ha pedido volver a traer las últimas líneas de los
     /// canales: ver `Comms::reload_soon`.
     pub(crate) comms_reloads: std::sync::atomic::AtomicU64,
+    pub(crate) chat: Mutex<chat::ChatData>,
+    /// Cuál de las aperturas de una conversación es la vigente: ver
+    /// `Chat::open`.
+    pub(crate) chat_turn: std::sync::atomic::AtomicU64,
+    /// Cuántas veces se ha pedido releer la conversación: ver
+    /// `Chat::refresh_soon`.
+    pub(crate) chat_reloads: std::sync::atomic::AtomicU64,
+    /// Cuántas lecturas de la conversación se han pedido: ver
+    /// `Chat::refresh`.
+    pub(crate) chat_reads: std::sync::atomic::AtomicU64,
     pub(crate) connection: Mutex<ConnectionState>,
     /// Qué stream de eventos es el vigente: ver `Stream::current`.
     pub(crate) stream_turn: std::sync::atomic::AtomicU64,
@@ -212,6 +227,10 @@ impl Core {
                 counter_reloads: Default::default(),
                 comms: Mutex::new(comms::CommsData::default()),
                 comms_reloads: std::sync::atomic::AtomicU64::new(0),
+                chat: Mutex::new(chat::ChatData::default()),
+                chat_turn: std::sync::atomic::AtomicU64::new(0),
+                chat_reloads: std::sync::atomic::AtomicU64::new(0),
+                chat_reads: std::sync::atomic::AtomicU64::new(0),
                 connection: Mutex::new(ConnectionState::default()),
                 stream_turn: std::sync::atomic::AtomicU64::new(0),
                 my_work_reloads: std::sync::atomic::AtomicU64::new(0),

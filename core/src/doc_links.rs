@@ -22,7 +22,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::doc_edit::DocLeave;
 use crate::docs::{kind_segment, Docs, DocsState, DOC_TABS};
 use crate::nav::NodeKind;
-use crate::task::TaskDetail;
 use crate::tree_rows::find_node;
 
 /// Lo que es un enlace de un documento.
@@ -137,11 +136,6 @@ pub fn doc_link(href: &str) -> DocLink {
     }
 }
 
-/// Si eso es el id de una tarea y no su nombre de fuera: un uuid.
-fn is_task_id(written: &str) -> bool {
-    written.len() == 36 && written.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
-}
-
 /// «¿Qué es esto?» → `que-es-esto`: el ancla de un título, como la pone
 /// `slugify` en `app/src/lib/headings.ts`. Sin acentos, para que
 /// «Configuración» y «Configuracion» den la misma.
@@ -235,15 +229,8 @@ impl Docs {
     }
 
     async fn open_linked_task(&self, href: &str, written: &str) {
-        if is_task_id(written) {
-            self.core.tasks().open(written).await;
-            return;
-        }
-        // Por su nombre de fuera: el servidor dice cuál es.
-        let named: String = written.bytes().map(|byte| if byte.is_ascii_alphanumeric() || byte == b'-' { (byte as char).to_string() } else { format!("%{byte:02X}") }).collect();
-        match self.core.get::<TaskDetail>(&format!("/api/v1/tasks/by-ref/{named}")).await {
-            Ok(detail) => self.core.tasks().open(&detail.task.id).await,
-            Err(_) => self.say_link_failed(href),
+        if !self.core.tasks().open_written(written).await {
+            self.say_link_failed(href);
         }
     }
 
@@ -364,8 +351,8 @@ mod tests {
     /// (404), o buscar un uuid por nombre.
     #[test]
     fn a_task_is_told_by_id_or_by_name() {
-        assert!(is_task_id("0d6bf322-2267-4259-9b81-337575aca792"));
-        assert!(!is_task_id("command-and-control-12"));
-        assert!(!is_task_id("0d6bf322-2267-4259-9b81-337575aca79"));
+        assert!(crate::task::is_task_id("0d6bf322-2267-4259-9b81-337575aca792"));
+        assert!(!crate::task::is_task_id("command-and-control-12"));
+        assert!(!crate::task::is_task_id("0d6bf322-2267-4259-9b81-337575aca79"));
     }
 }
