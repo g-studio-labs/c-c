@@ -244,6 +244,125 @@ mod tests {
         .unwrap();
     }
 
+    /// Una caja con fichas dentro del texto, como la del chat.
+    struct Tokens {
+        state: Entity<gpui_kit::component::input::TextareaState>,
+    }
+
+    impl gpui_kit::Render for Tokens {
+        fn render(&mut self, _: &mut gpui_kit::Window, _: &mut gpui_kit::Context<Self>) -> impl gpui_kit::IntoElement {
+            use gpui_kit::{InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _};
+            gpui_kit::div().size_full().p_4().child(
+                gpui_kit::component::input::Textarea::new(&self.state)
+                    // Lo que se ve de cada ficha, con su nombre para buscarla.
+                    .token(|token, _, _| {
+                        gpui_kit::div()
+                            .id(gpui_kit::SharedString::from(format!("token-{}", token.token().id())))
+                            .aria_label(token.token().label().clone())
+                            .child(token.token().label().clone())
+                            .test_support()
+                    }),
+            )
+        }
+    }
+
+    const LINK: &str = "[@luis](cac:user/22222222-2222-4222-8222-222222222222)";
+
+    fn mention() -> gpui_kit::component::input::InlineToken {
+        gpui_kit::component::input::InlineToken::new("u2", LINK).with_label("@Luis Mora")
+    }
+
+    fn open_tokens(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<gpui_kit::component::input::TextareaState>) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::theme::apply(gpui_kit::component::ThemeMode::Dark, cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds { origin: Point::default(), size: size(px(700.), px(400.)) })),
+                ..WindowOptions::default()
+            };
+            let mut state = None;
+            let (window, _) = gpui_kit::open_window(options, cx, |window, cx| {
+                let field = cx.new(|cx| gpui_kit::component::input::TextareaState::new(window, cx).auto_grow(1, 8));
+                state = Some(field.clone());
+                cx.new(|_| Tokens { state: field })
+            })
+            .expect("open test window");
+            (window, state.unwrap())
+        })
+    }
+
+    /// Las fichas del campo del kit sirven para la caja del chat (406): lo que
+    /// vale el campo es el markdown de la mención y lo que se ve es el nombre;
+    /// se borra entera, se deshace, el cursor la salta, y un acento con tecla
+    /// muerta junto a ella no la rompe.
+    ///
+    /// Es la comprobación antes de construir la caja encima: el kit 0.9.1 trae
+    /// las fichas y nada de la app las usaba. Roturas que atrapa (de una
+    /// subida del kit que cambie cualquiera de estas cosas): el valor sin el
+    /// enlace (el servidor no avisaría a nadie); el enlace pintado en crudo;
+    /// una ficha que se borra a trozos y deja `[@lu` en el mensaje; deshacer
+    /// que no la devuelve; el cursor que entra en ella; un acento junto a la
+    /// ficha que la parte o la tira.
+    #[gpui_kit::test]
+    fn the_kit_field_keeps_a_mention_as_one_token(cx: &mut TestAppContext) {
+        use gpui_kit::EntityInputHandler as _;
+        let (window, state) = open_tokens(cx);
+        cx.update_window(window, |_, window, cx| {
+            state.update(cx, |state, cx| state.focus(window, cx));
+            window.input("hola @lu", cx);
+            // Lo que hará el menú de menciones al elegir: cambiar lo tecleado
+            // desde la arroba por la ficha.
+            state.update(cx, |state, cx| state.replace_range_with_token(5..8, mention(), window, cx)).unwrap();
+            window.input(" ¿vienes?", cx);
+            window.render_frame(cx);
+
+            let value = state.read(cx).value().to_string();
+            assert_eq!(value, format!("hola {LINK} ¿vienes?"), "el valor no es el markdown que se envía");
+            assert_eq!(state.read(cx).tokens().len(), 1);
+            let shown = window.try_find("token-u2").and_then(|found| found.label().map(str::to_string));
+            assert_eq!(shown.as_deref(), Some("@Luis Mora"), "la ficha no enseña el nombre");
+
+            // El cursor salta la ficha entera: desde justo detrás, una
+            // flecha a la izquierda deja el cursor delante de ella.
+            let after = 5 + LINK.len();
+            state.update(cx, |state, cx| state.set_selected_range(after..after, cx));
+            window.press("left", cx);
+            assert_eq!(state.read(cx).selected_range(), 5..5, "el cursor entró en la ficha");
+
+            // Retroceso detrás de ella la borra entera, y deshacer la devuelve.
+            state.update(cx, |state, cx| state.set_selected_range(after..after, cx));
+            window.press("backspace", cx);
+            assert_eq!(state.read(cx).value().as_ref(), "hola  ¿vienes?", "la ficha se borró a trozos");
+            assert!(state.read(cx).tokens().is_empty());
+            window.press("ctrl-z", cx);
+            assert_eq!(state.read(cx).value().to_string(), format!("hola {LINK} ¿vienes?"), "deshacer no devolvió la ficha");
+            assert_eq!(state.read(cx).tokens().len(), 1);
+
+            // Una tecla muerta justo detrás de la ficha, como la manda X11:
+            // primero el acento suelto y marcado, luego la letra compuesta.
+            state.update(cx, |state, cx| {
+                state.set_selected_range(after..after, cx);
+                state.replace_and_mark_text_in_range(None, "´", Some(1..1), window, cx);
+                // Mientras se compone no se puede poner otra ficha: la caja
+                // tendrá que cerrar la composición antes.
+                assert_eq!(state.replace_with_token(mention(), window, cx), Err(gpui_kit::component::input::InlineTokenError::CompositionActive));
+                state.replace_text_in_range(None, "é", window, cx);
+            });
+            assert_eq!(state.read(cx).value().to_string(), format!("hola {LINK}é ¿vienes?"), "el acento junto a la ficha la rompió");
+            assert_eq!(state.read(cx).tokens().len(), 1);
+            assert_eq!(state.read(cx).tokens()[0].range(), 5..after);
+
+            // El borrador se guarda y se devuelve con su ficha (un borrador
+            // por conversación); vaciar tras enviar no deja ninguna.
+            let draft = state.read(cx).content();
+            state.update(cx, |state, cx| state.set_value("", window, cx));
+            assert!(state.read(cx).tokens().is_empty() && state.read(cx).value().is_empty());
+            state.update(cx, |state, cx| state.set_value(draft.clone(), window, cx));
+            assert_eq!(state.read(cx).content(), draft, "el borrador volvió sin su ficha");
+        })
+        .unwrap();
+    }
+
     /// La rueda del ratón mueve la lista.
     ///
     /// jose abrió la primera versión y la lista no se movía: se pintaba, pero
