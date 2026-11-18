@@ -183,21 +183,7 @@ pub struct TaskView {
 async fn upload_all(core: cac_core::Core, files: Vec<Incoming>) -> (Vec<TaskAttachment>, Option<(String, Option<ApiError>)>) {
     let (mut attached, mut failed) = (Vec::new(), None);
     for file in files {
-        let (name, read) = match file {
-            Incoming::Path(path) => {
-                let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-                // El tamaño se mira antes de leer: un fichero enorme no se carga en
-                // memoria para que digan que no. (Sin esto el core lo rechaza igual,
-                // ya leído: no hay prueba que lo distinga sin medir memoria.)
-                let read = std::fs::metadata(&path)
-                    .map_err(|_| None)
-                    .and_then(|file| cac_core::attachment_fits(file.len()).map_err(Some))
-                    .and_then(|()| std::fs::read(&path).map_err(|_| None));
-                (name, read)
-            }
-            // Una imagen pegada ya está en memoria.
-            Incoming::Picture { name, bytes } => (name, Ok(bytes)),
-        };
+        let (name, read) = crate::editor::read_incoming(file);
         let uploaded = match read {
             Ok(bytes) => core.tasks().attach(&name, bytes).await.map_err(Some),
             Err(error) => Err(error),

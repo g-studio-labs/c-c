@@ -1750,7 +1750,7 @@ mod tests {
         wait_until(cx, "se ofrece a Luis", |cx| on_screen(window, "mention-u2", cx));
         assert!(!on_screen(window, "mention-u1", cx), "se ofreció a quien escribe");
         press(window, "enter", cx);
-        assert_eq!(label(window, "composer-token-u2", cx), "@Luis Mora");
+        assert_eq!(label(window, "composer-token-user-u2", cx), "@Luis Mora");
         assert_eq!(written(&view, cx), "[@luis](cac:user/u2) ");
         assert!(sent(&server, CHAT_A).is_empty(), "Enter mandó en vez de elegir");
         // El espacio, y luego la ficha entera.
@@ -1858,7 +1858,7 @@ mod tests {
         click(window, "comms-channel-a", cx);
         wait_until(cx, "vuelve A", |cx| on_screen(window, "thread-line-a1", cx));
         assert_eq!(written(&view, cx), "para [@luis](cac:user/u2) a medias");
-        assert_eq!(label(window, "composer-token-u2", cx), "@Luis Mora", "la mención volvió sin su ficha");
+        assert_eq!(label(window, "composer-token-user-u2", cx), "@Luis Mora", "la mención volvió sin su ficha");
         click(window, "comms-channel-b", cx);
         wait_until(cx, "vuelve B", |cx| on_screen(window, "thread-line-b1", cx));
         assert_eq!(written(&view, cx), "otro de B");
@@ -1879,6 +1879,151 @@ mod tests {
         wait_until(cx, "se pinta", |cx| on_screen(window, "thread-line-m1", cx));
         assert_eq!(label(window, "thread-composer", cx), "Aquí puedes mirar, pero no cambiar nada.");
         assert!(!on_screen(window, "thread-send", cx) && !on_screen(window, "thread-reply-m1", cx));
+        stop(cx);
+    }
+
+    // ── Adjuntar ────────────────────────────────────────────────────────
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\xff";
+    const UPLOAD_A: &str = "/api/v1/task-spaces/a/chat/attachments";
+
+    /// Un servidor que guarda lo que se sube a ese canal y contesta como el
+    /// de verdad: con su ruta relativa y su nombre. Tarda eso.
+    fn mount_uploads(server: &FakeServer, delay: Duration) {
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path(UPLOAD_A))
+                .respond_with(move |request: &Request| {
+                    let body = String::from_utf8_lossy(&request.body);
+                    let (id, name, kind) = if body.contains("notas.txt") { ("f2", "notas.txt", "text/plain") } else { ("f1", "pasted.png", "image/png") };
+                    let file = json!({ "id": id, "spaceId": "a", "url": format!("{UPLOAD_A}/{id}/raw"), "fileName": name, "contentType": kind });
+                    ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": file })).set_delay(delay)
+                })
+                .with_priority(1),
+        );
+    }
+
+    fn paste_picture(window: AnyWindowHandle, cx: &mut TestAppContext) {
+        use gpui_kit::{ClipboardItem, Image, ImageFormat};
+        cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, PNG.to_vec())));
+        cx.update_window(window, |_, window, cx| window.dispatch_action(Box::new(gpui_kit::component::input::Paste), cx)).unwrap();
+        cx.run_until_parked();
+    }
+
+    /// Una imagen pegada y un fichero soltado se suben al canal con la
+    /// sesión y quedan como fichas con su nombre; mientras suben no se
+    /// manda; y lo que se manda los cita como los lee quien lo recibe.
+    ///
+    /// Roturas que atrapa: pegar una imagen y que no se suba; un fichero
+    /// soltado en la caja que no hace nada; mandar con un fichero a medio
+    /// subir (su enlace caería en el mensaje siguiente, como en la app de
+    /// siempre); la cita en crudo en la caja; una captura citada como
+    /// enlace, que no se vería.
+    #[gpui_kit::test]
+    fn what_is_pasted_or_dropped_is_uploaded_and_sent_as_its_citation(cx: &mut TestAppContext) {
+        use gpui_kit::{ExternalPaths, FileDropEvent, PlatformInput};
+        let server = server();
+        let talk = history(vec![line("m1", "u2", "Luis Mora", "hola", 5, 1)]);
+        mount_history(&server, CHAT_A, &talk, Duration::ZERO);
+        mount_writes(&server, CHAT_A, &talk);
+        mount_uploads(&server, Duration::from_millis(400));
+        let (window, view) = open(&server, cx);
+        enter(window, channel("a"), cx);
+        wait_until(cx, "se pinta", |cx| on_screen(window, "thread-line-m1", cx));
+
+        write(window, &view, "mira ", cx);
+        paste_picture(window, cx);
+        assert_eq!(label(window, "thread-uploading-1", cx), "Subiendo pasted.png…");
+        // A medio subir no se manda, ni con el botón ni con Enter.
+        click(window, "thread-send", cx);
+        press(window, "enter", cx);
+        assert!(sent(&server, CHAT_A).is_empty(), "se mandó con un fichero a medio subir");
+        wait_until(cx, "la imagen queda como ficha", |cx| on_screen(window, "composer-token-file-f1", cx));
+        assert_eq!(label(window, "composer-token-file-f1", cx), "pasted.png");
+        assert!(!on_screen(window, "thread-uploading-1", cx));
+        let uploaded = server.requests().into_iter().find(|request| request.url.path() == UPLOAD_A).unwrap();
+        assert_eq!(uploaded.body, cac_core::multipart("pasted.png", PNG).1);
+        assert!(uploaded.headers.get("Authorization").is_some(), "se subió sin la sesión");
+
+        // Un fichero soltado en la caja.
+        let dir = std::env::temp_dir().join(format!("cac-chat-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let notes = dir.join("notas.txt");
+        std::fs::write(&notes, b"hola").unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let position = window.find("thread-composer").bounds().center();
+            let paths = ExternalPaths(vec![notes.clone()].into());
+            // El ratón pasa por la ventana camino del gestor de ficheros:
+            // tras escribir, GPUI no ve nada «bajo el ratón» hasta que se
+            // mueve, y un `FileDrop` no cuenta como movimiento (trampa
+            // abierta en cac: soltar sin haber movido el ratón no llega).
+            window.dispatch_event(PlatformInput::MouseMove(gpui_kit::MouseMoveEvent { position, pressed_button: None, modifiers: Default::default() }), cx);
+            window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Entered { position, paths }), cx);
+            window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Submit { position }), cx);
+        })
+        .unwrap();
+        wait_until(cx, "el fichero queda como ficha", |cx| on_screen(window, "composer-token-file-f2", cx));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        press(window, "enter", cx);
+        wait_until(cx, "se manda", |_| !sent(&server, CHAT_A).is_empty());
+        assert_eq!(sent(&server, CHAT_A), [json!({ "body": format!("mira ![pasted.png]({UPLOAD_A}/f1/raw) [notas.txt]({UPLOAD_A}/f2/raw)") })]);
+        stop(cx);
+    }
+
+    /// Un fichero que termina de subir cuando ya se mira otra conversación
+    /// queda en la suya, no en la que se tiene delante.
+    ///
+    /// Rotura que atrapa: la captura de un canal citada en el mensaje que
+    /// se escribe en otro.
+    #[gpui_kit::test]
+    fn a_file_that_lands_after_leaving_stays_in_its_conversation(cx: &mut TestAppContext) {
+        let server = server();
+        mount_history(&server, CHAT_A, &history(vec![line("a1", "u2", "Luis Mora", "de A", 5, 1)]), Duration::ZERO);
+        mount_history(&server, CHAT_B, &history(vec![line("b1", "u3", "Bea Soto", "de B", 5, 1)]), Duration::ZERO);
+        mount_uploads(&server, Duration::from_millis(500));
+        let (window, view) = open(&server, cx);
+        enter(window, channel("a"), cx);
+        wait_until(cx, "se pinta A", |cx| on_screen(window, "thread-line-a1", cx));
+        write(window, &view, "en A", cx);
+        paste_picture(window, cx);
+        click(window, "comms-channel-b", cx);
+        wait_until(cx, "se pinta B", |cx| on_screen(window, "thread-line-b1", cx));
+        wait_until(cx, "termina de subir", |cx| cx.update(|cx| view.read(cx).composer.field.read(cx).value().is_empty()) && server.hits(UPLOAD_A) == 1);
+        std::thread::sleep(Duration::from_millis(700));
+        cx.run_until_parked();
+        assert_eq!(written(&view, cx), "", "la captura de A se citó en B");
+
+        click(window, "comms-channel-a", cx);
+        wait_until(cx, "vuelve A con su captura", |cx| on_screen(window, "composer-token-file-f1", cx));
+        assert_eq!(written(&view, cx), format!("en A ![pasted.png]({UPLOAD_A}/f1/raw) "));
+        stop(cx);
+    }
+
+    /// Un fichero que no se puede subir lo dice con su nombre y por qué, y
+    /// no deja nada en la caja.
+    ///
+    /// Roturas que atrapa: fallar en silencio; decirlo dos veces; una ficha
+    /// de un fichero que no está en el servidor.
+    #[gpui_kit::test]
+    fn a_file_that_cannot_be_uploaded_says_why(cx: &mut TestAppContext) {
+        let server = server();
+        mount_history(&server, CHAT_A, &history(vec![line("m1", "u2", "Luis Mora", "hola", 5, 1)]), Duration::ZERO);
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path(UPLOAD_A))
+                .respond_with(ResponseTemplate::new(413).set_body_json(json!({ "success": false, "error": "too-large", "message": "File exceeds 30 MB" })))
+                .with_priority(1),
+        );
+        let (window, view) = open(&server, cx);
+        enter(window, channel("a"), cx);
+        wait_until(cx, "se pinta", |cx| on_screen(window, "thread-line-m1", cx));
+        write(window, &view, "x", cx);
+        paste_picture(window, cx);
+        wait_until(cx, "se dice que no se pudo", |cx| on_screen(window, "thread-send-failed", cx));
+        assert_eq!(label(window, "thread-send-failed", cx), "No se pudo adjuntar pasted.png: Ese fichero es demasiado grande.");
+        assert_eq!(written(&view, cx), "x");
         stop(cx);
     }
 }

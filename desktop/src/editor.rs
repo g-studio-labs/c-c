@@ -40,6 +40,27 @@ pub enum Incoming {
     Picture { name: String, bytes: Vec<u8> },
 }
 
+/// El nombre y los bytes de lo que llegó, para subirlo. Un fichero del
+/// disco se lee aquí; el error es `None` si no se pudo leer, o el rechazo
+/// del core si no cabe.
+pub fn read_incoming(file: Incoming) -> (String, Result<Vec<u8>, Option<cac_core::ApiError>>) {
+    match file {
+        Incoming::Path(path) => {
+            let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            // El tamaño se mira antes de leer: un fichero enorme no se carga en
+            // memoria para que digan que no. (Sin esto el core lo rechaza igual,
+            // ya leído: no hay prueba que lo distinga sin medir memoria.)
+            let read = std::fs::metadata(&path)
+                .map_err(|_| None)
+                .and_then(|file| cac_core::attachment_fits(file.len()).map_err(Some))
+                .and_then(|()| std::fs::read(&path).map_err(|_| None));
+            (name, read)
+        }
+        // Una imagen pegada ya está en memoria.
+        Incoming::Picture { name, bytes } => (name, Ok(bytes)),
+    }
+}
+
 type Attach = Rc<dyn Fn(&mut Window, &mut App)>;
 type TakeFiles = Rc<dyn Fn(Vec<Incoming>, &mut Window, &mut App)>;
 
@@ -108,7 +129,7 @@ fn carry_list_on(state: &Entity<TextareaState>, window: &mut Window, cx: &mut Ap
 
 /// Lo que hay que adjuntar de lo que se pegó: los ficheros copiados y las
 /// imágenes. Vacío si era texto, que entonces se pega como texto.
-fn pasted(item: &ClipboardItem) -> Vec<Incoming> {
+pub(crate) fn pasted(item: &ClipboardItem) -> Vec<Incoming> {
     let mut out = Vec::new();
     for entry in item.entries() {
         match entry {

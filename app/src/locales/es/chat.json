@@ -6,6 +6,7 @@
   "emptyTeamOnly": "Todavía no hay nada. Este canal es sólo del equipo — nunca llega a un cliente.",
   "placeholder": "Escríbele al equipo — con # citas una tarjeta, con @ nombras a alguien",
   "composerPlaceholder": "Escríbele al equipo — con @ nombras a alguien",
+  "uploading": "Subiendo {{name}}…",
   "send": "Enviar",
   "save": "Guardar",
   "cancel": "Cancelar",

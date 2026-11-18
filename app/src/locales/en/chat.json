@@ -6,6 +6,7 @@
   "emptyTeamOnly": "Nothing here yet. This channel is only for the team — it never reaches a client.",
   "placeholder": "Message the team — # cites a card, @ names somebody",
   "composerPlaceholder": "Message the team — @ names somebody",
+  "uploading": "Uploading {{name}}…",
   "send": "Send",
   "save": "Save",
   "cancel": "Cancel",
