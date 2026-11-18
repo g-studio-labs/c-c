@@ -55,5 +55,7 @@
   "callChatEmpty": "Nothing yet. What you write here stays with the call — it doesn't go to the channel.",
   "callChatPlaceholder": "Message the call",
   "viewCallChat": "View chat ({{count}})",
-  "callChatTitle": "Call chat"
+  "callChatTitle": "Call chat",
+  "messagesNotHereYet": "This conversation's messages can't be read in this app yet.",
+  "couldNotOpenConversation": "The conversation could not be opened."
 }

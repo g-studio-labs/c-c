@@ -17,7 +17,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use cac_core::{
-    ApiError, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, OrgsState, Session, Storage,
+    ApiError, CommsState, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, OrgsState, Session, Storage,
     TaskState, TreeState,
 };
 use gpui_kit::{App, AppContext, Entity, Global};
@@ -32,6 +32,7 @@ enum CoreEvent {
     Docs(DocsState),
     Task(TaskState),
     Counters(CountersState),
+    Comms(CommsState),
     Connection(ConnectionState),
 }
 
@@ -68,6 +69,9 @@ impl Listener for Forwarder {
     fn counters_changed(&self, state: CountersState) {
         self.send(CoreEvent::Counters(state));
     }
+    fn comms_changed(&self, state: CommsState) {
+        self.send(CoreEvent::Comms(state));
+    }
     fn connection_changed(&self, state: ConnectionState) {
         self.send(CoreEvent::Connection(state));
     }
@@ -87,6 +91,8 @@ pub struct Snapshot {
     pub task: TaskState,
     /// Los números de la campana y del riel.
     pub counters: CountersState,
+    /// La lista de comunicación de la organización que se mira.
+    pub comms: CommsState,
     pub connection: ConnectionState,
 }
 
@@ -100,6 +106,7 @@ impl Snapshot {
             CoreEvent::Docs(state) => self.docs = state,
             CoreEvent::Task(state) => self.task = state,
             CoreEvent::Counters(state) => self.counters = state,
+            CoreEvent::Comms(state) => self.comms = state,
             CoreEvent::Connection(state) => self.connection = state,
         }
     }

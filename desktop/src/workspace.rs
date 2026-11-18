@@ -16,6 +16,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
+use crate::comms::CommsView;
 use crate::connect::{ConnectClosed, ConnectView};
 use crate::theme::Leading as _;
 use crate::docs::DocsView;
@@ -91,6 +92,10 @@ pub struct Workspace {
     pub(crate) my_work: Entity<MyWorkView>,
     docs: Entity<DocsView>,
     pub(crate) task: Entity<TaskView>,
+    /// La lista de comunicación: lo que el panel enseña mientras se está en
+    /// ese módulo.
+    pub(crate) comms: Entity<CommsView>,
+    _on_comms: Subscription,
     /// Lo escrito para filtrar el árbol por título. Es de esta pantalla: qué
     /// casa con ello lo dice el core.
     tree_filter: Entity<InputState>,
@@ -134,6 +139,10 @@ impl Workspace {
         window.focus(&focus_anchor, cx);
         let on_focus_lost = cx.on_focus_lost(window, |this, window, cx| window.focus(&this.focus_anchor, cx));
         let connect = cx.new(ConnectView::new);
+        let comms = cx.new(|cx| CommsView::new(window, cx));
+        // «Nueva conversación» se pinta aquí, encima de todo: al abrirse o
+        // cerrarse hay que repintar.
+        let on_comms = cx.observe(&comms, |_, _, cx| cx.notify());
         let on_connect = [
             // Lo que sabe cambia desde otro hilo (mirar la máquina, instalar):
             // el punto del menú se repinta con ello.
@@ -148,6 +157,8 @@ impl Workspace {
             my_work: cx.new(|cx| MyWorkView::new(window, cx)),
             docs: cx.new(DocsView::new),
             task: cx.new(|cx| TaskView::new(window, cx)),
+            comms,
+            _on_comms: on_comms,
             tree_filter: cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)),
             // Como se dejó en esta máquina la última vez.
             panel_pinned: Backend::core(cx).panel_pinned(),
@@ -896,6 +907,9 @@ impl Workspace {
         // puedas», no algo sin leer.
         let servers = RailCount { id: "rail-platform-count", count: counters.servers, warning: true };
         let invitations = RailCount { id: "rail-organization-count", count: counters.invitations, warning: false };
+        // En cuál de los dos módulos con pantalla se está lo dice el core.
+        let on_comms = Backend::snapshot(cx).read(cx).comms.on_screen;
+        let comms_label = counted_label(&tr(cx, "nav:module.comms"), comms.count);
         div()
             .w(px(RAIL_WIDTH))
             .h_full()
@@ -909,16 +923,24 @@ impl Workspace {
             .border_r_1()
             .border_color(border)
             .child(div().id("rail-brand").test_support().mb_2().child(crate::brand::brand_mark(20., sidebar, cx)))
-            // El único módulo con pantalla en la primera entrega. Pulsarlo
-            // fija el panel o lo suelta.
+            // Pulsar el módulo en el que se está fija el panel o lo suelta;
+            // pulsar el otro lleva a él, con su panel.
             .child(
-                Self::rail_button("rail-work", Lucide::Briefcase, tr(cx, "nav:module.work"), true, cx)
+                Self::rail_button("rail-work", Lucide::Briefcase, tr(cx, "nav:module.work"), !on_comms, cx)
                     .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx)))
+                    .on_click(cx.listener(move |this, _, _, cx| if on_comms { Backend::core(cx).comms().leave() } else { this.toggle_panel(cx) }))
                     .test_support(),
             )
             .child(Self::pending_module("rail-docs", Lucide::BookOpen, "nav:module.docs", None, cx))
-            .child(Self::pending_module("rail-comms", Lucide::MessagesSquare, "nav:module.comms", Some(comms), cx))
+            // Con lo que tiene sin leer, en su esquina y en lo que dice.
+            .child(
+                Self::rail_button("rail-comms", Lucide::MessagesSquare, comms_label.clone(), on_comms, cx)
+                    .aria_label(comms_label)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| if on_comms { this.toggle_panel(cx) } else { Backend::core(cx).comms().enter() }))
+                    .children(Self::rail_badge(comms, cx))
+                    .test_support(),
+            )
             .child(Self::pending_module("rail-platform", Lucide::Server, "nav:module.platform", Some(servers), cx))
             .child(div().flex_1())
             .child(Self::pending_module("rail-organization", Lucide::Building2, "nav:rail.organization", Some(invitations), cx))
@@ -1157,7 +1179,7 @@ impl Workspace {
             )
     }
 
-    fn render_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (sidebar, border, muted, hover, foreground) =
             (theme.sidebar, theme.sidebar_border, theme.muted_foreground, theme.sidebar_accent, theme.sidebar_foreground);
@@ -1165,6 +1187,8 @@ impl Workspace {
         // «Mi trabajo» es la pantalla, esté acotada o no: a qué, lo dice el
         // árbol. Leyendo documentación ya no se está en ella.
         let on_my_work = snapshot.docs.target.is_none();
+        // En comunicación el panel es su lista: misma cabecera, otro cuerpo.
+        let on_comms = snapshot.comms.on_screen;
         let pinned = self.panel_pinned;
         // El catálogo anuncia el atajo como en un Mac («⌘B»): se dice con
         // la tecla de este sistema.
@@ -1223,7 +1247,7 @@ impl Workspace {
         // como que la organización no tiene espacios.
         let nothing = count == 0 && !query.trim().is_empty();
 
-        div()
+        let panel = div()
             .w(px(PANEL_WIDTH))
             .h_full()
             .flex()
@@ -1245,7 +1269,7 @@ impl Workspace {
                     .leading_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(muted)
-                    .child(div().flex_1().child(tr(cx, "nav:module.work").to_uppercase()))
+                    .child(div().flex_1().child(tr(cx, if on_comms { "nav:module.comms" } else { "nav:module.work" }).to_uppercase()))
                     .child(
                         Button::new("panel-toggle")
                             .ghost()
@@ -1254,7 +1278,11 @@ impl Workspace {
                             .tooltip(toggle_hint)
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx))),
                     ),
-            )
+            );
+        if on_comms {
+            return panel.child(self.comms.clone()).into_any_element();
+        }
+        panel
             .child(
                 div()
                     .id("tree-everything")
@@ -1340,6 +1368,7 @@ impl Workspace {
                     .flex_col()
                     .children(tree),
             )
+            .into_any_element()
     }
 }
 
@@ -1348,7 +1377,17 @@ impl Render for Workspace {
         let snapshot = Backend::snapshot(cx).read(cx);
         let lasting = snapshot.connection.lasting;
         // Con un documento abierto se lee documentación; si no, las tareas.
-        let main: AnyView = if snapshot.docs.target.is_some() { self.docs.clone().into() } else { self.my_work.clone().into() };
+        // En comunicación, la conversación; volver a «Trabajo» deja lo que
+        // se estuviera mirando allí.
+        let main: AnyElement = if snapshot.comms.on_screen {
+            crate::comms::conversation(cx)
+        } else if snapshot.docs.target.is_some() {
+            self.docs.clone().into_any_element()
+        } else {
+            self.my_work.clone().into_any_element()
+        };
+        // «Nueva conversación», abierta desde la lista de comunicación.
+        let picker = self.comms.read(cx).picker.clone();
         // La tarea abierta, sobre lo que se estuviera mirando.
         let task = snapshot.task.task_id.is_some().then(|| self.task.clone());
         let pinned = self.panel_pinned;
@@ -1430,7 +1469,8 @@ impl Render for Workspace {
                     // aviso de conexión sigue a la vista, encima.
                     .children(task.map(|task| div().id("task-over").absolute().inset_0().occlude().child(task)))
                     // «Conectar Claude Code», encima de todo lo demás.
-                    .children(self.connect_open.then(|| div().id("connect-over").absolute().inset_0().child(self.connect.clone()))),
+                    .children(self.connect_open.then(|| div().id("connect-over").absolute().inset_0().child(self.connect.clone())))
+                    .children(picker.map(|picker| div().id("new-conversation-over").absolute().inset_0().child(picker))),
             )
     }
 }
@@ -3128,7 +3168,7 @@ mod tests {
         assert_eq!(label(window, "rail-platform-count", cx), "1");
         assert_eq!(label(window, "rail-organization-count", cx), "3");
         assert_eq!(label(window, "notifications-bell", cx), "Notificaciones (12) · Todavía no está en esta app");
-        assert_eq!(label(window, "rail-comms", cx), "Comunicación (120) · Todavía no está en esta app");
+        assert_eq!(label(window, "rail-comms", cx), "Comunicación (120)");
         assert_eq!(label(window, "rail-platform", cx), "Plataforma (1) · Todavía no está en esta app");
         assert_eq!(label(window, "rail-organization", cx), "Organización (3) · Todavía no está en esta app");
         assert!(!on_screen(window, "rail-docs-count", cx));
@@ -3163,7 +3203,7 @@ mod tests {
         for id in COUNTS {
             assert!(!on_screen(window, id, cx), "{id} se pinta sin nada que contar");
         }
-        assert_eq!(label(window, "rail-comms", cx), "Comunicación · Todavía no está en esta app");
+        assert_eq!(label(window, "rail-comms", cx), "Comunicación");
         assert_eq!(label(window, "notifications-bell", cx), "Notificaciones · Todavía no está en esta app");
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }

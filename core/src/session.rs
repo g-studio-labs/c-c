@@ -157,6 +157,7 @@ impl Core {
         // Sin sesión no hay stream: el que hubiera se retira en su próximo turno.
         self.stream().stop();
         self.counters().clear();
+        self.comms().clear();
         self.inner.listener.session_changed(None);
     }
 

@@ -55,5 +55,7 @@
   "callChatEmpty": "Nada todavía. Lo que escribas aquí se queda con la llamada: no sale en el canal.",
   "callChatPlaceholder": "Escribe a la llamada",
   "viewCallChat": "Ver chat ({{count}})",
-  "callChatTitle": "Chat de la llamada"
+  "callChatTitle": "Chat de la llamada",
+  "messagesNotHereYet": "Los mensajes de esta conversación todavía no se leen en esta app.",
+  "couldNotOpenConversation": "No se pudo abrir la conversación."
 }

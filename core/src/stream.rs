@@ -294,6 +294,10 @@ impl Stream {
         // Los contadores aparte, para que no esperen a «Mi trabajo».
         let core = self.core.clone();
         tokio::spawn(async move { core.counters().refresh().await });
+        // Y las últimas líneas de los canales: lo que se dijo durante el
+        // corte no llegó por evento.
+        let core = self.core.clone();
+        tokio::spawn(async move { core.comms().load().await });
     }
 
     fn dispatch(&self, event: ServerEvent) {
@@ -314,6 +318,7 @@ impl Stream {
             }
         }
         self.core.counters().server_event(&event);
+        self.core.comms().server_event(&event);
         self.core.inner.listener.server_event(event);
     }
 }

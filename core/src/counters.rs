@@ -19,11 +19,13 @@
 //! Un número que no se ha podido cargar es `None`, que no es cero: la
 //! pantalla no pinta nada, ni un «0» ni un aviso de error.
 
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::comms_wire::{ChatUnread, DmSummary};
 use crate::stream::ServerEvent;
 use crate::Core;
 
@@ -122,23 +124,6 @@ struct Feed {
     unread: i64,
 }
 
-/// Lo sin leer de un canal. Espejo de `domain.ChatUnread`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ChatUnread {
-    space_id: String,
-    count: i64,
-}
-
-/// Lo que se cuenta de `domain.DMSummary`: de qué organización es la
-/// conversación y cuánto hay sin leer en ella.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DmUnread {
-    org_id: String,
-    unread: i64,
-}
-
 /// Lo que se cuenta de `domain.ServerResponse`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -150,22 +135,31 @@ pub(crate) struct ServerStatus {
 /// Lo que hay detrás de los números: las listas tal como llegaron, de todas
 /// las organizaciones, para volver a contar cuando cambia algo sin volver a
 /// preguntar.
+///
+/// Lo sin leer de los canales y las conversaciones privadas van enteras, no
+/// sólo lo que se cuenta: son las mismas que pinta la lista de comunicación
+/// (`comms`), que las lee de aquí en vez de pedirlas otra vez. Así el número
+/// del riel y la suma de las filas salen de la misma respuesta.
 #[derive(Default)]
 pub(crate) struct CountersData {
     state: CountersState,
     chat: Option<Vec<ChatUnread>>,
-    dms: Option<Vec<DmUnread>>,
+    dms: Option<Vec<DmSummary>>,
     servers: Option<Vec<ServerStatus>>,
-    /// Los espacios de una organización, con la organización: un canal es un
-    /// espacio, y sólo cuentan los de la que se mira.
-    spaces: Option<(String, Vec<String>)>,
+    /// Los espacios de cada organización cuyo árbol ha llegado: un canal es
+    /// un espacio, y sólo cuentan los de la que se mira. Por organización, y
+    /// no «los últimos que llegaron»: hasta el 18-nov-2026 era un solo
+    /// hueco, y el árbol de la organización que se acababa de dejar, si
+    /// llegaba tarde, pisaba los de la nueva y el riel se quedaba sin contar
+    /// sus canales.
+    spaces: HashMap<String, Vec<String>>,
 }
 
 impl CountersData {
     /// Vuelve a contar lo que sale de las listas.
     fn recount(&mut self) {
         let org_id = self.state.org_id.as_deref();
-        let spaces = self.spaces.as_ref().filter(|(of, _)| Some(of.as_str()) == org_id).map(|(_, ids)| ids);
+        let spaces = org_id.and_then(|org_id| self.spaces.get(org_id));
         let channels = self.chat.as_ref().zip(spaces).map(|(rows, spaces)| {
             rows.iter().filter(|row| spaces.contains(&row.space_id)).map(|row| row.count).sum::<i64>()
         });
@@ -227,6 +221,33 @@ impl Counters {
         if let Some(state) = changed {
             self.core.inner.listener.counters_changed(state);
         }
+        // La lista de comunicación pinta estas mismas listas: se mueve con
+        // ellas aunque el número del riel no cambie (un mensaje más de la
+        // misma persona, el otro que lee).
+        self.core.comms().publish();
+    }
+
+    /// Lo sin leer de cada canal y las conversaciones privadas, tal como
+    /// llegaron: de todas las organizaciones. Quien las pinta las acota.
+    pub(crate) fn conversations(&self) -> (Option<Vec<ChatUnread>>, Option<Vec<DmSummary>>) {
+        let data = self.core.inner.counters.lock().expect("counters lock");
+        (data.chat.clone(), data.dms.clone())
+    }
+
+    /// El otro leyó esa conversación hasta `at` (`dm:read`): se apunta en su
+    /// fila, sin volver a pedir la lista. Lo sin leer de uno no cambia.
+    pub(crate) fn direct_read(&self, conversation_id: &str, at: &str) {
+        self.update(|data| {
+            if let Some(direct) = data.dms.iter_mut().flatten().find(|direct| direct.conversation_id == conversation_id) {
+                direct.other_read_at = Some(at.to_string());
+            }
+        });
+    }
+
+    /// Vuelve a pedir las conversaciones privadas ya, sin respiro: tras
+    /// abrir una, que tiene que estar en la lista para poder elegirla.
+    pub(crate) async fn reload_directs(&self) {
+        self.load_one(Source::Dms).await;
     }
 
     /// Cuenta para esa organización. Sin ninguna —alguien a quien acaban de
@@ -296,7 +317,7 @@ impl Counters {
                 self.update(|data| data.chat = Some(rows));
             }
             Source::Dms => {
-                let Ok(rows) = self.core.get_list::<DmUnread>("/api/v1/dm/").await else { return };
+                let Ok(rows) = self.core.get_list::<DmSummary>("/api/v1/dm/").await else { return };
                 self.update(|data| data.dms = Some(rows));
             }
             Source::Servers => {
@@ -348,7 +369,9 @@ impl Counters {
     /// El árbol de una organización llegó: sus espacios son sus canales,
     /// también la sala general, que el árbol no pinta.
     pub(crate) fn spaces_loaded(&self, org_id: &str, space_ids: Vec<String>) {
-        self.update(|data| data.spaces = Some((org_id.to_string(), space_ids)));
+        self.update(|data| {
+            data.spaces.insert(org_id.to_string(), space_ids);
+        });
     }
 
     /// Al salir: los números de una persona no son los de la siguiente.
@@ -429,7 +452,7 @@ mod tests {
         let channel: ChatUnread = serde_json::from_str(&fixture("chat_unread.json")).unwrap();
         assert_eq!((channel.space_id.as_str(), channel.count), ("e8bd6d46-a9ab-494e-ac29-de84d80a55f4", 4));
 
-        let dm: DmUnread = serde_json::from_str(&fixture("dm_summary.json")).unwrap();
+        let dm: DmSummary = serde_json::from_str(&fixture("dm_summary.json")).unwrap();
         assert_eq!((dm.org_id.as_str(), dm.unread), ("35d32154-922f-47dc-a6d9-051d4e78ae8a", 2));
 
         let server: ServerStatus = serde_json::from_str(&fixture("server_response.json")).unwrap();

@@ -18,6 +18,7 @@ mod backend;
 mod board;
 mod brand;
 mod calendar;
+mod comms;
 mod connect;
 mod docs;
 mod editor;

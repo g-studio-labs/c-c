@@ -435,11 +435,23 @@ impl Tree {
             state.error = None;
         });
         let path = format!("/api/v1/task-spaces/?orgId={org_id}");
-        match self.core.get::<Vec<SpaceTree>>(&path).await {
+        let answer = self.core.get::<Vec<SpaceTree>>(&path).await;
+        // La respuesta de una organización que ya no es la que se mira no se
+        // pinta. Hasta el 18-nov-2026 se pintaba: cambiar de organización
+        // mientras llegaba el árbol de la anterior dejaba ese árbol bajo el
+        // nombre de la nueva.
+        let stale = self.state().org_id.as_deref() != Some(org_id);
+        match answer {
             Ok(spaces) => {
                 // Antes de quitar la sala general: no se pinta en el árbol,
-                // pero es un canal y lo que tenga sin leer cuenta.
+                // pero es un canal y lo que tenga sin leer cuenta. Cada uno
+                // lo apunta bajo su organización, así que llegar tarde no
+                // estorba.
                 self.core.counters().spaces_loaded(org_id, spaces.iter().map(|space| space.id.clone()).collect());
+                self.core.comms().spaces_loaded(org_id, &spaces);
+                if stale {
+                    return;
+                }
                 self.update(|state| {
                     state.spaces = spaces.into_iter().filter(|space| !space.is_general()).collect();
                     state.loading = false;
@@ -448,6 +460,7 @@ impl Tree {
                 // uno nuevo hay que volver a mirar si sigue y cómo se llama.
                 self.core.my_work().tree_reloaded();
             }
+            Err(_) if stale => {}
             Err(error) => self.update(|state| {
                 state.error = Some(error.to_string());
                 state.loading = false;

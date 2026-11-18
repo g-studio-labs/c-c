@@ -9,6 +9,8 @@
 uniffi::setup_scaffolding!();
 
 pub mod account;
+pub mod comms;
+pub mod comms_text;
 pub mod comms_wire;
 pub mod counters;
 pub mod dates;
@@ -40,6 +42,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use account::{check_new_password, check_sign_in, gate, FormCheck, Gate, MIN_PASSWORD};
+pub use comms::{
+    comms_panel, conversation_title, people_matching, resolve_conversation, Channel, Comms, CommsPanel, CommsRow, CommsRows, CommsSection, CommsState,
+    CommsViewer, Conversation, ConversationTitle,
+};
+pub use comms_text::{list_time, mentions_a_call, preview_line, quote_text, seen_recently, was_read, LastLine};
 pub use comms_wire::{
     ChatLatest, ChatMessage, ChatMessageEvent, ChatUnread, DmMessage, DmMessageEvent, DmReadEvent, DmSummary, MessageQuote, Person, ReactionSummary,
     REACTION_EMOJIS, SYSTEM_KIND,
@@ -167,6 +174,10 @@ pub(crate) struct Inner {
     /// Cuántas veces se ha pedido volver a contar cada cosa: ver
     /// `Counters::reload_soon`.
     pub(crate) counter_reloads: [std::sync::atomic::AtomicU64; counters::SOURCES],
+    pub(crate) comms: Mutex<comms::CommsData>,
+    /// Cuántas veces se ha pedido volver a traer las últimas líneas de los
+    /// canales: ver `Comms::reload_soon`.
+    pub(crate) comms_reloads: std::sync::atomic::AtomicU64,
     pub(crate) connection: Mutex<ConnectionState>,
     /// Qué stream de eventos es el vigente: ver `Stream::current`.
     pub(crate) stream_turn: std::sync::atomic::AtomicU64,
@@ -199,6 +210,8 @@ impl Core {
                 task: Mutex::new(TaskState::default()),
                 counters: Mutex::new(counters::CountersData::default()),
                 counter_reloads: Default::default(),
+                comms: Mutex::new(comms::CommsData::default()),
+                comms_reloads: std::sync::atomic::AtomicU64::new(0),
                 connection: Mutex::new(ConnectionState::default()),
                 stream_turn: std::sync::atomic::AtomicU64::new(0),
                 my_work_reloads: std::sync::atomic::AtomicU64::new(0),
@@ -208,6 +221,7 @@ impl Core {
         *core.inner.held.lock().expect("held lock") = held;
         core.my_work().restore_preferences();
         core.orgs().restore();
+        core.comms().restore();
         Ok(core)
     }
 }

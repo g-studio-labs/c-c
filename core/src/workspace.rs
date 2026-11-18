@@ -50,8 +50,9 @@ impl Core {
         self.my_work().ensure_loaded(self.orgs().state().current_org_id).await;
     }
 
-    /// El árbol, sus marcas de documentación, «Mi trabajo» y los contadores
-    /// de la organización que se mira, a la vez.
+    /// El árbol, sus marcas de documentación, «Mi trabajo», los contadores y
+    /// las últimas líneas de los canales de la organización que se mira, a
+    /// la vez.
     async fn load_current_org(&self) {
         let org_id = self.orgs().state().current_org_id;
         // Los contadores en su propia tarea, y también sin organización: a
@@ -64,6 +65,12 @@ impl Core {
             let _ = counters.await;
             return;
         };
+        // Las últimas líneas de los canales, en la suya: la lista sale sin
+        // adelantos mientras llegan.
+        let comms = {
+            let core = self.clone();
+            tokio::spawn(async move { core.comms().load().await })
+        };
         // «Mi trabajo» en su propia tarea, para que no espere al árbol.
         let my_work = {
             let (core, org_id) = (self.clone(), org_id.clone());
@@ -75,5 +82,6 @@ impl Core {
         self.tree().load_doc_marks(&org_id).await;
         let _ = my_work.await;
         let _ = counters.await;
+        let _ = comms.await;
     }
 }
