@@ -71,6 +71,15 @@ fn detail(id: &str, title: &str, status: &str, project: &str, visibility: &str) 
     })
 }
 
+/// La misma, sin subtareas: para lo que mira sólo la máquina. Con una abierta,
+/// «hecha» y «cerrada» no se ofrecen sea cual sea la máquina
+/// (command-and-control-387), y eso tiene sus propias pruebas.
+fn detail_alone(id: &str, title: &str, status: &str, project: &str, visibility: &str) -> Value {
+    let mut detail = detail(id, title, status, project, visibility);
+    detail["subtasks"] = json!([]);
+    detail
+}
+
 fn columns() -> Value {
     json!([
         { "id": "s-pending", "listId": "l1", "name": "Open", "kind": "open", "status": "pending" },
@@ -142,7 +151,7 @@ async fn opening_a_task_brings_it_ready_to_show() {
 #[tokio::test]
 async fn a_clients_task_is_offered_only_what_its_machine_allows() {
     let rig = rig().await;
-    mount_task(&rig.server, "t1", detail("t1", "Del cliente", "pending", "p1", "public")).await;
+    mount_task(&rig.server, "t1", detail_alone("t1", "Del cliente", "pending", "p1", "public")).await;
     mount_columns(&rig.server).await;
 
     rig.core.tasks().open("t1").await;
@@ -165,7 +174,7 @@ async fn a_clients_task_is_offered_only_what_its_machine_allows() {
 #[tokio::test]
 async fn an_internal_task_in_a_clients_list_can_go_anywhere() {
     let rig = rig().await;
-    mount_task(&rig.server, "t1", detail("t1", "Interna", "pending", "p1", "internal")).await;
+    mount_task(&rig.server, "t1", detail_alone("t1", "Interna", "pending", "p1", "internal")).await;
     mount_columns(&rig.server).await;
 
     rig.core.tasks().open("t1").await;
@@ -1358,12 +1367,13 @@ fn my_work_ids(rig: &Rig) -> Vec<String> {
 }
 
 /// Antes de borrar se pregunta nombrando la tarea y diciendo qué se va con
-/// ella; si tiene subtareas, que ésas no se borran.
+/// ella; si tiene subtareas, va **como aviso aparte**: cuántas son y que
+/// dejarán de verse y de poder abrirse desde la vista principal.
 ///
-/// Roturas que atrapa: una pregunta que no dice qué tarea se borra; callar
-/// que las subtareas se quedan (el servidor no las borra, y quien borra una
-/// tarea partida en pasos da por hecho que se van); decirlo de una que no
-/// tiene ninguna.
+/// Roturas que atrapa: una pregunta que no dice qué tarea se borra; dejar lo
+/// de las subtareas como una frase más del cuerpo, donde no se lee (lo que
+/// había); un aviso que no dice que dejan de verse; no decir cuántas son, o
+/// «1 subtareas»; y avisar de subtareas a una que no tiene ninguna.
 #[tokio::test]
 async fn the_question_before_deleting_names_the_task_and_what_goes_with_it() {
     use cac_core::texts::Locale;
@@ -1372,14 +1382,33 @@ async fn the_question_before_deleting_names_the_task_and_what_goes_with_it() {
 
     let question = rig.core.tasks().delete_question(Locale::Es).expect("hay tarea abierta");
     assert_eq!(question.title, "¿Borrar la tarea «Subir el backend»?");
-    assert_eq!(question.body, "La quita con sus comentarios y sus adjuntos. No se puede deshacer. Sus subtareas no se borran con ella.");
+    assert_eq!(question.body, "La quita con sus comentarios y sus adjuntos. No se puede deshacer.");
+    assert_eq!(
+        question.warning.as_deref(),
+        Some("Tiene 1 subtarea enlazada. No se borra con ella, pero dejará de verse y de poder abrirse desde la vista principal.")
+    );
     assert_eq!((question.confirm.as_str(), question.cancel.as_str()), ("Borrar", "Cancelar"));
+
+    let mut several = detail("t8", "Partida en pasos", "pending", "", "");
+    several["subtasks"] = json!([
+        { "id": "a", "seq": 1, "title": "Uno", "priority": "medium", "statusId": "s-pending" },
+        { "id": "b", "seq": 2, "title": "Dos", "priority": "medium", "statusId": "s-resolved" },
+    ]);
+    mount_task(&rig.server, "t8", several).await;
+    rig.core.tasks().open("t8").await;
+    // Las terminadas también dejan de verse: cuentan todas las enlazadas.
+    assert_eq!(
+        rig.core.tasks().delete_question(Locale::En).unwrap().warning.as_deref(),
+        Some("It has 2 linked subtasks. They are not deleted with it, but they will no longer be visible or reachable from the main view.")
+    );
 
     let mut alone = detail("t9", "Suelta", "pending", "", "");
     alone["subtasks"] = json!([]);
     mount_task(&rig.server, "t9", alone).await;
     rig.core.tasks().open("t9").await;
-    assert_eq!(rig.core.tasks().delete_question(Locale::Es).unwrap().body, "La quita con sus comentarios y sus adjuntos. No se puede deshacer.");
+    let question = rig.core.tasks().delete_question(Locale::Es).unwrap();
+    assert_eq!(question.body, "La quita con sus comentarios y sus adjuntos. No se puede deshacer.");
+    assert_eq!(question.warning, None);
 
     rig.core.tasks().close();
     assert_eq!(rig.core.tasks().delete_question(Locale::Es), None);
@@ -1606,4 +1635,166 @@ async fn a_pull_request_that_is_not_one_or_is_refused_is_not_linked() {
 
     assert_eq!(refusal(rig.core.tasks().link_pr("https://github.com/otra/cosa/pull/9").await), "repo-not-in-org");
     assert_eq!(open_task(&rig).git, None);
+}
+
+/// Una subtarea en esa columna, como llega en el detalle.
+fn subtask_in(id: &str, column: &str) -> Value {
+    json!({ "id": id, "seq": 20, "title": format!("Paso {id}"), "priority": "medium", "statusId": column })
+}
+
+/// Las opciones de estado como las pinta la página: columna, si se puede y
+/// qué se dice si no.
+fn choices(rig: &Rig) -> Vec<(String, bool, Option<String>)> {
+    let sheet = rig.core.tasks().sheet(cac_core::Locale::Es).expect("hay tarea abierta");
+    sheet.status_choices.into_iter().map(|choice| (choice.id, choice.allowed, choice.reason)).collect()
+}
+
+/// Un padre con subtareas abiertas no ofrece «hecha» ni «cerrada», dice por
+/// qué en cada una, con la cuenta, y si aun así se elige no se pide nada y el
+/// fallo se dice entero, con dónde arreglarlo (command-and-control-387).
+///
+/// Roturas que atrapa: ofrecerlas (el servidor contesta 409); vigilar sólo
+/// «hecha»; una opción apagada que no dice por qué; un motivo sin la cuenta, o
+/// «cerrar» en la de «hecha»; mandar el movimiento igualmente; decir el
+/// rechazo con la frase de la máquina o con un «no se pudo» genérico; y no
+/// señalar las subtareas, que están en esa misma página.
+#[tokio::test]
+async fn a_parent_with_open_subtasks_is_not_offered_done_or_closed_and_says_why() {
+    let rig = rig().await;
+    let mut parent = detail("t1", "Madre", "in_progress", "", "");
+    parent["subtasks"] = json!([subtask_in("a", "s-pending"), subtask_in("b", "s-in_progress"), subtask_in("c", "s-resolved"), subtask_in("d", "s-closed")]);
+    mount_task(&rig.server, "t1", parent).await;
+    mount_columns(&rig.server).await;
+    rig.core.tasks().open("t1").await;
+
+    assert_eq!(
+        choices(&rig),
+        [
+            ("s-pending".to_string(), true, None),
+            ("s-in_progress".to_string(), true, None),
+            ("s-resolved".to_string(), false, Some("No se puede marcar como hecha: tiene 2 subtareas abiertas".to_string())),
+            ("s-closed".to_string(), false, Some("No se puede cerrar: tiene 2 subtareas abiertas".to_string())),
+        ]
+    );
+    // Y cuál es la suya, que es la que el desplegable marca.
+    let current: Vec<bool> = rig.core.tasks().sheet(cac_core::Locale::Es).unwrap().status_choices.iter().map(|choice| choice.current).collect();
+    assert_eq!(current, [false, true, false, false]);
+    let refusals: Vec<Option<String>> = rig.core.tasks().state().statuses.into_iter().map(|option| option.refusal).collect();
+    assert_eq!(refusals, [None, None, Some("subtasks-open".to_string()), Some("subtasks-open".to_string())]);
+
+    let refused = rig.core.tasks().set_status("s-closed").await.unwrap_err();
+    assert!(matches!(&refused, cac_core::ApiError::Server { code, .. } if code == "subtasks-open"), "{refused:?}");
+    assert!(requests_to(&rig.server, "POST", "/move").await.is_empty(), "se pidió algo que se sabía rechazado");
+    assert_eq!(
+        rig.core.tasks().status_error_phrase(cac_core::Locale::Es, &refused, "s-closed", "work:task.errMoveList"),
+        "No se puede cerrar: tiene 2 subtareas abiertas. Termínalas o ciérralas en «Subtareas», más abajo en esta página."
+    );
+    let finishing = rig.core.tasks().set_status("s-resolved").await.unwrap_err();
+    assert_eq!(
+        rig.core.tasks().status_error_phrase(cac_core::Locale::En, &finishing, "s-resolved", "work:task.errMoveList"),
+        "It can't be marked done: it has 2 open subtasks. Finish or close them under “Subtasks”, further down this page."
+    );
+}
+
+/// Con todas las subtareas hechas o cerradas, el padre se termina y se cierra;
+/// y uno ya terminado con algo abierto debajo se puede reabrir siempre.
+///
+/// Roturas que atrapa: contar como abierta una subtarea cerrada o hecha (el
+/// padre no se podría terminar nunca); bloquear a quien tiene subtareas, sin
+/// mirar si están abiertas; impedir reabrir, que es la salida de un padre que
+/// quedó terminado con trabajo debajo.
+#[tokio::test]
+async fn finished_subtasks_block_nothing_and_reopening_is_always_offered() {
+    let rig = rig().await;
+    let mut ready = detail("t1", "Madre", "in_progress", "", "");
+    ready["subtasks"] = json!([subtask_in("c", "s-resolved"), subtask_in("d", "s-closed")]);
+    mount_task(&rig.server, "t1", ready).await;
+    mount_columns(&rig.server).await;
+    rig.core.tasks().open("t1").await;
+    assert!(choices(&rig).iter().all(|(_, allowed, reason)| *allowed && reason.is_none()), "{:?}", choices(&rig));
+
+    let mut finished = detail("t2", "Terminada con algo abierto", "resolved", "", "");
+    finished["subtasks"] = json!([subtask_in("a", "s-pending")]);
+    mount_task(&rig.server, "t2", finished).await;
+    rig.core.tasks().open("t2").await;
+    let offered: Vec<(String, bool)> = choices(&rig).into_iter().map(|(id, allowed, _)| (id, allowed)).collect();
+    assert_eq!(
+        offered,
+        [("s-pending".to_string(), true), ("s-in_progress".to_string(), true), ("s-resolved".to_string(), true), ("s-closed".to_string(), false)]
+    );
+}
+
+/// En un ticket de cliente manda primero su máquina, como en el servidor: lo
+/// que no existe se dice como tal, y lo que la máquina deja pero las
+/// subtareas impiden, con el motivo de las subtareas.
+///
+/// Roturas que atrapa: dejar fuera de la regla al flujo del cliente; decir
+/// «subtareas» por un salto que no existe ni sin ellas.
+#[tokio::test]
+async fn a_clients_ticket_says_the_machine_first_and_the_subtasks_after() {
+    let rig = rig().await;
+    mount_task(&rig.server, "t1", detail("t1", "Del cliente", "pending", "p1", "public")).await;
+    mount_columns(&rig.server).await;
+    rig.core.tasks().open("t1").await;
+    let reasons: Vec<Option<String>> = choices(&rig).into_iter().map(|(_, _, reason)| reason).collect();
+    assert_eq!(
+        reasons,
+        [None, None, Some("Ese estado no puede ir detrás de éste.".to_string()), Some("No se puede cerrar: tiene 1 subtarea abierta".to_string())]
+    );
+
+    mount_task(&rig.server, "t2", detail("t2", "Del cliente, en curso", "in_progress", "p1", "public")).await;
+    rig.core.tasks().open("t2").await;
+    let reasons: Vec<Option<String>> = choices(&rig).into_iter().map(|(_, _, reason)| reason).collect();
+    assert_eq!(reasons[2].as_deref(), Some("No se puede marcar como hecha: tiene 1 subtarea abierta"));
+}
+
+/// Si quien rechaza es el servidor —aquí las subtareas se veían terminadas—,
+/// la tarea se vuelve a leer, la opción queda apagada y el motivo se dice con
+/// la cuenta que acaba de llegar.
+///
+/// Roturas que atrapa: decir «No se pudo mover» por un rechazo que tiene
+/// motivo; no volver a leer la tarea (la opción seguiría ofreciéndose y la
+/// frase no llevaría la cuenta); y, si ni así se sabe cuántas, callar el
+/// motivo.
+#[tokio::test]
+async fn a_server_refusal_for_open_subtasks_is_said_with_what_the_task_now_shows() {
+    let rig = rig().await;
+    let mut stale = detail("t1", "Madre", "in_progress", "", "");
+    stale["subtasks"] = json!([subtask_in("a", "s-resolved")]);
+    let mut fresh = stale.clone();
+    fresh["subtasks"] = json!([subtask_in("a", "s-pending")]);
+    Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(stale.clone())).up_to_n_times(1).mount(&rig.server).await;
+    Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(fresh)).mount(&rig.server).await;
+    mount_columns(&rig.server).await;
+    let no = ResponseTemplate::new(409).set_body_json(json!({
+        "success": false, "error": "subtasks-open",
+        "message": "cannot close this task: 1 subtask is still open — finish or close it first",
+    }));
+    Mock::given(method("POST")).and(path("/api/v1/tasks/t1/move")).respond_with(no).mount(&rig.server).await;
+    rig.core.tasks().open("t1").await;
+    assert!(choices(&rig).iter().all(|(_, allowed, _)| *allowed));
+
+    let refused = rig.core.tasks().set_status("s-closed").await.unwrap_err();
+
+    assert_eq!(requests_to(&rig.server, "POST", "/move").await.len(), 1);
+    assert_eq!(
+        rig.core.tasks().status_error_phrase(cac_core::Locale::Es, &refused, "s-closed", "work:task.errMoveList"),
+        "No se puede cerrar: tiene 1 subtarea abierta. Termínalas o ciérralas en «Subtareas», más abajo en esta página."
+    );
+    assert_eq!(choices(&rig)[3].1, false, "la opción sigue ofreciéndose tras el rechazo");
+
+    // Sin cuenta (otra tarea, o un detalle que sigue sin enseñarlas): el
+    // motivo se dice igual.
+    mount_task(&rig.server, "t2", stale).await;
+    rig.core.tasks().open("t2").await;
+    assert_eq!(
+        rig.core.tasks().status_error_phrase(cac_core::Locale::Es, &refused, "s-closed", "work:task.errMoveList"),
+        "No se puede terminar ni cerrar: tiene subtareas abiertas. Termínalas o ciérralas primero."
+    );
+    // Y un fallo que no es ése sale como siempre.
+    let other = cac_core::ApiError::Server { status: 500, code: "boom".into(), message: "x".into() };
+    assert_eq!(
+        rig.core.tasks().status_error_phrase(cac_core::Locale::Es, &other, "s-closed", "work:task.errMoveList"),
+        cac_core::text(cac_core::Locale::Es, "work:task.errMoveList")
+    );
 }

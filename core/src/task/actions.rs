@@ -15,7 +15,7 @@
 use serde_json::json;
 
 use super::{client_reads, refused, TaskDetail, TaskPatch, Tasks};
-use crate::texts::{text, text_with, Locale};
+use crate::texts::{text, text_count, text_with, Locale};
 use crate::tree::{FolderTree, SpaceTree};
 use crate::ApiError;
 
@@ -55,6 +55,9 @@ pub struct MoveGroup {
 pub struct Question {
     pub title: String,
     pub body: String,
+    /// Lo que quien contesta no puede dejar de leer, aparte del cuerpo: se
+    /// pinta destacado, como un aviso. `None` casi siempre.
+    pub warning: Option<String>,
     pub confirm: String,
     pub cancel: String,
 }
@@ -161,6 +164,7 @@ pub fn move_question(locale: Locale, detail: &TaskDetail, groups: &[MoveGroup], 
         (target.label.clone(), text(locale, "work:task.moveListSameSpace"))
     };
     Some(Question {
+        warning: None,
         title: text_with(locale, "work:task.moveListTitle", &[("list", &label)]),
         body,
         confirm: text(locale, "work:task.moveListConfirm"),
@@ -254,18 +258,19 @@ impl Tasks {
     /// va con ella.
     ///
     /// El servidor (`TaskRepository.DeleteTask`) borra la tarea con sus
-    /// comentarios y sus adjuntos, y **no** sus subtareas: si las tiene, se
-    /// dice, que quien borra una tarea partida en pasos da por hecho que los
-    /// pasos se van con ella.
+    /// comentarios y sus adjuntos, y **no** sus subtareas: se quedan, pero
+    /// colgadas de una madre que ya no existe, y desde la vista principal no
+    /// se ven ni se llega a ellas. Eso va como **aviso** y no como una frase
+    /// más del cuerpo (jose, 17-nov-2026, command-and-control-387): quien
+    /// borra una tarea partida en pasos tiene que enterarse antes de
+    /// contestar, y una frase más al final de un párrafo no se lee.
     pub fn delete_question(&self, locale: Locale) -> Option<Question> {
         let detail = self.state().detail?;
-        let mut body = text(locale, "work:task.deleteTaskBody");
-        if !detail.subtasks.is_empty() {
-            body = format!("{body} {}", text(locale, "work:task.deleteTaskKeepsSubtasks"));
-        }
+        let linked = detail.subtasks.len() as i64;
         Some(Question {
             title: text_with(locale, "work:task.deleteTaskTitle", &[("name", &detail.task.title)]),
-            body,
+            body: text(locale, "work:task.deleteTaskBody"),
+            warning: (linked > 0).then(|| text_count(locale, "work:task.deleteTaskKeepsSubtasks", linked)),
             confirm: text(locale, "work:task.delete"),
             cancel: text(locale, "work:task.cancel"),
         })
@@ -293,6 +298,7 @@ impl Tasks {
     pub fn withdraw_question(&self, locale: Locale) -> Option<Question> {
         let detail = self.state().detail?;
         client_reads(&detail).then(|| Question {
+            warning: None,
             title: text(locale, "work:task.withdrawTitle"),
             body: text(locale, "work:task.withdrawBody"),
             confirm: text(locale, "work:task.withdraw"),

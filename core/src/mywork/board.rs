@@ -16,14 +16,10 @@ use crate::error::ApiError;
 use crate::hue::hue_index;
 use crate::mywork::list::{due_label, parent_crumb, DueLabel};
 use crate::mywork::{MyWork, OpenTask, TaskFilter};
-use crate::task::{can_transition, canonical_priority, canonical_status, Flow, TaskStatus};
-use crate::texts::{text, Locale};
+use crate::task::{canonical_priority, canonical_status, status_refusal, status_refusal_phrase, Flow, TaskStatus, SUBTASKS_OPEN};
+use crate::texts::{error_phrase, text, Locale};
 
-/// El código con que se rechaza un cambio de estado que la máquina de la tarea
-/// no deja. Es el del servidor, a propósito: su frase ya está en el catálogo
-/// (`errors:bad-transition`) y así el rechazo se dice igual venga de quien
-/// venga.
-pub const BAD_TRANSITION: &str = "bad-transition";
+pub use crate::task::BAD_TRANSITION;
 
 /// La lista de la tarjeta no tiene columna para ese estado.
 pub const COLUMN_MISSING: &str = "column-missing";
@@ -135,8 +131,9 @@ pub enum DropVerdict {
     /// Ya está ahí: no pasa nada, y no es un rechazo (la columna no se pinta
     /// en rojo).
     Stay,
-    /// Su máquina no lo deja. `code` es la etiqueta del catálogo de errores
-    /// con la que se dice por qué (`errors:<code>`).
+    /// No se puede: su máquina no lo deja (`bad-transition`), o tiene
+    /// subtareas abiertas y la columna es de terminar (`subtasks-open`).
+    /// `code` es el del servidor; la frase la da `MyWork::drop_error_phrase`.
     Refused { code: String },
 }
 
@@ -156,11 +153,16 @@ pub fn can_drop(task: &OpenTask, column: BoardStatus) -> DropVerdict {
     if BoardStatus::of(&task.status) == Some(column) {
         return DropVerdict::Stay;
     }
-    if can_transition(flow_of(task), &task.status, column.key()) {
-        DropVerdict::Move
-    } else {
-        DropVerdict::Refused { code: BAD_TRANSITION.to_string() }
+    match status_refusal(flow_of(task), &task.status, column.key(), open_subtasks(task)) {
+        None => DropVerdict::Move,
+        Some(code) => DropVerdict::Refused { code: code.to_string() },
     }
+}
+
+/// Cuántas subtareas de la tarjeta siguen abiertas. El servidor manda cuántas
+/// tiene y cuántas están terminadas (hechas o cerradas): la diferencia.
+fn open_subtasks(task: &OpenTask) -> i64 {
+    (task.subtasks_total - task.subtasks_done).max(0)
 }
 
 fn assignee(name: &str) -> BoardAssignee {
@@ -236,6 +238,22 @@ impl MyWork {
         self.state().tasks.iter().find(|task| task.id == task_id).map(|task| can_drop(task, column))
     }
 
+    /// Un fallo al soltar esa tarjeta en esa columna, dicho para quien lo lee.
+    ///
+    /// Un rechazo de cambio de estado dice el motivo, y el de las subtareas
+    /// abiertas con su cuenta («No se puede cerrar: tiene 2 subtareas
+    /// abiertas»), lo haya decidido el core antes de pedir nada o lo haya
+    /// contestado el servidor. Lo demás, como cualquier otro fallo.
+    pub fn drop_error_phrase(&self, locale: Locale, error: &ApiError, task_id: &str, column: BoardStatus, fallback_key: &str) -> String {
+        if let ApiError::Server { code, .. } = error {
+            let open = self.state().tasks.iter().find(|task| task.id == task_id).map(open_subtasks).unwrap_or(0);
+            if let Some(phrase) = status_refusal_phrase(locale, code, column.key(), open) {
+                return phrase;
+            }
+        }
+        error_phrase(locale, error, Some(fallback_key))
+    }
+
     /// Pone un estado a una tarea de las cargadas, aquí y sin preguntar.
     fn set_status_local(&self, task_id: &str, status: &str) {
         self.update(|state| {
@@ -271,6 +289,12 @@ impl MyWork {
         self.set_status_local(task_id, column.key());
         if let Err(error) = self.move_to_column(&task, column).await {
             self.set_status_local(task_id, &task.status);
+            // Lo rechazó el servidor por subtareas que la tarjeta no sabía
+            // que tenía abiertas: se vuelve a preguntar, para que la columna
+            // ya la rechace en el aire y el motivo se diga con su cuenta.
+            if matches!(&error, ApiError::Server { code, .. } if code == SUBTASKS_OPEN) {
+                self.load(self.state().org_id).await;
+            }
             return Err(error);
         }
         // Se vuelve a preguntar: lo que la tarjeta dice de su columna (el

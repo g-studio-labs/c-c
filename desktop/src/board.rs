@@ -7,7 +7,7 @@
 //! le pasa el gesto.
 
 use cac_core::{BoardCard, BoardColumn, BoardStatus, DropVerdict, TaskFilter};
-use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
@@ -126,25 +126,31 @@ fn card_face(card: &BoardCard, cx: &App) -> Div {
 }
 
 impl MyWorkView {
-    /// Suelta la tarjeta en esa columna. Lo que el flujo prohíbe no se pide
-    /// ni se avisa (la columna ya salió en rojo mientras iba en el aire); lo
-    /// que el servidor rechaza se dice, con la tarjeta ya de vuelta.
+    /// Suelta la tarjeta en esa columna, y **todo «no» se dice**: lo rechace
+    /// el core sin pedir nada (su máquina no lo deja, o tiene subtareas
+    /// abiertas) o lo rechace el servidor, sale el motivo en el aviso del
+    /// tablero, con la tarjeta en su columna. Hasta el 17-nov-2026 lo que
+    /// prohibía la máquina no se avisaba, «porque la columna ya salió en
+    /// rojo»: jose decidió ese día que un movimiento bloqueado nunca es
+    /// silencioso (command-and-control-387) — el rojo dice que no, no por qué.
+    ///
+    /// Qué se puede y cómo se dice lo decide el core (`drop_on`,
+    /// `drop_error_phrase`); aquí sólo se le pasa el gesto y se pinta lo que
+    /// conteste. El aviso se queda hasta el siguiente gesto.
     fn drop_card(&mut self, card_id: String, status: BoardStatus, cx: &mut Context<Self>) {
         self.board_error = None;
         cx.notify();
-        if !matches!(Backend::core(cx).my_work().drop_verdict(&card_id, status), Some(DropVerdict::Move)) {
-            return;
-        }
-        let answer = Backend::ask(cx, move |core| async move { core.my_work().drop_on(&card_id, status).await });
+        let asked = card_id.clone();
+        let answer = Backend::ask(cx, move |core| async move { core.my_work().drop_on(&asked, status).await });
         cx.spawn(async move |this, cx| {
             let Ok(Err(error)) = answer.await else { return };
             let _ = this.update(cx, |this, cx| {
-                this.board_error = Some(crate::lang::error_text(cx, &error, "common:misc.errSave"));
+                let phrase = Backend::core(cx).my_work().drop_error_phrase(locale(cx), &error, &card_id, status, "common:misc.errSave");
+                this.board_error = Some(phrase);
                 cx.notify();
             });
         })
         .detach();
-        cx.notify();
     }
 
     fn render_column(&self, column: BoardColumn, cx: &mut Context<Self>) -> impl IntoElement {
@@ -294,7 +300,32 @@ impl MyWorkView {
             // (`flex h-full gap-3 overflow-x-auto p-4`), que es el que se
             // desliza de lado.
             .p_4()
-            .children(error.map(|error| div().id("board-error").px_4().pb_2().leading_sm().text_color(danger).child(error).test_support()))
+            // El aviso de un movimiento que no se hizo: una caja roja con
+            // su icono, no un renglón suelto (`border-error/40 bg-error/10
+            // text-error` de los avisos de la app de siempre). Tiene que
+            // verse: es lo único que dice por qué la tarjeta sigue donde
+            // estaba.
+            .children(error.map(|error| {
+                div().px_4().pb_2().child(
+                    div()
+                        .id("board-error")
+                        .aria_label(error.clone())
+                        .flex()
+                        .items_start()
+                        .gap_1p5()
+                        .px_2()
+                        .py_1p5()
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(danger.opacity(0.4))
+                        .bg(danger.opacity(0.1))
+                        .leading_sm()
+                        .text_color(danger)
+                        .child(Icon::new(gpui_kit::assets::IconName::CircleAlert).size_3p5().flex_none().mt(px(3.)))
+                        .child(div().min_w_0().child(error))
+                        .test_support(),
+                )
+            }))
             .child(
                 div()
                     .id("board-columns")
@@ -447,41 +478,107 @@ mod tests {
         stop(cx);
     }
 
+    /// Lo que dice el aviso del tablero.
+    fn said(window: AnyWindowHandle, cx: &mut TestAppContext) -> String {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.find(gpui_kit::SharedString::from("board-error")).label().unwrap_or_default().to_string()
+        })
+        .unwrap()
+    }
+
     /// Lo que el flujo del cliente no deja (de pendiente a terminada, sin
-    /// pasar por en curso) no se pide ni se avisa: la tarjeta se queda.
+    /// pasar por en curso) no se pide, la tarjeta se queda, y **se dice por
+    /// qué**: la columna en rojo dice que no, no el motivo.
     ///
     /// Roturas que atrapa: mandar al servidor un movimiento que va a
-    /// rechazar; enseñar un error por algo que la columna ya dijo en rojo.
+    /// rechazar; un «no» mudo (lo que había: la tarjeta volvía y nadie sabía
+    /// por qué); un aviso sin el motivo; la tarjeta en la columna a la que
+    /// no podía ir.
     #[gpui_kit::test]
-    fn a_drop_the_flow_forbids_asks_nothing(cx: &mut TestAppContext) {
+    fn a_drop_the_flow_forbids_asks_nothing_and_says_why(cx: &mut TestAppContext) {
         let server = server();
         server.mount(Mock::given(method("POST")).and(path("/api/v1/tasks/t3/move")).respond_with(ok(json!(null))));
         let window = show_board(&server, cx);
 
         drag(window, "t3", "done", cx);
-        cx.run_until_parked();
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        cx.run_until_parked();
+        wait_until(cx, "se dice el rechazo", |cx| on_screen(window, "board-error", cx));
+        assert_eq!(said(window, cx), "Ese estado no puede ir detrás de éste.");
         assert_eq!(server.hits("/api/v1/tasks/t3/move"), 0, "se pidió un movimiento prohibido");
-        assert!(in_column(window, "t3", "open", cx));
-        assert!(!on_screen(window, "board-error", cx), "avisa de un error por soltar donde no se puede");
+        assert!(in_column(window, "t3", "open", cx) && !in_column(window, "t3", "done", cx));
         stop(cx);
     }
 
-    /// Si el servidor rechaza el movimiento, se dice y la tarjeta vuelve.
+    /// Un padre con subtareas abiertas no cae ni en «Cerrada» ni en «Hecha»:
+    /// no se pide nada, la tarjeta sigue en su columna y el aviso dice el
+    /// motivo con la cuenta (command-and-control-387). Y el aviso se va con
+    /// el siguiente movimiento que sí se hace.
+    ///
+    /// (La tarjeta de la fixture del contrato tiene tres subtareas y una
+    /// terminada: dos abiertas.)
+    ///
+    /// Roturas que atrapa: soltar y que no pase ni se diga nada; pedirle al
+    /// servidor lo que se sabe rechazado; un aviso genérico («No se pudo
+    /// guardar») o sin cuántas quedan; decir «cerrar» a quien soltó en
+    /// «Hecha»; la tarjeta pintada en la columna de destino; y un aviso que
+    /// se queda puesto después de un movimiento que salió bien.
+    #[gpui_kit::test]
+    fn a_parent_with_open_subtasks_dropped_on_done_or_closed_stays_and_says_how_many(cx: &mut TestAppContext) {
+        let server = server();
+        let moved = contract_task("t1", "a", |task| task["status"] = json!("in_progress"));
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/tasks/t1/move")).respond_with(ok(moved)));
+        let window = show_board(&server, cx);
+
+        drag(window, "t1", "closed", cx);
+        wait_until(cx, "se dice el rechazo", |cx| on_screen(window, "board-error", cx));
+        assert_eq!(said(window, cx), "No se puede cerrar: tiene 2 subtareas abiertas");
+        assert!(in_column(window, "t1", "open", cx) && !in_column(window, "t1", "closed", cx), "la tarjeta no está en su columna");
+
+        drag(window, "t1", "done", cx);
+        wait_until(cx, "se dice el otro rechazo", |cx| said(window, cx) == "No se puede marcar como hecha: tiene 2 subtareas abiertas");
+        assert!(in_column(window, "t1", "open", cx) && !in_column(window, "t1", "done", cx));
+        assert_eq!(server.hits("/api/v1/tasks/t1/move"), 0, "se pidió un movimiento que se sabía rechazado");
+
+        // Lo que sí se puede se hace, y el aviso de antes ya no pinta nada.
+        drag(window, "t1", "in_progress", cx);
+        wait_until(cx, "se pide el cambio", |_| server.hits("/api/v1/tasks/t1/move") == 1);
+        assert!(!on_screen(window, "board-error", cx), "el aviso sigue puesto tras un movimiento que salió bien");
+        stop(cx);
+    }
+
+    /// Si quien rechaza es el servidor —la tarjeta no sabía de sus subtareas
+    /// abiertas—, se dice el mismo motivo y la tarjeta vuelve.
     ///
     /// Roturas que atrapa: un rechazo que se traga en silencio (la tarjeta
-    /// vuelve sola a su sitio y nadie sabe por qué).
+    /// vuelve sola a su sitio y nadie sabe por qué); decirlo como un fallo
+    /// cualquiera («No se pudo guardar»), sin el motivo; la tarjeta en
+    /// «Hecha».
     #[gpui_kit::test]
     fn a_move_the_server_refuses_is_said(cx: &mut TestAppContext) {
-        let server = server();
-        let refusal = ResponseTemplate::new(409).set_body_json(json!({ "success": false, "error": "subtasks-open", "message": "Close its subtasks first" }));
+        let alone = contract_task("t1", "a", |task| {
+            task["status"] = json!("in_progress");
+            task["flow"] = json!("internal");
+            task["subtasksTotal"] = json!(0);
+            task["subtasksDone"] = json!(0);
+        });
+        let server = server_with_tasks(vec![alone]);
+        let columns = json!([
+            { "id": "col-b", "listId": "l-a", "name": "In progress", "kind": "active", "status": "in_progress" },
+            { "id": "col-c", "listId": "l-a", "name": "Done", "kind": "done", "status": "resolved" },
+        ]);
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/task-lists/l-a/statuses")).respond_with(ok(columns)));
+        let refusal = ResponseTemplate::new(409).set_body_json(json!({
+            "success": false, "error": "subtasks-open",
+            "message": "cannot mark this task done: 2 subtasks are still open — finish or close them first",
+        }));
         server.mount(Mock::given(method("POST")).and(path("/api/v1/tasks/t1/move")).respond_with(refusal));
         let window = show_board(&server, cx);
 
-        drag(window, "t1", "in_progress", cx);
+        drag(window, "t1", "done", cx);
         wait_until(cx, "se dice el rechazo", |cx| on_screen(window, "board-error", cx));
-        assert!(in_column(window, "t1", "open", cx), "la tarjeta no volvió a su columna");
+        assert_eq!(server.hits("/api/v1/tasks/t1/move"), 1);
+        assert_eq!(said(window, cx), "No se puede terminar ni cerrar: tiene subtareas abiertas. Termínalas o ciérralas primero.");
+        wait_until(cx, "la tarjeta vuelve a su columna", |cx| in_column(window, "t1", "in_progress", cx) && !in_column(window, "t1", "done", cx));
         stop(cx);
     }
 }

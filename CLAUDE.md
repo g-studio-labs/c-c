@@ -40,6 +40,19 @@ depende que el check de «hecho» funcione: salta de Open a Done, que sólo es l
 en el flujo interno.
 → Guardián: `domain.TestUnaSubtareaEsInterna` y `service/subtarea_interna_test.go`.
 
+**Un padre no se termina ni se cierra con subtareas abiertas**
+(command-and-control-387). «Abierta» es la que no está ni hecha ni cerrada;
+vale en las dos máquinas y por las dos puertas que cambian un estado
+(`TaskService.MoveTask` y `ReportService.Update`), que contestan 409
+`subtasks-open` con el motivo y la cuenta. Reabrir se puede siempre. Hasta el
+17-nov-2026 era una opción de la organización, sólo para «hecho», y cerrar era
+la salida: el campo `DoneNeedsSubtasksDone` sigue en la base y ya no decide
+nada. Y un «no» nunca es mudo: el core da el motivo (`status_refusal_phrase`)
+y quien pinta lo enseña.
+→ Guardianes: `domain.TestOpenSubtasksBlockDoneAndClosed`,
+`service/subtasks_open_test.go`, y en el core `open_subtasks_block_what_the_server_blocks`
+(la misma tabla, escrita por Go en `state_machines.json`).
+
 **`dueAt` es una fecha guardada como instante.** Léela con `dueDay`
 (`app/src/lib/month.ts`). Con los captadores locales (`getDate()`, etc.) el día se
 corre un día al oeste de Greenwich. `dayKey` **también** es local: no la

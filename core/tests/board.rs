@@ -402,14 +402,14 @@ async fn a_drop_the_server_refuses_puts_the_card_back() {
     let rig = rig(vec![raw("t1", "in_progress", "l1"), raw("t2", "open", "l1")]).await;
     mount_columns(&rig.server, "l1", ok(columns_of("l1"))).await;
     let no = ResponseTemplate::new(409)
-        .set_body_json(json!({ "success": false, "error": "subtasks-open", "message": "Close its subtasks first" }));
+        .set_body_json(json!({ "success": false, "error": "task-status-changed", "message": "Read it again" }));
     mount_move(&rig.server, "t1", no).await;
     let announced = rig.recorder.0.lock().unwrap().len();
 
     let refused = rig.core.my_work().drop_on("t1", BoardStatus::Done).await;
 
     match refused {
-        Err(ApiError::Server { status, code, .. }) => assert_eq!((status, code.as_str()), (409, "subtasks-open")),
+        Err(ApiError::Server { status, code, .. }) => assert_eq!((status, code.as_str()), (409, "task-status-changed")),
         other => panic!("tenía que salir el error del servidor: {other:?}"),
     }
     let since: Vec<String> =
@@ -477,4 +477,147 @@ async fn what_the_board_paints_respects_scope_filter_and_the_closed_switch() {
 
     work.set_include_closed(true);
     assert!(work.board(&TaskFilter::default(), Locale::Es)[2].asked);
+}
+
+/// Una tarjeta con subtareas abiertas, como la manda el servidor: cuántas
+/// tiene y cuántas están terminadas.
+fn parent(id: &str, status: &str, total: i64, done: i64) -> Value {
+    let mut value = raw(id, status, "l1");
+    value["subtasksTotal"] = json!(total);
+    value["subtasksDone"] = json!(done);
+    value
+}
+
+/// Una tarjeta con subtareas abiertas no cae ni en «Hecha» ni en «Cerrada», y
+/// el rechazo lleva el código de las subtareas, no el de la máquina
+/// (command-and-control-387).
+///
+/// Roturas que atrapa: dejarla caer (el servidor contesta 409 y la tarjeta va
+/// y vuelve); vigilar sólo «Hecha»; impedir reabrir una terminada que tiene
+/// algo abierto debajo; seguir rechazando cuando ya están todas terminadas;
+/// rechazar con `bad-transition`, que diría otra cosa a quien lo lee; y, en un
+/// ticket de cliente pendiente, decir «subtareas» cuando lo primero que no
+/// existe es el salto.
+#[test]
+fn a_card_with_open_subtasks_cannot_land_on_done_or_closed() {
+    let card = |status: &str, total: i64, done: i64| -> OpenTask { serde_json::from_value(parent("t", status, total, done)).unwrap() };
+    let refused = DropVerdict::Refused { code: "subtasks-open".into() };
+
+    for status in ["pending", "in_progress"] {
+        assert_eq!(can_drop(&card(status, 3, 1), BoardStatus::Done), refused, "{status} → Hecha");
+        assert_eq!(can_drop(&card(status, 3, 1), BoardStatus::Closed), refused, "{status} → Cerrada");
+        assert_eq!(can_drop(&card(status, 3, 3), BoardStatus::Done), DropVerdict::Move);
+        assert_eq!(can_drop(&card(status, 3, 3), BoardStatus::Closed), DropVerdict::Move);
+    }
+    assert_eq!(can_drop(&card("pending", 3, 1), BoardStatus::InProgress), DropVerdict::Move);
+
+    // Reabrir se puede siempre; quedarse donde está no es un rechazo; y de
+    // hecha a cerrada es cerrar.
+    assert_eq!(can_drop(&card("resolved", 2, 0), BoardStatus::Open), DropVerdict::Move);
+    assert_eq!(can_drop(&card("closed", 2, 0), BoardStatus::InProgress), DropVerdict::Move);
+    assert_eq!(can_drop(&card("resolved", 2, 0), BoardStatus::Done), DropVerdict::Stay);
+    assert_eq!(can_drop(&card("resolved", 2, 0), BoardStatus::Closed), refused);
+
+    // En la máquina del cliente manda primero la máquina, como en el servidor.
+    let mut ticket = card("pending", 2, 0);
+    ticket.flow = Some("client".into());
+    assert_eq!(can_drop(&ticket, BoardStatus::Done), DropVerdict::Refused { code: "bad-transition".into() });
+    assert_eq!(can_drop(&ticket, BoardStatus::Closed), refused);
+}
+
+/// Soltar en «Hecha» o «Cerrada» una tarjeta con subtareas abiertas no pide
+/// nada, la deja donde estaba y dice por qué, con la cuenta.
+///
+/// Roturas que atrapa: pedir el movimiento; mover la tarjeta aquí; un rechazo
+/// sin frase, o con una frase que no dice cuántas quedan; decir «cerrar» a
+/// quien la soltó en «Hecha»; «1 subtareas».
+#[tokio::test]
+async fn a_drop_blocked_by_open_subtasks_asks_nothing_and_says_how_many() {
+    let rig = rig(vec![parent("t1", "in_progress", 3, 1), parent("t2", "pending", 1, 0)]).await;
+    let work = rig.core.my_work();
+    let said = |task: &str, column: BoardStatus, error: &ApiError| work.drop_error_phrase(Locale::Es, error, task, column, "common:misc.errSave");
+
+    let closing = work.drop_on("t1", BoardStatus::Closed).await.unwrap_err();
+    assert!(matches!(&closing, ApiError::Server { code, .. } if code == "subtasks-open"), "{closing:?}");
+    assert_eq!(said("t1", BoardStatus::Closed, &closing), "No se puede cerrar: tiene 2 subtareas abiertas");
+
+    let finishing = work.drop_on("t1", BoardStatus::Done).await.unwrap_err();
+    assert_eq!(said("t1", BoardStatus::Done, &finishing), "No se puede marcar como hecha: tiene 2 subtareas abiertas");
+    let one = work.drop_on("t2", BoardStatus::Done).await.unwrap_err();
+    assert_eq!(said("t2", BoardStatus::Done, &one), "No se puede marcar como hecha: tiene 1 subtarea abierta");
+    assert_eq!(work.drop_error_phrase(Locale::En, &one, "t2", BoardStatus::Closed, "common:misc.errSave"), "It can't be closed: it has 1 open subtask");
+
+    assert!(asked(&rig.server).await.is_empty(), "se pidió algo que se sabía rechazado");
+    assert_eq!(status_of(&work.state(), "t1"), "in_progress");
+    assert_eq!(work.drop_verdict("t1", BoardStatus::Closed), Some(DropVerdict::Refused { code: "subtasks-open".into() }));
+}
+
+/// El otro rechazo, el de la máquina, también tiene su frase, y un fallo que
+/// no es un rechazo de estado sale como cualquier otro.
+///
+/// Roturas que atrapa: decir «subtareas» por un salto que no existe; tragarse
+/// la frase de la máquina; tomar cualquier fallo por un rechazo de estado.
+#[tokio::test]
+async fn the_other_refusals_keep_their_own_phrase() {
+    let mut ticket = raw("t1", "pending", "l1");
+    ticket["flow"] = json!("client");
+    let rig = rig(vec![ticket]).await;
+    let work = rig.core.my_work();
+
+    let refused = work.drop_on("t1", BoardStatus::Done).await.unwrap_err();
+    assert_eq!(work.drop_error_phrase(Locale::Es, &refused, "t1", BoardStatus::Done, "common:misc.errSave"), "Ese estado no puede ir detrás de éste.");
+    let offline = ApiError::Network("down".into());
+    assert_eq!(work.drop_error_phrase(Locale::Es, &offline, "t1", BoardStatus::Done, "common:misc.errSave"), cac_core::text(Locale::Es, "nav:panel.serverStatus.offline"));
+}
+
+/// Si quien rechaza es el servidor —la tarjeta no sabía que tenía subtareas
+/// abiertas—, vuelve a su columna, se vuelve a preguntar por las tareas y el
+/// motivo se dice igual, con la cuenta que acaba de llegar.
+///
+/// Roturas que atrapa: dejar la tarjeta en «Cerrada»; decir un error genérico
+/// («No se pudo guardar») por un rechazo que tiene motivo; no volver a
+/// preguntar, con lo que la columna seguiría aceptándola en el aire y la
+/// frase no podría llevar la cuenta.
+#[tokio::test]
+async fn a_server_refusal_for_open_subtasks_is_said_with_the_fresh_count() {
+    // La primera vez la tarjeta llega sin subtareas; después, con dos abiertas.
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/v1/tasks/")).respond_with(ok(json!([raw("t1", "in_progress", "l1")]))).up_to_n_times(1).mount(&server).await;
+    Mock::given(method("GET")).and(path("/api/v1/tasks/")).respond_with(ok(json!([parent("t1", "in_progress", 2, 0)]))).mount(&server).await;
+    let recorder = Arc::new(Recorder::default());
+    let core = Core::new(Config::new(server.uri()), Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
+    core.sign_in(serde_json::from_value(json!({ "id": "u1", "username": "ana" })).unwrap(), "access".into(), "refresh".into()).unwrap();
+    core.my_work().load(Some("o1".into())).await;
+    mount_columns(&server, "l1", ok(columns_of("l1"))).await;
+    let no = ResponseTemplate::new(409).set_body_json(json!({
+        "success": false, "error": "subtasks-open",
+        "message": "cannot close this task: 2 subtasks are still open — finish or close them first",
+    }));
+    mount_move(&server, "t1", no).await;
+    let work = core.my_work();
+    assert_eq!(work.drop_verdict("t1", BoardStatus::Closed), Some(DropVerdict::Move), "la tarjeta aún no sabe de sus subtareas");
+
+    let refused = work.drop_on("t1", BoardStatus::Closed).await.unwrap_err();
+
+    assert_eq!(status_of(&work.state(), "t1"), "in_progress", "la tarjeta no volvió a su columna");
+    assert_eq!(work.drop_error_phrase(Locale::Es, &refused, "t1", BoardStatus::Closed, "common:misc.errSave"), "No se puede cerrar: tiene 2 subtareas abiertas");
+    assert_eq!(work.drop_verdict("t1", BoardStatus::Closed), Some(DropVerdict::Refused { code: "subtasks-open".into() }));
+}
+
+/// Y si ni después de volver a preguntar se sabe cuántas son, se dice el
+/// motivo sin la cuenta: nunca un «no se pudo guardar».
+///
+/// Rotura que atrapa: caer en la frase genérica cuando falta la cuenta.
+#[tokio::test]
+async fn a_server_refusal_without_a_count_still_says_the_reason() {
+    let rig = rig(vec![raw("t1", "in_progress", "l1")]).await;
+    let refused = ApiError::Server { status: 409, code: "subtasks-open".into(), message: "cannot close this task".into() };
+    let phrase = rig.core.my_work().drop_error_phrase(Locale::Es, &refused, "t1", BoardStatus::Closed, "common:misc.errSave");
+    assert_eq!(phrase, "No se puede terminar ni cerrar: tiene subtareas abiertas. Termínalas o ciérralas primero.");
+    // La frase es de la regla, no de que el catálogo de errores tenga por
+    // casualidad esa etiqueta: quien pregunte por ella directamente (otra
+    // app) la recibe igual, y un código que no es de un cambio de estado no
+    // tiene ninguna.
+    assert_eq!(cac_core::status_refusal_phrase(Locale::Es, "subtasks-open", "closed", 0), Some(phrase));
+    assert_eq!(cac_core::status_refusal_phrase(Locale::Es, "task-status-changed", "closed", 2), None);
 }

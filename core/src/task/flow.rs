@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::texts::{text, text_count, Locale};
+
 /// Qué máquina gobierna una tarea.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
@@ -76,6 +78,63 @@ pub fn can_transition(flow: Flow, from: &str, to: &str) -> bool {
                 | ("resolved", "in_progress")
                 | ("resolved", "closed")
         ),
+    }
+}
+
+/// El código con que se rechaza un cambio de estado que la máquina de la tarea
+/// no deja. Es el del servidor, a propósito: así el rechazo se dice igual
+/// venga de quien venga.
+pub const BAD_TRANSITION: &str = "bad-transition";
+
+/// El código con que se rechaza terminar o cerrar una tarea con subtareas
+/// abiertas. También es el del servidor (`service.ErrSubtasksOpen`).
+pub const SUBTASKS_OPEN: &str = "subtasks-open";
+
+/// ¿Impiden sus subtareas abiertas que la tarea pase a ese estado?
+///
+/// Espejo de `domain.OpenSubtasksBlock` (command-and-control-387): un padre no
+/// se termina ni se cierra con subtareas abiertas, sea de la máquina que sea.
+/// `open` son las que no están ni hechas ni cerradas. Reabrir y quedarse donde
+/// se está no se impiden nunca. Lo ata al servidor la tabla `subtaskBlocks` de
+/// `state_machines.json`.
+pub fn open_subtasks_block(from: &str, to: &str, open: i64) -> bool {
+    let (from, to) = (canonical_status(from), canonical_status(to));
+    open > 0 && from != to && matches!(to, "resolved" | "closed")
+}
+
+/// Por qué no se puede ir de `from` a `to`, con el código con que lo diría el
+/// servidor; `None` si se puede.
+///
+/// Primero la máquina y luego las subtareas, que es el orden en que pregunta
+/// el servidor: a un ticket de cliente pendiente con subtareas abiertas lo
+/// primero que le pasa al ir a «hecha» es que ese salto no existe.
+pub fn status_refusal(flow: Flow, from: &str, to: &str, open_subtasks: i64) -> Option<&'static str> {
+    if !can_transition(flow, from, to) {
+        Some(BAD_TRANSITION)
+    } else if open_subtasks_block(from, to, open_subtasks) {
+        Some(SUBTASKS_OPEN)
+    } else {
+        None
+    }
+}
+
+/// Un rechazo de cambio de estado, dicho para quien lo lee: qué se quiso
+/// hacer, por qué no se puede y, si se sabe, cuántas subtareas quedan
+/// («No se puede cerrar: tiene 2 subtareas abiertas»).
+///
+/// `open` es cero cuando no se sabe cuántas (lo rechazó el servidor y aquí
+/// aún no han llegado): entonces sale la frase del catálogo de errores, que
+/// dice el motivo sin la cuenta. Un código que no es de un cambio de estado
+/// no tiene frase aquí.
+pub fn status_refusal_phrase(locale: Locale, code: &str, to: &str, open: i64) -> Option<String> {
+    match code {
+        BAD_TRANSITION => Some(text(locale, "errors:bad-transition")),
+        SUBTASKS_OPEN if open > 0 => {
+            let key = if canonical_status(to) == "closed" { "work:task.subtasksOpenClose" } else { "work:task.subtasksOpenDone" };
+            Some(text_count(locale, key, open))
+        }
+        SUBTASKS_OPEN => Some(text(locale, "errors:subtasks-open")),
+        _ => None,
     }
 }
 

@@ -31,14 +31,18 @@ pub use files::{attachment_fits, attachment_path, file_citation, image_type, is_
     with_citation, Cited, Picture,
     MAX_ATTACHMENT_BYTES, THUMBNAIL_MAX_HEIGHT, THUMBNAIL_MAX_WIDTH,
 };
-pub use flow::{can_transition, canonical_priority, canonical_status, flow_for, Flow};
-pub use sheet::{client_reads, can_change_comment, is_agent_note, says_something, task_sheet, SheetActivity, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};
+pub use flow::{
+    can_transition, canonical_priority, canonical_status, flow_for, open_subtasks_block, status_refusal, status_refusal_phrase, Flow, BAD_TRANSITION,
+    SUBTASKS_OPEN,
+};
+pub use sheet::{client_reads, can_change_comment, is_agent_note, says_something, task_sheet, SheetActivity, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, StatusChoice, TaskSheet};
 pub use types::{
     CommentAuthor, DecisionRef, GitSummary, ReleaseRef, Task, TaskAttachment, TaskBlocker, TaskCard,
     TaskComment, TaskDetail, TaskGitLink, TaskGitLinks, TaskStatus, TaskTag, UserSummary,
 };
 
 use crate::dates::due_day;
+use crate::texts::{error_phrase, text, Locale};
 use crate::{ApiError, Core};
 
 /// Una columna a la que se podría mover la tarea abierta, y si se puede.
@@ -50,6 +54,11 @@ pub struct StatusOption {
     /// Si la máquina de la tarea deja ir ahí desde donde está. Una que no se
     /// puede se enseña apagada: ofrecerla es un botón que contesta 409.
     pub allowed: bool,
+    /// Por qué no se puede, con el código del catálogo de errores
+    /// (`bad-transition`, `subtasks-open`). Sin él, una opción apagada es un
+    /// «no» que no dice por qué.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -210,13 +219,26 @@ fn tidy(mut detail: TaskDetail) -> TaskDetail {
 /// está.
 fn options_for(detail: &TaskDetail, statuses: Vec<TaskStatus>) -> Vec<StatusOption> {
     let flow = flow_for(&detail.task.project_id, &detail.task.visibility);
+    let open = open_subtasks(detail, &statuses);
     statuses
         .into_iter()
-        .map(|status| StatusOption {
-            allowed: can_transition(flow, &detail.task.status, &status.status),
-            status,
+        .map(|status| {
+            let refusal = status_refusal(flow, &detail.task.status, &status.status, open);
+            StatusOption { allowed: refusal.is_none(), refusal: refusal.map(str::to_string), status }
         })
         .collect()
+}
+
+/// Cuántas subtareas de la tarea siguen abiertas: las que no están en una
+/// columna de «hecho» (hecha o cerrada), que es la misma cuenta que hace el
+/// servidor (`CountOpenSubtasks`).
+///
+/// Una subtarea vive en la lista de su madre, así que su columna es una de
+/// éstas. Si no lo es (las columnas son de antes de moverla de lista), cuenta
+/// como abierta, igual que el checklist la pinta sin hacer.
+pub(crate) fn open_subtasks(detail: &TaskDetail, columns: &[TaskStatus]) -> i64 {
+    let done = |card: &TaskCard| columns.iter().any(|column| column.id == card.status_id && column.kind == "done");
+    detail.subtasks.iter().filter(|card| !done(card)).count() as i64
 }
 
 /// El detalle de este core.
@@ -373,15 +395,45 @@ impl Tasks {
     pub async fn set_status(&self, status_id: &str) -> Result<(), ApiError> {
         let task_id = self.open_id()?;
         let option = self.state().statuses.into_iter().find(|option| option.status.id == status_id);
-        if matches!(option, Some(StatusOption { allowed: false, .. })) {
+        if let Some(StatusOption { allowed: false, refusal, .. }) = option {
             // Con el código con que lo diría el servidor: es el mismo
             // rechazo, y así quien lo lee encuentra la misma frase.
-            return Err(refused("bad-transition", "This status change is not allowed"));
+            return Err(refused(refusal.as_deref().unwrap_or(BAD_TRANSITION), "This status change is not allowed"));
         }
-        self.move_to(&task_id, status_id).await?;
+        if let Err(error) = self.move_to(&task_id, status_id).await {
+            // Lo rechazó el servidor por subtareas que aquí no se veían
+            // abiertas: se vuelve a leer la tarea, para que la opción salga
+            // ya apagada y el motivo pueda decirse con su cuenta.
+            if matches!(&error, ApiError::Server { code, .. } if code == SUBTASKS_OPEN) {
+                self.refresh().await;
+            }
+            return Err(error);
+        }
         self.refresh().await;
         self.tell_my_work(&task_id, false);
         Ok(())
+    }
+
+    /// Un fallo al cambiar el estado de la tarea abierta, dicho para quien lo
+    /// lee. Un rechazo por subtareas abiertas dice a qué se quiso pasar y
+    /// cuántas quedan, venga de aquí o del servidor, y dónde arreglarlo (están
+    /// en esta misma página); lo demás, como cualquier otro fallo.
+    pub fn status_error_phrase(&self, locale: Locale, error: &ApiError, status_id: &str, fallback_key: &str) -> String {
+        if let ApiError::Server { code, .. } = error {
+            if code == SUBTASKS_OPEN {
+                let state = self.state();
+                let columns: Vec<TaskStatus> = state.statuses.into_iter().map(|option| option.status).collect();
+                let to = columns.iter().find(|column| column.id == status_id).map(|column| column.status.clone()).unwrap_or_default();
+                let open = state.detail.as_ref().map(|detail| open_subtasks(detail, &columns)).unwrap_or(0);
+                // Sin la cuenta, la frase del catálogo ya dice qué hacer.
+                match status_refusal_phrase(locale, code, &to, open) {
+                    Some(phrase) if open > 0 => return format!("{phrase}. {}", text(locale, "work:task.subtasksOpenHint")),
+                    Some(phrase) => return phrase,
+                    None => {}
+                }
+            }
+        }
+        error_phrase(locale, error, Some(fallback_key))
     }
 
     async fn move_to(&self, task_id: &str, status_id: &str) -> Result<(), ApiError> {

@@ -61,7 +61,8 @@ pub use tree_rows::{filter_tree, tree_rows, tree_rows_matching, TreeRow};
 pub use storage::{FileStorage, Storage};
 pub use stream::{backoff, parse_frame, Connection, ConnectionState, FrameBuffer, ServerEvent, Stream};
 pub use task::{
-    can_transition, canonical_priority, canonical_status, due_instant, flow_for, new_task_body, patch_body,
+    can_transition, canonical_priority, canonical_status, due_instant, flow_for, new_task_body, open_subtasks_block, patch_body, status_refusal,
+    status_refusal_phrase, SUBTASKS_OPEN,
     CommentAuthor, DecisionRef, DueChange, Flow, GitSummary, NewTask, ReleaseRef, StatusOption, Task,
     TaskAttachment, TaskBlocker, TaskCard, TaskComment, TaskDetail, TaskGitLink, TaskGitLinks, TaskPatch,
     TaskState, TaskStatus, TaskTag, Tasks, UserSummary,
@@ -77,7 +78,7 @@ pub use task::{
 };
 pub use task::{compose, continue_list, ComposeAction, ComposeEdit};
 pub use task::{assignee_choices, retitled, shown_name, tag_choices, tag_color_for, title_line, Choice, MAX_TAG_NAME, TAG_PALETTE};
-pub use task::{can_change_comment, is_agent_note, says_something, task_sheet, SheetActivity, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskSheet};
+pub use task::{can_change_comment, is_agent_note, says_something, task_sheet, SheetActivity, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, StatusChoice, TaskSheet};
 pub use texts::{error_phrase, pick_locale, text, text_count, text_count_unit, text_with, Locale};
 pub use transport::Reply;
 

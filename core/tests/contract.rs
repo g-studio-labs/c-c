@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 
 use cac_core::{
-    can_transition, canonical_priority, flow_for, DocDecision, DocMark, DocTab, Flow, OpenTask, Organization, Session, SpaceTree, TaskDetail,
+    can_transition, canonical_priority, flow_for, open_subtasks_block, DocDecision, DocMark, DocTab, Flow, OpenTask, Organization, Session, SpaceTree, TaskDetail,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -203,6 +203,32 @@ fn the_state_machines_are_the_servers() {
     for t in transitions {
         let ours = can_transition(Flow::named(&t.flow), &t.from, &t.to);
         assert_eq!(ours, t.allowed, "{}: {} → {}", t.flow, t.from, t.to);
+    }
+}
+
+#[derive(Deserialize)]
+struct SubtaskBlock {
+    from: String,
+    to: String,
+    open: i64,
+    blocked: bool,
+}
+
+/// La regla de las subtareas abiertas es la del servidor, caso por caso.
+///
+/// Roturas que atrapa: dejar terminar o cerrar con subtareas abiertas (el
+/// servidor contesta 409 y la pantalla lo habría ofrecido); impedir reabrir, o
+/// quedarse en la columna en la que ya se está; bloquear sin ninguna abierta;
+/// no entender `open` y `done`.
+#[test]
+fn open_subtasks_block_what_the_server_blocks() {
+    let written = fixture("state_machines.json");
+    let blocks: Vec<SubtaskBlock> = serde_json::from_value(written["subtaskBlocks"].clone()).unwrap();
+    assert_eq!(blocks.len(), 108, "seis nombres de estado por seis, con cero, una y dos abiertas");
+    assert!(blocks.iter().any(|b| b.blocked) && blocks.iter().any(|b| !b.blocked && b.open > 0));
+
+    for b in blocks {
+        assert_eq!(open_subtasks_block(&b.from, &b.to, b.open), b.blocked, "{} → {} con {} abiertas", b.from, b.to, b.open);
     }
 }
 

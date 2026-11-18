@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use cac_core::{
-    ApiError, Choice, MentionMark, MentionMenu, MentionPerson, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, StatusOption, TaskAttachment, TaskSheet,
+    ApiError, Choice, MentionMark, MentionMenu, MentionPerson, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskAttachment, TaskSheet,
     PRIORITIES,
 };
 use chrono::NaiveDate;
@@ -40,6 +40,10 @@ use cac_core::task::Question;
 
 /// El ancho del riel de propiedades: el de la app de siempre (`lg:w-72`).
 const RAIL_WIDTH: f32 = 288.;
+/// El ancho de una opción de estado que lleva su motivo debajo: a ese ancho
+/// «No se puede marcar como hecha: tiene 2 subtareas abiertas» cabe en dos
+/// renglones.
+const STATUS_REASON_WIDTH: f32 = 224.;
 /// Por debajo de este ancho de ventana el riel va debajo de la lectura (el
 /// `lg` de la app de siempre).
 pub(crate) const STACK_BELOW: f32 = 1024.;
@@ -597,6 +601,7 @@ impl TaskView {
     /// también deja de verlo.
     pub(crate) fn delete_comment(&mut self, comment_id: String, window: &mut Window, cx: &mut Context<Self>) {
         let question = Question {
+            warning: None,
             title: tr(cx, "work:task.deleteCommentTitle"),
             body: tr(cx, "work:task.deleteCommentBody"),
             confirm: tr(cx, "work:task.delete"),
@@ -615,6 +620,7 @@ impl TaskView {
     /// dice que también se va del texto.
     pub(crate) fn remove_file(&mut self, file: SheetFile, window: &mut Window, cx: &mut Context<Self>) {
         let question = Question {
+            warning: None,
             title: cac_core::text_with(locale(cx), "work:task.removeAttachmentTitle", &[("name", &file.name)]),
             body: tr(cx, if file.cited { "work:task.removeAttachmentInUse" } else { "work:task.removeAttachmentPlain" }),
             confirm: tr(cx, "work:task.remove"),
@@ -1012,6 +1018,22 @@ impl TaskView {
         F: FnOnce(cac_core::Core) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<(), cac_core::ApiError>> + Send + 'static,
     {
+        self.save_saying(move |cx, error| error_text(cx, error, fallback_key), work, done, window, cx);
+    }
+
+    /// Lo mismo, cuando el fallo tiene quien lo diga mejor que el catálogo de
+    /// errores: `say` es la frase que se deja en la página.
+    fn save_saying<F, Fut>(
+        &mut self,
+        say: impl FnOnce(&App, &cac_core::ApiError) -> String + 'static,
+        work: F,
+        done: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) where
+        F: FnOnce(cac_core::Core) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), cac_core::ApiError>> + Send + 'static,
+    {
         let Some(task_id) = Backend::snapshot(cx).read(cx).task.task_id.clone() else { return };
         self.problem = None;
         cx.notify();
@@ -1022,7 +1044,7 @@ impl TaskView {
                 match result {
                     Ok(()) => done(this, window, cx),
                     Err(error) => {
-                        this.problem = Some((task_id, error_text(cx, &error, fallback_key)));
+                        this.problem = Some((task_id, say(cx, &error)));
                         // El selector de fecha se quedó con lo que se eligió
                         // y no se guardó: que vuelva a enseñar lo que hay.
                         this.due_shown = None;
@@ -1468,10 +1490,13 @@ impl TaskView {
     }
 
     /// Mueve la tarea abierta a otra columna. Si se puede lo decide el core
-    /// (y el servidor); aquí sólo se enseña lo que conteste.
+    /// (y el servidor); aquí sólo se enseña lo que conteste, y cómo se dice
+    /// un «no» también es suyo (`status_error_phrase`): el de las subtareas
+    /// abiertas lleva cuántas quedan y dónde están.
     pub(crate) fn move_to(&mut self, status_id: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.save(
-            "work:task.errMoveList",
+        let asked = status_id.clone();
+        self.save_saying(
+            move |cx, error| Backend::core(cx).tasks().status_error_phrase(locale(cx), error, &asked, "work:task.errMoveList"),
             move |core| async move { core.tasks().set_status(&status_id).await },
             |_, _, _| {},
             window,
@@ -1531,6 +1556,28 @@ impl TaskView {
             (theme.background, theme.foreground, theme.muted_foreground, theme.muted, theme.border, theme.danger);
         let dark = theme.is_dark();
         let (title, body) = (asking.question.title.clone(), asking.question.body.clone());
+        // Lo que no se puede dejar de leer antes de contestar va aparte y
+        // destacado: la caja de aviso de la app de siempre (`rounded border
+        // border-warning/40 bg-warning/10 px-2 py-1.5`, con su icono), no
+        // una frase más al final del cuerpo gris.
+        let warning_tone = theme.warning;
+        let warning = asking.question.warning.clone().map(|warning| {
+            div()
+                .id("task-confirm-warning")
+                .aria_label(warning.clone())
+                .flex()
+                .items_start()
+                .gap_1p5()
+                .px_2()
+                .py_1p5()
+                .rounded(px(4.))
+                .border_1()
+                .border_color(warning_tone.opacity(0.4))
+                .bg(warning_tone.opacity(0.1))
+                .child(Icon::new(Lucide::CircleAlert).size_3p5().flex_none().mt(px(3.)).text_color(warning_tone))
+                .child(div().min_w_0().font_weight(FontWeight::MEDIUM).child(warning))
+                .test_support()
+        });
         let cancel = Button::new("task-confirm-cancel")
             .outline()
             .small()
@@ -1614,7 +1661,8 @@ impl TaskView {
                             .child(title)
                             .test_support(),
                     )
-                    .child(div().id("task-confirm-body").aria_label(body.clone()).text_color(muted).child(body).test_support()),
+                    .child(div().id("task-confirm-body").aria_label(body.clone()).text_color(muted).child(body).test_support())
+                    .children(warning),
             )
             .child(
                 div()
@@ -1829,7 +1877,7 @@ impl TaskView {
     /// `TaskDetailDrawer.tsx`: cada propiedad es su rótulo con icono y,
     /// debajo, su control; apiladas, no en dos columnas (en 288 px una
     /// etiqueta al lado deja al control sin sitio).
-    fn render_properties(&self, sheet: &TaskSheet, statuses: Vec<StatusOption>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_properties(&self, sheet: &TaskSheet, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (muted, foreground, border, secondary, on_secondary, unknown, input) =
             (theme.muted_foreground, theme.foreground, theme.border, theme.secondary, theme.secondary_foreground, theme.muted, theme.input);
@@ -1856,22 +1904,40 @@ impl TaskView {
                 })
                 .child(sheet.status_name.clone())
         };
-        let current = sheet.status_name.clone();
+        let choices = sheet.status_choices.clone();
         let status = Button::new("task-status").ghost().p_0().h_auto().child(status_chip).dropdown_menu({
             let view = view.clone();
             move |mut menu, _, _| {
-                // Las columnas de su lista; la que su máquina no deja sale
-                // apagada en vez de ser un botón que contesta 409.
-                for option in statuses.clone() {
-                    let (view, id) = (view.clone(), option.status.id.clone());
-                    menu = menu.item(
-                        PopupMenuItem::new(option.status.name.clone())
-                            .checked(option.status.name == current)
-                            .disabled(!option.allowed)
-                            .on_click(move |_, window, cx| {
-                                let _ = view.update(cx, |this, cx| this.move_to(id.clone(), window, cx));
-                            }),
-                    );
+                // Las columnas de su lista, todas. A la que no se puede ir
+                // no se esconde ni se apaga muda: sale gris **con su motivo
+                // debajo** (lo dice el core), y si aun así se pulsa, el
+                // motivo queda dicho en la página. Un «no» nunca es
+                // silencioso (jose, 17-nov-2026, command-and-control-387).
+                for choice in choices.clone() {
+                    let (view, id) = (view.clone(), choice.id.clone());
+                    let pick = move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let _ = view.update(cx, |this, cx| this.move_to(id.clone(), window, cx));
+                    };
+                    menu = menu.item(match choice.reason.clone() {
+                        None => PopupMenuItem::new(choice.name.clone()).checked(choice.current).disabled(!choice.allowed).on_click(pick),
+                        Some(reason) => {
+                            let (name, blocked_id) = (choice.name.clone(), SharedString::from(format!("status-blocked-{}", choice.id)));
+                            PopupMenuItem::element(move |_, _| {
+                                div()
+                                    .id(blocked_id.clone())
+                                    .aria_label(reason.clone())
+                                    .w(px(STATUS_REASON_WIDTH))
+                                    .flex()
+                                    .flex_col()
+                                    .py_0p5()
+                                    .text_color(muted)
+                                    .child(div().child(name.clone()))
+                                    .child(div().text_size(px(11.)).line_height(px(14.)).child(reason.clone()))
+                                    .test_support()
+                            })
+                            .on_click(pick)
+                        }
+                    });
                 }
                 menu
             }
@@ -2912,8 +2978,7 @@ impl Render for TaskView {
 
         // Ancha, el riel al lado; estrecha, debajo de la lectura.
         let wide = window.viewport_size().width >= px(STACK_BELOW);
-        let statuses = state.statuses.clone();
-        let properties = sheet.as_ref().map(|sheet| self.render_properties(sheet, statuses, cx).into_any_element());
+        let properties = sheet.as_ref().map(|sheet| self.render_properties(sheet, cx).into_any_element());
         let reading = div()
             .flex()
             .flex_col()
@@ -4440,6 +4505,148 @@ mod tests {
         server
     }
 
+    /// La primera tarea con las cuatro columnas de su lista y su subtarea
+    /// en la columna `subtask_in`. La tarea es de un cliente y está en curso:
+    /// su máquina deja ir a todas.
+    fn server_with_board_columns(subtask_in: &str) -> FakeServer {
+        let server = server_with_tasks(vec![contract_task("t1", "a", |_| {}), contract_task("t2", "a", |_| {})]);
+        let mut first = detail("t1");
+        let list = first["task"]["listId"].clone();
+        first["subtasks"][0]["statusId"] = json!(subtask_in);
+        let column = |id: &str, name: &str, kind: &str, status: &str| json!({ "id": id, "listId": list, "name": name, "kind": kind, "status": status });
+        let columns = json!([
+            column("s-open", "Open", "open", "pending"),
+            column("s1", "In progress", "active", "in_progress"),
+            column("s-done", "Done", "done", "resolved"),
+            column("s-closed", "Closed", "done", "closed"),
+        ]);
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(first)));
+        server.mount(Mock::given(method("GET")).and(path_regex("^/api/v1/task-lists/[^/]+/statuses$")).respond_with(ok(columns)));
+        server
+    }
+
+    /// Con una subtarea abierta, el desplegable del estado enseña «Done» y
+    /// «Closed» con su motivo debajo en vez de esconderlas o apagarlas mudas,
+    /// y pulsarlas no pide nada y deja el motivo dicho en la página, con
+    /// dónde arreglarlo (command-and-control-387).
+    ///
+    /// Roturas que atrapa: una opción apagada sin decir por qué (lo que
+    /// había para la máquina); un motivo sin cuántas quedan, o el de «cerrar»
+    /// en «hecha»; pulsarla y que no pase ni se diga nada; pedirle al
+    /// servidor lo que se sabe rechazado; decirlo como un fallo cualquiera
+    /// («No se pudo mover la tarea»).
+    #[gpui_kit::test]
+    fn the_status_picker_says_why_done_and_closed_cannot_be_chosen(cx: &mut TestAppContext) {
+        let server = server_with_board_columns("s1");
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/tasks/t1/move")).respond_with(ok(json!(null))));
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+        assert!(!on_screen(window, "status-blocked-s-done", cx), "el desplegable sale abierto");
+
+        click(window, "task-status", cx);
+        wait_until(cx, "el desplegable se abre con sus motivos", |cx| on_screen(window, "status-blocked-s-closed", cx));
+        assert_eq!(label_of(window, "status-blocked-s-done", cx), "No se puede marcar como hecha: tiene 1 subtarea abierta");
+        assert_eq!(label_of(window, "status-blocked-s-closed", cx), "No se puede cerrar: tiene 1 subtarea abierta");
+        assert!(!on_screen(window, "status-blocked-s-open", cx) && !on_screen(window, "status-blocked-s1", cx), "marca como bloqueado lo que se puede");
+
+        click(window, "status-blocked-s-closed", cx);
+        wait_until(cx, "queda dicho en la página", |cx| on_screen(window, "task-problem", cx));
+        assert_eq!(
+            label_of(window, "task-problem", cx),
+            "No se puede cerrar: tiene 1 subtarea abierta. Termínalas o ciérralas en «Subtareas», más abajo en esta página."
+        );
+        assert!(moves(&server).is_empty(), "se pidió un cambio que se sabía rechazado: {:?}", moves(&server));
+        stop(cx);
+    }
+
+    /// Con la subtarea terminada no hay nada que avisar: ninguna opción sale
+    /// bloqueada.
+    ///
+    /// Rotura que atrapa: bloquear a toda tarea que tenga subtareas, estén
+    /// como estén.
+    #[gpui_kit::test]
+    fn the_status_picker_blocks_nothing_once_the_subtasks_are_finished(cx: &mut TestAppContext) {
+        let server = server_with_board_columns("s-done");
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+        let closed = pieces(window, cx);
+
+        click(window, "task-status", cx);
+        wait_until(cx, "el desplegable se abre", |cx| pieces(window, cx) > closed);
+        for column in ["s-open", "s1", "s-done", "s-closed"] {
+            assert!(!on_screen(window, &format!("status-blocked-{column}"), cx), "{column} sale bloqueada sin subtareas abiertas");
+        }
+        stop(cx);
+    }
+
+    /// Si quien rechaza es el servidor, en la página queda el motivo, no un
+    /// «no se pudo» genérico.
+    ///
+    /// Rotura que atrapa: decir «No se pudo mover la tarea» por un rechazo
+    /// que tiene motivo.
+    #[gpui_kit::test]
+    fn a_server_refusal_for_open_subtasks_says_the_reason_on_the_page(cx: &mut TestAppContext) {
+        let server = server_with_board_columns("s-done");
+        let refusal = wiremock::ResponseTemplate::new(409).set_body_json(json!({
+            "success": false, "error": "subtasks-open",
+            "message": "cannot close this task: 1 subtask is still open — finish or close it first",
+        }));
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/tasks/t1/move")).respond_with(refusal));
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+
+        move_to(window, &view, "s-closed", cx);
+        wait_until(cx, "queda dicho en la página", |cx| on_screen(window, "task-problem", cx));
+        assert_eq!(moves(&server).len(), 1);
+        assert_eq!(label_of(window, "task-problem", cx), "No se puede terminar ni cerrar: tiene subtareas abiertas. Termínalas o ciérralas primero.");
+        stop(cx);
+    }
+
+    /// La casilla de una subtarea que a su vez tiene subtareas abiertas: el
+    /// servidor no deja terminarla, y en la página queda dicho por qué.
+    ///
+    /// Rotura que atrapa: una casilla que parece no hacer nada, o que dice
+    /// «No se pudo mover la tarea» sin el motivo.
+    #[gpui_kit::test]
+    fn a_tick_refused_for_open_subtasks_says_the_reason(cx: &mut TestAppContext) {
+        let server = server_with_board_columns("s1");
+        let refusal = wiremock::ResponseTemplate::new(409).set_body_json(json!({
+            "success": false, "error": "subtasks-open",
+            "message": "cannot mark this task done: 2 subtasks are still open — finish or close them first",
+        }));
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/tasks/t2/move")).respond_with(refusal));
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+
+        click(window, "subtask-tick-t2", cx);
+        wait_until(cx, "queda dicho en la página", |cx| on_screen(window, "task-problem", cx));
+        assert_eq!(label_of(window, "task-problem", cx), "No se puede terminar ni cerrar: tiene subtareas abiertas. Termínalas o ciérralas primero.");
+        stop(cx);
+    }
+
+    /// Una tarea sin subtareas se borra sin ese aviso.
+    ///
+    /// Rotura que atrapa: avisar de subtareas enlazadas a quien no tiene
+    /// ninguna (un aviso que sale siempre deja de leerse).
+    #[gpui_kit::test]
+    fn deleting_a_task_without_subtasks_shows_no_warning(cx: &mut TestAppContext) {
+        let server = server_with_tasks(vec![contract_task("t1", "a", |_| {}), contract_task("t2", "a", |_| {})]);
+        let mut alone = detail("t1");
+        alone["subtasks"] = json!([]);
+        let mut column = alone["status"].clone();
+        column["listId"] = alone["task"]["listId"].clone();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ok(alone)));
+        server.mount(Mock::given(method("GET")).and(path_regex("^/api/v1/task-lists/[^/]+/statuses$")).respond_with(ok(json!([column]))));
+        let window = open(&server, cx);
+        open_first_task(window, cx);
+
+        click(window, "task-delete", cx);
+        assert!(shown_question(window, cx).is_some(), "no preguntó antes de borrar");
+        assert!(!on_screen(window, "task-confirm-warning", cx), "avisa de subtareas que no tiene");
+        answer(window, false, cx);
+        stop(cx);
+    }
+
     /// Las tareas que «Mi trabajo» tiene cargadas.
     fn my_work(cx: &mut TestAppContext) -> Vec<String> {
         cx.update(|cx| Backend::core(cx).my_work().state().tasks.into_iter().map(|task| task.id).collect())
@@ -4463,7 +4670,11 @@ mod tests {
         click(window, "task-delete", cx);
         let (question, detail) = shown_question(window, cx).expect("no preguntó antes de borrar");
         assert!(question.contains("«Subir el backend»"), "no dice qué tarea: {question}");
-        assert!(detail.contains("comentarios") && detail.contains("subtareas no se borran"), "{detail}");
+        assert!(detail.contains("comentarios") && !detail.contains("subtarea"), "lo de las subtareas va aparte, como aviso: {detail}");
+        // El aviso, en su caja: cuántas tiene enlazadas y que dejan de verse.
+        assert!(on_screen(window, "task-confirm-warning", cx), "no avisa de las subtareas enlazadas");
+        let warning = label_of(window, "task-confirm-warning", cx);
+        assert_eq!(warning, "Tiene 1 subtarea enlazada. No se borra con ella, pero dejará de verse y de poder abrirse desde la vista principal.");
         // Mientras se pregunta, lo de debajo no se pulsa.
         click(window, "task-add-subtask", cx);
         assert!(!on_screen(window, "task-new-subtask", cx), "se pulsó la página por debajo de la pregunta");

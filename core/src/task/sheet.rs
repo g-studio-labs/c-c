@@ -7,7 +7,7 @@
 use chrono::{NaiveDate, Utc};
 
 use super::files::{is_image, size_label};
-use super::{shown_name, StatusOption, TaskComment, TaskDetail, Tasks};
+use super::{open_subtasks, shown_name, status_refusal_phrase, StatusOption, TaskComment, TaskDetail, TaskStatus, Tasks};
 use crate::dates::{date_and_time, due_day, today_in};
 use crate::mywork::{due_label, BoardStatus, DueLabel};
 use crate::session::Session;
@@ -127,6 +127,24 @@ pub struct SheetFile {
     pub cited: bool,
 }
 
+/// Una columna a la que se ofrece mover la tarea, dicha: lo que pinta el
+/// desplegable de su estado.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct StatusChoice {
+    /// El id de la columna: lo que se le pasa a `Tasks::set_status`.
+    pub id: String,
+    pub name: String,
+    /// Si es en la que está.
+    pub current: bool,
+    pub allowed: bool,
+    /// Por qué no se puede, dicho («No se puede cerrar: tiene 2 subtareas
+    /// abiertas»). Una opción que no se puede **se enseña con esto**, no se
+    /// esconde ni se apaga muda: decidido por jose el 17-nov-2026, «un
+    /// movimiento bloqueado nunca es silencioso».
+    pub reason: Option<String>,
+}
+
 /// Lo que pinta el detalle de una tarea.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -150,6 +168,9 @@ pub struct TaskSheet {
     /// chip (los `--status-*` del tema), no del hex que manda el servidor,
     /// que no cambia con el tema. `None` si es uno que esta versión no conoce.
     pub status: Option<BoardStatus>,
+    /// Las columnas de su lista, cada una con si se puede ir y, si no, por
+    /// qué. Vacía mientras no llegan.
+    pub status_choices: Vec<StatusChoice>,
     /// Con su nombre de la API (`normal`, no `medium`). `none` es sin prioridad.
     pub priority: String,
     pub due: Option<DueLabel>,
@@ -244,6 +265,8 @@ pub fn task_sheet(
     let (notes, talk): (Vec<&TaskComment>, Vec<&TaskComment>) = said.into_iter().partition(|c| is_agent_note(c));
     let handoff = task.handoff.clone().filter(|handoff| !handoff.trim().is_empty());
     let done = |status_id: &str| statuses.iter().any(|option| option.status.id == status_id && option.status.kind == "done");
+    let columns: Vec<TaskStatus> = statuses.iter().map(|option| option.status.clone()).collect();
+    let open = open_subtasks(detail, &columns);
 
     TaskSheet {
         id: task.id.clone(),
@@ -257,6 +280,16 @@ pub fn task_sheet(
         status_name: detail.status.name.clone(),
         status_color: detail.status.color.clone(),
         status: BoardStatus::of(&detail.status.status),
+        status_choices: statuses
+            .iter()
+            .map(|option| StatusChoice {
+                id: option.status.id.clone(),
+                name: option.status.name.clone(),
+                current: option.status.id == detail.status.id,
+                allowed: option.allowed,
+                reason: option.refusal.as_deref().and_then(|code| status_refusal_phrase(locale, code, &option.status.status, open)),
+            })
+            .collect(),
         priority: task.priority.clone(),
         due: due_label(locale, task.due_at.as_deref(), today),
         due_day: due_day(task.due_at.as_deref()).map(|day| day.to_string()),

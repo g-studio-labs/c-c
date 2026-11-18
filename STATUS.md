@@ -49,6 +49,16 @@ va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
   interna deja una línea de sistema interna con quien lo hizo, y esas líneas
   no salen en las búsquedas. Sólo sale al fusionar a `main`, y el backend va
   antes que la app.
+- **Toca el servidor, sin desplegar (387):** un padre no se termina ni se
+  cierra con subtareas abiertas, en toda organización y por las dos puertas
+  (tablero y reportes): 409 `subtasks-open` con el motivo y la cuenta en la
+  frase. Deja sin efecto la opción «terminar pide subtareas terminadas» de la
+  organización (el campo se guarda y ya no se consulta; el interruptor de la
+  app de Tauri queda sin hacer nada). El core lo sabe antes de pedir, y el
+  escritorio dice siempre por qué: columna en rojo y aviso al soltar, motivo
+  bajo la opción en el selector de estado. Borrar una tarea con subtareas lo
+  avisa en una caja aparte. El MCP pasa la frase del servidor además del
+  código, y eso sólo sale con una release de la app de Tauri.
 - **En curso:** dar comportamiento a lo pintado sin él en el detalle (editar
   «dónde quedó», añadir subtarea, mover de lista, borrar, retirar) y en la
   carcasa (⌘B y panel recordado, idioma del sistema en macOS y Windows, crear,
