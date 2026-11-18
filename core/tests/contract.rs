@@ -13,6 +13,7 @@
 use std::collections::BTreeSet;
 
 use cac_core::{
+    ChatLatest, ChatMessage, ChatUnread, DmMessage, DmReadEvent, DmSummary, Person,
     can_transition, canonical_priority, flow_for, open_subtasks_block, DocDecision, DocInfo, DocMark, DocPageView, DocTab, Flow, OpenTask, Organization, Session, SpaceTree, TaskDetail,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -361,4 +362,64 @@ fn a_doc_mark_is_read_whole() {
     let mark: DocMark = reads_every_field(&fixture("doc_mark.json"));
     assert!(mark.written);
     assert_eq!(mark.pages, Some(3));
+}
+
+/// Una línea de un canal y una de un directo se leen enteras, con su cita y
+/// sus reacciones dentro.
+///
+/// Roturas que atrapa: `authorName`, `replyTo`, `reactions`, `mine`, `names`
+/// o `gone` renombrados en Go (el mensaje saldría sin firma, sin su cita o
+/// sin sus reacciones, y nada fallaría); un campo nuevo del mensaje que el
+/// core todavía no lee.
+#[test]
+fn a_channel_line_and_a_direct_line_are_read_whole() {
+    let line: ChatMessage = reads_every_field(&fixture("chat_message_response.json"));
+    assert_eq!((line.id.as_str(), line.author_name.as_str(), line.kind.as_str()), ("m2", "Luis Mora", "user"));
+    assert_eq!(line.via.as_deref(), Some("mcp"));
+    assert_eq!((line.created_at.as_str(), line.updated_at.as_str()), ("2026-09-30T00:00:00Z", "2026-09-30T00:05:00Z"));
+    let reaction = &line.reactions[0];
+    assert_eq!((reaction.emoji.as_str(), reaction.count, reaction.mine), ("👍", 2, true));
+    assert_eq!(reaction.names, ["Ana Pérez", "Luis Mora"]);
+    let quote = line.reply_to.as_ref().unwrap();
+    assert_eq!((quote.id.as_str(), quote.author_name.as_str(), quote.body.as_str(), quote.gone), ("m1", "Ana Pérez", "¿sale mañana?", true));
+
+    let direct: DmMessage = reads_every_field(&fixture("dm_message_response.json"));
+    assert_eq!((direct.conversation_id.as_str(), direct.author_user_id.as_str()), ("c1", "u2"));
+    assert_eq!(direct.reactions[0].names, ["Ana Pérez"]);
+    assert!(direct.reply_to.as_ref().unwrap().gone);
+}
+
+/// Lo que pinta la lista de comunicación se lee entero: la última línea de
+/// un canal, lo que tiene sin leer, una conversación privada, a quién se le
+/// puede escribir y el aviso de que el otro leyó.
+///
+/// Roturas que atrapa: `kind` de la última línea renombrado (una línea del
+/// sistema saldría firmada por quien la provocó); `lastBody`, `lastAuthorId`
+/// u `otherReadAt` renombrados (la fila de un directo sin su adelanto o sin
+/// sus palomitas); `lastSeenAt` de una persona que el core no lee (nadie
+/// saldría «activo»); `at` del aviso de lectura.
+#[test]
+fn what_the_conversation_list_paints_is_read_whole() {
+    let latest: ChatLatest = reads_every_field(&fixture("chat_latest.json"));
+    assert!(latest.is_system());
+    assert_eq!((latest.author_user_id.as_str(), latest.author_name.as_str(), latest.body.as_str()), ("u2", "Luis Mora", "Grabación lista"));
+    assert_eq!(latest.created_at, "2026-09-30T00:00:00Z");
+
+    let unread: ChatUnread = reads_every_field(&fixture("chat_unread.json"));
+    assert_eq!((unread.space_id.as_str(), unread.count), ("e8bd6d46-a9ab-494e-ac29-de84d80a55f4", 4));
+
+    let direct: DmSummary = reads_every_field(&fixture("dm_summary.json"));
+    assert_eq!((direct.conversation_id.as_str(), direct.org_id.as_str()), ("c1", "35d32154-922f-47dc-a6d9-051d4e78ae8a"));
+    assert_eq!((direct.user_id.as_str(), direct.username.as_str(), direct.unread), ("u2", "luis", 2));
+    assert_eq!(direct.last_body.as_deref(), Some("¿quedamos mañana?"));
+    assert_eq!(direct.last_author_id.as_deref(), Some("u2"));
+    assert_eq!(direct.other_read_at.as_deref(), Some("2026-09-30T00:00:00Z"));
+    assert_eq!(direct.last_seen_at.as_deref(), Some("2026-09-30T00:00:00Z"));
+
+    let person: Person = reads_every_field(&fixture("user_summary.json"));
+    assert_eq!((person.id.as_str(), person.shown_name()), ("u2", "Luis Mora"));
+    assert_eq!(person.last_seen_at.as_deref(), Some("2026-09-30T00:00:00Z"));
+
+    let read: DmReadEvent = reads_every_field(&fixture("dm_read_event.json"));
+    assert_eq!((read.conversation_id.as_str(), read.user_id.as_str(), read.at.as_str()), ("c1", "u2", "2026-09-30T00:00:00Z"));
 }

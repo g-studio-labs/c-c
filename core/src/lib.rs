@@ -9,6 +9,7 @@
 uniffi::setup_scaffolding!();
 
 pub mod account;
+pub mod comms_wire;
 pub mod counters;
 pub mod dates;
 pub mod error;
@@ -39,6 +40,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use account::{check_new_password, check_sign_in, gate, FormCheck, Gate, MIN_PASSWORD};
+pub use comms_wire::{
+    ChatLatest, ChatMessage, ChatMessageEvent, ChatUnread, DmMessage, DmMessageEvent, DmReadEvent, DmSummary, MessageQuote, Person, ReactionSummary,
+    REACTION_EMOJIS, SYSTEM_KIND,
+};
 pub use counters::{count_badge, counted_label, rings_bell, Counters, CountersState, BELL_CAP, RAIL_CAP};
 pub use dates::{date_and_time, due_day, due_state, short_date, today_in, zone_hint, DueState};
 pub use doc_edit::{close_window_question, doc_editor_side_by_side, DocAsk, DocConflict, DocEdit, DocEditError, DocEditWhat, DocLeave, SIDE_BY_SIDE_FROM};

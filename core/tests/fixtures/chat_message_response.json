@@ -1,0 +1,28 @@
+{
+  "id": "m2",
+  "spaceId": "e8bd6d46-a9ab-494e-ac29-de84d80a55f4",
+  "authorUserId": "u2",
+  "authorName": "Luis Mora",
+  "kind": "user",
+  "via": "mcp",
+  "body": "Sí, **mañana** sale",
+  "createdAt": "2026-09-30T00:00:00Z",
+  "updatedAt": "2026-09-30T00:05:00Z",
+  "reactions": [
+    {
+      "emoji": "👍",
+      "count": 2,
+      "mine": true,
+      "names": [
+        "Ana Pérez",
+        "Luis Mora"
+      ]
+    }
+  ],
+  "replyTo": {
+    "id": "m1",
+    "authorName": "Ana Pérez",
+    "body": "¿sale mañana?",
+    "gone": true
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "id": "d2",
+  "conversationId": "c1",
+  "authorUserId": "u2",
+  "authorName": "Luis Mora",
+  "via": "mcp",
+  "body": "¿quedamos mañana?",
+  "createdAt": "2026-09-30T00:00:00Z",
+  "updatedAt": "2026-09-30T00:05:00Z",
+  "reactions": [
+    {
+      "emoji": "❤️",
+      "count": 1,
+      "mine": true,
+      "names": [
+        "Ana Pérez"
+      ]
+    }
+  ],
+  "replyTo": {
+    "id": "d1",
+    "authorName": "Ana Pérez",
+    "body": "¿cuándo?",
+    "gone": true
+  }
+}

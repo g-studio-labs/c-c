@@ -245,6 +245,49 @@ func TestTheCoreReadsWhatTheServerWrites(t *testing.T) {
 			LastAuthorID:   "u2",
 			OtherReadAt:    &day,
 		},
+		// La comunicación: una línea de un canal y una de un directo, con su
+		// cita y sus reacciones, la última línea de un canal para su fila en la
+		// lista, a quién se puede escribir y el aviso de que el otro leyó.
+		//
+		// Los eventos `chat:message` y `dm:message` **no** están aquí: el
+		// servidor los escribe como mapas sueltos (`service/chat.go`,
+		// `service/dm.go`), no con un struct, así que no hay forma que fijar. El
+		// core los lee con tipos escritos mirando ese código.
+		"chat_message_response.json": ChatMessageResponse{
+			ID:           "m2",
+			SpaceID:      "e8bd6d46-a9ab-494e-ac29-de84d80a55f4",
+			AuthorUserID: "u2",
+			AuthorName:   "Luis Mora",
+			Kind:         ChatKindUser,
+			Via:          "mcp",
+			Body:         "Sí, **mañana** sale",
+			CreatedAt:    day,
+			UpdatedAt:    time.Date(2026, 9, 30, 0, 5, 0, 0, time.UTC),
+			Reactions:    []ReactionSummary{{Emoji: ReactionEmojis[0], Count: 2, Mine: true, Names: []string{"Ana Pérez", "Luis Mora"}}},
+			ReplyTo:      &MessageQuote{ID: "m1", AuthorName: "Ana Pérez", Body: "¿sale mañana?", Gone: true},
+		},
+		"dm_message_response.json": DMMessageResponse{
+			ID:             "d2",
+			ConversationID: "c1",
+			AuthorUserID:   "u2",
+			AuthorName:     "Luis Mora",
+			Via:            "mcp",
+			Body:           "¿quedamos mañana?",
+			CreatedAt:      day,
+			UpdatedAt:      time.Date(2026, 9, 30, 0, 5, 0, 0, time.UTC),
+			Reactions:      []ReactionSummary{{Emoji: ReactionEmojis[1], Count: 1, Mine: true, Names: []string{"Ana Pérez"}}},
+			ReplyTo:        &MessageQuote{ID: "d1", AuthorName: "Ana Pérez", Body: "¿cuándo?", Gone: true},
+		},
+		"chat_latest.json": ChatLatest{
+			SpaceID:      "e8bd6d46-a9ab-494e-ac29-de84d80a55f4",
+			AuthorUserID: "u2",
+			AuthorName:   "Luis Mora",
+			Kind:         ChatKindSystem,
+			Body:         "Grabación lista",
+			CreatedAt:    day,
+		},
+		"user_summary.json":  UserSummary{ID: "u2", Username: "luis", Name: "Luis Mora", LastSeenAt: &day},
+		"dm_read_event.json": DMReadEvent{ConversationID: "c1", UserID: "u2", At: day},
 		"server_response.json": ServerResponse{
 			ID:                "s1",
 			OrgID:             "35d32154-922f-47dc-a6d9-051d4e78ae8a",
