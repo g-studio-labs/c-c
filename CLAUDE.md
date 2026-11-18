@@ -200,8 +200,7 @@ monta en una microtarea, después.
 
 ## El CI corre las pruebas de backend, app, transcriptor, agente y MCP
 
-Las cuatro primeras corren **por delante** de lo que publican, así que rojo no
-sale; la del MCP todavía no frena nada, porque todavía no publica nada:
+Corren **por delante** de lo que publican, así que rojo no sale:
 
 | Workflow | Qué corre | Qué frena |
 |---|---|---|
@@ -209,7 +208,7 @@ sale; la del MCP todavía no frena nada, porque todavía no publica nada:
 | `app.yml` | tipos, eslint, la suite **bajo las tres zonas**, y `cargo test` del core (`core/`) | la release: `app-release.yml` lo llama antes de compilar (#69) |
 | `transcriber.yml` | `pytest` | la imagen del worker |
 | `swarm-manage.yml` | `go test` del agente | su imagen (`:vN` desde `swarm-manage/VERSION`) |
-| `mcp.yml` | `cargo test` y el binario `cac-mcp` en release, mirando con `ldd` que no enlaza interfaz | nada todavía: `cac-mcp` no se publica (y la release de la app no lo llama) |
+| `mcp.yml` | `cargo test` (incluye el script de instalar, corrido de verdad), el binario `cac-mcp` en release mirando con `ldd` que no enlaza interfaz, y el mismo binario estático con musl | la release del MCP: `mcp-release.yml` lo llama antes de compilar |
 
 Al encender cada una salió algo que llevaba tiempo escondido: una prueba del
 backend roja desde hacía meses, y en la app un error huérfano de tiptap que hacía
@@ -281,8 +280,44 @@ la capa de Tauri (los comandos `ansible_*`, abrir enlaces).
 - Las skills que instala (`mcp/skills/`) y los hooks (`.claude/hooks/`) van
   dentro del binario con `include_str!`.
 
-Repartir `cac-mcp` (artefactos por plataforma, instalarlo o actualizarlo desde
-la app) **no está hecho**: es el paso siguiente.
+### Repartir `cac-mcp`
+
+Una sola lógica, en `mcp/src/update.rs`, para saber qué versión hay, bajarla,
+comprobar su SHA-256 contra el `SHA256SUMS` publicado y ponerla en su sitio
+(renombrando, nunca escribiendo sobre el binario en marcha; en Windows el viejo
+se aparta a `.old`). La usan `cac-mcp update`, el aviso al agente de que hay
+una versión nueva y la app nativa (`desktop/src/connect.rs`, «Conectar Claude
+Code» en el menú de la cuenta); `scripts/install-mcp.sh` y `install-mcp.ps1`
+hacen lo mismo para quien no tiene nada. **Nada se instala solo**: se avisa, y
+actualiza quien lo pide.
+
+- **Una release del MCP nunca se marca «latest».** Sale de este mismo repo con
+  la etiqueta `mcp-vX.Y.Z` (`mcp-release.yml`, sólo a mano), y el actualizador
+  de la app de Tauri lee `releases/latest/download/latest.json`: con una del
+  MCP como última, esa dirección da 404 y **nadie actualiza la app**, sin un
+  error a la vista. Por eso se publica con `--latest=false`, y por eso la
+  última versión del MCP se lee de **`mcp/VERSION`** en `main` (por
+  `raw.githubusercontent.com`), no de `releases/latest`.
+  → Guardián: `mcp/tests/release.rs` (`an_mcp_release_is_never_marked_as_the_latest`).
+- **`mcp/VERSION` y `mcp/Cargo.toml` se suben juntos**, y es la versión del
+  MCP, no la de la app: tiene su propia línea desde 1.33.0. Una versión
+  publicada no se re-corta (el workflow se niega si la etiqueta existe).
+  → Guardián: `the_version_file_and_the_manifest_agree`, ahí mismo.
+- **Los nombres de los ficheros están en cuatro sitios** (`update::ASSETS`, el
+  workflow y los dos scripts) y tienen que decir lo mismo.
+  → Guardián: `the_workflow_the_scripts_and_the_binary_name_the_same_files`.
+- **Sólo el binario suelto pregunta por sus versiones** (`Host::updates_itself`):
+  una vez al día, en un hilo aparte, recordado en su carpeta de estado, y se
+  calla con `CAC_MCP_NO_UPDATE_CHECK=1`. A `cac --mcp` lo actualiza la app.
+  → Guardianes: `mcp/tests/updates.rs` (con el binario de verdad contra una
+  release de mentira) y `server::tests::only_the_standalone_binary_watches_for_its_own_updates`.
+- **Ninguna prueba sale a internet**: `update::fake::FakeReleases` sirve
+  `VERSION`, los binarios y las sumas en esta máquina, y las direcciones se
+  cambian por el entorno (`CAC_MCP_VERSION_URL`, `CAC_MCP_DOWNLOAD_BASE`). El
+  script de sh se prueba de verdad (`mcp/tests/install_script.rs`); **el de
+  PowerShell no se ha corrido nunca**: sólo se comprueba que nombra lo mismo.
+- La suma protege de una descarga rota o cambiada por el camino. **No** de
+  alguien que pueda publicar en el repo: nada va firmado.
 
 ## La puerta de verificación
 
@@ -292,7 +327,8 @@ Entera, antes de dar algo por hecho. Desde la raíz del repo:
 (cd app           && npx tsc --noEmit)                            # tipos
 (cd app           && bun run test)                                # eslint + vitest
 (cd core          && cargo test && cargo check --features uniffi) # el core compartido
-(cd mcp           && cargo test && cargo build --release)         # el MCP y su binario
+(cd mcp           && cargo test && cargo build --release)         # el MCP, su binario y los scripts de instalar
+(cd desktop       && cargo test --locked)                         # la app nativa (usa mcp/ por ruta)
 (cd app/src-tauri && cargo check)                                 # el lado Rust
 (cd backend       && go build ./... && go vet ./... && go test ./...)
 python3 .claude/hooks/hooks_test.py                                 # los hooks de cac

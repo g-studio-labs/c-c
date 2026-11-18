@@ -13,6 +13,37 @@ tablero: **App** `ca0bfd49-0909-43eb-8135-bc8ecd0f282c` y **Backend**
 
 ## 🟢 Al día
 
+**18-nov, `cac-mcp` se reparte, se instala con una línea y avisa de sus
+versiones** (command-and-control-388, paso 2), en la rama `wt-mcp2`, sin
+fusionar. **Nada publicado todavía: ni etiqueta, ni release, ni se ha lanzado
+el workflow.** Cortar la primera es decisión de jose.
+- **Dónde sale:** releases de este mismo repo, etiqueta `mcp-vX.Y.Z`, **nunca
+  «latest»** (el actualizador de la app de Tauri lee `releases/latest`). Un
+  binario suelto por plataforma (`cac-mcp-linux-x86_64` estático con musl,
+  `cac-mcp-macos-arm64`, `cac-mcp-macos-x86_64`, `cac-mcp-windows-x86_64.exe`)
+  y `SHA256SUMS`. Workflow `mcp-release.yml`, sólo a mano, con las pruebas por
+  delante; se niega si la etiqueta existe.
+- **La última versión** se lee de `mcp/VERSION` en `main`. El MCP lleva su
+  propia línea de versiones desde 1.33.0.
+- **Instalar:** `curl -fsSL https://raw.githubusercontent.com/g-studio-labs/c-c/main/scripts/install-mcp.sh | sh`
+  (Windows: `irm …/scripts/install-mcp.ps1 | iex`). Comprueba el SHA-256 y, si
+  no coincide, no instala. A `~/.local/bin/cac-mcp`, sin root, sin tokens.
+- **Actualizar:** nunca solo. `cac-mcp` pregunta una vez al día, de fondo, y se
+  lo dice al agente con la orden (`cac-mcp update`); `update --check` sólo
+  informa; `--version` dice la instalada y, si la sabe, la que hay.
+- **En la app nativa:** «Claude Code» del menú de la cuenta abre una ventana
+  que dice si está, qué versión, si hay otra, y lo instala o actualiza con la
+  misma lógica (`cac_mcp::update`); un punto en el menú cuando hay versión
+  nueva. No crea ni enseña tokens.
+- **Sin correr nunca:** el script de PowerShell, los binarios de macOS y
+  Windows, el build con musl (no hay `musl-gcc` en esta máquina; `mcp.yml` lo
+  compila en cada push) y el workflow de la release.
+- **Hasta que exista la primera release**, la línea de instalar contesta
+  «could not download … (is version 1.33.0 published?)»: `mcp/VERSION` ya dice
+  1.33.0 y esa release no existe.
+- **Sin tocar, a propósito:** `ConnectMcpDialog.tsx` de la app de Tauri sigue
+  registrando `cac --mcp`.
+
 **17-nov, el MCP es su propio binario, `cac-mcp`** (command-and-control-388), en
 la rama `wt-mcp`, sin fusionar, sin release y **sin repartir todavía**. El
 servidor MCP sale de la app de Tauri a su crate, `mcp/` (como `core/` y
@@ -29,10 +60,9 @@ servidor MCP sale de la app de Tauri a su crate, `mcp/` (como `core/` y
   usa desde `cac_mcp::…`; en `app/src-tauri` quedan los comandos de Tauri.
 - **Quién sirve:** sólo `cac --mcp` se fía de `APPIMAGE` y `OWD`; el binario
   suelto vigila su propio ejecutable para avisar de que quedó viejo.
-- **Falta (paso siguiente, no empezado):** publicar `cac-mcp` por plataforma, un
-  instalador de una línea, e instalarlo o actualizarlo desde la app de
-  escritorio. Los textos que dicen «this cac app ships» siguen igual a
-  propósito (no cambiar textos en la extracción) y habrá que revisarlos ahí.
+- **El paso siguiente** (repartirlo, instalarlo, actualizarlo) está hecho en
+  `wt-mcp2`: ver arriba. Los textos que decían «this cac app ships» dicen
+  ahora «this MCP server ships», que vale en los dos anfitriones.
 - **A mano:** `rust-platforms.yml` compila y prueba `cac-mcp` en macOS y
   Windows; no se ha lanzado.
 
