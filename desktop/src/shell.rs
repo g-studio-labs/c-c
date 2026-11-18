@@ -19,6 +19,12 @@ enum Screen {
 pub struct Shell {
     gate: Gate,
     screen: Screen,
+    /// Se quiso cerrar la ventana con texto sin guardar: se está preguntando.
+    closing: bool,
+    /// El foco de esa pregunta, y quién lo tenía antes: si contestan que
+    /// no, se sigue escribiendo donde se estaba.
+    close_focus: FocusHandle,
+    focus_before: Option<FocusHandle>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -43,8 +49,53 @@ impl Shell {
                 Backend::run(cx, |core| async move { core.docs().came_back().await });
             }
         });
+        // Cerrar la ventana con texto sin guardar pregunta antes: lo que se
+        // pierde sin vuelta atrás siempre pregunta. Sin nada que perder, se
+        // cierra sin más.
+        let shell = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| shell.update(cx, |this, cx| this.may_close(window, cx)).unwrap_or(true));
         let now = gate(snapshot.read(cx).session.as_ref());
-        Self { gate: now, screen: Self::screen_for(now, window, cx), _subscriptions: [subscription, on_return] }
+        Self {
+            gate: now,
+            screen: Self::screen_for(now, window, cx),
+            closing: false,
+            close_focus: cx.focus_handle(),
+            focus_before: None,
+            _subscriptions: [subscription, on_return],
+        }
+    }
+
+    /// Si hay algo escrito que cerrar la ventana perdería: en la
+    /// documentación (lo dice el core, que tiene el borrador) o en la tarea
+    /// abierta (lo dice su página, que tiene sus cajas).
+    fn has_unsaved(&self, cx: &App) -> bool {
+        Backend::core(cx).unsaved_docs() || matches!(&self.screen, Screen::Open(workspace) if workspace.read(cx).task.read(cx).has_unsaved(cx))
+    }
+
+    /// Si la ventana puede cerrarse ya. Con texto sin guardar no: se
+    /// pregunta, y es la respuesta la que la cierra.
+    fn may_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.has_unsaved(cx) {
+            return true;
+        }
+        if !self.closing {
+            self.closing = true;
+            self.focus_before = window.focused(cx);
+            self.close_focus.focus(window, cx);
+            cx.notify();
+        }
+        false
+    }
+
+    /// La respuesta a «¿cerrar y perder lo escrito?».
+    fn answer_close(&mut self, yes: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.closing = false;
+        if yes {
+            window.remove_window();
+        } else if let Some(before) = self.focus_before.take() {
+            before.focus(window, cx);
+        }
+        cx.notify();
     }
 
     /// Siempre una pantalla recién hecha: al salir, la contraseña que se
@@ -68,12 +119,27 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        match &self.screen {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let asking = self.closing.then(|| {
+            let shell = cx.entity().downgrade();
+            let question = cac_core::close_window_question(crate::lang::locale(cx));
+            crate::ask::question_dialog(
+                "close-ask",
+                question,
+                &self.close_focus,
+                move |yes, window, cx| {
+                    let _ = shell.update(cx, |this, cx| this.answer_close(yes, window, cx));
+                },
+                window,
+                cx,
+            )
+        });
+        let screen = match &self.screen {
             Screen::SignIn(view) => div().size_full().child(view.clone()),
             Screen::NewPassword(view) => div().size_full().child(view.clone()),
             Screen::Open(view) => div().size_full().child(view.clone()),
-        }
+        };
+        screen.children(asking)
     }
 }
 
@@ -212,13 +278,9 @@ mod tests {
         assert_eq!(server.hits("/api/v1/auth/change-password"), 1);
     }
 
-    /// Al volver a la ventana se pone al día el documento abierto; al irse
-    /// de ella, no.
-    ///
-    /// Rotura que atrapa: volver de otra ventana —donde un agente acaba de
-    /// reescribir el runbook— y seguir leyendo el de antes.
-    #[gpui_kit::test]
-    fn coming_back_to_the_window_refreshes_the_open_document(cx: &mut TestAppContext) {
+    /// La app abierta con la documentación del espacio `a` a la vista, que
+    /// quien entra puede escribir.
+    fn open_with_a_document(cx: &mut TestAppContext, edit: impl FnOnce(&mut cac_core::Config)) -> (FakeServer, AnyWindowHandle) {
         let server = FakeServer::start();
         login_answers(&server, false);
         let get = |route: &str, data: serde_json::Value| {
@@ -230,8 +292,7 @@ mod tests {
         server.mount(get("/api/v1/task-spaces/", json!([space])));
         server.mount(get("/api/v1/docs/space/a", json!({ "doc": null, "tabs": [{ "key": "overview", "body": "Lo de siempre." }], "decisions": [] })));
         server.mount(get("/api/v1/docs/space/a/pages", json!([])));
-        // Sin rato de gracia: lo leído hace un instante ya no vale por reciente.
-        server.install_with(cx, |config| config.doc_fresh_for = std::time::Duration::ZERO);
+        server.install_with(cx, edit);
         let (window, _) = open(cx);
         type_and_send(window, cx);
         wait_until(cx, "la app se abre", |cx| on_screen(window, "open", cx));
@@ -243,6 +304,115 @@ mod tests {
             })
         });
         wait_until(cx, "llega el documento", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).docs.body() == "Lo de siempre."));
+        (server, window)
+    }
+
+    /// Cerrar la ventana con texto sin guardar pregunta antes, en un
+    /// diálogo: «Seguir aquí», la equis y Escape la dejan abierta con lo
+    /// escrito; Enter no contesta; «Cerrar sin guardar» la cierra. Sin nada
+    /// que perder, se cierra sin preguntar.
+    ///
+    /// Roturas que atrapa: cerrar la ventana y perder medio documento sin
+    /// aviso; una pregunta que no se pinta (la ventana parece no querer
+    /// cerrarse); un Escape o un Enter que cierran; un «Cerrar sin guardar»
+    /// que no cierra; preguntar a quien no escribió nada.
+    #[gpui_kit::test]
+    fn closing_the_window_with_unsaved_text_asks_first(cx: &mut TestAppContext) {
+        let (_server, window) = open_with_a_document(cx, |_| {});
+        let try_to_close = |cx: &mut TestAppContext| gpui_kit::VisualTestContext::from_window(window.into(), cx).simulate_close();
+        let draft = |cx: &mut TestAppContext| cx.update(|cx| Backend::snapshot(cx).read(cx).docs.edit.as_ref().map(|edit| edit.body.clone()));
+        let label = |id: &'static str, cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.find(id).label().unwrap_or_default().to_string()
+            })
+            .unwrap()
+        };
+
+        // Se escribe en la caja, como quien la pulsa y teclea.
+        cx.update(|cx| assert!(Backend::core(cx).docs().start_edit()));
+        wait_until(cx, "sale el editor", |cx| on_screen(window, "doc-edit-input", cx));
+        cx.update_window(window, |_, window, cx| {
+            window.click("doc-edit-input", cx);
+            window.input("X", cx);
+        })
+        .unwrap();
+        wait_until(cx, "lo tecleado llega al borrador", |cx| draft(cx).is_some_and(|body| body.contains('X')));
+
+        assert!(!try_to_close(cx), "la ventana se cerró con texto sin guardar");
+        wait_until(cx, "se pregunta", |cx| on_screen(window, "close-ask", cx));
+        assert_eq!(label("close-ask-title", cx), "¿Cerrar y perder lo que has escrito?");
+        cx.update_window(window, |_, window, cx| window.press("enter", cx)).unwrap();
+        cx.run_until_parked();
+        assert!(on_screen(window, "close-ask", cx), "Enter contestó la pregunta");
+        cx.update_window(window, |_, window, cx| window.press("escape", cx)).unwrap();
+        wait_until(cx, "Escape la quita", |cx| !on_screen(window, "close-ask", cx));
+        // Y se sigue escribiendo donde se estaba, sin pulsar la caja otra vez.
+        cx.update_window(window, |_, window, cx| window.input("Z", cx)).unwrap();
+        wait_until(cx, "lo siguiente cae en la caja", |cx| draft(cx).is_some_and(|body| body.contains('Z')));
+        let typed = draft(cx);
+
+        for way_out in ["close-ask-no", "close-ask-close"] {
+            assert!(!try_to_close(cx));
+            wait_until(cx, "se pregunta otra vez", |cx| on_screen(window, "close-ask", cx));
+            cx.update_window(window, |_, window, cx| window.click(way_out, cx)).unwrap();
+            wait_until(cx, "se quita", |cx| !on_screen(window, "close-ask", cx));
+            assert_eq!(draft(cx), typed, "{way_out} tiró lo escrito");
+        }
+
+        assert!(!try_to_close(cx));
+        wait_until(cx, "se pregunta", |cx| on_screen(window, "close-ask", cx));
+        cx.update_window(window, |_, window, cx| window.click("close-ask-yes", cx)).unwrap();
+        cx.run_until_parked();
+        assert!(cx.update_window(window, |_, _, _| ()).is_err(), "«Cerrar sin guardar» no cerró la ventana");
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Un comentario a medias en una tarea también hace preguntar.
+    ///
+    /// Rotura que atrapa: que la ventana sólo mire la documentación y se
+    /// cierre con un comentario escrito y sin mandar.
+    #[gpui_kit::test]
+    fn closing_the_window_with_a_half_written_comment_asks_too(cx: &mut TestAppContext) {
+        let (server, window) = open_with_a_document(cx, |_| {});
+        let detail: serde_json::Value = serde_json::from_str(include_str!("../../core/tests/fixtures/task_detail.json")).unwrap();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t1")).respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true, "data": detail }))));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.tasks().open("t1").await }));
+        wait_until(cx, "llega la tarea", |cx| on_screen(window, "comment-input", cx));
+        cx.update_window(window, |_, window, cx| {
+            window.click("comment-input", cx);
+            window.input("a medias", cx);
+        })
+        .unwrap();
+        assert!(!gpui_kit::VisualTestContext::from_window(window.into(), cx).simulate_close(), "la ventana se cerró con un comentario a medias");
+        wait_until(cx, "se pregunta", |cx| on_screen(window, "close-ask", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Sin nada escrito, la ventana se cierra sin preguntar: también con el
+    /// editor abierto y sin tocar.
+    ///
+    /// Rotura que atrapa: una ventana que pregunta «¿perder lo escrito?» a
+    /// quien sólo estaba leyendo.
+    #[gpui_kit::test]
+    fn closing_the_window_with_nothing_to_lose_just_closes(cx: &mut TestAppContext) {
+        let (_server, window) = open_with_a_document(cx, |_| {});
+        cx.update(|cx| assert!(Backend::core(cx).docs().start_edit()));
+        cx.run_until_parked();
+        assert!(gpui_kit::VisualTestContext::from_window(window.into(), cx).simulate_close(), "no dejó cerrar la ventana");
+        assert!(!on_screen(window, "close-ask", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Al volver a la ventana se pone al día el documento abierto; al irse
+    /// de ella, no.
+    ///
+    /// Rotura que atrapa: volver de otra ventana —donde un agente acaba de
+    /// reescribir el runbook— y seguir leyendo el de antes.
+    #[gpui_kit::test]
+    fn coming_back_to_the_window_refreshes_the_open_document(cx: &mut TestAppContext) {
+        // Sin rato de gracia: lo leído hace un instante ya no vale por reciente.
+        let (server, window) = open_with_a_document(cx, |config| config.doc_fresh_for = std::time::Duration::ZERO);
 
         let leave = |cx: &mut TestAppContext| {
             gpui_kit::VisualTestContext::from_window(window.into(), cx).deactivate_window();

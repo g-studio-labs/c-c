@@ -1379,5 +1379,11 @@
     "appimage": "Linux · AppImage",
     "deb": "Linux · .deb (Debian, Ubuntu)",
     "rpm": "Linux · .rpm (Fedora, openSUSE)"
+  },
+  "unsaved": {
+    "closeTitle": "Close and lose what you wrote?",
+    "closeWhy": "There is unsaved text. If you close the window, it is lost.",
+    "closeAnyway": "Close without saving",
+    "stay": "Stay here"
   }
 }

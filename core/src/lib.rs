@@ -40,7 +40,7 @@ use std::time::Duration;
 pub use account::{check_new_password, check_sign_in, gate, FormCheck, Gate, MIN_PASSWORD};
 pub use counters::{count_badge, counted_label, rings_bell, Counters, CountersState, BELL_CAP, RAIL_CAP};
 pub use dates::{date_and_time, due_day, due_state, short_date, today_in, zone_hint, DueState};
-pub use doc_edit::{doc_editor_side_by_side, DocAsk, DocConflict, DocEdit, DocEditError, DocEditWhat, DocLeave, SIDE_BY_SIDE_FROM};
+pub use doc_edit::{close_window_question, doc_editor_side_by_side, DocAsk, DocConflict, DocEdit, DocEditError, DocEditWhat, DocLeave, SIDE_BY_SIDE_FROM};
 pub use doc_header::{DocHeader, DocInfo};
 pub use doc_links::{doc_link, heading_slug, DocJump, DocLink, DocLinkFailure};
 pub use doc_pages::{DocBacklink, DocBacklinkRow, DocPage, DocPageCrumb, DocPageItem, DocPageLink, DocPageRow, DocPageView};

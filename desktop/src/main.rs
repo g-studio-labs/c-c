@@ -11,6 +11,7 @@
 // que la app escribe.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod ask;
 mod assets;
 mod auth;
 mod backend;

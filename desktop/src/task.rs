@@ -385,6 +385,16 @@ impl TaskView {
         Backend::snapshot(cx).read(cx).task.task_id.clone()
     }
 
+    /// Si en la tarea abierta hay algo escrito que se perdería al cerrar la
+    /// ventana: un comentario a medias, o la descripción, el «dónde quedó» o
+    /// un comentario abiertos para corregirlos. (Abiertos, se hayan tocado o
+    /// no: preguntar de más es mejor que perder algo.)
+    pub(crate) fn has_unsaved(&self, cx: &App) -> bool {
+        let Some(open) = Self::open_task_id(cx) else { return false };
+        let of_this = |task: &Option<String>| task.as_deref() == Some(open.as_str());
+        !self.comment.read(cx).value().trim().is_empty() || of_this(&self.editing) || of_this(&self.editing_handoff) || self.editing_comment.is_some()
+    }
+
     /// Baja un adjunto y lo abre con el programa del sistema que lo entiende.
     /// Su dirección pide sesión, así que no se le puede dar tal cual.
     pub(crate) fn open_file(&mut self, file_id: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -3242,6 +3252,38 @@ mod tests {
         click(window, "task-close", cx);
         wait_until(cx, "se cierra", |cx| !on_screen(window, "task-page", cx));
         stop(cx);
+    }
+
+    /// Lo que se escribe en una tarea es algo que cerrar la ventana
+    /// perdería: un comentario a medias, o la descripción abierta para
+    /// corregirla. Sin nada de eso, o con la tarea cerrada, no.
+    ///
+    /// Roturas que atrapa: cerrar la ventana con un comentario a medias sin
+    /// que nadie pregunte; preguntar «¿perder lo escrito?» a quien sólo
+    /// leía la tarea, o por lo que quedó escrito en una que ya se cerró.
+    #[gpui_kit::test]
+    fn what_is_being_written_in_a_task_is_unsaved(cx: &mut TestAppContext) {
+        let server = server();
+        let (window, view) = open_with_view(&server, cx);
+        let unsaved = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).has_unsaved(cx));
+        wait_until(cx, "las tareas llegan", |cx| on_screen(window, "work-row-t1", cx));
+        assert!(!unsaved(cx), "sin tarea abierta");
+        click(window, "work-row-t1", cx);
+        wait_until(cx, "llega el detalle", |cx| on_screen(window, "comment-input", cx));
+        assert!(!unsaved(cx), "sólo se lee");
+
+        cx.update_window(window, |_, window, cx| view.update(cx, |view, cx| view.start_editing(window, cx))).unwrap();
+        assert!(unsaved(cx), "la descripción está abierta para corregirla");
+        cx.update(|cx| view.update(cx, |view, _| view.editing = None));
+        assert!(!unsaved(cx));
+
+        write(window, "  ", cx);
+        assert!(!unsaved(cx), "unos espacios no son un comentario");
+        write(window, "a medias", cx);
+        assert!(unsaved(cx));
+        cx.update(|cx| Backend::core(cx).tasks().close());
+        wait_until(cx, "se cierra la tarea", |cx| !on_screen(window, "task-page", cx));
+        assert!(!unsaved(cx), "lo escrito era de una tarea que ya no está abierta");
     }
 
     /// Escape cierra la página, pero no a quien está escribiendo.

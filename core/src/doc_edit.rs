@@ -11,8 +11,9 @@
 //! - **Lo escrito no se pierde sin preguntar.** Todo lo que saca del editor
 //!   con cambios sin guardar —otra pestaña, otra página, otro nodo, volver a
 //!   las tareas, cambiar de organización, cerrar la sesión, «Cancelar»— se
-//!   queda en una pregunta, y sólo se hace si contestan que sí. (Cerrar la
-//!   ventana no pasa por aquí: eso es de cada plataforma.)
+//!   queda en una pregunta, y sólo se hace si contestan que sí. Cerrar la
+//!   ventana también pregunta: cada plataforma mira `Core::unsaved_docs` y
+//!   enseña `close_window_question` antes de dejarla cerrarse.
 //! - **Un guardado que falla deja el texto donde estaba**, con el motivo al
 //!   lado. También el que llega tarde.
 //! - **No se pisa a nadie.** Cada guardado dice de qué versión salió
@@ -345,7 +346,27 @@ fn data_of<T: for<'de> Deserialize<'de>>(body: &str) -> Option<T> {
     serde_json::from_value(envelope.get_mut("data")?.take()).ok()
 }
 
+/// Lo que se pregunta al cerrar la ventana con texto sin guardar. Lo que se
+/// pierde sin vuelta atrás **siempre** pregunta, en un diálogo (jose): el
+/// primer botón es el que pierde lo escrito.
+pub fn close_window_question(locale: Locale) -> Question {
+    Question {
+        title: text(locale, "common:unsaved.closeTitle"),
+        body: text(locale, "common:unsaved.closeWhy"),
+        warning: None,
+        confirm: text(locale, "common:unsaved.closeAnyway"),
+        cancel: text(locale, "common:unsaved.stay"),
+    }
+}
+
 impl Core {
+    /// Si en la documentación hay algo escrito que el servidor no tiene:
+    /// cerrar la ventana ahora lo perdería. Un editor abierto y sin tocar
+    /// no cuenta.
+    pub fn unsaved_docs(&self) -> bool {
+        self.docs().state().edit.is_some_and(|edit| edit.is_dirty())
+    }
+
     /// De la documentación a las tareas del mismo nodo, en esa vista. Si
     /// hay texto sin guardar se pregunta antes, y la vista no se cambia
     /// hasta que contesten.

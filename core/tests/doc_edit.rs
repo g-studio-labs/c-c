@@ -311,6 +311,30 @@ async fn saving_a_tab_sends_its_text_and_the_version_it_came_from() {
     assert_eq!(docs.state().body(), "pasos");
 }
 
+/// Hay texto que perder cuando el borrador ya no es lo que se leyó; un
+/// editor abierto y sin tocar, o ya guardado, no tiene nada que perder. Y
+/// la pregunta de cerrar la ventana dice lo que se pierde.
+///
+/// Roturas que atrapa: cerrar la ventana con medio documento escrito sin
+/// que nadie pregunte; preguntar «¿perder lo escrito?» a quien no escribió
+/// nada; una pregunta cuyo botón rojo no dice que cierra.
+#[tokio::test]
+async fn unsaved_text_is_what_closing_the_window_would_lose() {
+    let rig = rig().await;
+    assert!(!rig.core.unsaved_docs());
+    assert!(rig.core.docs().start_edit());
+    assert!(!rig.core.unsaved_docs(), "un editor sin tocar no tiene nada que perder");
+    rig.core.docs().draft_body("a medias");
+    assert!(rig.core.unsaved_docs());
+    rig.core.docs().save().await;
+    assert!(!rig.core.unsaved_docs(), "lo guardado ya no se pierde");
+
+    let asked = cac_core::close_window_question(Locale::Es);
+    assert_eq!((asked.confirm.as_str(), asked.cancel.as_str()), ("Cerrar sin guardar", "Seguir aquí"));
+    assert!(asked.title.starts_with('¿') && asked.body.contains("sin guardar"));
+    assert_eq!(cac_core::close_window_question(Locale::En).confirm, "Close without saving");
+}
+
 /// El primer guardado crea el documento, y con él llega su cabecera; al
 /// volver a abrirlo sigue ahí, y la documentación de otro nodo no la hereda.
 ///
