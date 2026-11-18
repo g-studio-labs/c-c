@@ -122,7 +122,7 @@
   "server-template-not-found": "That template doesn't exist in this organization.",
   "space-outside-org": "That space isn't in this organization.",
   "store-disabled": "That store is switched off on this server.",
-  "subtasks-open": "There are subtasks still open.",
+  "subtasks-open": "It can't be finished or closed: it has open subtasks. Finish or close them first.",
   "superadmin-only": "Only a superadmin can do this.",
   "superadmin-required": "Only a platform superadmin can do that.",
   "title-required": "A title is needed.",
@@ -254,5 +254,6 @@
   "bad-commit": "That isn't a commit: give a sha or owner/repo@sha.",
   "installation-taken": "That installation already belongs to another organization.",
   "superadmin-in-person": "Only a superadmin, signed in (not with a token), can do this.",
-  "not-this-cluster": "This server isn't the cluster cac runs in: its views would show another cluster."
+  "not-this-cluster": "This server isn't the cluster cac runs in: its views would show another cluster.",
+  "work-still-open": "It can't be resolved or closed yet: the team still has open work on it."
 }

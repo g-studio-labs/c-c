@@ -190,7 +190,9 @@ func TestAnUnknownActorLeavesTheLineWithoutAnAuthor(t *testing.T) {
 		t.Errorf("sin persona no hay autor, y se guardó %q", *rows[0].AuthorUserID)
 	}
 
-	moveTo(t, svc, domain.WithVia(context.Background(), domain.ViaMCP), "int-1", ana, domain.ReportResolved)
+	// De vuelta a pendiente y no a hecha: `int-1` tiene una subtarea abierta,
+	// y con ella no se termina (command-and-control-387).
+	moveTo(t, svc, domain.WithVia(context.Background(), domain.ViaMCP), "int-1", ana, domain.ReportPending)
 	rows = threadRows(t, db, "int-1")
 	if len(rows) != 2 || rows[1].Via != domain.ViaMCP {
 		t.Fatalf("lo que mueve un agente con el token de Ana lo dice la fila: %+v", rows)

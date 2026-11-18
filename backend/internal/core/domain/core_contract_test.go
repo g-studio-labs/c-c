@@ -345,5 +345,21 @@ func stateMachines() map[string]any {
 	for _, p := range ItemPriorities() {
 		priorities = append(priorities, priority{p, p.TaskWire()})
 	}
-	return map[string]any{"transitions": pairs, "flows": owners, "priorities": priorities}
+	// La regla de las subtareas abiertas, con su tabla: el core la copia
+	// (`open_subtasks_block`) para no ofrecer lo que aquí se va a rechazar.
+	type block struct {
+		From    ReportStatus `json:"from"`
+		To      ReportStatus `json:"to"`
+		Open    int64        `json:"open"`
+		Blocked bool         `json:"blocked"`
+	}
+	blocks := []block{}
+	for _, from := range statuses {
+		for _, to := range statuses {
+			for _, open := range []int64{0, 1, 2} {
+				blocks = append(blocks, block{from, to, open, OpenSubtasksBlock(from, to, open)})
+			}
+		}
+	}
+	return map[string]any{"transitions": pairs, "flows": owners, "priorities": priorities, "subtaskBlocks": blocks}
 }

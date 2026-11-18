@@ -53,13 +53,13 @@ type Organization struct {
 	// GuestsCanUseDevTools is how somebody without an account reaches the
 	// on-device tools and nothing else.
 	GuestsCanUseDevTools bool `json:"guestsCanUseDevTools"`
-	// DoneNeedsSubtasksDone impide dar por hecha una tarea con subtareas
-	// abiertas.
+	// DoneNeedsSubtasksDone ya no decide nada.
 	//
-	// Apagado de salida, porque cerrar el padre a sabiendas es una decisión
-	// legítima: a veces lo que queda ya no hace falta. Encendido, la disciplina
-	// vale más que la excepción — y es una decisión de equipo, no de quien
-	// arrastra la tarjeta, por eso vive aquí.
+	// Era la opción que impedía dar por hecha una tarea con subtareas
+	// abiertas. Desde el 17-nov-2026 eso vale para toda organización, y
+	// también para cerrar (`OpenSubtasksBlock`, command-and-control-387). El
+	// campo se queda porque las apps instaladas lo leen y lo escriben; el
+	// servidor lo guarda y no lo consulta.
 	DoneNeedsSubtasksDone bool `json:"doneNeedsSubtasksDone"`
 
 	// Timezone: la zona del equipo (IANA, «America/Cancun»). Las reuniones

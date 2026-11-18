@@ -23,8 +23,9 @@ var (
 	ErrBadStatus = errors.New("unknown status")
 	// ErrBadTransition: the move is one the shared state machine refuses.
 	ErrBadTransition = errors.New("that move is not allowed from the current state")
-	// ErrSubtasksOpen: la organización pide terminar las subtareas antes de dar
-	// por hecha la tarea que las contiene.
+	// ErrSubtasksOpen: no se termina ni se cierra una tarea con subtareas
+	// abiertas. Lo que se devuelve es un `*SubtasksOpenError`, que lleva la
+	// cuenta; esto es con lo que se le reconoce (`errors.Is`).
 	ErrSubtasksOpen = errors.New("this task still has open subtasks")
 	// ErrTaskStatusChanged: se pidió «sólo si sigue en X» y ya no está en X.
 	// Dos agentes a la vez: el segundo no pisa al primero sin enterarse.
@@ -36,6 +37,45 @@ var (
 	ErrBlockerNotFound = errors.New("that task does not exist in this organization")
 	ErrBlockerIsSelf   = errors.New("a task cannot wait for itself")
 )
+
+// SubtasksOpenError: el rechazo de `domain.OpenSubtasksBlock`, con cuántas
+// quedan abiertas y a qué estado se quería ir, que es lo que hace falta para
+// decirlo entero.
+type SubtasksOpenError struct {
+	Open int64
+	To   domain.ReportStatus
+}
+
+func (e *SubtasksOpenError) Error() string { return domain.OpenSubtasksReason(e.To, e.Open) }
+
+func (e *SubtasksOpenError) Is(target error) bool { return target == ErrSubtasksOpen }
+
+// openSubtaskCounter: lo único que la regla le pide a un repositorio. Las dos
+// puertas que cambian un estado tienen cada una el suyo.
+type openSubtaskCounter interface {
+	CountOpenSubtasks(parentID string) (int64, error)
+}
+
+// refuseWithOpenSubtasks impone la regla en un cambio de estado. Una sola
+// función para las dos puertas (`TaskService.MoveTask` y
+// `ReportService.Update`): escrita en cada una, un día una de las dos deja de
+// preguntar.
+//
+// Sólo cuenta cuando el destino es terminar: mover entre pendiente y en curso
+// es lo de todos los días y no tiene por qué pagar una consulta.
+func refuseWithOpenSubtasks(repo openSubtaskCounter, id string, from, to domain.ReportStatus) error {
+	if !domain.OpenSubtasksBlock(from, to, 1) {
+		return nil
+	}
+	open, err := repo.CountOpenSubtasks(id)
+	if err != nil {
+		return err
+	}
+	if domain.OpenSubtasksBlock(from, to, open) {
+		return &SubtasksOpenError{Open: open, To: to}
+	}
+	return nil
+}
 
 type TaskService struct {
 	repo *repository.TaskRepository
@@ -839,18 +879,13 @@ func (s *TaskService) MoveTask(ctx context.Context, id, userID string, req domai
 		return ErrBadTransition
 	}
 
-	// Dar por hecha una tarea con subtareas abiertas, si la organización lo pide.
+	// Un padre no se termina ni se cierra con subtareas abiertas.
 	//
 	// Se comprueba aquí y no sólo en la pantalla porque el tablero no es la única
 	// puerta: el MCP mueve tarjetas, y un tenant también. Una regla que sólo
 	// vigila la interfaz es una regla que no está.
-	if s.orgs != nil && task.OrgID != "" {
-		if org, err := s.orgs.FindByID(task.OrgID); err == nil && org != nil {
-			total, hechas := s.repo.SubtaskProgress(id)
-			if domain.SubtasksBlockDone(org.DoneNeedsSubtasksDone, next, total, hechas) {
-				return ErrSubtasksOpen
-			}
-		}
+	if err := refuseWithOpenSubtasks(s.repo, id, task.Status, next); err != nil {
+		return err
 	}
 
 	// Sticky, which is the report semantics rather than the task one: the date

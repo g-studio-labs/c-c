@@ -963,6 +963,29 @@ func (r *TaskRepository) SubtaskProgress(parentID string) (total, done int64) {
 	return fila.Total, fila.Done
 }
 
+// CountOpenSubtasks: cuántas subtareas de una tarea siguen abiertas, es decir,
+// ni hechas ni cerradas. Es lo que impide terminar o cerrar a su padre
+// (`domain.OpenSubtasksBlock`).
+//
+// Una archivada o borrada no cuenta: ya no es trabajo de nadie. Y sólo las
+// hijas directas: una nieta abierta impide terminar a su madre, y ésta, abierta
+// por eso, a la suya.
+//
+// Devuelve el error en vez de un cero: una cuenta que falla y se lee como
+// «ninguna abierta» es la regla apagada sin que nadie lo sepa.
+func (r *TaskRepository) CountOpenSubtasks(parentID string) (int64, error) {
+	return countOpenSubtasks(r.db, parentID)
+}
+
+func countOpenSubtasks(db *gorm.DB, parentID string) (int64, error) {
+	var open int64
+	err := db.Table("items t").
+		Where("t.parent_id = ? AND t.archived_at IS NULL AND t.deleted_at IS NULL", parentID).
+		Where("t.status NOT IN ?", []domain.ReportStatus{domain.ReportResolved, domain.ReportClosed}).
+		Count(&open).Error
+	return open, err
+}
+
 func (r *TaskRepository) Subtasks(parentID string) ([]domain.TaskCard, error) {
 	var tasks []domain.Task
 	if err := r.db.Where("parent_id = ? AND archived_at IS NULL", parentID).

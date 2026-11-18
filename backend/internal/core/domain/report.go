@@ -705,20 +705,44 @@ type ReportDetailResponse struct {
 	Telemetry json.RawMessage `json:"telemetry,omitempty"`
 }
 
-// SubtasksBlockDone dice si una tarea no puede darse por hecha todavía.
+// OpenSubtasksBlock dice si una tarea no puede pasar a ese estado porque aún
+// tiene subtareas abiertas.
 //
-// **Sólo «hecho», nunca «cerrado».** Son cosas distintas: hecho dice que se
-// terminó todo, cerrado dice que no se va a hacer. Un guard que impidiera cerrar
-// dejaría atrapada exactamente la tarea que se quiere abandonar — que es cuando
-// más falta hace poder cerrarla.
+// **«Hecho» y «cerrado», los dos, y en toda organización.** Hasta el
+// 17-nov-2026 era una opción de la organización (`DoneNeedsSubtasksDone`) que
+// sólo vigilaba «hecho» y dejaba cerrar siempre. Lo decidió jose ese día
+// (command-and-control-387): un padre terminado o cerrado con trabajo abierto
+// debajo es trabajo que deja de verse —sus subtareas no salen en la vista
+// principal sin él—, así que primero se terminan o se cierran ellas. Quien
+// quiere abandonar la tarea entera cierra sus subtareas y luego la cierra.
 //
-// Pura y aquí porque la comprueban los dos lados: el servidor la impone y el
-// tablero la consulta antes de dejar soltar la tarjeta. Escrita dos veces sería
-// una regla que un día deja de coincidir consigo misma, y el síntoma sería una
-// tarjeta que se mueve y vuelve sola.
-func SubtasksBlockDone(required bool, target ReportStatus, total, done int64) bool {
-	if !required || target.Canonical() != ReportResolved {
+// «Abierta» es la que no está ni hecha ni cerrada: `open` es esa cuenta, y la
+// hace `CountOpenSubtasks`.
+//
+// Reabrir nunca se impide, y quedarse en el mismo estado tampoco: reordenar
+// una tarjeta dentro de «Hecho» no es terminar nada.
+//
+// Pura y aquí porque la comprueban las dos puertas que cambian un estado (el
+// tablero y la pantalla de reportes) y la copia el core de las apps
+// (`core/src/task/flow.rs`), que la consulta antes de pedir nada.
+func OpenSubtasksBlock(from, to ReportStatus, open int64) bool {
+	if open <= 0 || from.Canonical() == to.Canonical() {
 		return false
 	}
-	return total > done
+	return IsFinished(to.Canonical())
+}
+
+// OpenSubtasksReason: la frase, en inglés, con que el servidor dice ese
+// rechazo. Lleva el motivo y la cuenta porque hay quien sólo imprime lo que
+// contesta el servidor (un agente por el MCP, un tenant por su API): con «409»
+// a secas no sabría qué hacer.
+func OpenSubtasksReason(to ReportStatus, open int64) string {
+	act := "mark this task done"
+	if to.Canonical() == ReportClosed {
+		act = "close this task"
+	}
+	if open == 1 {
+		return "cannot " + act + ": 1 subtask is still open — finish or close it first"
+	}
+	return fmt.Sprintf("cannot %s: %d subtasks are still open — finish or close them first", act, open)
 }

@@ -612,3 +612,10 @@ func (r *ReportRepository) ApplyCommentEdit(commentID, body string, add []domain
 func (r *ReportRepository) DeleteImage(id string) error {
 	return r.db.Delete(&domain.ReportImage{}, "id = ?", id).Error
 }
+
+// CountOpenSubtasks: la misma cuenta que hace el tablero
+// (`TaskRepository.CountOpenSubtasks`), para la otra puerta que cambia un
+// estado: la pantalla de reportes.
+func (r *ReportRepository) CountOpenSubtasks(parentID string) (int64, error) {
+	return countOpenSubtasks(r.db, parentID)
+}

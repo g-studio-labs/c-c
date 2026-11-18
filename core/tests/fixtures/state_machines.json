@@ -53,6 +53,656 @@
       "wire": "urgent"
     }
   ],
+  "subtaskBlocks": [
+    {
+      "from": "pending",
+      "to": "pending",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "pending",
+      "to": "pending",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "pending",
+      "to": "pending",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "pending",
+      "to": "in_progress",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "pending",
+      "to": "in_progress",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "pending",
+      "to": "in_progress",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "pending",
+      "to": "resolved",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "pending",
+      "to": "resolved",
+      "open": 1,
+      "blocked": true
+    },
+    {
+      "from": "pending",
+      "to": "resolved",
+      "open": 2,
+      "blocked": true
+    },
+    {
+      "from": "pending",
+      "to": "closed",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "pending",
+      "to": "closed",
+      "open": 1,
+      "blocked": true
+    },
+    {
+      "from": "pending",
+      "to": "closed",
+      "open": 2,
+      "blocked": true
+    },
+    {
+      "from": "pending",
+      "to": "open",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "pending",
+      "to": "open",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "pending",
+      "to": "open",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "pending",
+      "to": "done",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "pending",
+      "to": "done",
+      "open": 1,
+      "blocked": true
+    },
+    {
+      "from": "pending",
+      "to": "done",
+      "open": 2,
+      "blocked": true
+    },
+    {
+      "from": "in_progress",
+      "to": "pending",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "in_progress",
+      "to": "pending",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "in_progress",
+      "to": "pending",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "in_progress",
+      "to": "in_progress",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "in_progress",
+      "to": "in_progress",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "in_progress",
+      "to": "in_progress",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "in_progress",
+      "to": "resolved",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "in_progress",
+      "to": "resolved",
+      "open": 1,
+      "blocked": true
+    },
+    {
+      "from": "in_progress",
+      "to": "resolved",
+      "open": 2,
+      "blocked": true
+    },
+    {
+      "from": "in_progress",
+      "to": "closed",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "in_progress",
+      "to": "closed",
+      "open": 1,
+      "blocked": true
+    },
+    {
+      "from": "in_progress",
+      "to": "closed",
+      "open": 2,
+      "blocked": true
+    },
+    {
+      "from": "in_progress",
+      "to": "open",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "in_progress",
+      "to": "open",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "in_progress",
+      "to": "open",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "in_progress",
+      "to": "done",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "in_progress",
+      "to": "done",
+      "open": 1,
+      "blocked": true
+    },
+    {
+      "from": "in_progress",
+      "to": "done",
+      "open": 2,
+      "blocked": true
+    },
+    {
+      "from": "resolved",
+      "to": "pending",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "resolved",
+      "to": "pending",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "resolved",
+      "to": "pending",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "resolved",
+      "to": "in_progress",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "resolved",
+      "to": "in_progress",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "resolved",
+      "to": "in_progress",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "resolved",
+      "to": "resolved",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "resolved",
+      "to": "resolved",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "resolved",
+      "to": "resolved",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "resolved",
+      "to": "closed",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "resolved",
+      "to": "closed",
+      "open": 1,
+      "blocked": true
+    },
+    {
+      "from": "resolved",
+      "to": "closed",
+      "open": 2,
+      "blocked": true
+    },
+    {
+      "from": "resolved",
+      "to": "open",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "resolved",
+      "to": "open",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "resolved",
+      "to": "open",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "resolved",
+      "to": "done",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "resolved",
+      "to": "done",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "resolved",
+      "to": "done",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "closed",
+      "to": "pending",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "closed",
+      "to": "pending",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "closed",
+      "to": "pending",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "closed",
+      "to": "in_progress",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "closed",
+      "to": "in_progress",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "closed",
+      "to": "in_progress",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "closed",
+      "to": "resolved",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "closed",
+      "to": "resolved",
+      "open": 1,
+      "blocked": true
+    },
+    {
+      "from": "closed",
+      "to": "resolved",
+      "open": 2,
+      "blocked": true
+    },
+    {
+      "from": "closed",
+      "to": "closed",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "closed",
+      "to": "closed",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "closed",
+      "to": "closed",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "closed",
+      "to": "open",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "closed",
+      "to": "open",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "closed",
+      "to": "open",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "closed",
+      "to": "done",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "closed",
+      "to": "done",
+      "open": 1,
+      "blocked": true
+    },
+    {
+      "from": "closed",
+      "to": "done",
+      "open": 2,
+      "blocked": true
+    },
+    {
+      "from": "open",
+      "to": "pending",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "open",
+      "to": "pending",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "open",
+      "to": "pending",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "open",
+      "to": "in_progress",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "open",
+      "to": "in_progress",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "open",
+      "to": "in_progress",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "open",
+      "to": "resolved",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "open",
+      "to": "resolved",
+      "open": 1,
+      "blocked": true
+    },
+    {
+      "from": "open",
+      "to": "resolved",
+      "open": 2,
+      "blocked": true
+    },
+    {
+      "from": "open",
+      "to": "closed",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "open",
+      "to": "closed",
+      "open": 1,
+      "blocked": true
+    },
+    {
+      "from": "open",
+      "to": "closed",
+      "open": 2,
+      "blocked": true
+    },
+    {
+      "from": "open",
+      "to": "open",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "open",
+      "to": "open",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "open",
+      "to": "open",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "open",
+      "to": "done",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "open",
+      "to": "done",
+      "open": 1,
+      "blocked": true
+    },
+    {
+      "from": "open",
+      "to": "done",
+      "open": 2,
+      "blocked": true
+    },
+    {
+      "from": "done",
+      "to": "pending",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "done",
+      "to": "pending",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "done",
+      "to": "pending",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "done",
+      "to": "in_progress",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "done",
+      "to": "in_progress",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "done",
+      "to": "in_progress",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "done",
+      "to": "resolved",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "done",
+      "to": "resolved",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "done",
+      "to": "resolved",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "done",
+      "to": "closed",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "done",
+      "to": "closed",
+      "open": 1,
+      "blocked": true
+    },
+    {
+      "from": "done",
+      "to": "closed",
+      "open": 2,
+      "blocked": true
+    },
+    {
+      "from": "done",
+      "to": "open",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "done",
+      "to": "open",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "done",
+      "to": "open",
+      "open": 2,
+      "blocked": false
+    },
+    {
+      "from": "done",
+      "to": "done",
+      "open": 0,
+      "blocked": false
+    },
+    {
+      "from": "done",
+      "to": "done",
+      "open": 1,
+      "blocked": false
+    },
+    {
+      "from": "done",
+      "to": "done",
+      "open": 2,
+      "blocked": false
+    }
+  ],
   "transitions": [
     {
       "flow": "client",

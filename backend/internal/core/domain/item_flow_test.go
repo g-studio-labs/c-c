@@ -118,64 +118,73 @@ func TestUnaSubtareaEsInterna(t *testing.T) {
 	}
 }
 
-// Dar por hecha una tarea que aún tiene subtareas abiertas.
+// Un padre no se termina ni se cierra con subtareas abiertas
+// (command-and-control-387, decidido por jose el 17-nov-2026).
 //
-// Es una regla de equipo, no de quien arrastra la tarjeta, y por eso se enciende
-// en la organización. Apagada de salida: cerrar el padre a sabiendas es legítimo
-// — a veces lo que queda ya no hace falta.
-func TestSubtareasAbiertasBloqueanHecho(t *testing.T) {
-	t.Run("apagada, nada estorba", func(t *testing.T) {
-		if SubtasksBlockDone(false, ReportResolved, 3, 1) {
-			t.Fatal("sin la regla encendida no se impide nada")
-		}
-	})
-
-	t.Run("encendida, con subtareas abiertas no se puede", func(t *testing.T) {
-		if !SubtasksBlockDone(true, ReportResolved, 3, 1) {
-			t.Fatal("quedan dos por hacer")
-		}
-	})
-
-	t.Run("y con todas hechas sí", func(t *testing.T) {
-		if SubtasksBlockDone(true, ReportResolved, 3, 3) {
-			t.Fatal("no queda ninguna abierta")
-		}
-	})
-
-	/**
-	 * **Cerrado no es hecho**, y la regla no lo toca.
-	 *
-	 * «Hecho» dice que se terminó todo; «cerrado» dice que no se va a hacer. Un
-	 * guard que impidiera cerrar dejaría atrapada exactamente la tarea que se
-	 * quiere abandonar, que es cuando más falta hace poder cerrarla.
-	 */
-	t.Run("cerrar nunca se bloquea", func(t *testing.T) {
-		if SubtasksBlockDone(true, ReportClosed, 3, 0) {
-			t.Fatal("abandonar algo a medias es justamente para lo que sirve cerrar")
-		}
-	})
-
-	t.Run("moverse a Open o In progress tampoco", func(t *testing.T) {
-		for _, d := range []ReportStatus{ReportPending, ReportInProgress} {
-			if SubtasksBlockDone(true, d, 3, 0) {
-				t.Fatalf("%q no es dar nada por hecho", d)
+// Hasta entonces era una opción de la organización, sólo para «hecho», y
+// cerrar era la salida. Ahora vale para los dos y para todos: lo que quedaba
+// abierto debajo de un padre cerrado dejaba de verse en la vista principal.
+//
+// Roturas que atrapa: dejar pasar «cerrado» (la regla de antes); dejar pasar
+// «hecho»; impedir reabrir; impedir reordenar dentro de la columna en la que
+// ya está; bloquear a quien no tiene ninguna abierta; y que una app vieja se
+// la salte mandando «done».
+func TestOpenSubtasksBlockDoneAndClosed(t *testing.T) {
+	for _, to := range []ReportStatus{ReportResolved, ReportClosed} {
+		for _, from := range []ReportStatus{ReportPending, ReportInProgress} {
+			if !OpenSubtasksBlock(from, to, 2) {
+				t.Fatalf("%s → %s con dos subtareas abiertas tiene que rechazarse", from, to)
+			}
+			if OpenSubtasksBlock(from, to, 0) {
+				t.Fatalf("%s → %s sin ninguna abierta no tiene nada que esperar", from, to)
 			}
 		}
-	})
-
-	// Los dos vocabularios conviven mientras haya apps instaladas viejas: una
-	// anterior al renombrado manda «done» donde ahora se dice `resolved`, y sin
-	// plegarlo la regla no se aplicaría — justo para quien no ha actualizado.
-	t.Run("el nombre viejo de «hecho» cuenta igual", func(t *testing.T) {
-		if !SubtasksBlockDone(true, "done", 3, 1) {
-			t.Fatal("una app sin actualizar se saltaría la regla entera")
+	}
+	// Entre los dos estados terminados también: de hecha a cerrada es cerrar.
+	if !OpenSubtasksBlock(ReportResolved, ReportClosed, 1) || !OpenSubtasksBlock(ReportClosed, ReportResolved, 1) {
+		t.Fatal("pasar de hecha a cerrada (o al revés) con una abierta también es terminarla")
+	}
+	// Reabrir siempre se puede: es como se sale de un padre que quedó
+	// terminado con algo abierto debajo.
+	for _, from := range []ReportStatus{ReportResolved, ReportClosed} {
+		for _, to := range []ReportStatus{ReportPending, ReportInProgress} {
+			if OpenSubtasksBlock(from, to, 3) {
+				t.Fatalf("reabrir (%s → %s) no se impide nunca", from, to)
+			}
 		}
-	})
+	}
+	// Reordenar dentro de su columna no es un cambio de estado.
+	if OpenSubtasksBlock(ReportResolved, ReportResolved, 3) || OpenSubtasksBlock(ReportClosed, ReportClosed, 3) {
+		t.Fatal("soltar la tarjeta en la columna en la que ya está no termina nada")
+	}
+	// Los dos vocabularios conviven: una app anterior al renombrado manda
+	// «done» donde ahora se dice `resolved`.
+	if !OpenSubtasksBlock("open", "done", 1) {
+		t.Fatal("una app sin actualizar se saltaría la regla entera")
+	}
+	if OpenSubtasksBlock("done", ReportResolved, 1) {
+		t.Fatal("«done» y `resolved` son el mismo estado: no hay cambio")
+	}
+}
 
-	// Una tarea sin subtareas no tiene nada pendiente por definición.
-	t.Run("sin subtareas no hay nada que exigir", func(t *testing.T) {
-		if SubtasksBlockDone(true, ReportResolved, 0, 0) {
-			t.Fatal("no hay ninguna abierta porque no hay ninguna")
+// La frase del rechazo dice qué se quiso hacer, cuántas quedan y qué hacer.
+//
+// Roturas que atrapa: una frase sin la cuenta; decir «close» a quien quiso
+// marcarla hecha (o al revés); «1 subtasks».
+func TestOpenSubtasksReasonNamesTheActAndTheCount(t *testing.T) {
+	cases := []struct {
+		to   ReportStatus
+		open int64
+		want string
+	}{
+		{ReportClosed, 2, "cannot close this task: 2 subtasks are still open — finish or close them first"},
+		{ReportResolved, 2, "cannot mark this task done: 2 subtasks are still open — finish or close them first"},
+		{"done", 1, "cannot mark this task done: 1 subtask is still open — finish or close it first"},
+		{ReportClosed, 1, "cannot close this task: 1 subtask is still open — finish or close it first"},
+	}
+	for _, c := range cases {
+		if got := OpenSubtasksReason(c.to, c.open); got != c.want {
+			t.Fatalf("%s con %d: %q", c.to, c.open, got)
 		}
-	})
+	}
 }

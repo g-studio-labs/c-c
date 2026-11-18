@@ -34,6 +34,24 @@ func NewReportAdminHandler(svc *service.ReportService) ReportAdminHandler {
 	return &reportAdminHandler{svc: svc}
 }
 
+// refuseOpenSubtasksToTenant: el mismo rechazo de las subtareas abiertas, dicho
+// para un cliente que entra con la llave de su proyecto.
+//
+// La regla le alcanza igual —su ticket no se cierra mientras el equipo tenga
+// trabajo abierto debajo— pero las subtareas son siempre internas: la frase de
+// dentro («2 subtasks are still open») le contaría cuánto trabajo interno
+// cuelga de su ticket, que es justo lo que la visibilidad le esconde. Por eso
+// ni la frase ni el código hablan de subtareas ni llevan la cuenta: el suyo es
+// `work-still-open`, estable, para que su integración lo reconozca.
+func refuseOpenSubtasksToTenant(w http.ResponseWriter, user *domain.ClaimsJWT, err error) bool {
+	if user == nil || !user.IsProjectScoped() || !errors.Is(err, service.ErrSubtasksOpen) {
+		return false
+	}
+	SendErrorResponse(w, http.StatusConflict,
+		"cannot resolve or close this report yet: the team still has open work on it", "work-still-open")
+	return true
+}
+
 func mapReportError(w http.ResponseWriter, err error) bool {
 	switch {
 	case errors.Is(err, repository.ErrReportNotFound):
@@ -44,6 +62,11 @@ func mapReportError(w http.ResponseWriter, err error) bool {
 		SendErrorResponse(w, http.StatusNotFound, "Image not found", err.Error())
 	case errors.Is(err, service.ErrInvalidTransition):
 		SendErrorResponse(w, http.StatusConflict, "Invalid status transition", err.Error())
+	// El mismo 409 y el mismo código que contesta el tablero (`mapTaskError`):
+	// es la misma regla por otra puerta, y quien la lee tiene que encontrar la
+	// misma etiqueta.
+	case errors.Is(err, service.ErrSubtasksOpen):
+		SendErrorResponse(w, http.StatusConflict, err.Error(), "subtasks-open")
 	case errors.Is(err, service.ErrAssigneeNotMember):
 		SendErrorResponse(w, http.StatusBadRequest, "Assignee is not a member of the organization", err.Error())
 	case errors.Is(err, service.ErrCommentImmutable):
@@ -275,6 +298,9 @@ func (h *reportAdminHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	detail, err := h.svc.Update(r.Context(), user.EventActor(), user.UserID, reportID, req)
 	if err != nil {
+		if refuseOpenSubtasksToTenant(w, user, err) {
+			return
+		}
 		if mapReportError(w, err) {
 			return
 		}

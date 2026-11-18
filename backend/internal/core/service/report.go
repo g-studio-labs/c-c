@@ -621,6 +621,11 @@ func (s *ReportService) Update(ctx context.Context, actor, actorUserID, reportID
 		if !domain.CanTransition(report.Flow(), report.Status, *req.Status) {
 			return nil, fmt.Errorf("%w: %s → %s", ErrInvalidTransition, report.Status, *req.Status)
 		}
+		// La misma regla que en el tablero, por la misma función: esta puerta
+		// también termina y cierra tareas, y una con subtareas llega hasta aquí.
+		if err := refuseWithOpenSubtasks(s.repo, reportID, report.Status, *req.Status); err != nil {
+			return nil, err
+		}
 		old := report.Status
 		report.Status = *req.Status
 		// resolved_at is (re)set on entering resolved and NOT cleared on reopen

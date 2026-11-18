@@ -122,7 +122,7 @@
   "server-template-not-found": "Esa plantilla no existe en esta organización.",
   "space-outside-org": "Ese espacio no es de esta organización.",
   "store-disabled": "Ese almacén está apagado en este servidor.",
-  "subtasks-open": "Quedan subtareas sin cerrar.",
+  "subtasks-open": "No se puede terminar ni cerrar: tiene subtareas abiertas. Termínalas o ciérralas primero.",
   "superadmin-only": "Sólo un superadministrador puede hacer esto.",
   "superadmin-required": "Eso sólo lo puede hacer un superadmin de la plataforma.",
   "title-required": "Hace falta un título.",
@@ -254,5 +254,6 @@
   "bad-commit": "Eso no es un commit: pasa un sha o owner/repo@sha.",
   "installation-taken": "Esa instalación ya es de otra organización.",
   "superadmin-in-person": "Sólo un superadmin, con su sesión (no con un token), puede hacer esto.",
-  "not-this-cluster": "Este servidor no es el clúster donde corre cac: sus vistas enseñarían otro clúster."
+  "not-this-cluster": "Este servidor no es el clúster donde corre cac: sus vistas enseñarían otro clúster.",
+  "work-still-open": "Todavía no se puede resolver ni cerrar: el equipo aún tiene trabajo abierto en él."
 }

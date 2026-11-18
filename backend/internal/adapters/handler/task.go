@@ -233,10 +233,9 @@ func mapTaskError(w http.ResponseWriter, err error) bool {
 	// 409 por lo mismo: el estado del tablero es lo que impide el movimiento, no
 	// un permiso ni una petición mal formada.
 	case errors.Is(err, service.ErrSubtasksOpen):
-		SendErrorResponse(w, http.StatusConflict,
-			"This task still has open subtasks, and this organization asks for them "+
-				"to be finished first. Close them, or close this task instead of "+
-				"marking it done.", "subtasks-open")
+		// La frase es la del propio error: dice qué se quiso hacer y cuántas
+		// quedan (`domain.OpenSubtasksReason`).
+		SendErrorResponse(w, http.StatusConflict, err.Error(), "subtasks-open")
 	// 400 y no 409: aquí no hay conflicto con ningún estado, es que el id de
 	// columna no nombra nada. Petición malformada.
 	case errors.Is(err, service.ErrBadStatus):
