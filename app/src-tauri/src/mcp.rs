@@ -525,7 +525,17 @@ fn explain_write_failure(status: reqwest::StatusCode, body: &Value) -> String {
             "cac rejected the token itself ({msg}) — this is authentication, not a missing \
              permission. Check CAC_TOKEN is the current one and hasn't expired."
         ),
-        _ => format!("cac returned {status}: {msg}"),
+        // La etiqueta **y** la frase. `error` es el código con que se
+        // reconoce el rechazo (`subtasks-open`); `message` es donde el
+        // servidor dice el motivo («cannot close this task: 2 subtasks are
+        // still open — finish or close them first»). Con sólo la etiqueta, el
+        // agente que quiso cerrar una tarea con subtareas abiertas recibía
+        // «409: subtasks-open» y tenía que adivinar cuántas y qué hacer
+        // (command-and-control-387).
+        _ => match body.get("message").and_then(|v| v.as_str()).filter(|m| !m.is_empty() && *m != msg) {
+            Some(why) => format!("cac returned {status}: {msg} — {why}"),
+            None => format!("cac returned {status}: {msg}"),
+        },
     }
 }
 
@@ -2355,7 +2365,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "update_task",
-            "description": "Change an existing task: title, markdown description, priority, tags, assignees, due date, its `handoff` (where it was left), what it waits for (`blockedBy`), which column it sits in (status by name: open, in_progress, done, closed), or which list it lives in (`listId`, to tidy up a task filed in the wrong place). To take a task, pass `claim: true`: you become an assignee (nobody is removed) and it moves to in progress in one step; if it is already in progress with someone else the answer says so (`claimed: false`, with who and their handoff) and you comment instead of taking it. `ifStatus` makes any change conditional on the task still being in that state. Needs a token with the `tasks:manage` scope — separate from creating, because this overwrites work someone else may have written. Only the fields you send are touched.",
+            "description": "Change an existing task: title, markdown description, priority, tags, assignees, due date, its `handoff` (where it was left), what it waits for (`blockedBy`), which column it sits in (status by name: open, in_progress, done, closed), or which list it lives in (`listId`, to tidy up a task filed in the wrong place). To take a task, pass `claim: true`: you become an assignee (nobody is removed) and it moves to in progress in one step; if it is already in progress with someone else the answer says so (`claimed: false`, with who and their handoff) and you comment instead of taking it. `ifStatus` makes any change conditional on the task still being in that state. A task with open subtasks cannot be moved to done or closed: cac answers 409 `subtasks-open` saying how many are open, so finish or close them first. Needs a token with the `tasks:manage` scope — separate from creating, because this overwrites work someone else may have written. Only the fields you send are touched.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -8419,6 +8429,55 @@ mod tests {
         assert_eq!(out["conflict"], "task-claimed-by-other");
         assert_eq!(out["assignees"], json!(["ana"]));
         assert_eq!(out["handoff"], "Falta la release");
+    }
+
+    /// Cerrar o terminar por el MCP una tarea con subtareas abiertas le dice al
+    /// agente por qué no se pudo: el código y la frase del servidor, con la
+    /// cuenta. Y lo mismo por `update_report`, que es la otra puerta
+    /// (command-and-control-387).
+    ///
+    /// Roturas que detecta: quedarse con la etiqueta y tirar la frase (lo que
+    /// había: «409: subtasks-open», sin cuántas ni qué hacer); tirar la
+    /// etiqueta, que es con lo que se reconoce el rechazo; tomarlo por un
+    /// conflicto de «ya no está como creías» y contestar como si no fuera un
+    /// error; y repetir la etiqueta cuando el servidor no manda frase.
+    #[test]
+    fn closing_a_parent_with_open_subtasks_tells_the_agent_why() {
+        let why = "cannot close this task: 2 subtasks are still open — finish or close them first";
+        let (cfg, _) = fake_cac(move |m, p, _| {
+            if (m == "POST" && p.ends_with("/move")) || (m == "PATCH" && p.starts_with("/api/v1/reports/")) {
+                json!({ "__status": 409, "error": "subtasks-open", "message": why })
+            } else {
+                json!({ "task": { "id": "t1", "status": "in_progress" }, "assignees": [], "comments": [] })
+            }
+        });
+        let err = call_tool(&cfg, "update_task", &json!({ "id": "t1", "status": "closed" })).unwrap_err();
+        assert!(err.contains("subtasks-open") && err.contains(why), "{err}");
+        let err = call_tool(&cfg, "update_report", &json!({ "id": "r1", "status": "closed" })).unwrap_err();
+        assert!(err.contains("subtasks-open") && err.contains(why), "{err}");
+
+        // Sin frase, sólo la etiqueta, una vez.
+        let (cfg, _) = fake_cac(|m, p, _| {
+            if m == "POST" && p.ends_with("/move") {
+                json!({ "__status": 409, "error": "subtasks-open" })
+            } else {
+                json!({ "task": { "id": "t1", "status": "in_progress" }, "assignees": [], "comments": [] })
+            }
+        });
+        let err = call_tool(&cfg, "update_task", &json!({ "id": "t1", "status": "closed" })).unwrap_err();
+        assert_eq!(err.matches("subtasks-open").count(), 1, "{err}");
+        assert!(!err.contains('—'), "{err}");
+
+        // Y sin etiqueta, sólo la frase, una vez.
+        let (cfg, _) = fake_cac(|m, p, _| {
+            if m == "POST" && p.ends_with("/move") {
+                json!({ "__status": 409, "message": "only a sentence" })
+            } else {
+                json!({ "task": { "id": "t1", "status": "in_progress" }, "assignees": [], "comments": [] })
+            }
+        });
+        let err = call_tool(&cfg, "update_task", &json!({ "id": "t1", "status": "closed" })).unwrap_err();
+        assert_eq!(err.matches("only a sentence").count(), 1, "{err}");
     }
 
     /// Roturas que detecta: repetir la fecha que el agente ya escribió, o
