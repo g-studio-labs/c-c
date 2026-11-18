@@ -7,8 +7,8 @@
 //! `PanelRow.tsx`, `PanelSection.tsx`, `NewConversation.tsx`) y se le pasa
 //! cada gesto.
 //!
-//! La conversación en sí —los mensajes, escribir— todavía no está: la vista
-//! enseña de qué conversación se trata y lo dice.
+//! La conversación en sí —sus mensajes— la pinta `chat.rs`; aquí está su
+//! cabecera, que sale de la misma lista.
 
 use cac_core::{CommsRow, CommsRows, CommsSection, Conversation, Person};
 use gpui_kit::assets::IconName as Lucide;
@@ -383,66 +383,136 @@ impl Render for CommsView {
     }
 }
 
-/// La conversación que se tiene delante: su cabecera, con el nombre del
-/// canal o de la persona, y el aviso de que los mensajes todavía no se leen
-/// aquí. La fase siguiente pone en su sitio la lista de mensajes.
-pub fn conversation(cx: &App) -> AnyElement {
+/// Una pestaña de un canal (`TabButton` en `ChannelView.tsx`): `rounded-md
+/// px-2 py-1 text-xs`, con su icono a `size-3`. La de la conversación es la
+/// que se lee; las otras están en su sitio y todavía no se abren aquí.
+fn channel_tab(id: &'static str, icon: Lucide, label: String, active: bool, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
-    let (border, muted) = (theme.border, theme.muted_foreground);
-    let title = cac_core::conversation_title(&Backend::snapshot(cx).read(cx).comms, chrono::Utc::now());
+    let (muted, primary) = (theme.muted_foreground, theme.primary);
+    let hint = tr(cx, "common:misc.notInThisApp");
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap_1()
+        .rounded(px(8.))
+        .px_2()
+        .py_1()
+        .leading_xs()
+        .map(|this| if active { this.font_weight(FontWeight::MEDIUM).text_color(primary).bg(primary.opacity(0.1)) } else { this.text_color(muted) })
+        .when(!active, |this| this.tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx)))
+        .aria_label(label.clone())
+        .aria_selected(active)
+        .child(Icon::new(icon).size_3().flex_none())
+        .child(label)
+}
+
+/// La conversación que se tiene delante: su cabecera —el nombre del canal
+/// con quién anda por aquí, o el de la persona— y, debajo, sus mensajes
+/// (`chat.rs`).
+pub fn conversation(thread: &Entity<crate::chat::ChatView>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let (border, muted, success) = (theme.border, theme.muted_foreground, theme.success);
+    let now = chrono::Utc::now();
+    let title = cac_core::conversation_title(&Backend::snapshot(cx).read(cx).comms, now);
     // Sin conversación —una organización sin espacios— no hay cabecera, y se
     // dice lo que dice `Channels.tsx`.
-    let said = tr(cx, if title.is_some() { "chat:messagesNotHereYet" } else { "nav:comms.nothingToRead" });
-    let header = title.map(|title| {
-        div()
-            .id("conversation-header")
-            .h(px(HEADER_HEIGHT))
+    let Some(title) = title else {
+        let said = tr(cx, "nav:comms.nothingToRead");
+        return div()
+            .id("conversation")
+            .size_full()
             .flex()
-            .flex_none()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .border_b_1()
-            .border_color(border)
-            .when(title.direct, |this| this.child(presence_dot(title.present, cx)))
+            .flex_col()
             .child(
                 div()
-                    .id("conversation-title")
-                    .min_w_0()
-                    .truncate()
+                    .id("conversation-not-yet")
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .px_4()
                     .leading_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .aria_label(title.title.clone())
-                    .child(title.title)
+                    .text_color(muted)
+                    .aria_label(said.clone())
+                    .child(Icon::new(Lucide::MessagesSquare).size_4().flex_none())
+                    .child(said)
                     .test_support(),
             )
             .test_support()
-    });
-    div()
-        .id("conversation")
-        .size_full()
-        .flex()
-        .flex_col()
-        .children(header)
-        .child(
+            .into_any_element();
+    };
+    let direct = title.direct;
+    // Quién de la organización anda por aquí (`QuienAnda`): tres nombres y
+    // cuántos más, con todos al pasar el ratón. Sólo en un canal.
+    let around = (!direct).then(|| Backend::core(cx).comms().around(now)).filter(|names| !names.is_empty());
+    let around = around.and_then(|names| {
+        let label = cac_core::around_label(&names)?;
+        let everyone = cac_core::text_with(locale(cx), "chat:aroundTitle", &[("names", &names.join(", "))]);
+        Some(
             div()
-                .id("conversation-not-yet")
-                .flex_1()
-                .min_h_0()
+                .id("conversation-around")
                 .flex()
+                .flex_none()
                 .items_center()
-                .justify_center()
-                .gap_2()
-                .px_4()
-                .leading_sm()
+                .gap_1()
+                .leading_xs()
                 .text_color(muted)
-                .aria_label(said.clone())
-                .child(Icon::new(Lucide::MessagesSquare).size_4().flex_none())
-                .child(said)
+                .tooltip(move |window, cx| Tooltip::new(everyone.clone()).build(window, cx))
+                .aria_label(label.clone())
+                .child(div().size_1p5().flex_none().rounded_full().bg(success))
+                .child(label)
                 .test_support(),
         )
-        .test_support()
-        .into_any_element()
+    });
+    let header = div()
+        .id("conversation-header")
+        .h(px(HEADER_HEIGHT))
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .border_b_1()
+        .border_color(border)
+        .when(direct, |this| this.child(presence_dot(title.present, cx)))
+        .child(
+            div()
+                .id("conversation-title")
+                .min_w_0()
+                .truncate()
+                .leading_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .aria_label(title.title.clone())
+                .child(title.title)
+                .test_support(),
+        )
+        .children(around)
+        // `ml-auto text-xs text-muted-foreground` (`DMThread.tsx`).
+        .when(direct, |this| this.child(div().id("conversation-private").ml_auto().flex_none().leading_xs().text_color(muted).child(tr(cx, "chat:private")).test_support()))
+        .test_support();
+    // Las pestañas de un canal, en su fila (`relative flex items-center
+    // gap-1 border-b px-2 py-1`). Un directo no las tiene.
+    let tabs = (!direct).then(|| {
+        div()
+            .id("conversation-tabs")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_1()
+            .border_b_1()
+            .border_color(border)
+            .px_2()
+            .py_1()
+            .child(channel_tab("conversation-tab-thread", Lucide::MessageSquare, tr(cx, "chat:tabConversation"), true, cx).test_support())
+            .child(channel_tab("conversation-tab-media", Lucide::Image, tr(cx, "chat:tabMedia"), false, cx).test_support())
+            .child(channel_tab("conversation-tab-links", Lucide::Link2, tr(cx, "chat:tabLinks"), false, cx).test_support())
+            .test_support()
+    });
+    div().id("conversation").size_full().flex().flex_col().child(header).children(tabs).child(thread.clone()).test_support().into_any_element()
 }
 
 /// «Nueva conversación» se cerró: quien la tiene la quita.
@@ -798,7 +868,8 @@ mod tests {
         assert!(!on_screen(window, "comms-channel-z", cx) && !on_screen(window, "comms-direct-c9", cx), "se pinta lo de otra organización");
         // Sin haber elegido nada, la sala general.
         assert_eq!(label(window, "conversation-title", cx), "#General");
-        assert_eq!(label(window, "conversation-not-yet", cx), "Los mensajes de esta conversación todavía no se leen en esta app.");
+        // Y debajo de su cabecera, la conversación (la pinta `chat.rs`).
+        assert!(on_screen(window, "thread", cx) && !on_screen(window, "conversation-not-yet", cx));
 
         click(window, "rail-work", cx);
         wait_until(cx, "vuelve el árbol", |cx| on_screen(window, "tree-everything", cx));

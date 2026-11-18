@@ -112,13 +112,21 @@ va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
   bajo la opción en el selector de estado. Borrar una tarea con subtareas lo
   avisa en una caja aparte. El MCP pasa la frase del servidor además del
   código, y eso sólo sale con una release de la app de Tauri.
+- **Comunicación, en lectura (394–397):** el riel cambia el panel por los
+  canales y directos de la organización, y elegir uno deja delante su
+  conversación: páginas de 50 hacia arriba sin saltos, en vivo por el stream
+  (nuevos, editados, retirados, reacciones), turnos y días, líneas de cac,
+  citas que llevan a su mensaje, imágenes con la sesión, palomitas en
+  directos y «Mensajes nuevos» leyendo arriba. Se marca leído al abrir y al
+  llegar algo estando abajo; leyendo arriba, al bajar. Escribir, reaccionar y
+  las menciones como fichas esperan a decidir el compositor.
 - **En curso:** dar comportamiento a lo pintado sin él en el detalle (editar
   «dónde quedó», añadir subtarea, mover de lista, borrar, retirar) y en la
   carcasa (⌘B y panel recordado, idioma del sistema en macOS y Windows, crear,
   renombrar y borrar nodos del árbol).
 - **Falta decidir (jose):** nombre definitivo, firma de los instaladores y
   dónde se publican; cuándo se fusiona a `main` y se corta la release.
-- **No entra en la primera entrega:** documentación con su editor, chat,
+- **No entra en la primera entrega:** escribir en el chat,
   llamadas, servidores, notas, buscador global y el panel de avisos; siguen
   en la de Tauri.
 - **Cómo se mira:** `cd desktop && cargo run --release`. Su sesión va aparte

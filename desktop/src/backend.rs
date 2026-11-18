@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use cac_core::{
     ApiError, CommsState, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, OrgsState, Session, Storage,
-    TaskState, TreeState,
+    TaskState, ThreadState, TreeState,
 };
 use gpui_kit::{App, AppContext, Entity, Global};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
@@ -33,6 +33,7 @@ enum CoreEvent {
     Task(TaskState),
     Counters(CountersState),
     Comms(CommsState),
+    Thread(ThreadState),
     Connection(ConnectionState),
 }
 
@@ -72,6 +73,9 @@ impl Listener for Forwarder {
     fn comms_changed(&self, state: CommsState) {
         self.send(CoreEvent::Comms(state));
     }
+    fn thread_changed(&self, state: ThreadState) {
+        self.send(CoreEvent::Thread(state));
+    }
     fn connection_changed(&self, state: ConnectionState) {
         self.send(CoreEvent::Connection(state));
     }
@@ -93,6 +97,11 @@ pub struct Snapshot {
     pub counters: CountersState,
     /// La lista de comunicación de la organización que se mira.
     pub comms: CommsState,
+    /// La conversación que se tiene delante, con sus mensajes.
+    pub thread: ThreadState,
+    /// Cuántas veces ha cambiado: quien la pinta lleva su lista al día
+    /// cuando cambia, y no en cada aviso de cualquier otra cosa.
+    pub thread_revision: u64,
     pub connection: ConnectionState,
 }
 
@@ -107,6 +116,10 @@ impl Snapshot {
             CoreEvent::Task(state) => self.task = state,
             CoreEvent::Counters(state) => self.counters = state,
             CoreEvent::Comms(state) => self.comms = state,
+            CoreEvent::Thread(state) => {
+                self.thread = state;
+                self.thread_revision += 1;
+            }
             CoreEvent::Connection(state) => self.connection = state,
         }
     }

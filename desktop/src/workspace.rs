@@ -16,6 +16,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
+use crate::chat::ChatView;
 use crate::comms::CommsView;
 use crate::connect::{ConnectClosed, ConnectView};
 use crate::theme::Leading as _;
@@ -96,6 +97,8 @@ pub struct Workspace {
     /// ese módulo.
     pub(crate) comms: Entity<CommsView>,
     _on_comms: Subscription,
+    /// La conversación que se tiene delante.
+    pub(crate) chat: Entity<ChatView>,
     /// Lo escrito para filtrar el árbol por título. Es de esta pantalla: qué
     /// casa con ello lo dice el core.
     tree_filter: Entity<InputState>,
@@ -143,6 +146,7 @@ impl Workspace {
         // «Nueva conversación» se pinta aquí, encima de todo: al abrirse o
         // cerrarse hay que repintar.
         let on_comms = cx.observe(&comms, |_, _, cx| cx.notify());
+        let chat = cx.new(ChatView::new);
         let on_connect = [
             // Lo que sabe cambia desde otro hilo (mirar la máquina, instalar):
             // el punto del menú se repinta con ello.
@@ -159,6 +163,7 @@ impl Workspace {
             task: cx.new(|cx| TaskView::new(window, cx)),
             comms,
             _on_comms: on_comms,
+            chat,
             tree_filter: cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)),
             // Como se dejó en esta máquina la última vez.
             panel_pinned: Backend::core(cx).panel_pinned(),
@@ -1380,7 +1385,7 @@ impl Render for Workspace {
         // En comunicación, la conversación; volver a «Trabajo» deja lo que
         // se estuviera mirando allí.
         let main: AnyElement = if snapshot.comms.on_screen {
-            crate::comms::conversation(cx)
+            crate::comms::conversation(&self.chat, cx)
         } else if snapshot.docs.target.is_some() {
             self.docs.clone().into_any_element()
         } else {

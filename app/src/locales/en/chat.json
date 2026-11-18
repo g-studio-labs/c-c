@@ -56,6 +56,12 @@
   "callChatPlaceholder": "Message the call",
   "viewCallChat": "View chat ({{count}})",
   "callChatTitle": "Call chat",
-  "messagesNotHereYet": "This conversation's messages can't be read in this app yet.",
+  "unknownAuthor": "unknown",
+  "private": "private",
+  "couldNotLoad": "The messages could not be read.",
+  "couldNotLoadOlder": "The earlier messages could not be loaded.",
+  "retry": "Retry",
+  "picture": "Image",
+  "aroundTitle": "Active recently: {{names}}",
   "couldNotOpenConversation": "The conversation could not be opened."
 }

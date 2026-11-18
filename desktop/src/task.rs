@@ -12,9 +12,6 @@
 //! Aquí está qué pestaña del hilo se mira, que es lo único propio, y la
 //! pintura. Cada cambio se le pide al core, que es quien sabe qué mandar.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use cac_core::{
     ApiError, Choice, MentionMark, MentionMenu, MentionPerson, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskAttachment, TaskSheet,
     PRIORITIES,
@@ -33,6 +30,7 @@ use gpui_kit::*;
 
 use crate::backend::Backend;
 use crate::theme::Leading as _;
+use crate::thumbs::{Thumb, Thumbs};
 use crate::editor::{Incoming, MarkdownEditor};
 use crate::files;
 use crate::lang::{error_text, locale, tr};
@@ -74,22 +72,6 @@ pub(crate) enum Draft {
     /// El comentario que se corrige.
     CommentEdit,
     Description,
-}
-
-/// Una imagen de la tarea, en lo que tarda en poder enseñarse.
-enum Thumb {
-    Loading,
-    Ready(Arc<RenderImage>),
-    /// No llegó, o no es algo que se pueda pintar: se queda con su nombre,
-    /// que sigue abriéndola.
-    Failed,
-}
-
-/// La imagen ya decodificada, o `None` si esta app no sabe pintarla (un
-/// AVIF) o el fichero está roto. Qué imagen es lo dijo el core.
-fn decoded(picture: cac_core::Picture, svg: SvgRenderer) -> Option<Arc<RenderImage>> {
-    let format = ImageFormat::from_mime_type(&picture.mime)?;
-    Image::from_bytes(format, picture.bytes).to_image_data(svg).ok()
 }
 
 /// Lo que se está preguntando antes de hacer algo que no se deshace o que ve
@@ -185,7 +167,7 @@ pub struct TaskView {
     citing: Option<Draft>,
     /// Las imágenes de la tarea abierta, por el id de su adjunto. Se bajan
     /// una vez, al verla, y se tiran al abrir otra.
-    thumbs: HashMap<String, Thumb>,
+    thumbs: Thumbs,
     /// Qué identificador se acaba de copiar: su pastilla lo dice un momento
     /// con una marca en vez del icono de copiar.
     copied: Option<&'static str>,
@@ -361,7 +343,7 @@ impl TaskView {
             pr_url,
             _pr_entered: pr_entered,
             citing: None,
-            thumbs: HashMap::new(),
+            thumbs: Thumbs::default(),
             copied: None,
             asking: None,
             confirm_focus: cx.focus_handle(),
@@ -649,36 +631,10 @@ impl TaskView {
     /// que ya no son suyas. Cuáles son imágenes lo dice el core, y por él
     /// vienen: con la sesión, y sólo de este servidor.
     fn show_thumbs(&mut self, sheet: &TaskSheet, window: &mut Window, cx: &mut Context<Self>) {
-        self.thumbs.retain(|id, _| sheet.attachments.iter().any(|file| file.image && file.id == *id));
+        self.thumbs.retain(|id| sheet.attachments.iter().any(|file| file.image && file.id == id));
         for file in sheet.attachments.iter().filter(|file| file.image) {
-            if self.thumbs.contains_key(&file.id) {
-                continue;
-            }
-            // Apuntada ya como pedida: la siguiente pintada no la pide otra
-            // vez, ni tampoco si falla.
-            self.thumbs.insert(file.id.clone(), Thumb::Loading);
             let id = file.id.clone();
-            let answer = Backend::ask(cx, {
-                let id = id.clone();
-                move |core| async move { core.tasks().picture(&id).await }
-            });
-            let svg = cx.svg_renderer();
-            cx.spawn_in(window, async move |this, cx| {
-                let image = match answer.await {
-                    // Decodificar una captura grande tarda: fuera del hilo
-                    // que pinta.
-                    Ok(Ok(picture)) => cx.background_spawn(async move { decoded(picture, svg) }).await,
-                    _ => None,
-                };
-                this.update(cx, |this, cx| {
-                    if let Some(thumb) = this.thumbs.get_mut(&id) {
-                        *thumb = image.map_or(Thumb::Failed, Thumb::Ready);
-                        cx.notify();
-                    }
-                })
-                .ok();
-            })
-            .detach();
+            self.thumbs.request(file.id.clone(), move |core| async move { core.tasks().picture(&id).await }, |this: &mut Self| &mut this.thumbs, |_, _, _| {}, window, cx);
         }
     }
 

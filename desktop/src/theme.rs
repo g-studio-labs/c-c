@@ -201,12 +201,23 @@ pub fn prose_with_links(
     follow: impl Fn(&str, &mut gpui_kit::Window, &mut gpui_kit::App) + Send + Sync + 'static,
     cx: &App,
 ) -> gpui_kit::Div {
+    painted_prose_with_links(id, cac_core::prose_for_painting(&text.into()), follow, cx)
+}
+
+/// Lo mismo, con el texto ya preparado con `cac_core::prose_for_painting`:
+/// para quien lo guarda y no quiere prepararlo otra vez en cada pintado.
+pub fn painted_prose_with_links(
+    id: impl Into<gpui_kit::SharedString>,
+    painted: impl Into<gpui_kit::SharedString>,
+    follow: impl Fn(&str, &mut gpui_kit::Window, &mut gpui_kit::App) + Send + Sync + 'static,
+    cx: &App,
+) -> gpui_kit::Div {
     use gpui_kit::{ParentElement, Styled};
     // `md-body text-sm leading-relaxed` (`Markdown.tsx`).
     gpui_kit::div().leading_sm().line_height(gpui_kit::relative(1.625)).child(
         // Un título de tercer nivel, como etiqueta de sección (`.md-body
         // h3`: pequeño, en mayúsculas y apagado).
-        gpui_kit::component::text::TextView::markdown(id.into(), cac_core::prose_for_painting(&text.into()))
+        gpui_kit::component::text::TextView::markdown(id.into(), painted.into())
             .style(md_body_style(cx))
             .on_link_click(move |url, _, window, cx| follow(url, window, cx)),
     )

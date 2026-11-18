@@ -56,6 +56,12 @@
   "callChatPlaceholder": "Escribe a la llamada",
   "viewCallChat": "Ver chat ({{count}})",
   "callChatTitle": "Chat de la llamada",
-  "messagesNotHereYet": "Los mensajes de esta conversación todavía no se leen en esta app.",
+  "unknownAuthor": "desconocido",
+  "private": "privado",
+  "couldNotLoad": "No se pudieron leer los mensajes.",
+  "couldNotLoadOlder": "No se pudieron traer los mensajes anteriores.",
+  "retry": "Reintentar",
+  "picture": "Imagen",
+  "aroundTitle": "Activos hace poco: {{names}}",
   "couldNotOpenConversation": "No se pudo abrir la conversación."
 }

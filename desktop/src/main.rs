@@ -18,6 +18,7 @@ mod backend;
 mod board;
 mod brand;
 mod calendar;
+mod chat;
 mod comms;
 mod connect;
 mod docs;
@@ -33,6 +34,7 @@ mod shell;
 mod spike;
 mod task;
 mod theme;
+mod thumbs;
 mod workspace;
 #[cfg(test)]
 mod testing;
