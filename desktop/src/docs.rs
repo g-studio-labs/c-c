@@ -17,7 +17,13 @@
 //! (`cac_core::doc_edit`): aquí están las cajas, que le cuentan cada tecla.
 
 use cac_core::task::Question;
-use cac_core::{DocBacklinkRow, DocBlock, DocDecision, DocEdit, DocEditWhat, DocHeading, DocPageLink, DocPageRow, DocsState, WorkLayout, DOC_TABS};
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
+
+use cac_core::{
+    DocBacklinkRow, DocDecision, DocEdit, DocEditWhat, DocEntryPlace, DocHeading, DocPageLink, DocPageRow, DocPiece, DocPieceEnd, DocsState, WorkLayout, DOC_TABS,
+};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Enter, InputEvent, Textarea, TextareaState};
@@ -60,6 +66,186 @@ const PAGES_SHEET_WIDTH: f32 = 320.;
 /// `DocPageView.tsx`).
 const PAGE_TEMPLATES: [(&str, Lucide); 2] = [("component", Lucide::Puzzle), ("procedure", Lucide::ClipboardList)];
 
+/// El aire alrededor de lo que se lee (`p-6`).
+const READING_PAD: f32 = 24.;
+/// El hueco entre un trozo de prosa y uno ancho (`gap-3`).
+const PIECE_GAP: f32 = 12.;
+/// El tamaño del texto que se lee (`text-[15px]` de `.prose-doc .md-body`).
+const READING_SIZE: f32 = 15.;
+
+/// A qué tamaño se pinta un título de lo que se lee, por su nivel:
+/// `text-lg`, y los 17 y 13 px de `.prose-doc .md-body h2` y `h3`.
+fn heading_size(level: u8) -> f32 {
+    match level {
+        1 => 18.,
+        2 => 17.,
+        3 => 13.,
+        _ => READING_SIZE,
+    }
+}
+
+/// El aire que lleva encima un trozo de lo que se lee.
+///
+/// Un trozo que empieza por un título venía pintado dentro del mismo texto
+/// que el párrafo de antes, y el aire entre los dos lo ponía el pintor de
+/// markdown de GPUI Kit. Ahora cada título empieza su trozo (así el índice
+/// salta a él y sólo se maqueta lo que cabe), y ese aire se pone aquí **con
+/// la misma cuenta**, para que se vea igual: lo que mide el título por lo
+/// que pide su nivel (1,1 un `#`; 1,6 un `##`; 1,4 los demás), y tras una
+/// raya nunca menos que el aire de la raya (1,6 veces el texto). Dos
+/// títulos seguidos van juntos: 0,35 del de arriba más 0,25 del de abajo.
+/// Los números son los de `heading_metrics` y `HEADING_BOTTOM_GAP` de
+/// `gpui-base` 0.9.1 (`text/node.rs`): si al subir de versión cambian, el
+/// salto entre secciones se nota aquí.
+/// → Guardián: `split_at_its_headings_the_text_takes_the_room_it_took_whole`.
+///
+/// (Allí tampoco baja del hueco de un párrafo, 0,8 rem; con estos tamaños
+/// ningún título pide menos, así que aquí no se mira.)
+fn piece_lead(before: Option<&DocPiece>, piece: &DocPiece) -> f32 {
+    let Some(before) = before else { return 0. };
+    let Some(level) = piece.heading.filter(|_| !before.wide && !piece.wide) else { return PIECE_GAP };
+    let size = heading_size(level);
+    let wanted = size
+        * match level {
+            1 => 1.1,
+            2 => 1.6,
+            _ => 1.4,
+        };
+    match before.end {
+        DocPieceEnd::Heading => heading_size(before.heading.unwrap_or(level)) * 0.35 + size * 0.25,
+        DocPieceEnd::Rule => wanted.max(READING_SIZE * 1.6),
+        DocPieceEnd::Text => wanted,
+    }
+}
+
+/// Por dónde va la lectura de una pestaña o de una página: su lista, que
+/// guarda lo que se ha bajado y sólo maqueta las filas que caben.
+struct Reading {
+    list: ListState,
+    /// De qué texto y de cuántas filas es lo que la lista tiene medido.
+    stamp: u64,
+    rows: usize,
+}
+
+/// Una fila de lo que se lee.
+#[derive(Clone, Copy)]
+enum ReadingRow {
+    /// Las migas y el título de una página.
+    PageHead,
+    /// Por qué no hay nada que leer.
+    Nothing,
+    Piece(usize),
+    Decision(usize),
+    /// Lo que cuelga de una página y lo que la enlaza.
+    PageTail,
+}
+
+/// Lo que se lee, tal como lo pide la lista: fila a fila, cuando le toca
+/// pintarse.
+struct ReadingRows {
+    rows: Vec<ReadingRow>,
+    pieces: Vec<DocPiece>,
+    /// El aire sobre cada trozo (`piece_lead`).
+    leads: Vec<f32>,
+    decisions: Vec<DocDecision>,
+    node: String,
+    name: String,
+    /// De qué pestaña o página es el texto: el de una no le presta su
+    /// estado al de la otra.
+    key: String,
+    empty: Option<&'static str>,
+    editable: bool,
+    can_add: bool,
+    /// De una página: sus migas, su título y, cuando ya llegó, lo que
+    /// cuelga de ella y lo que la enlaza.
+    trail: Vec<DocPageLink>,
+    title: Option<String>,
+    tail: Option<(String, Vec<DocPageLink>, Vec<DocBacklinkRow>)>,
+    wide: bool,
+    /// Si a la derecha va el índice: la fila le deja su sitio.
+    with_contents: bool,
+}
+
+impl ReadingRows {
+    /// El aire de arriba de una fila antes de lo que se lee en ella: a eso
+    /// hay que bajar para dejar su título arriba del todo.
+    fn lead_of(&self, row: usize) -> f32 {
+        let first = if row == 0 { READING_PAD } else { 0. };
+        match self.rows.get(row) {
+            Some(ReadingRow::Piece(at)) => first + self.leads[*at],
+            _ => first,
+        }
+    }
+
+    fn row_of_piece(&self, piece: usize) -> Option<usize> {
+        self.rows.iter().position(|row| matches!(row, ReadingRow::Piece(at) if *at == piece))
+    }
+
+    fn render_row(&self, row: usize, _window: &mut Window, cx: &mut App) -> AnyElement {
+        #[cfg(test)]
+        tests::ROWS_BUILT.with(|built| built.borrow_mut().insert(row));
+        let inner: AnyElement = match self.rows[row] {
+            ReadingRow::PageHead => DocsView::render_page_head(self.name.clone(), self.trail.clone(), self.title.clone(), cx).into_any_element(),
+            ReadingRow::Nothing => DocsView::render_nothing(self.empty.unwrap_or("work:docs.emptyTab"), self.editable, cx).into_any_element(),
+            ReadingRow::Piece(at) => {
+                let piece = &self.pieces[at];
+                // Un id por nodo, pestaña y trozo: el del texto anterior no
+                // debe prestarle su estado a éste.
+                let id = SharedString::from(format!("doc-text-{}-{}-{at}", self.node, self.key));
+                let kind = if piece.wide { "wide" } else { "prose" };
+                let text = div()
+                    .id(SharedString::from(format!("doc-{kind}-{at}")))
+                    .w_full()
+                    .min_w_0()
+                    .text_size(px(READING_SIZE))
+                    .line_height(relative(1.75))
+                    // La prosa en su medida y centrada; lo ancho (tablas,
+                    // código), a todo lo que da la página.
+                    .when(!piece.wide, |this| this.max_w(px(READING_MEASURE)).mx_auto())
+                    .child(DocsView::doc_text(id, piece.text.clone(), reading_style(cx)))
+                    .test_support();
+                // El primero dice que hay texto que leer.
+                if at == 0 {
+                    div().id("doc-body").w_full().min_w_0().child(text).test_support().into_any_element()
+                } else {
+                    div().w_full().min_w_0().pt(px(self.leads[at])).child(text).into_any_element()
+                }
+            }
+            ReadingRow::Decision(at) => div()
+                .w_full()
+                .max_w(px(READING_MEASURE))
+                .mx_auto()
+                .when(at > 0, |this| this.pt_2())
+                .child(DocsView::render_decision(self.decisions[at].clone(), cx))
+                .into_any_element(),
+            ReadingRow::PageTail => match &self.tail {
+                Some((page_id, children, backlinks)) => {
+                    DocsView::render_page_tail(page_id.clone(), self.can_add, children.clone(), backlinks.clone(), cx).into_any_element()
+                }
+                None => div().into_any_element(),
+            },
+        };
+        // La caja de siempre, fila a fila: `p-6` alrededor, el ancho de la
+        // página centrado y, en una ventana grande, el sitio del índice.
+        div()
+            .w_full()
+            .px(px(READING_PAD))
+            .when(row == 0, |this| this.pt(px(READING_PAD)))
+            .when(row + 1 == self.rows.len(), |this| this.pb(px(READING_PAD)))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(if self.wide { WIDE_PAGE_WIDTH } else { PAGE_WIDTH }))
+                    .mx_auto()
+                    .flex()
+                    .when(self.wide, |this| this.gap_8())
+                    .child(div().min_w_0().flex_1().flex().flex_col().child(inner))
+                    .when(self.with_contents, |this| this.child(div().w(px(CONTENTS_WIDTH)).flex_none())),
+            )
+            .into_any_element()
+    }
+}
+
 /// Las cajas donde se escribe. Se crean la primera vez que se abre el
 /// editor: hacen falta con la ventana delante.
 struct EditBoxes {
@@ -86,6 +272,13 @@ pub struct DocsView {
     /// De qué enlace fallido (`DocLinkFailure::serial`) es el aviso que ya
     /// tiene puesto su reloj para quitarse solo.
     timed_failure: Option<u64>,
+    /// Por dónde va la lectura de cada pestaña del documento abierto, y la
+    /// de la página que se lee: cada una guarda lo suyo.
+    readings: HashMap<String, Reading>,
+    /// De qué nodo son.
+    readings_of: String,
+    /// La entrada del índice marcada en el último pintado.
+    active_entry: Option<u32>,
 }
 
 /// Cuánto se queda a la vista el aviso de un enlace que no se pudo abrir:
@@ -136,14 +329,7 @@ fn reading_style(cx: &App) -> TextViewStyle {
     table.overflow.x = Some(Overflow::Scroll);
     TextViewStyle::default()
         .paragraph_gap(rems(0.8))
-        .heading_font_size(|level, _| {
-            px(match level {
-                1 => 18.,
-                2 => 17.,
-                3 => 13.,
-                _ => 15.,
-            })
-        })
+        .heading_font_size(|level, _| px(heading_size(level)))
         .code_block(StyleRefinement::default().bg(muted).rounded(px(8.)).p_3().leading_xs())
         .table(table)
         .table_head(StyleRefinement::default().bg(muted.opacity(0.5)).font_weight(FontWeight::MEDIUM))
@@ -160,6 +346,9 @@ impl DocsView {
             question_focus: cx.focus_handle(),
             was_asking: false,
             timed_failure: None,
+            readings: HashMap::new(),
+            readings_of: String::new(),
+            active_entry: None,
         }
     }
 
@@ -1032,7 +1221,7 @@ impl DocsView {
     /// Una entrada del registro, con las medidas de `DecisionList.tsx`
     /// (`rounded-[11px] border p-3`): arriba cuándo, quién y su etiqueta;
     /// el título; el porqué, tal cual se escribió; y de dónde salió.
-    fn render_decision(&self, decision: DocDecision, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_decision(decision: DocDecision, cx: &App) -> impl IntoElement {
         let theme = cx.theme();
         let (muted, border, chip) = (theme.muted_foreground, theme.border, theme.muted);
         let when = decision.decided_on(locale(cx));
@@ -1178,52 +1367,120 @@ impl DocsView {
             .test_support()
     }
 
-    /// Lo que se lee, trozo a trozo: la prosa en su medida y centrada, y lo
-    /// ancho (tablas, código) a todo lo que da la página.
-    fn render_blocks(blocks: Vec<DocBlock>, node: &str, tab: &str, cx: &App) -> impl IntoElement {
-        let style = reading_style(cx);
-        div().id("doc-body").flex().flex_col().gap_3().text_size(px(15.)).line_height(relative(1.75)).children(blocks.into_iter().enumerate().map(
-            |(index, block)| {
-                // Un id por nodo, pestaña y trozo: el del texto anterior no
-                // debe prestarle su estado a éste.
-                let id = SharedString::from(format!("doc-text-{node}-{tab}-{index}"));
-                let text = Self::doc_text(id, block.text, style.clone());
-                let kind = if block.wide { "wide" } else { "prose" };
-                div()
-                    .id(SharedString::from(format!("doc-{kind}-{index}")))
-                    .w_full()
-                    .min_w_0()
-                    .when(!block.wide, |this| this.max_w(px(READING_MEASURE)).mx_auto())
-                    .child(text)
-                    .test_support()
-            },
-        ))
-        .test_support()
+    /// Sin nada que leer: por qué, en el centro (`py-12 text-center`), y
+    /// cómo empezar a escribirlo, a quien puede.
+    fn render_nothing(key: &'static str, editable: bool, cx: &App) -> Div {
+        let theme = cx.theme();
+        let (muted, border) = (theme.muted_foreground, theme.border);
+        let said = div().id("doc-empty").test_support().leading_sm().text_color(muted).child(tr(cx, key));
+        let block = div().py_12().flex().flex_col().items_center().text_center();
+        match key {
+            "work:decisions.empty" => block
+                .child(Icon::new(Lucide::Gavel).size_5().mb_2().text_color(muted))
+                .child(said)
+                .child(div().mt_1().max_w(px(384.)).leading_xs().text_color(muted).child(tr(cx, "work:decisions.emptyWhy"))),
+            "work:docs.emptyPage" => Self::render_empty_page(said, editable, cx),
+            "work:docs.emptyTab" => block.child(said).when(editable, |this| {
+                this.child(
+                    ghost_button("doc-write", Lucide::Pencil, tr(cx, "work:docs.writeIt"), cx)
+                        .mt_3()
+                        .border_1()
+                        .border_color(border)
+                        .cursor_pointer()
+                        .on_click(|_, _, cx| {
+                            Backend::core(cx).docs().start_edit();
+                        })
+                        .test_support(),
+                )
+            }),
+            _ => block.child(said),
+        }
     }
 
-    /// «En esta página»: las secciones de lo que se lee, al lado en una
-    /// ventana grande (`DocToc.tsx`). Saltar a una todavía no está aquí.
-    fn render_contents(contents: Vec<DocHeading>, cx: &App) -> impl IntoElement {
+    /// La lista de lo que se lee en esa pestaña o esa página, con lo que
+    /// se había bajado en ella. La de otra pestaña se guarda; la de una
+    /// página sólo vive mientras se lee, así que cada página empieza arriba.
+    fn reading_for(&mut self, node: &str, key: &str, stamp: u64, rows: usize, cx: &mut Context<Self>) -> ListState {
+        if self.readings_of != node {
+            self.readings.clear();
+            self.readings_of = node.to_string();
+        }
+        self.readings.retain(|other, _| other == key || !other.starts_with("page-"));
+        let reading = self.readings.entry(key.to_string()).or_insert_with(|| {
+            // Medio alto de ventana de más por arriba y por abajo: lo que
+            // está a punto de asomar ya está maquetado.
+            let list = ListState::new(rows, ListAlignment::Top, px(480.));
+            let view = cx.entity().downgrade();
+            // El índice marca por dónde se va: al bajar hay que repintarlo.
+            list.set_scroll_handler(move |_, _, cx| {
+                let view = view.clone();
+                cx.defer(move |cx| {
+                    let _ = view.update(cx, |_, cx| cx.notify());
+                });
+            });
+            Reading { list, stamp, rows }
+        });
+        if reading.stamp != stamp || reading.rows != rows {
+            // El texto cambió debajo (se guardó, o alguien lo cambió): lo
+            // medido ya no vale, pero se sigue por donde se iba.
+            let top = reading.list.logical_scroll_top();
+            reading.list.reset(rows);
+            reading.list.scroll_to(top);
+            (reading.stamp, reading.rows) = (stamp, rows);
+        }
+        reading.list.clone()
+    }
+
+    /// Por dónde va la lectura de esa pestaña o esa página: en qué fila
+    /// y cuánto dentro de ella.
+    #[cfg(test)]
+    fn read_down_to(&self, key: &str) -> Option<(usize, f32)> {
+        let top = self.readings.get(key)?.list.logical_scroll_top();
+        Some((top.item_ix, f32::from(top.offset_in_item)))
+    }
+
+    /// «En esta página» (`DocToc.tsx`): las secciones de lo que se lee, al
+    /// lado en una ventana grande. Pulsar una salta a ella, y va marcada
+    /// la de la sección por la que va la lectura.
+    fn render_contents(contents: Vec<DocHeading>, active: Option<u32>, list: ListState, rows: Rc<ReadingRows>, window: &Window, cx: &App) -> impl IntoElement {
         let theme = cx.theme();
-        let (muted, foreground, border) = (theme.muted_foreground, theme.foreground, theme.border);
+        let (muted, foreground, border, primary) = (theme.muted_foreground, theme.foreground, theme.border, theme.primary);
         div()
             .id("doc-contents")
             .w(px(CONTENTS_WIDTH))
+            // Un índice más alto que la ventana se desliza por dentro
+            // (`max-h-[calc(100dvh-14rem)] overflow-y-auto`).
+            .max_h((window.viewport_size().height - px(224.)).max(px(120.)))
+            .overflow_y_scroll()
             .flex_none()
             .flex()
             .flex_col()
             .child(div().mb_2().text_size(px(11.)).text_color(muted).child(tr(cx, "work:docs.onThisPage").to_uppercase()))
             .child(div().flex().flex_col().gap_0p5().border_l_1().border_color(border).children(contents.into_iter().enumerate().map(|(index, heading)| {
+                let on = active == Some(index as u32);
+                let (list, rows) = (list.clone(), rows.clone());
                 div()
                     .id(("doc-contents-entry", index))
+                    // `-ml-px border-l-2`: su raya, encima de la del índice.
+                    .ml(px(-1.))
+                    .border_l_2()
+                    .border_color(if on { primary } else { primary.opacity(0.) })
                     .py_1()
                     .pr_2()
                     .map(|this| if heading.level == 3 { this.pl_5() } else { this.pl_3() })
                     .leading_xs()
-                    .text_color(muted)
+                    .text_color(if on { foreground } else { muted })
+                    .when(on, |this| this.font_weight(FontWeight::MEDIUM))
+                    .cursor_pointer()
                     .hover(move |style| style.text_color(foreground))
+                    .on_click(move |_, window, _| {
+                        let Some(row) = rows.row_of_piece(heading.piece as usize) else { return };
+                        // Su título, arriba del todo (`scrollIntoView`).
+                        list.scroll_to(ListOffset { item_ix: row, offset_in_item: px(rows.lead_of(row)) });
+                        window.refresh();
+                    })
                     .child(heading.text)
-                    .tooltip(not_yet(cx))
+                    .test_support()
             })))
             .test_support()
     }
@@ -1240,7 +1497,7 @@ impl Render for DocsView {
         let name = docs.target.as_ref().map(|target| target.name.clone()).unwrap_or_default();
         let node = docs.target.as_ref().map(|target| target.id.clone()).unwrap_or_default();
         let empty = docs.empty_reason();
-        let blocks = docs.blocks();
+        let has_text = !docs.body().is_empty();
         let decisions = docs.standing_decisions();
         let on_decisions = docs.tab == "decisions";
         let width = window.viewport_size().width;
@@ -1381,65 +1638,43 @@ impl Render for DocsView {
                 })
         }));
 
-        // Sin nada que leer: por qué, en el centro (`py-12 text-center`), y
-        // cómo empezar a escribirlo, a quien puede.
-        let nothing = empty.map(|key| {
-            let said = div().id("doc-empty").test_support().leading_sm().text_color(muted).child(tr(cx, key));
-            let block = div().py_12().flex().flex_col().items_center().text_center();
-            match key {
-                "work:decisions.empty" => block
-                    .child(Icon::new(Lucide::Gavel).size_5().mb_2().text_color(muted))
-                    .child(said)
-                    .child(div().mt_1().max_w(px(384.)).leading_xs().text_color(muted).child(tr(cx, "work:decisions.emptyWhy"))),
-                "work:docs.emptyPage" => Self::render_empty_page(said, editable, cx),
-                "work:docs.emptyTab" => block.child(said).when(editable, |this| {
-                    this.child(
-                        ghost_button("doc-write", Lucide::Pencil, tr(cx, "work:docs.writeIt"), cx)
-                            .mt_3()
-                            .border_1()
-                            .border_color(border)
-                            .cursor_pointer()
-                            .on_click(|_, _, cx| {
-                                Backend::core(cx).docs().start_edit();
-                            })
-                            .test_support(),
-                    )
-                }),
-                _ => block.child(said),
-            }
-        });
-
         // De qué es el texto: de una pestaña o de una página. El de una no
         // le presta su estado al de la otra.
         let reading_key = docs.page_id.as_ref().map(|id| format!("page-{id}")).unwrap_or_else(|| docs.tab.clone());
-        // Una página lleva encima sus migas y su título, y debajo —cuando
-        // ya llegó— lo que tiene dentro y lo que la enlaza.
-        let page_head = on_page.then(|| Self::render_page_head(name.clone(), docs.page_trail(here), docs.page_title(here), cx));
-        let page_tail = docs
-            .page
-            .as_ref()
-            .map(|view| Self::render_page_tail(view.page.id.clone(), can_add, docs.page_children(here), docs.page_backlinks(here), cx));
-        let reading = div()
-            .min_w_0()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .children(page_head)
-            .children(nothing)
-            .when(!blocks.is_empty(), |this| this.child(Self::render_blocks(blocks.clone(), &node, &reading_key, cx)))
-            .when(!decisions.is_empty(), |this| {
-                this.child(
-                    div()
-                        .w_full()
-                        .max_w(px(READING_MEASURE))
-                        .mx_auto()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .children(decisions.into_iter().map(|decision| self.render_decision(decision, cx))),
-                )
-            })
-            .children(page_tail);
+        // Lo que se lee, fila a fila. Una página lleva encima sus migas y
+        // su título, y debajo —cuando ya llegó— lo que tiene dentro y lo
+        // que la enlaza.
+        let pieces = docs.pieces();
+        let mut rows = Vec::new();
+        if on_page {
+            rows.push(ReadingRow::PageHead);
+        }
+        if empty.is_some() {
+            rows.push(ReadingRow::Nothing);
+        }
+        rows.extend((0..pieces.len()).map(ReadingRow::Piece));
+        rows.extend((0..decisions.len()).map(ReadingRow::Decision));
+        if docs.page.is_some() {
+            rows.push(ReadingRow::PageTail);
+        }
+        let leads = pieces.iter().enumerate().map(|(at, piece)| piece_lead(at.checked_sub(1).map(|before| &pieces[before]), piece)).collect();
+        let reading = Rc::new(ReadingRows {
+            rows,
+            pieces,
+            leads,
+            decisions,
+            node: node.clone(),
+            name: name.clone(),
+            key: reading_key.clone(),
+            empty,
+            editable,
+            can_add,
+            trail: docs.page_trail(here),
+            title: docs.page_title(here),
+            tail: docs.page.as_ref().map(|view| (view.page.id.clone(), docs.page_children(here), docs.page_backlinks(here))),
+            wide,
+            with_contents: !contents.is_empty(),
+        });
 
         // El pie (`border-t px-4 py-2`): en el registro, apuntar una
         // decisión, que todavía no está en esta app; en lo demás, si hay
@@ -1458,7 +1693,7 @@ impl Render for DocsView {
             // historial y, al fondo, mandarla a la papelera.
             Some(
                 foot_bar()
-                    .when(!blocks.is_empty() && editable, |this| this.child(edit_button()))
+                    .when(has_text && editable, |this| this.child(edit_button()))
                     .child(
                         ghost_button("doc-page-history", Lucide::RotateCcwClock, tr(cx, "work:docs.history"), cx).h_6().gap_1p5().leading_xs().tooltip(not_yet(cx)).test_support(),
                     )
@@ -1468,7 +1703,7 @@ impl Render for DocsView {
             None
         } else if on_decisions {
             Some(foot_bar().child(ghost_button("doc-record-decision", Lucide::Gavel, tr(cx, "work:decisions.record"), cx).tooltip(not_yet(cx)).test_support()))
-        } else if !blocks.is_empty() && editable {
+        } else if has_text && editable {
             Some(foot_bar().child(edit_button()))
         } else {
             None
@@ -1490,9 +1725,42 @@ impl Render for DocsView {
             }
         }
         self.was_asking = asking;
-        // Cada página empieza arriba: la que se abre desde el pie de otra no
-        // hereda lo que se había bajado en ella.
-        let scroll_id = docs.page_id.as_ref().map(|id| SharedString::from(format!("doc-scroll-{id}"))).unwrap_or_else(|| "doc-scroll".into());
+        // La lista de lo que se lee aquí, con lo que se había bajado. Sólo
+        // mientras se lee: con el editor delante no se toca.
+        let read = editing.is_none().then(|| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            docs.body().hash(&mut hasher);
+            let list = self.reading_for(&node, &reading_key, hasher.finish(), reading.rows.len(), cx);
+            // A donde lleva un enlace (una sección, un ancla), si lo que se
+            // lee lo tiene. El enlace ya esperó a que llegara el texto: si
+            // no está aquí, no va a estar, y el salto se da por dado.
+            if docs.jump.is_some() {
+                if let Some(row) = docs.jump_piece().and_then(|piece| reading.row_of_piece(piece as usize)) {
+                    list.scroll_to(ListOffset { item_ix: row, offset_in_item: px(reading.lead_of(row)) });
+                }
+                Backend::core(cx).docs().jump_done();
+            }
+            // Qué sección se marca en el índice: dónde cae cada título
+            // respecto a lo que se ve lo sabe la lista; cuál es, el core.
+            let top = list.logical_scroll_top();
+            let seen = list.viewport_bounds();
+            let places: Vec<DocEntryPlace> = contents
+                .iter()
+                .map(|heading| match reading.row_of_piece(heading.piece as usize) {
+                    Some(row) if row < top.item_ix => DocEntryPlace::Above,
+                    Some(row) => match list.bounds_for_item(row) {
+                        Some(bounds) => DocEntryPlace::At { top: f32::from(bounds.origin.y - seen.origin.y) + reading.lead_of(row) },
+                        None => DocEntryPlace::Below,
+                    },
+                    None => DocEntryPlace::Below,
+                })
+                .collect();
+            self.active_entry = cac_core::doc_active_entry(&places, f32::from(seen.size.height));
+            // El índice se queda arriba mientras se baja (`sticky top-0`):
+            // primero se va el aire de arriba, y él ya no sube más.
+            let gone = if top.item_ix == 0 { f32::from(top.offset_in_item) } else { READING_PAD };
+            (list, (READING_PAD - gone).max(0.))
+        });
         // Un enlace que no se pudo abrir lo dice, abajo a la derecha.
         let link_failure = docs.link_failed.as_ref().map(|failure| self.render_link_failure(failure, cx));
         if link_failure.is_none() {
@@ -1513,23 +1781,37 @@ impl Render for DocsView {
             // Las pestañas son de la portada: una página no las lleva, ni
             // una página nueva que se escribe sobre ella.
             .when(!on_page && !editing.as_ref().is_some_and(DocEdit::has_title), |this| this.child(tabs))
-            .map(|this| match editor {
-                Some(editor) => this.child(editor),
-                None => this
-                    .child(
-                        div().id(scroll_id).flex_1().min_h_0().overflow_y_scroll().p_6().child(
+            .map(|this| match (editor, read) {
+                (Some(editor), _) => this.child(editor),
+                (None, Some((scroll, index_top))) => {
+                    let rows = reading.clone();
+                    let scroll_id = docs.page_id.as_ref().map(|id| SharedString::from(format!("doc-scroll-{id}"))).unwrap_or_else(|| "doc-scroll".into());
+                    let index = (!contents.is_empty()).then(|| {
+                        // Encima de la lista y en su sitio de siempre: la
+                        // columna de la derecha del ancho de la página.
+                        div().absolute().top(px(index_top)).left_0().right_0().px(px(READING_PAD)).child(
                             div()
                                 .w_full()
-                                .max_w(px(if wide { WIDE_PAGE_WIDTH } else { PAGE_WIDTH }))
+                                .max_w(px(WIDE_PAGE_WIDTH))
                                 .mx_auto()
                                 .flex()
-                                .when(wide, |this| this.gap_8())
-                                .child(reading)
-                                .when(!contents.is_empty(), |this| this.child(Self::render_contents(contents, cx))),
+                                .justify_end()
+                                .child(Self::render_contents(contents, self.active_entry, scroll.clone(), reading.clone(), window, cx)),
                         )
-                        .test_support(),
+                    });
+                    this.child(
+                        div()
+                            .id(scroll_id)
+                            .flex_1()
+                            .min_h_0()
+                            .relative()
+                            .child(list(scroll, move |row, window, cx| rows.render_row(row, window, cx)).size_full())
+                            .children(index)
+                            .test_support(),
                     )
-                    .children(foot),
+                    .children(foot)
+                }
+                (None, None) => this,
             })
             .children(link_failure)
             .children(sheet)
@@ -1552,10 +1834,15 @@ mod tests {
 
     /// El resumen del espacio `a` tal como lo tiene el servidor: su texto,
     /// su versión y quién lo dejó así.
+    #[derive(Default)]
     struct Kept {
         body: String,
         version: u32,
         by: &'static str,
+        /// El runbook, que sólo se lee, y las secciones que el servidor
+        /// reconoce en él.
+        runbook: String,
+        runbook_sections: Value,
     }
 
     fn doc(kept: &Kept) -> Value {
@@ -1563,7 +1850,7 @@ mod tests {
             "doc": null, "orgId": "o1", "decisions": [], "attachments": [],
             "tabs": [
                 { "key": "overview", "body": kept.body, "bodyHash": format!("h{}", kept.version), "updatedByName": kept.by },
-                { "key": "runbook", "body": "" },
+                { "key": "runbook", "body": kept.runbook, "sections": kept.runbook_sections },
             ],
         })
     }
@@ -1598,7 +1885,7 @@ mod tests {
         server.mount(get("/api/v1/docs/").respond_with(ok(json!({}))));
         server.mount(get("/api/v1/tasks/").respond_with(ok(json!([]))));
 
-        let kept = Arc::new(Mutex::new(Kept { body: "## Qué es\n\nEl espacio.".into(), version: 1, by: "Luis Gil" }));
+        let kept = Arc::new(Mutex::new(Kept { body: "## Qué es\n\nEl espacio.".into(), version: 1, by: "Luis Gil", ..Kept::default() }));
         let (read, written) = (kept.clone(), kept.clone());
         server.mount(get("/api/v1/docs/space/a").respond_with(move |_: &Request| ok(doc(&read.lock().unwrap()))));
         server.mount(Mock::given(method("PUT")).and(path("/api/v1/docs/space/a/tabs/overview")).respond_with(move |request: &Request| {
@@ -1607,7 +1894,7 @@ mod tests {
             if sent["baseHash"].as_str() != Some(format!("h{}", kept.version).as_str()) {
                 return ResponseTemplate::new(409).set_body_json(json!({ "success": false, "error": "doc-conflict", "data": doc(&kept) }));
             }
-            *kept = Kept { body: sent["body"].as_str().unwrap_or_default().into(), version: kept.version + 1, by: "Ana Ruiz" };
+            (kept.body, kept.version, kept.by) = (sent["body"].as_str().unwrap_or_default().into(), kept.version + 1, "Ana Ruiz");
             ok(doc(&kept))
         }));
         let tree = json!([
@@ -1752,6 +2039,342 @@ mod tests {
 
     fn stop(cx: &mut TestAppContext) {
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    thread_local! {
+        /// Las filas de lo que se lee que se han construido desde que se
+        /// vació: lo que la lista maqueta, se vea o no.
+        pub(super) static ROWS_BUILT: std::cell::RefCell<std::collections::HashSet<usize>> = Default::default();
+    }
+
+    /// De un documento largo sólo se construye lo que cabe en la ventana y
+    /// un poco más, esté donde esté la lectura.
+    ///
+    /// Rotura que atrapa: volver a maquetar el documento entero en cada
+    /// pintado, que en uno de 3.000 líneas eran 115 ms por cuadro.
+    #[gpui_kit::test]
+    fn only_what_fits_is_laid_out(cx: &mut TestAppContext) {
+        ROWS_BUILT.with(|built| built.borrow_mut().clear());
+        let (server, kept) = server("member");
+        kept.lock().unwrap().body = (1..=80).map(|n| format!("## Sección {n}\n\n{}", filler("Texto", 3))).collect::<Vec<_>>().join("\n\n");
+        let (window, _) = open(&server, 1400., cx);
+        // Las que se han construido desde que se abrió: una fila ya medida
+        // no se vuelve a construir en cada pintado, así que se cuentan todas.
+        let built = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| window.render_frame(cx)).unwrap();
+            ROWS_BUILT.with(|built| built.borrow().len())
+        };
+        let at_the_top = built(cx);
+        assert!((1..30).contains(&at_the_top), "arriba se construyen {at_the_top} de 80 secciones");
+        cx.update(|cx| Backend::run(cx, |core| async move { core.docs().follow_link("#seccion-41").await }));
+        wait_until(cx, "se llega a la sección 41", |cx| on_screen(window, "doc-prose-40", cx));
+        let in_the_middle = built(cx);
+        assert!(in_the_middle < 60, "tras saltar a media altura se han construido {in_the_middle} de 80 secciones");
+        stop(cx);
+    }
+
+    /// Unos cuantos párrafos, para que lo que se lee no quepa en la ventana.
+    fn filler(what: &str, paragraphs: usize) -> String {
+        (1..=paragraphs).map(|n| format!("{what} {n}, con algo de texto para que ocupe su renglón.")).collect::<Vec<_>>().join("\n\n")
+    }
+
+    /// Un resumen más alto que la ventana, con tres secciones.
+    fn tall() -> String {
+        format!(
+            "{}\n\n## Uno\n\n{}\n\n## Dos\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n{}\n\n### Tres\n\n{}",
+            filler("Antes", 9),
+            filler("En uno", 14),
+            filler("En dos", 14),
+            filler("En tres", 30)
+        )
+    }
+
+    /// A qué altura está una pieza y a cuál la caja en la que se lee.
+    fn top_of(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> f32 {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            f32::from(window.find(id).bounds().origin.y)
+        })
+        .unwrap()
+    }
+
+    fn wheel(window: AnyWindowHandle, down: f32, cx: &mut TestAppContext) {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll("doc-scroll", gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-down))), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    fn active(view: &Entity<DocsView>, window: AnyWindowHandle, cx: &mut TestAppContext) -> Option<u32> {
+        cx.update_window(window, |_, window, cx| window.render_frame(cx)).unwrap();
+        cx.update(|cx| view.read(cx).active_entry)
+    }
+
+    /// Pulsar una entrada de «En esta página» deja su sección arriba del
+    /// todo, y el índice marca la sección por la que va la lectura mientras
+    /// se baja y se sube.
+    ///
+    /// Roturas que atrapa: una entrada que no hace nada al pulsarla (lo que
+    /// había); saltar a otra sección que la pulsada, o dejar su título a
+    /// media pantalla; un índice que no marca ninguna, o que se queda en la
+    /// primera aunque se lea la última; marcar una sección a la que todavía
+    /// no se ha llegado.
+    #[gpui_kit::test]
+    fn the_index_jumps_to_its_section_and_marks_where_the_reading_is(cx: &mut TestAppContext) {
+        let (server, kept) = server("member");
+        kept.lock().unwrap().body = tall();
+        let (window, view) = open(&server, 1400., cx);
+        assert!(on_screen(window, "doc-contents", cx));
+        // Las piezas: lo de antes (0), «Uno» (1), «Dos» (2), su tabla (3),
+        // su texto (4) y «Tres» (5).
+        assert_eq!(active(&view, window, cx), None, "marca una sección antes de llegar a ninguna");
+        assert!(!on_screen(window, "doc-prose-5", cx), "se pinta lo que queda muy por debajo de la ventana");
+
+        let entry = |at: usize| gpui_kit::ElementId::NamedInteger("doc-contents-entry".into(), at as u64);
+        cx.update_window(window, |_, window, cx| window.click(entry(1), cx)).unwrap();
+        wait_until(cx, "salta a «Dos»", |cx| active(&view, window, cx) == Some(1));
+        let (text, frame) = (top_of(window, "doc-prose-2", cx), top_of(window, "doc-scroll", cx));
+        assert!((text - frame).abs() <= 1., "el título de «Dos» no quedó arriba del todo: a {} de la caja", text - frame);
+        assert!(!on_screen(window, "doc-prose-0", cx), "lo que quedó muy arriba se sigue pintando");
+
+        // Bajando por el texto de «Dos», con su título ya fuera de la
+        // vista, sigue marcada «Dos».
+        wheel(window, 320., cx);
+        assert_eq!(cx.update(|cx| view.read(cx).read_down_to("overview")).map(|(row, _)| row), Some(4), "no se bajó al texto de «Dos»");
+        assert_eq!(active(&view, window, cx), Some(1), "con el título fuera de la vista, su sección dejó de estar marcada");
+
+        // Se sigue bajando con la rueda: al llegar «Tres» arriba, se marca.
+        for _ in 0..40 {
+            if active(&view, window, cx) == Some(2) {
+                break;
+            }
+            wheel(window, 60., cx);
+        }
+        assert_eq!(active(&view, window, cx), Some(2), "bajando no llegó a marcar «Tres»");
+        cx.update_window(window, |_, window, cx| window.click(entry(0), cx)).unwrap();
+        wait_until(cx, "vuelve a «Uno»", |cx| active(&view, window, cx) == Some(0));
+        let (text, frame) = (top_of(window, "doc-prose-1", cx), top_of(window, "doc-scroll", cx));
+        assert!((text - frame).abs() <= 1.);
+        // Y subiendo del todo, ninguna.
+        wheel(window, -100_000., cx);
+        assert_eq!(active(&view, window, cx), None);
+        assert_eq!(cx.update(|cx| view.read(cx).read_down_to("overview")), Some((0, 0.)));
+        stop(cx);
+    }
+
+    /// Cada pestaña guarda lo que se había bajado en ella, y una página
+    /// empieza arriba.
+    ///
+    /// Roturas que atrapa: bajar en «Resumen», ir a «Runbook» y encontrarlo
+    /// ya bajado (las cuatro compartían la posición); volver a «Resumen» y
+    /// encontrarlo arriba; abrir una página a media altura por lo que se
+    /// bajó en la portada.
+    #[gpui_kit::test]
+    fn each_tab_keeps_how_far_it_was_read(cx: &mut TestAppContext) {
+        let (server, kept) = server("member");
+        {
+            let mut kept = kept.lock().unwrap();
+            kept.body = tall();
+            kept.runbook = format!("## Desplegar\n\n{}", filler("Paso", 60));
+        }
+        let (window, view) = open(&server, 1400., cx);
+        let down = |key: &'static str, cx: &mut TestAppContext| cx.update(|cx| view.read(cx).read_down_to(key));
+
+        wheel(window, 700., cx);
+        let overview = down("overview", cx).expect("no se lee el resumen");
+        assert_ne!(overview, (0, 0.), "la rueda no bajó nada");
+
+        click(window, "doc-tab-runbook", cx);
+        wait_until(cx, "se lee el runbook", |cx| on_screen(window, "doc-prose-0", cx) && down("runbook", cx).is_some());
+        assert_eq!(down("runbook", cx), Some((0, 0.)), "el runbook heredó lo que se bajó en el resumen");
+        wheel(window, 300., cx);
+        let runbook = down("runbook", cx).unwrap();
+        assert_ne!(runbook, (0, 0.));
+
+        click(window, "doc-tab-overview", cx);
+        wait_until(cx, "vuelve el resumen", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).docs.tab == "overview"));
+        cx.update_window(window, |_, window, cx| window.render_frame(cx)).unwrap();
+        assert_eq!(down("overview", cx), Some(overview), "el resumen no está donde se dejó");
+        click(window, "doc-tab-runbook", cx);
+        cx.update_window(window, |_, window, cx| window.render_frame(cx)).unwrap();
+        assert_eq!(down("runbook", cx), Some(runbook), "el runbook no está donde se dejó");
+
+        // Una página empieza arriba, y al volver la portada sigue donde iba.
+        cx.update(|cx| Backend::run(cx, |core| async move { core.docs().open_page("p1").await }));
+        wait_until(cx, "llega la página", |cx| on_screen(window, "doc-page-children", cx));
+        assert_eq!(down("page-p1", cx), Some((0, 0.)));
+        cx.update(|cx| Backend::core(cx).docs().close_page());
+        wait_until(cx, "vuelve la portada", |cx| on_screen(window, "doc-tab-runbook", cx));
+        cx.update_window(window, |_, window, cx| window.render_frame(cx)).unwrap();
+        assert_eq!(down("runbook", cx), Some(runbook));
+        assert_eq!(down("page-p1", cx), None, "la página guarda por dónde iba: al reabrirla no empezaría arriba");
+        stop(cx);
+    }
+
+    /// Un enlace a una sección de otra pestaña cambia de pestaña y deja la
+    /// sección arriba; un ancla del propio texto, igual. El salto se da una
+    /// vez: después se puede seguir bajando.
+    ///
+    /// Roturas que atrapa: un enlace a una sección que abre su pestaña y se
+    /// queda arriba; un salto que se repite en cada pintado y no deja
+    /// moverse de ahí.
+    #[gpui_kit::test]
+    fn a_link_to_a_section_lands_on_it(cx: &mut TestAppContext) {
+        let (server, kept) = server("member");
+        {
+            let mut kept = kept.lock().unwrap();
+            kept.body = tall();
+            kept.runbook = format!("{}\n\n## Restaurar\n\n{}", filler("Paso", 30), filler("Otro", 30));
+            kept.runbook_sections = json!([{ "id": "s1", "heading": "Restaurar", "level": 2, "index": 0 }]);
+        }
+        let (window, view) = open(&server, 1400., cx);
+        let follow = |href: &'static str, cx: &mut TestAppContext| cx.update(|cx| Backend::run(cx, move |core| async move { core.docs().follow_link(href).await }));
+        let docs = |cx: &mut TestAppContext| cx.update(|cx| Backend::snapshot(cx).read(cx).docs.clone());
+        let down = |key: &'static str, cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| window.render_frame(cx)).unwrap();
+            cx.update(|cx| view.read(cx).read_down_to(key))
+        };
+
+        follow("/tasks?doc=space:a&tab=runbook&section=s1", cx);
+        wait_until(cx, "se lee el runbook, en «Restaurar»", |cx| docs(cx).tab == "runbook" && down("runbook", cx).is_some_and(|(row, _)| row == 1));
+        let (text, frame) = (top_of(window, "doc-prose-1", cx), top_of(window, "doc-scroll", cx));
+        assert!((text - frame).abs() <= 1., "«Restaurar» no quedó arriba: a {}", text - frame);
+        wait_until(cx, "el salto queda dado", |cx| docs(cx).jump.is_none());
+        wheel(window, 200., cx);
+        let after = down("runbook", cx).unwrap();
+        cx.update_window(window, |_, window, cx| window.render_frame(cx)).unwrap();
+        assert_eq!(down("runbook", cx), Some(after), "el salto se repite y no deja bajar");
+        assert_ne!(after.0 as f32 + after.1, 1., "la rueda no bajó de «Restaurar»");
+
+        click(window, "doc-tab-overview", cx);
+        follow("#dos", cx);
+        wait_until(cx, "el ancla lleva a «Dos»", |cx| down("overview", cx).is_some_and(|(row, _)| row == 2));
+        stop(cx);
+    }
+
+    /// Lo que se lee sigue al texto cuando cambia debajo, más corto o más
+    /// largo.
+    ///
+    /// Rotura que atrapa: tras un cambio, la lista con las filas del texto
+    /// de antes (faltan trozos, o se pide uno que ya no existe y la app se
+    /// cae).
+    #[gpui_kit::test]
+    fn what_is_read_follows_the_text_when_it_changes(cx: &mut TestAppContext) {
+        let (server, kept) = server("member");
+        kept.lock().unwrap().body = tall();
+        let (window, view) = open(&server, 1400., cx);
+        let reopen = |cx: &mut TestAppContext| cx.update(|cx| Backend::run(cx, |core| async move { core.docs().open("a").await }));
+        let body = |cx: &mut TestAppContext| cx.update(|cx| Backend::snapshot(cx).read(cx).docs.body().to_string());
+        wheel(window, 900., cx);
+
+        kept.lock().unwrap().body = "Ahora es corto.".into();
+        reopen(cx);
+        wait_until(cx, "llega el texto corto", |cx| body(cx) == "Ahora es corto.");
+        assert!(on_screen(window, "doc-prose-0", cx) && !on_screen(window, "doc-prose-1", cx));
+
+        kept.lock().unwrap().body = format!("{}\n\n## Al final\n\nLo último.", tall());
+        reopen(cx);
+        wait_until(cx, "llega el texto largo", |cx| body(cx).ends_with("Lo último."));
+        let last = gpui_kit::ElementId::NamedInteger("doc-contents-entry".into(), 3);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(last, cx);
+        })
+        .unwrap();
+        wait_until(cx, "se llega al último trozo", |cx| on_screen(window, "doc-prose-6", cx));
+        assert_ne!(cx.update(|cx| view.read(cx).read_down_to("overview")), Some((0, 0.)));
+
+        stop(cx);
+    }
+
+    /// La lectura de un nodo no es la de otro, aunque la pestaña se llame
+    /// igual: la del nuevo empieza arriba. Y la del mismo, cuando su texto
+    /// cambia, sigue por donde iba.
+    ///
+    /// Rotura que atrapa: abrir la documentación de otro nodo a la altura
+    /// a la que se leía la del anterior (pasa cuando el documento nuevo
+    /// llega sin que medie un pintado).
+    #[gpui_kit::test]
+    fn another_nodes_reading_starts_at_the_top(cx: &mut TestAppContext) {
+        let (server, _) = server("member");
+        let (_, view) = open(&server, 1400., cx);
+        let top = |list: &gpui_kit::ListState| list.logical_scroll_top().item_ix;
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                let first = view.reading_for("a", "overview", 1, 9, cx);
+                first.scroll_to(gpui_kit::ListOffset { item_ix: 5, offset_in_item: px(0.) });
+                assert_eq!(top(&view.reading_for("a", "overview", 2, 9, cx)), 5, "al cambiar el texto no se siguió por donde se iba");
+                assert_eq!(top(&view.reading_for("b", "overview", 3, 9, cx)), 0, "el otro nodo heredó lo bajado");
+            })
+        });
+        stop(cx);
+    }
+
+    /// Entre un trozo de prosa y uno ancho va el hueco de siempre, y el
+    /// primero no lleva nada encima.
+    ///
+    /// Rotura que atrapa: una tabla pegada al párrafo de antes, o el título
+    /// que la sigue separado como de un párrafo.
+    #[test]
+    fn a_wide_piece_keeps_its_gap() {
+        let pieces = cac_core::doc_pieces("Texto.\n\n| a |\n| - |\n\n## Título\n\nMás.", &[]);
+        let leads: Vec<f32> = pieces.iter().enumerate().map(|(at, piece)| super::piece_lead(at.checked_sub(1).map(|before| &pieces[before]), piece)).collect();
+        assert_eq!(leads, [0., 12., 12.]);
+    }
+
+    /// Lo que se lee partido en trozos ocupa lo mismo que pintado de una
+    /// pieza: el aire entre un título y lo de antes es el que le ponía el
+    /// pintor de markdown.
+    ///
+    /// Roturas que atrapa: títulos pegados al párrafo de antes, o con más
+    /// aire que antes, al partir el texto en cada título; y un cambio de
+    /// esas medidas en GPUI Kit al subir de versión, que aquí habría que
+    /// seguir.
+    #[gpui_kit::test]
+    fn split_at_its_headings_the_text_takes_the_room_it_took_whole(cx: &mut TestAppContext) {
+        struct Both(String);
+        impl gpui_kit::Render for Both {
+            fn render(&mut self, _: &mut gpui_kit::Window, cx: &mut gpui_kit::Context<Self>) -> impl gpui_kit::IntoElement {
+                use gpui_kit::*;
+                let column = |id: &'static str| div().id(id).w(px(640.)).flex().flex_col().text_size(px(15.)).line_height(relative(1.75));
+                let pieces = cac_core::doc_pieces(&self.0, &[]);
+                let split = pieces.iter().enumerate().map(|(at, piece)| {
+                    let lead = super::piece_lead(at.checked_sub(1).map(|before| &pieces[before]), piece);
+                    div().pt(px(lead)).child(DocsView::doc_text(format!("split-{at}").into(), piece.text.clone(), super::reading_style(cx))).into_any_element()
+                });
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_4()
+                    .child(column("whole").child(DocsView::doc_text("whole-text".into(), self.0.clone(), super::reading_style(cx))).test_support())
+                    .child(column("split").children(split).test_support())
+            }
+        }
+        let server = FakeServer::start();
+        server.install(cx);
+        let text = "Un párrafo.\n\n# Uno\n\nTexto.\n\n## Dos\n### Tres\n\n- un punto\n- otro\n\n### Cuatro\n\nMás texto.\n\n---\n\n## Cinco\n\n---\n\n### Seis\n\n#### Siete\n\nY el final.";
+        assert!(cac_core::doc_pieces(text, &[]).len() >= 8, "el texto no se partió");
+        let window = cx.update(|cx| {
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds { origin: Point::default(), size: size(px(1400.), px(1600.)) })),
+                ..WindowOptions::default()
+            };
+            let (window, _) = gpui_kit::open_window(options, cx, |_, cx| cx.new(|_| Both(text.to_string()))).expect("open test window");
+            gpui_kit::AnyWindowHandle::from(window)
+        });
+        let tall = |id: &'static str, cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                f32::from(window.find(id).bounds().size.height)
+            })
+            .unwrap()
+        };
+        let (whole, split) = (tall("whole", cx), tall("split", cx));
+        assert!(whole > 400., "el texto entero mide {whole}");
+        assert!((whole - split).abs() <= 0.5, "de una pieza mide {whole} y a trozos {split}");
     }
 
     /// Un enlace escrito en el texto, al pulsarlo, va a donde apunta: el de
@@ -1962,7 +2585,7 @@ mod tests {
         type_in(window, "doc-edit-input", "X", cx);
         wait_until(cx, "lo tecleado llega al borrador", |cx| draft(cx).is_some_and(|edit| edit.is_dirty()));
         let typed = boxes(&view, cx).1;
-        *kept.lock().unwrap() = Kept { body: "lo de Luis".into(), version: 2, by: "Luis Gil" };
+        *kept.lock().unwrap() = Kept { body: "lo de Luis".into(), version: 2, by: "Luis Gil", ..Kept::default() };
 
         assert!(!on_screen(window, "doc-conflict", cx));
         click(window, "doc-save", cx);
@@ -2005,7 +2628,7 @@ mod tests {
         type_in(window, "doc-edit-input", "X", cx);
         wait_until(cx, "lo tecleado llega al borrador", |cx| draft(cx).is_some_and(|edit| edit.is_dirty()));
         let typed = boxes(&view, cx).1;
-        *kept.lock().unwrap() = Kept { body: "lo de Luis".into(), version: 2, by: "Luis Gil" };
+        *kept.lock().unwrap() = Kept { body: "lo de Luis".into(), version: 2, by: "Luis Gil", ..Kept::default() };
         click(window, "doc-save", cx);
         wait_until(cx, "se dice el choque", |cx| on_screen(window, "doc-conflict", cx));
 

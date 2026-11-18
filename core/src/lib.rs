@@ -15,6 +15,7 @@ pub mod error;
 pub mod doc_edit;
 pub mod doc_links;
 pub mod doc_pages;
+pub mod doc_reading;
 pub mod docs;
 pub mod events;
 pub mod mywork;
@@ -41,7 +42,8 @@ pub use dates::{date_and_time, due_day, due_state, short_date, today_in, zone_hi
 pub use doc_edit::{doc_editor_side_by_side, DocAsk, DocConflict, DocEdit, DocEditError, DocEditWhat, DocLeave, SIDE_BY_SIDE_FROM};
 pub use doc_links::{doc_link, heading_slug, DocJump, DocLink, DocLinkFailure};
 pub use doc_pages::{DocBacklink, DocBacklinkRow, DocPage, DocPageCrumb, DocPageItem, DocPageLink, DocPageRow, DocPageView};
-pub use docs::{doc_blocks, doc_headings, DocBlock, DocDecision, DocHeading, DocSection, DocTab, DocTarget, Docs, DocsState, DOC_TABS};
+pub use doc_reading::{doc_active_entry, doc_headings, doc_pieces, DocEntryPlace, DocHeading, DocPiece, DocPieceEnd};
+pub use docs::{doc_blocks, DocBlock, DocDecision, DocSection, DocTab, DocTarget, Docs, DocsState, DOC_TABS};
 pub use error::ApiError;
 pub use events::{Listener, NoListener};
 pub use mywork::{

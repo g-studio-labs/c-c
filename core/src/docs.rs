@@ -265,66 +265,7 @@ pub fn doc_blocks(markdown: &str) -> Vec<DocBlock> {
     blocks
 }
 
-/// Una sección del texto, para el índice «En esta página».
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct DocHeading {
-    /// 2 o 3: el índice no baja más.
-    pub level: u8,
-    pub text: String,
-}
-
-/// Las secciones de un markdown: sus títulos de segundo y tercer nivel, sin
-/// los signos de énfasis. Vino de `headingsOf` en `app/src/lib/headings.ts`.
-/// Un `# comentario` dentro de un bloque de código no es una sección.
-pub fn doc_headings(markdown: &str) -> Vec<DocHeading> {
-    let mut headings = Vec::new();
-    let mut in_code = false;
-    for line in markdown.lines() {
-        if line.trim_start().starts_with("```") {
-            in_code = !in_code;
-            continue;
-        }
-        if in_code {
-            continue;
-        }
-        let level = line.chars().take_while(|c| *c == '#').count();
-        let rest = &line[level..];
-        if !(2..=3).contains(&level) || !rest.starts_with(char::is_whitespace) {
-            continue;
-        }
-        let text = rest.replace(['*', '_', '`'], "").trim().to_string();
-        if !text.is_empty() {
-            headings.push(DocHeading { level: level as u8, text });
-        }
-    }
-    headings
-}
-
-/// Las pestañas que llevan índice: en una lista de entradas repetiría lo
-/// que se ve (`WITH_TOC` en `DocTabs.tsx`).
-const TABS_WITH_CONTENTS: [&str; 2] = ["overview", "runbook"];
-
 impl DocsState {
-    /// El índice de lo que se lee: sólo donde aporta (una página siempre;
-    /// de la portada, dos pestañas), y sólo si hay al menos dos secciones
-    /// entre las que saltar.
-    pub fn contents(&self) -> Vec<DocHeading> {
-        if !self.on_page() && !TABS_WITH_CONTENTS.contains(&self.tab.as_str()) {
-            return Vec::new();
-        }
-        let headings = doc_headings(self.body());
-        if headings.len() < 2 {
-            return Vec::new();
-        }
-        headings
-    }
-
-    /// Lo que se lee, partido en prosa y en lo ancho.
-    pub fn blocks(&self) -> Vec<DocBlock> {
-        doc_blocks(self.body())
-    }
-
     /// Si esa pestaña no tiene nada: sale apagada, para saber dónde hay algo
     /// escrito sin abrirlas una a una. La de decisiones no se mide por su
     /// texto —no tiene—, sino por si hay entradas.
@@ -709,30 +650,6 @@ mod tests {
         assert!(docs.tab_is_empty("links"), "una pestaña que el documento no trae no está escrita");
         assert!(!docs.tab_is_empty("decisions"));
         assert!(DocsState::default().tab_is_empty("decisions"));
-    }
-
-    /// El índice son los títulos de segundo y tercer nivel, limpios, y sólo
-    /// donde hay entre qué saltar.
-    ///
-    /// Roturas que atrapa: el título del documento o uno de cuarto nivel en
-    /// el índice; un `## comentario` de un bloque de código tomado por
-    /// sección; los asteriscos del énfasis a la vista; un índice de una sola
-    /// entrada, o uno en la pestaña de enlaces.
-    #[test]
-    fn the_contents_are_the_second_and_third_level_headings() {
-        let text = "# Doc\n\n## Qué **es**\n\n```sh\n## no es sección\n```\n\n### Cómo `corre`\n\n#### Detalle\n\n##sin espacio\n\n## \n";
-        let said: Vec<(u8, String)> = doc_headings(text).into_iter().map(|heading| (heading.level, heading.text)).collect();
-        assert_eq!(said, [(2, "Qué es".to_string()), (3, "Cómo corre".to_string())]);
-
-        let with = |tab: &str, body: &str| DocsState {
-            tab: tab.into(),
-            tabs: vec![DocTab { key: tab.into(), body: body.into(), ..DocTab::default() }],
-            ..DocsState::default()
-        };
-        assert_eq!(with("overview", text).contents().len(), 2);
-        assert_eq!(with("runbook", text).contents().len(), 2);
-        assert!(with("links", text).contents().is_empty());
-        assert!(with("overview", "## Una sola\n\ntexto").contents().is_empty());
     }
 
     /// Una decisión dice de qué tarea salió, o que se escribió en el registro.
