@@ -853,6 +853,47 @@ impl Chat {
     }
 }
 
+// ── Las imágenes de la conversación ─────────────────────────────────────
+
+/// Una imagen de la conversación, para el visor: de qué mensaje es, dónde
+/// se baja y cómo se llama.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ThreadPicture {
+    pub message_id: String,
+    /// La ruta del servidor: con ella se baja, con la sesión.
+    pub path: String,
+    pub name: String,
+    /// Quién la mandó, como lo firma el mensaje.
+    pub author: String,
+}
+
+/// Las imágenes de los mensajes cargados, de la más vieja a la más nueva:
+/// las que el visor recorre con las flechas. Las de un mismo mensaje, en el
+/// orden en que van en él. Las de fuera de este servidor no están: no se
+/// bajan (`message_body`).
+pub fn thread_pictures(messages: &[ThreadMessage], base_url: &str) -> Vec<ThreadPicture> {
+    messages
+        .iter()
+        .flat_map(|message| {
+            message_body(&message.body, base_url).pictures.into_iter().map(move |picture| ThreadPicture {
+                message_id: message.id.clone(),
+                path: picture.path,
+                name: picture.name,
+                author: message.author_name.clone(),
+            })
+        })
+        .collect()
+}
+
+/// A cuál se pasa desde la de `at` moviéndose `by` (−1 la anterior, 1 la
+/// siguiente). Sin dar la vuelta: desde la primera no se va a la última,
+/// como en WhatsApp. `None` si no hay a dónde ir.
+pub fn picture_step(count: usize, at: usize, by: i32) -> Option<usize> {
+    let to = at as i64 + by as i64;
+    (to >= 0 && (to as usize) < count && to as usize != at).then_some(to as usize)
+}
+
 // ── Escribir ────────────────────────────────────────────────────────────
 
 /// Lo más largo que acepta el servidor, en caracteres: el `max=8000` de
@@ -1287,6 +1328,34 @@ pub fn around_label(names: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// El visor recorre las imágenes de todos los mensajes cargados, en el
+    /// orden en que se leen, y no da la vuelta.
+    ///
+    /// Roturas que atrapa: sólo las del mensaje que se pulsó; el orden al
+    /// revés (→ iría a la anterior); dar la vuelta de la última a la
+    /// primera; contar las de otro servidor, que no se pueden bajar.
+    #[test]
+    fn the_pictures_of_a_conversation_go_in_reading_order_without_wrapping() {
+        let base = "https://cac.example";
+        let mut first = message("m1", "u2", "2026-10-15T10:00:00Z");
+        first.body = "![uno.png](/api/v1/task-spaces/a/chat/attachments/a1/raw)".into();
+        let mut middle = message("m2", "u3", "2026-10-15T10:01:00Z");
+        middle.body = "sin imagen".into();
+        let mut last = message("m3", "u2", "2026-10-15T10:02:00Z");
+        last.body = "dos:\n\n![dos.png](/api/v1/task-spaces/a/chat/attachments/a2/raw)\n\n![fuera.png](https://otro.example/x.png)\n\n![tres.png](/api/v1/task-spaces/a/chat/attachments/a3/raw)".into();
+        let pictures = thread_pictures(&[first, middle, last], base);
+        let names: Vec<&str> = pictures.iter().map(|picture| picture.name.as_str()).collect();
+        assert_eq!(names, ["uno.png", "dos.png", "tres.png"]);
+        assert_eq!((pictures[1].message_id.as_str(), pictures[1].author.as_str()), ("m3", "N-u2"));
+        assert_eq!(pictures[0].path, "/api/v1/task-spaces/a/chat/attachments/a1/raw");
+
+        assert_eq!(picture_step(3, 0, 1), Some(1));
+        assert_eq!(picture_step(3, 1, -1), Some(0));
+        assert_eq!(picture_step(3, 2, 1), None, "se dio la vuelta a la primera");
+        assert_eq!(picture_step(3, 0, -1), None, "se dio la vuelta a la última");
+        assert_eq!(picture_step(0, 0, 1), None);
+    }
 
     /// Enter manda, salvo dentro de un bloque de código abierto antes del
     /// cursor; uno ya cerrado no cuenta, ni las comillas sueltas de una
