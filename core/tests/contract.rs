@@ -281,7 +281,9 @@ fn a_priority_has_the_name_the_api_speaks() {
 #[test]
 fn a_doc_tab_and_a_decision_are_read_for_reading() {
     let tab: DocTab =
-        reads_every_field_but(&fixture("doc_tab.json"), &["id", "createdAt", "docId", "updatedBy", "sections"]);
+        reads_every_field_but(&fixture("doc_tab.json"), &["id", "createdAt", "docId", "updatedBy"]);
+    // Sus títulos con identidad: a ellos llega un enlace a una sección.
+    assert_eq!((tab.sections[0].id.as_str(), tab.sections[0].heading.as_str(), tab.sections[0].level, tab.sections[0].index), ("s1", "Desplegar", 2, 0));
     assert_eq!(tab.key, "runbook");
     // Con qué se guarda sin pisar a nadie: si Go lo renombra, todo guardado
     // saldría sin versión y el servidor lo rechazaría.
@@ -303,8 +305,8 @@ fn a_doc_tab_and_a_decision_are_read_for_reading() {
 
 /// Una página abierta se lee con lo que se pinta de ella: su texto, sus
 /// migas, sus hijas (la misma fila que la lista de páginas) y lo que la
-/// enlaza, y la versión de su texto, con la que se guarda. Las secciones
-/// con identidad se dejan fuera a propósito y se nombran.
+/// enlaza, la versión de su texto, con la que se guarda, y sus secciones
+/// con identidad, a las que llega un enlace.
 ///
 /// Roturas que atrapa: `parentId`, `breadcrumb`, `children` o
 /// `referencedFrom` renombrados en Go (el árbol sale plano, o la página sin
@@ -316,13 +318,13 @@ fn a_doc_page_is_read_with_its_trail_its_children_and_what_links_to_it() {
         &fixture("doc_page_view.json"),
         &[
             "orgId", "page.createdAt", "page.docId", "page.orgId", "page.rank", "page.updatedBy", "page.deletedAt",
-            "page.sections",
         ],
     );
     assert_eq!((view.page.id.as_str(), view.page.parent_id.as_deref()), ("p2", Some("p1")));
     assert!(view.page.body.starts_with("## Qué es"));
     assert_eq!(view.page.body_hash.as_deref(), Some("abc123"));
     assert_eq!(view.breadcrumb[0].title, "Arquitectura");
+    assert_eq!(view.page.sections[0].id, "s1");
     let child = &view.children[0];
     assert_eq!((child.id.as_str(), child.parent_id.as_deref(), child.has_body, child.subpages), ("p3", Some("p2"), true, 2));
     assert_eq!(view.referenced_from[0].place.as_deref(), Some("runbook"));

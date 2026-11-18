@@ -13,7 +13,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::doc_edit::{DocEdit, DocLeave};
+use crate::doc_links::{DocJump, DocLinkFailure};
 use crate::doc_pages::{DocPageItem, DocPageView};
+use crate::task::DecisionRef;
 
 use crate::mywork::day_and_month;
 use crate::nav::{docs_reachable_from_scope, Looking, NodeKind, TreeClick};
@@ -24,6 +26,27 @@ use crate::Core;
 /// Las cuatro pestañas, en el orden en que se pintan. Ninguna se esconde por
 /// estar vacía: que un proyecto no tenga runbook es un dato sobre el proyecto.
 pub const DOC_TABS: [&str; 4] = ["overview", "runbook", "decisions", "links"];
+
+/// Una sección (un título) de una pestaña o de una página, con identidad
+/// propia en el servidor: renombrarla o moverla no le cambia el id, así que
+/// un enlace a ella, o una decisión que la sostiene, siguen llegando
+/// (command-and-control-91). Espejo de `domain.DocSectionView`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct DocSection {
+    pub id: String,
+    #[serde(default)]
+    pub heading: String,
+    #[serde(default)]
+    pub level: u8,
+    /// Su puesto entre los títulos de la pestaña o la página.
+    #[serde(default)]
+    pub index: u32,
+    /// Las decisiones vigentes que la sostienen: por qué dice lo que dice.
+    #[serde(default, deserialize_with = "crate::doc_pages::or_empty", skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<DecisionRef>,
+}
 
 /// Una pestaña del documento. Espejo de `domain.DocTab`, con lo que se lee.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -42,6 +65,9 @@ pub struct DocTab {
     pub updated_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_by_name: Option<String>,
+    /// Sus títulos, con el id que les da el servidor.
+    #[serde(default, deserialize_with = "crate::doc_pages::or_empty", skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<DocSection>,
 }
 
 /// Una entrada del registro de decisiones. Espejo de `domain.Decision`.
@@ -133,6 +159,11 @@ pub struct DocsState {
     pub can_edit: bool,
     /// Lo que se está escribiendo, si se escribe algo (ver `doc_edit`).
     pub edit: Option<DocEdit>,
+    /// A qué parte de lo que se lee hay que saltar cuando esté pintado: lo
+    /// pidió un enlace (ver `doc_links`).
+    pub jump: Option<DocJump>,
+    /// El último enlace que no se pudo abrir, hasta que se quite el aviso.
+    pub link_failed: Option<DocLinkFailure>,
 }
 
 impl Default for DocsState {
@@ -154,6 +185,8 @@ impl Default for DocsState {
             page_folds: HashMap::new(),
             can_edit: false,
             edit: None,
+            jump: None,
+            link_failed: None,
         }
     }
 }
@@ -448,6 +481,13 @@ impl Docs {
     ///
     /// Con texto sin guardar no se cambia de nodo: se pregunta (`doc_edit`).
     pub async fn open(&self, id: &str) {
+        self.open_at(id, None, None).await;
+    }
+
+    /// Lo mismo, llegando ya a esa pestaña o a esa página: es a donde lleva
+    /// un enlace (`doc_links`). Así no se enseña «Resumen» un instante antes
+    /// de lo que se pidió.
+    pub(crate) async fn open_at(&self, id: &str, tab: Option<&str>, page: Option<&str>) {
         let Some((kind, name)) = find_node(&self.core.tree().state().spaces, id) else { return };
         let other_node = self.state().target.as_ref().map(|target| target.id.as_str()) != Some(id);
         if other_node && self.held_back(DocLeave::Node { id: id.to_string() }) {
@@ -465,7 +505,21 @@ impl Docs {
                 // lo que se estaba escribiendo en él. De otro nodo no queda
                 // nada que llevarse: lo de arriba ya preguntó.
                 let edit = state.edit.take();
-                *state = DocsState { target: Some(target), edit, ..DocsState::default() };
+                // El aviso de un enlace que no se abrió no es del documento.
+                let link_failed = state.link_failed.take();
+                *state = DocsState { target: Some(target), edit, link_failed, ..DocsState::default() };
+            }
+            if let Some(tab) = tab.filter(|tab| DOC_TABS.contains(tab)) {
+                state.tab = tab.to_string();
+            }
+            if let Some(page) = page {
+                // La de antes no se enseña mientras llega ésta.
+                if state.page_id.as_deref() != Some(page) {
+                    state.page = None;
+                }
+                state.page_id = Some(page.to_string());
+                state.page_loading = true;
+                state.page_error = None;
             }
             state.can_edit = can_edit;
             state.loading = true;
@@ -523,7 +577,11 @@ impl Docs {
         if self.held_back(DocLeave::Tab { key: key.to_string() }) {
             return;
         }
-        self.update(|state| state.tab = key.to_string());
+        self.update(|state| {
+            state.tab = key.to_string();
+            // A donde se iba a saltar era de la otra pestaña.
+            state.jump = None;
+        });
     }
 }
 

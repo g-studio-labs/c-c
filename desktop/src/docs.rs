@@ -83,7 +83,14 @@ pub struct DocsView {
     /// Escape la contesta que no.
     question_focus: FocusHandle,
     was_asking: bool,
+    /// De qué enlace fallido (`DocLinkFailure::serial`) es el aviso que ya
+    /// tiene puesto su reloj para quitarse solo.
+    timed_failure: Option<u64>,
 }
+
+/// Cuánto se queda a la vista el aviso de un enlace que no se pudo abrir:
+/// lo que dura un aviso de la app de siempre (sonner, 4 s).
+const FAILURE_SHOWN_FOR: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// `text-xs font-semibold uppercase text-muted-foreground`: el título de
 /// una sección al pie de una página.
@@ -152,6 +159,7 @@ impl DocsView {
             loaded_session: None,
             question_focus: cx.focus_handle(),
             was_asking: false,
+            timed_failure: None,
         }
     }
 
@@ -1009,12 +1017,11 @@ impl DocsView {
                         .child(Icon::new(icon).size_3p5().flex_none().text_color(muted))
                         .child(div().min_w_0().truncate().text_color(primary).child(link.title))
                         .children(link.place.map(|place| div().flex_none().leading_xs().text_color(muted).child(place)))
-                        // Otra página de este documento se abre aquí; una
-                        // tarea u otro documento, todavía no.
-                        .map(|this| match link.page_id {
-                            Some(id) => this.cursor_pointer().hover(|style| style.underline()).on_click(move |_, _, cx| Self::open_page(id.clone(), cx)),
-                            None => this.tooltip(not_yet(cx)),
-                        })
+                        // Lo que la nombra se abre: otra página, una tarea,
+                        // o la pestaña de otro documento.
+                        .cursor_pointer()
+                        .hover(|style| style.underline())
+                        .on_click(move |_, _, cx| Self::follow_link(&link.link, cx))
                         .test_support()
                 })))
                 .test_support()
@@ -1070,16 +1077,105 @@ impl DocsView {
             )
     }
 
-    /// Un texto del documento, pintado, con sus enlaces: uno a otra página
-    /// de este documento la abre aquí; lo demás, como siempre.
-    fn doc_text(id: SharedString, markdown: String, style: TextViewStyle) -> TextView {
-        TextView::markdown(id, markdown).style(style).on_link_click(|url, _, _, cx| {
-            if let Some(page) = Backend::snapshot(cx).read(cx).docs.page_for_link(url) {
-                Self::open_page(page, cx);
-            } else if crate::theme::leads_somewhere(url) {
-                cx.open_url(url);
+    /// Sigue un enlace de un documento. Qué es lo dice el core
+    /// (`cac_core::doc_link`): lo de fuera se le da al sistema; lo de dentro
+    /// —una tarea, una página, la pestaña de otro nodo, una sección— lo abre
+    /// el core, que pregunta antes si hay texto sin guardar y deja dicho lo
+    /// que no se pudo abrir.
+    fn follow_link(url: &str, cx: &mut App) {
+        match cac_core::doc_link(url) {
+            cac_core::DocLink::Web { url } => cx.open_url(&url),
+            _ => {
+                let href = url.to_string();
+                Backend::run(cx, move |core| async move { core.docs().follow_link(&href).await });
             }
-        })
+        }
+    }
+
+    /// Un texto del documento, pintado, con sus enlaces seguidos por
+    /// [`Self::follow_link`].
+    fn doc_text(id: SharedString, markdown: String, style: TextViewStyle) -> TextView {
+        TextView::markdown(id, markdown).style(style).on_link_click(|url, _, _, cx| Self::follow_link(url, cx))
+    }
+
+    /// El aviso de que un enlace no se pudo abrir: el de la app de siempre
+    /// (`toast.error` de sonner con `richColors closeButton`, abajo a la
+    /// derecha: 356 px, `p-4`, 13 px, radio 8), con sus colores de error. Se
+    /// quita solo a los cuatro segundos, o con su equis.
+    fn render_link_failure(&mut self, failure: &cac_core::DocLinkFailure, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.timed_failure != Some(failure.serial) {
+            self.timed_failure = Some(failure.serial);
+            let serial = failure.serial;
+            cx.spawn(async move |_, cx| {
+                cx.background_executor().timer(FAILURE_SHOWN_FOR).await;
+                cx.update(|cx| {
+                    // Sólo el suyo: uno más nuevo tiene su propio reloj.
+                    let core = Backend::core(cx);
+                    if core.docs().state().link_failed.is_some_and(|failure| failure.serial == serial) {
+                        core.docs().dismiss_link_failure();
+                    }
+                });
+            })
+            .detach();
+        }
+        // Los de `[data-rich-colors] [data-type=error]` de sonner.
+        let (background, border, text) = if cx.theme().is_dark() {
+            (hsla(358. / 360., 0.76, 0.10, 1.), hsla(357. / 360., 0.89, 0.16, 1.), hsla(358. / 360., 1., 0.81, 1.))
+        } else {
+            (hsla(359. / 360., 1., 0.97, 1.), hsla(359. / 360., 1., 0.94, 1.), hsla(360. / 360., 1., 0.45, 1.))
+        };
+        let said = tr(cx, "common:last.openLinkFailed");
+        let close_hint = tr(cx, "common:last.close");
+        div()
+            .id("doc-link-failed")
+            .aria_label(said.clone())
+            .absolute()
+            .bottom_6()
+            .right_6()
+            .w(px(356.))
+            .max_w_full()
+            .occlude()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .p_4()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(border)
+            .bg(background)
+            .shadow_lg()
+            .text_size(px(13.))
+            .line_height(px(19.5))
+            .text_color(text)
+            .child(Icon::new(Lucide::CircleAlert).size_4().flex_none())
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(div().font_weight(FontWeight::MEDIUM).child(said))
+                    // Cuál: lo que llevaba escrito el enlace.
+                    .child(div().id("doc-link-failed-href").aria_label(failure.href.clone()).truncate().child(failure.href.clone()).test_support()),
+            )
+            .child(
+                div()
+                    .id("doc-link-failed-close")
+                    .size_5()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(border))
+                    .child(Icon::new(Lucide::X).size_3())
+                    .on_click(|_, _, cx| Backend::core(cx).docs().dismiss_link_failure())
+                    .tooltip(move |window, cx| Tooltip::new(close_hint.clone()).build(window, cx))
+                    .test_support(),
+            )
+            .test_support()
     }
 
     /// Lo que se lee, trozo a trozo: la prosa en su medida y centrada, y lo
@@ -1397,11 +1493,17 @@ impl Render for DocsView {
         // Cada página empieza arriba: la que se abre desde el pie de otra no
         // hereda lo que se había bajado en ella.
         let scroll_id = docs.page_id.as_ref().map(|id| SharedString::from(format!("doc-scroll-{id}"))).unwrap_or_else(|| "doc-scroll".into());
+        // Un enlace que no se pudo abrir lo dice, abajo a la derecha.
+        let link_failure = docs.link_failed.as_ref().map(|failure| self.render_link_failure(failure, cx));
+        if link_failure.is_none() {
+            self.timed_failure = None;
+        }
 
         div()
             .id("docs")
             .test_support()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(background)
@@ -1429,6 +1531,7 @@ impl Render for DocsView {
                     )
                     .children(foot),
             })
+            .children(link_failure)
             .children(sheet)
             .children(question)
     }
@@ -1463,6 +1566,15 @@ mod tests {
                 { "key": "runbook", "body": "" },
             ],
         })
+    }
+
+    /// La tarea que nombra a la página `p1`.
+    const TASK: &str = "0d6bf322-2267-4259-9b81-337575aca792";
+
+    fn get_task() -> Mock {
+        let mut detail: Value = serde_json::from_str(include_str!("../../core/tests/fixtures/task_detail.json")).unwrap();
+        detail["task"]["id"] = json!(TASK);
+        Mock::given(method("GET")).and(path(format!("/api/v1/tasks/{TASK}"))).respond_with(ok(detail))
     }
 
     fn page(id: &str, parent: Option<&str>, title: &str, body: &str) -> Value {
@@ -1504,7 +1616,12 @@ mod tests {
         ]);
         server.mount(get("/api/v1/docs/space/a/pages").respond_with(ok(tree)));
         let view = |page: Value| ok(json!({ "page": page, "breadcrumb": [], "children": [], "referencedFrom": [] }));
-        server.mount(get("/api/v1/docs/space/a/pages/p1").respond_with(view(page("p1", None, "Arquitectura", "## Capas\n\nTres."))));
+        // A `p1` la nombra una tarea.
+        let cited = json!({
+            "page": page("p1", None, "Arquitectura", "## Capas\n\nTres."), "breadcrumb": [], "children": [],
+            "referencedFrom": [{ "kind": "task", "title": "Subir el backend", "where": "tasks", "link": format!("/tasks?task={TASK}") }],
+        });
+        server.mount(get("/api/v1/docs/space/a/pages/p1").respond_with(ok(cited)));
         server.mount(get("/api/v1/docs/space/a/pages/p2").respond_with(view(page("p2", Some("p1"), "", ""))));
         server.mount(get("/api/v1/docs/space/a/pages/new1").respond_with(view(page("new1", Some("p1"), "Los tipos", ""))));
         server.mount(
@@ -1568,6 +1685,17 @@ mod tests {
         .unwrap();
     }
 
+    /// Pulsa dentro de una pieza, a esa distancia de su esquina: un enlace
+    /// del texto no tiene id propio.
+    fn click_at(window: AnyWindowHandle, id: &str, x: f32, y: f32, cx: &mut TestAppContext) {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click_at(id, gpui_kit::point(px(x), px(y)), cx);
+        })
+        .unwrap();
+    }
+
     fn label_of(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> String {
         let id = gpui_kit::SharedString::from(id.to_string());
         cx.update_window(window, |_, window, cx| {
@@ -1624,6 +1752,43 @@ mod tests {
 
     fn stop(cx: &mut TestAppContext) {
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Un enlace escrito en el texto, al pulsarlo, va a donde apunta: el de
+    /// una página de este documento la abre, y el que no se sabe abrir lo
+    /// dice en pantalla, con su equis para quitarlo. Y lo que nombra a una
+    /// página, al pie, se abre también: aquí, una tarea.
+    ///
+    /// Roturas que atrapa: un enlace del texto que no hace nada al pulsarlo
+    /// (el clic no llega al core); uno roto que tampoco dice nada; un aviso
+    /// que no se puede quitar; una tarea que enlaza a la página pintada
+    /// como algo que no se pulsa.
+    #[gpui_kit::test]
+    fn a_link_in_the_text_goes_where_it_points(cx: &mut TestAppContext) {
+        let (server, kept) = server("member");
+        kept.lock().unwrap().body = "[Arquitectura](/tasks?doc=space:a&page=p1)\n\n[Notas](/notes/n1)".into();
+        let (window, _) = open(&server, 1400., cx);
+        let docs = |cx: &mut TestAppContext| cx.update(|cx| Backend::snapshot(cx).read(cx).docs.clone());
+
+        // El segundo párrafo: un renglón (26 px) y su hueco más abajo.
+        assert!(!on_screen(window, "doc-link-failed", cx));
+        click_at(window, "doc-prose-0", 10., 52., cx);
+        wait_until(cx, "se dice que no se pudo abrir", |cx| on_screen(window, "doc-link-failed", cx));
+        assert_eq!(label_of(window, "doc-link-failed", cx), "No se pudo abrir el enlace");
+        assert_eq!(label_of(window, "doc-link-failed-href", cx), "/notes/n1");
+        assert!(!docs(cx).on_page());
+        click(window, "doc-link-failed-close", cx);
+        wait_until(cx, "la equis quita el aviso", |cx| !on_screen(window, "doc-link-failed", cx));
+
+        click_at(window, "doc-prose-0", 10., 13., cx);
+        wait_until(cx, "se abre la página", |cx| docs(cx).page_id.as_deref() == Some("p1") && on_screen(window, "doc-page-backlinks", cx));
+        assert!(!on_screen(window, "doc-link-failed", cx));
+
+        server.mount(get_task());
+        click(window, "doc-page-backlink-0", cx);
+        wait_until(cx, "se abre la tarea que la nombra", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).task.task_id.as_deref() == Some(TASK)));
+        assert_eq!(docs(cx).page_id.as_deref(), Some("p1"), "el documento sigue debajo");
+        stop(cx);
     }
 
     /// «Editar» abre la caja con el texto que había y, al lado, el

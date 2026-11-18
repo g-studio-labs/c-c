@@ -1372,8 +1372,10 @@ async fn what_links_to_a_page_is_said_and_only_a_page_of_this_doc_is_a_place_to_
     // Lo mismo vale para un enlace escrito en el texto de la página.
     let state = rig.core.docs().state();
     assert_eq!(state.page_for_link("/tasks?doc=folder:f-a&page=p-core#que-es").as_deref(), Some("p-core"));
-    assert_eq!(state.page_for_link("https://cac.example/tasks?doc=folder:f-a&section=s1&page=p-core").as_deref(), Some("p-core"));
-    for elsewhere in ["/tasks?doc=space:b&page=p-b", "/tasks?doc=folder:f-a&tab=runbook", "/tasks?task=t1", "https://example.com/page=p-core", "/tasks?doc=folder:f-a&page="] {
+    assert_eq!(state.page_for_link("/tasks?doc=folder:f-a&section=s1&page=p-core").as_deref(), Some("p-core"));
+    // Una dirección entera, aunque acabe igual, es de fuera: el prefijo es
+    // exacto, como en la app de siempre (`docRefFromHref`).
+    for elsewhere in ["https://cac.example/tasks?doc=folder:f-a&page=p-core", "/tasks?doc=space:b&page=p-b", "/tasks?doc=folder:f-a&tab=runbook", "/tasks?task=t1", "https://example.com/page=p-core", "/tasks?doc=folder:f-a&page="] {
         assert_eq!(state.page_for_link(elsewhere), None, "{elsewhere}");
     }
     assert_eq!(

@@ -14,12 +14,12 @@ use std::collections::HashSet;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::doc_edit::DocLeave;
-use crate::docs::{kind_segment, Docs, DocsState, DOC_TABS};
+use crate::docs::{kind_segment, DocSection, Docs, DocsState, DOC_TABS};
 use crate::error::ApiError;
 use crate::texts::{text, Locale};
 
 /// Go escribe `null` donde una lista está sin crear. Aquí es una lista vacía.
-fn or_empty<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+pub(crate) fn or_empty<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
@@ -99,6 +99,9 @@ pub struct DocPage {
     pub updated_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_by_name: Option<String>,
+    /// Sus títulos, con el id que les da el servidor.
+    #[serde(default, deserialize_with = "or_empty", skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<DocSection>,
 }
 
 /// Una página abierta: ella, de dónde cuelga, qué cuelga de ella y qué la
@@ -149,9 +152,11 @@ pub struct DocBacklinkRow {
     pub title: String,
     /// De dónde es, al lado y apagado. Una pestaña ya lo dice en su título.
     pub place: Option<String>,
-    /// Si es otra página **de este mismo documento**, cuál: a ésa se puede
-    /// ir desde aquí. Lo demás (una tarea, otro documento) todavía no.
+    /// Si es otra página **de este mismo documento**, cuál.
     pub page_id: Option<String>,
+    /// El enlace a lo que la nombra, para seguirlo (`Docs::follow_link`):
+    /// una tarea, o la pestaña o la página de otro documento.
+    pub link: String,
 }
 
 /// El título de una página, o «Sin título».
@@ -161,14 +166,6 @@ fn shown_title(locale: Locale, title: &str) -> String {
     } else {
         title.to_string()
     }
-}
-
-/// El valor de un parámetro de un enlace interno (`/tasks?doc=list:l1&page=p2`).
-fn link_param<'a>(link: &'a str, name: &str) -> Option<&'a str> {
-    let (_, query) = link.split_once('?')?;
-    // Lo que va tras `#` es un ancla, no parte del último valor.
-    let query = query.split('#').next().unwrap_or(query);
-    query.split('&').find_map(|pair| pair.split_once('=').filter(|(key, _)| *key == name).map(|(_, value)| value))
 }
 
 impl DocsState {
@@ -240,19 +237,6 @@ impl DocsState {
         Some(shown_title(locale, title))
     }
 
-    /// La página de **este** documento a la que lleva un enlace interno
-    /// (`/tasks?doc=folder:f1&page=p2`), si lleva a una. Es lo que se puede
-    /// abrir sin salir de lo que se lee; un enlace a otro documento, a una
-    /// pestaña o a una tarea no lo es.
-    pub fn page_for_link(&self, link: &str) -> Option<String> {
-        let target = self.target.as_ref()?;
-        let here = format!("{}:{}", kind_segment(target.kind), target.id);
-        if link_param(link, "doc") != Some(here.as_str()) {
-            return None;
-        }
-        link_param(link, "page").filter(|page| !page.is_empty()).map(str::to_string)
-    }
-
     /// Las migas de pan: de la raíz a la madre, sin la propia página. Las
     /// que manda el servidor con la página; mientras llega, las del árbol.
     pub fn page_trail(&self, locale: Locale) -> Vec<DocPageLink> {
@@ -284,9 +268,9 @@ impl DocsState {
                         Some(tab) => format!("{} · {tab}", link.title),
                         None => link.title.clone(),
                     };
-                    return DocBacklinkRow { from_task: false, title, place: None, page_id: None };
+                    return DocBacklinkRow { from_task: false, title, place: None, page_id: None, link: link.link.clone() };
                 }
-                DocBacklinkRow { from_task: link.kind == "task", title: shown_title(locale, &link.title), place, page_id: self.page_for_link(&link.link) }
+                DocBacklinkRow { from_task: link.kind == "task", title: shown_title(locale, &link.title), place, page_id: self.page_for_link(&link.link), link: link.link.clone() }
             })
             .collect()
     }
@@ -371,6 +355,7 @@ impl Docs {
             state.page_loading = true;
             state.page_error = None;
             state.pages_shown = false;
+            state.jump = None;
         });
         self.load_page(page_id).await;
     }
@@ -422,6 +407,7 @@ impl Docs {
                 state.page_loading = false;
                 state.page_error = None;
                 state.pages_shown = false;
+                state.jump = None;
             });
         }
     }

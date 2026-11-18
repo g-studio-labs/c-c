@@ -97,6 +97,8 @@ pub enum DocLeave {
     Home,
     /// Una página nueva.
     NewPage { parent_id: Option<String> },
+    /// A donde lleve un enlace del propio texto (ver `doc_links`).
+    Link { href: String },
 }
 
 /// Lo que se está preguntando sobre lo que se escribe.
@@ -531,6 +533,7 @@ impl Docs {
             DocLeave::Page { id } => self.open_page(&id).await,
             DocLeave::Home => self.close_page(),
             DocLeave::NewPage { parent_id } => self.begin_new_page(parent_id),
+            DocLeave::Link { href } => self.follow_link(&href).await,
         }
     }
 
