@@ -33,11 +33,12 @@ use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable};
+use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
+use crate::composer::Composer;
 use crate::files;
 use crate::lang::{error_text, locale, tr};
 use crate::theme::Leading as _;
@@ -75,7 +76,7 @@ pub struct ChatView {
     /// cambió en vez de rehacerla.
     shown: Vec<String>,
     lines: Vec<ThreadLine>,
-    messages: Vec<ThreadMessage>,
+    pub(crate) messages: Vec<ThreadMessage>,
     /// Cada mensaje ya partido en texto, imágenes y ficheros, por su id: un
     /// refresco no vuelve a partir los que no cambiaron.
     bodies: HashMap<String, Rc<Body>>,
@@ -101,11 +102,13 @@ pub struct ChatView {
     notices: u64,
     /// El mensaje al que acaba de llevar una cita.
     flash: Option<String>,
+    /// La caja de escribir, con un borrador por conversación.
+    pub(crate) composer: Composer,
     _on_snapshot: Subscription,
 }
 
 impl ChatView {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let list = ListState::new(0, ListAlignment::Bottom, px(OVERDRAW));
         list.set_follow_mode(FollowMode::Tail);
         let view = cx.entity().downgrade();
@@ -137,6 +140,7 @@ impl ChatView {
             notice: None,
             notices: 0,
             flash: None,
+            composer: Composer::new(window, cx),
             _on_snapshot: on_snapshot,
         };
         this.sync(cx);
@@ -724,11 +728,29 @@ impl ChatView {
         });
         let flashed = self.flash.as_deref() == Some(id.as_str());
         let hover = muted.opacity(0.4);
+        // Responder, en la esquina del mensaje al pasar por él (el hueco de
+        // `pr-12` es para esto). Una línea de cac no se responde, y quien no
+        // puede escribir no responde.
+        let can_write = Backend::snapshot(cx).read(cx).thread.can_write;
+        let group = SharedString::from(format!("thread-row-{id}"));
+        let actions = (!line.system && can_write).then(|| {
+            let replied = line.clone();
+            div().absolute().top_0p5().right_1().opacity(0.).group_hover(group.clone(), |style| style.opacity(1.)).child(
+                Button::new(SharedString::from(format!("thread-reply-{id}")))
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(Lucide::CornerUpLeft))
+                    .tooltip(tr(cx, "chat:reply"))
+                    .on_click(cx.listener(move |this, _, window, cx| this.reply_to(&replied, window, cx))),
+            )
+        });
         // `relative rounded-md py-1 pl-2 pr-12` (`pr-7` en una línea de
         // cac); lo propio, `max-w-[75%] rounded-tr-sm border
         // border-primary/25 bg-primary/10`, y lo demás a todo el ancho.
         let bubble = div()
             .id(SharedString::from(format!("thread-bubble-{id}")))
+            .relative()
+            .group(group.clone())
             .min_w_0()
             .rounded(px(8.))
             .py_1()
@@ -749,6 +771,7 @@ impl ChatView {
             .when(!pictures.is_empty(), |this| this.child(div().mt_1().flex().flex_wrap().gap_2().children(pictures)))
             .when(!files.is_empty(), |this| this.child(div().mt_1().flex().flex_col().gap_1().children(files)))
             .children(ticks)
+            .children(actions)
             .test_support();
 
         // `space-y-3`: cada fila deja doce píxeles con la de arriba, y la
@@ -789,58 +812,14 @@ impl ChatView {
             .test_support()
             .into_any_element()
     }
-
-    /// La caja de escribir de la app de siempre, en su sitio y apagada:
-    /// escribir todavía no está en esta app, y lo dice.
-    fn render_composer(direct: Option<String>, cx: &App) -> impl IntoElement {
-        let theme = cx.theme();
-        let (muted_ink, border) = (theme.muted_foreground, theme.border);
-        let hint = tr(cx, "common:misc.notInThisApp");
-        let placeholder = match direct {
-            Some(name) => cac_core::text_with(locale(cx), "common:misc.messageTo", &[("name", &name)]),
-            None => tr(cx, "chat:placeholder"),
-        };
-        div()
-            .id("thread-composer")
-            .flex_none()
-            .border_t_1()
-            .border_color(border)
-            .p_2()
-            .flex()
-            .flex_col()
-            .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
-            .aria_label(placeholder.clone())
-            .child(
-                div()
-                    .min_h(px(48.))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(border)
-                    .bg(crate::theme::field_background(cx))
-                    .px_3()
-                    .py_2()
-                    .leading_sm()
-                    .text_color(muted_ink)
-                    .opacity(0.6)
-                    .child(placeholder),
-            )
-            .child(div().mt_1().flex().justify_end().child(Button::new("thread-send").primary().small().icon(Icon::new(Lucide::Send)).label(tr(cx, "chat:send")).disabled(true)))
-            .test_support()
-    }
 }
 
 impl Render for ChatView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (conversation, loading, failed, loading_older, older_failed, direct_name) = {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (conversation, loading, failed, loading_older, older_failed) = {
             let snapshot = Backend::snapshot(cx).read(cx);
             let thread = &snapshot.thread;
-            let direct_name = match &thread.conversation {
-                Some(Conversation::Direct { conversation_id }) => {
-                    snapshot.comms.directs.iter().find(|direct| &direct.conversation_id == conversation_id).map(|direct| direct.username.clone())
-                }
-                _ => None,
-            };
-            (thread.conversation.clone(), thread.loading, thread.failed, thread.loading_older, thread.older_failed, direct_name)
+            (thread.conversation.clone(), thread.loading, thread.failed, thread.loading_older, thread.older_failed)
         };
         let theme = cx.theme();
         let (muted_ink, primary, on_primary, border, background, danger) =
@@ -968,7 +947,7 @@ impl Render for ChatView {
                         )
                     }),
             )
-            .child(Self::render_composer(direct_name.filter(|_| direct), cx))
+            .child(self.render_composer(window, cx))
             .test_support()
     }
 }
@@ -1047,8 +1026,13 @@ mod tests {
     /// Una organización con la sala general, «Producto» (`a`) y «Diseño»
     /// (`b`), y un directo con Luis (`c1`).
     fn server() -> FakeServer {
+        server_as("member")
+    }
+
+    /// Lo mismo, con ese papel en la organización.
+    fn server_as(role: &str) -> FakeServer {
         let server = FakeServer::start();
-        let org = json!({ "id": "o1", "name": "G Studio", "slug": "o1", "role": "member", "memberCount": 3, "createdAt": "2026-06-09T12:00:00Z", "timezone": "" });
+        let org = json!({ "id": "o1", "name": "G Studio", "slug": "o1", "role": role, "memberCount": 3, "createdAt": "2026-06-09T12:00:00Z", "timezone": "" });
         server.mount(get("/api/v1/organizations/").respond_with(ok(json!([org]))));
         server.mount(get("/api/v1/task-spaces/").respond_with(ok(json!([space("a", "Producto", None), space("b", "Diseño", None), space("g", "General", Some("general"))]))));
         server.mount(get("/api/v1/docs/").respond_with(ok(json!({}))));
@@ -1282,9 +1266,10 @@ mod tests {
     /// mensajes; lo propio a la izquierda, o lo de otro a la derecha; una
     /// línea de cac pintada como propia de quien la provocó; un turno
     /// pegado con cabecera, o uno de agente sin ella; un día sin su raya;
-    /// una respuesta sin su cita; reacciones que no se ven; una caja de
-    /// escribir que parece que funciona; la cabecera sin quién anda por
-    /// aquí; un mensaje corregido que sigue diciendo lo de antes.
+    /// una respuesta sin su cita; reacciones que no se ven; mandar algo con
+    /// la caja vacía; la caja prometiendo `#`, que aquí todavía no cita
+    /// nada; la cabecera sin quién anda por aquí; un mensaje corregido que
+    /// sigue diciendo lo de antes.
     #[gpui_kit::test]
     fn a_channel_reads_as_people_talk(cx: &mut TestAppContext) {
         let server = server();
@@ -1333,8 +1318,9 @@ mod tests {
         let order: Vec<f32> = ["m1", "m2", "m3", "m4", "m5", "m6", "m7"].iter().map(|id| top(window, &format!("thread-line-{id}"), cx)).collect();
         assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "los mensajes no están en su orden: {order:?}");
 
-        // Lo que todavía no se hace aquí: pintado, y no hace nada.
-        assert_eq!(label(window, "thread-composer", cx), "Escríbele al equipo — con # citas una tarjeta, con @ nombras a alguien");
+        // La caja vacía no manda nada, y lo que todavía no se hace aquí
+        // (reaccionar, las pestañas) tampoco escribe.
+        assert_eq!(label(window, "thread-composer", cx), "Escríbele al equipo — con @ nombras a alguien");
         let before = server.requests().len();
         click(window, "thread-send", cx);
         click(window, "thread-reaction-m1-0", cx);
@@ -1650,6 +1636,249 @@ mod tests {
         wait_until(cx, "dice que no se pudo abrir", |cx| label(window, "thread-notice", cx) == "No se pudo abrir el enlace");
         follow("/tasks?task=cac-12", cx);
         wait_until(cx, "la tarea se abre en su página", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).task.task_id.as_deref() == Some("t1")));
+        stop(cx);
+    }
+
+    // ── Escribir ────────────────────────────────────────────────────────
+
+    /// Un servidor que, al recibir un mensaje en esa ruta, lo guarda en la
+    /// conversación como el de verdad, y contesta con el mensaje en bruto.
+    /// Va por delante del POST de cualquier cosa del servidor de mentira.
+    fn mount_writes(server: &FakeServer, route: &str, talk: &History) {
+        let talk = talk.clone();
+        let direct = route.starts_with("/api/v1/dm/");
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path(route.to_string()))
+                .respond_with(move |request: &Request| {
+                    let sent: Value = serde_json::from_slice(&request.body).unwrap();
+                    let mut talk = talk.lock().unwrap();
+                    let next = 100 + talk.len() as u32;
+                    let body = sent["body"].as_str().unwrap();
+                    let written = if direct { private_line(&format!("w{next}"), "u1", "Ana Ruiz", body, next) } else { line(&format!("w{next}"), "u1", "Ana Ruiz", body, 5, next) };
+                    talk.push(written.clone());
+                    ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": { "id": written["id"], "body": body } }))
+                })
+                .with_priority(1),
+        );
+    }
+
+    /// Lo que se mandó a esa ruta, en orden.
+    fn sent(server: &FakeServer, route: &str) -> Vec<Value> {
+        server.requests().iter().filter(|request| request.method.as_str() == "POST" && request.url.path() == route).map(|request| serde_json::from_slice(&request.body).unwrap()).collect()
+    }
+
+    /// Escribe en la caja, como con el teclado.
+    fn write(window: AnyWindowHandle, view: &Entity<ChatView>, text: &str, cx: &mut TestAppContext) {
+        cx.update_window(window, |_, window, cx| {
+            let field = view.read(cx).composer.field.clone();
+            field.update(cx, |field, cx| field.focus(window, cx));
+            window.input(text, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    fn press(window: AnyWindowHandle, key: &str, cx: &mut TestAppContext) {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press(key, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    fn written(view: &Entity<ChatView>, cx: &mut TestAppContext) -> String {
+        cx.update(|cx| view.read(cx).composer.field.read(cx).value().to_string())
+    }
+
+    /// Escribir y Enter manda lo escrito, vacía la caja y baja al final,
+    /// también si se leía más arriba; Mayús+Enter es otra línea.
+    ///
+    /// Roturas que atrapa: un Enter que salta de línea en vez de mandar;
+    /// Mayús+Enter que manda a medias; la caja con lo mandado todavía
+    /// dentro; lo mandado fuera de la vista porque se leía arriba (y un
+    /// «Mensajes nuevos» por lo propio).
+    #[gpui_kit::test]
+    fn writing_and_enter_sends_and_shows_it_at_the_end(cx: &mut TestAppContext) {
+        let server = server();
+        let talk = history(numbered(0..40));
+        mount_history(&server, CHAT_A, &talk, Duration::ZERO);
+        mount_writes(&server, CHAT_A, &talk);
+        let (window, view) = open(&server, cx);
+        enter(window, channel("a"), cx);
+        wait_until(cx, "se abre por el final", |cx| on_screen(window, "thread-line-m039", cx));
+
+        write(window, &view, "uno", cx);
+        press(window, "shift-enter", cx);
+        write(window, &view, "dos", cx);
+        assert_eq!(written(&view, cx), "uno\ndos");
+        assert!(sent(&server, CHAT_A).is_empty(), "Mayús+Enter mandó");
+
+        // Se lee más arriba y se manda: se baja a verlo.
+        scroll_up(window, 700., cx);
+        assert!(!on_screen(window, "thread-line-m039", cx));
+        press(window, "enter", cx);
+        wait_until(cx, "llega lo mandado", |cx| on_screen(window, "thread-line-w140", cx));
+        assert_eq!(sent(&server, CHAT_A), [json!({ "body": "uno\ndos" })]);
+        assert_eq!(written(&view, cx), "", "la caja se quedó con lo mandado");
+        assert!(gap_below(window, "w140", cx).abs() <= 13., "lo mandado quedó fuera: {}", gap_below(window, "w140", cx));
+        assert!(!on_screen(window, "thread-new-messages", cx), "se avisó de «nuevos» por lo propio");
+        stop(cx);
+    }
+
+    /// `@` ofrece a la gente del canal; Enter pone la ficha con el nombre,
+    /// que se borra entera; lo que se manda lleva el enlace que el servidor
+    /// lee para avisar. En un directo no se ofrece a nadie.
+    ///
+    /// Roturas que atrapa: el enlace en crudo en la caja; una mención que
+    /// se borra a trozos; mandar «@Luis Mora» en texto (el servidor no
+    /// avisaría); que Enter mande el mensaje en vez de elegir; menciones en
+    /// un directo.
+    #[gpui_kit::test]
+    fn naming_someone_puts_a_token_and_sends_its_link(cx: &mut TestAppContext) {
+        let server = server();
+        let talk = history(vec![line("m1", "u2", "Luis Mora", "hola", 5, 1)]);
+        mount_history(&server, CHAT_A, &talk, Duration::ZERO);
+        mount_writes(&server, CHAT_A, &talk);
+        mount_history(&server, DM_C1, &history(Vec::new()), Duration::ZERO);
+        let (window, view) = open(&server, cx);
+        enter(window, channel("a"), cx);
+        wait_until(cx, "se pinta", |cx| on_screen(window, "thread-line-m1", cx));
+
+        write(window, &view, "@lu", cx);
+        wait_until(cx, "se ofrece a Luis", |cx| on_screen(window, "mention-u2", cx));
+        assert!(!on_screen(window, "mention-u1", cx), "se ofreció a quien escribe");
+        press(window, "enter", cx);
+        assert_eq!(label(window, "composer-token-u2", cx), "@Luis Mora");
+        assert_eq!(written(&view, cx), "[@luis](cac:user/u2) ");
+        assert!(sent(&server, CHAT_A).is_empty(), "Enter mandó en vez de elegir");
+        // El espacio, y luego la ficha entera.
+        press(window, "backspace", cx);
+        press(window, "backspace", cx);
+        assert_eq!(written(&view, cx), "", "la mención se borró a trozos");
+
+        write(window, &view, "hola @lu", cx);
+        wait_until(cx, "se ofrece a Luis", |cx| on_screen(window, "mention-u2", cx));
+        press(window, "enter", cx);
+        write(window, &view, "¿vienes?", cx);
+        press(window, "enter", cx);
+        wait_until(cx, "se manda", |_| !sent(&server, CHAT_A).is_empty());
+        assert_eq!(sent(&server, CHAT_A), [json!({ "body": "hola [@luis](cac:user/u2) ¿vienes?" })]);
+
+        // En un directo, `@` es una arroba.
+        cx.update(|cx| assert!(Backend::core(cx).comms().select(Conversation::Direct { conversation_id: "c1".into() })));
+        wait_until(cx, "se abre el directo", |cx| on_screen(window, "thread-empty", cx));
+        write(window, &view, "@lu", cx);
+        assert!(!on_screen(window, "mentions", cx), "se ofrecieron menciones en un directo");
+        stop(cx);
+    }
+
+    /// Responder pone encima de la caja a qué se responde; Escape lo quita;
+    /// lo que se manda lleva a qué responde, y después la barra se va.
+    ///
+    /// Roturas que atrapa: una respuesta que sale sin su cita; una barra
+    /// que no se puede quitar; la barra que se queda tras mandar y se pega
+    /// al mensaje siguiente.
+    #[gpui_kit::test]
+    fn replying_sends_what_it_answers_and_escape_drops_it(cx: &mut TestAppContext) {
+        let server = server();
+        let talk = history(vec![line("m1", "u2", "Luis Mora", "¿sale **hoy**?", 5, 1)]);
+        mount_history(&server, CHAT_A, &talk, Duration::ZERO);
+        mount_writes(&server, CHAT_A, &talk);
+        let (window, view) = open(&server, cx);
+        enter(window, channel("a"), cx);
+        wait_until(cx, "se pinta", |cx| on_screen(window, "thread-line-m1", cx));
+
+        click(window, "thread-reply-m1", cx);
+        assert_eq!(label(window, "thread-replying", cx), "Respondiendo a Luis Mora: ¿sale hoy?");
+        press(window, "escape", cx);
+        assert!(!on_screen(window, "thread-replying", cx), "Escape no quitó la respuesta");
+
+        click(window, "thread-reply-m1", cx);
+        write(window, &view, "sí", cx);
+        press(window, "enter", cx);
+        wait_until(cx, "se manda", |_| !sent(&server, CHAT_A).is_empty());
+        assert_eq!(sent(&server, CHAT_A), [json!({ "body": "sí", "replyToId": "m1" })]);
+        wait_until(cx, "la barra se va", |cx| !on_screen(window, "thread-replying", cx));
+        stop(cx);
+    }
+
+    /// Si no se puede mandar, lo escrito se queda y se dice por qué.
+    ///
+    /// Roturas que atrapa: perder lo escrito cuando falla; fallar en
+    /// silencio.
+    #[gpui_kit::test]
+    fn a_failed_send_keeps_the_text_and_says_why(cx: &mut TestAppContext) {
+        let server = server();
+        mount_history(&server, CHAT_A, &history(vec![line("m1", "u2", "Luis Mora", "hola", 5, 1)]), Duration::ZERO);
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path(CHAT_A))
+                .respond_with(ResponseTemplate::new(400).set_body_json(json!({ "success": false, "error": "reply-elsewhere", "message": "x" })))
+                .with_priority(1),
+        );
+        let (window, view) = open(&server, cx);
+        enter(window, channel("a"), cx);
+        wait_until(cx, "se pinta", |cx| on_screen(window, "thread-line-m1", cx));
+
+        write(window, &view, "a eso", cx);
+        press(window, "enter", cx);
+        wait_until(cx, "se dice que falló", |cx| on_screen(window, "thread-send-failed", cx));
+        assert_eq!(label(window, "thread-send-failed", cx), "Ese mensaje ya no está en esta conversación: puede que lo hayan retirado.");
+        assert_eq!(written(&view, cx), "a eso", "se perdió lo escrito");
+        stop(cx);
+    }
+
+    /// Lo escrito en una conversación se queda en ella, con sus menciones,
+    /// al ir a otra y volver; y no aparece en la otra.
+    ///
+    /// Roturas que atrapa: perder el borrador al cambiar de canal (lo que
+    /// pasa en la app de siempre); un borrador que se cuela en otra
+    /// conversación (lo que pasa allí con los directos); volver sin la
+    /// ficha de la mención, con su enlace en crudo.
+    #[gpui_kit::test]
+    fn a_draft_stays_with_its_conversation(cx: &mut TestAppContext) {
+        let server = server();
+        mount_history(&server, CHAT_A, &history(vec![line("a1", "u2", "Luis Mora", "de A", 5, 1)]), Duration::ZERO);
+        mount_history(&server, CHAT_B, &history(vec![line("b1", "u3", "Bea Soto", "de B", 5, 1)]), Duration::ZERO);
+        let (window, view) = open(&server, cx);
+        enter(window, channel("a"), cx);
+        wait_until(cx, "se pinta A", |cx| on_screen(window, "thread-line-a1", cx));
+        write(window, &view, "para @lu", cx);
+        wait_until(cx, "se ofrece a Luis", |cx| on_screen(window, "mention-u2", cx));
+        press(window, "enter", cx);
+        write(window, &view, "a medias", cx);
+
+        click(window, "comms-channel-b", cx);
+        wait_until(cx, "se pinta B", |cx| on_screen(window, "thread-line-b1", cx));
+        assert_eq!(written(&view, cx), "", "el borrador de A se coló en B");
+        write(window, &view, "otro de B", cx);
+
+        click(window, "comms-channel-a", cx);
+        wait_until(cx, "vuelve A", |cx| on_screen(window, "thread-line-a1", cx));
+        assert_eq!(written(&view, cx), "para [@luis](cac:user/u2) a medias");
+        assert_eq!(label(window, "composer-token-u2", cx), "@Luis Mora", "la mención volvió sin su ficha");
+        click(window, "comms-channel-b", cx);
+        wait_until(cx, "vuelve B", |cx| on_screen(window, "thread-line-b1", cx));
+        assert_eq!(written(&view, cx), "otro de B");
+        stop(cx);
+    }
+
+    /// Quien sólo mira la organización ve la caja de un canal cerrada y por
+    /// qué, sin botón de mandar ni de responder.
+    ///
+    /// Roturas que atrapa: una caja abierta que acaba en un 403 al mandar;
+    /// ofrecer responder a quien no puede escribir.
+    #[gpui_kit::test]
+    fn a_viewer_sees_the_box_closed_and_why(cx: &mut TestAppContext) {
+        let server = server_as("viewer");
+        mount_history(&server, CHAT_A, &history(vec![line("m1", "u2", "Luis Mora", "hola", 5, 1)]), Duration::ZERO);
+        let (window, _) = open(&server, cx);
+        enter(window, channel("a"), cx);
+        wait_until(cx, "se pinta", |cx| on_screen(window, "thread-line-m1", cx));
+        assert_eq!(label(window, "thread-composer", cx), "Aquí puedes mirar, pero no cambiar nada.");
+        assert!(!on_screen(window, "thread-send", cx) && !on_screen(window, "thread-reply-m1", cx));
         stop(cx);
     }
 }

@@ -146,7 +146,7 @@ impl Workspace {
         // «Nueva conversación» se pinta aquí, encima de todo: al abrirse o
         // cerrarse hay que repintar.
         let on_comms = cx.observe(&comms, |_, _, cx| cx.notify());
-        let chat = cx.new(ChatView::new);
+        let chat = cx.new(|cx| ChatView::new(window, cx));
         let on_connect = [
             // Lo que sabe cambia desde otro hilo (mirar la máquina, instalar):
             // el punto del menú se repinta con ello.

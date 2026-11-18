@@ -13,7 +13,7 @@
 //! pintura. Cada cambio se le pide al core, que es quien sabe qué mandar.
 
 use cac_core::{
-    ApiError, Choice, MentionMark, MentionMenu, MentionPerson, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskAttachment, TaskSheet,
+    ApiError, Choice, MentionMenu, MentionPerson, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, TaskAttachment, TaskSheet,
     PRIORITIES,
 };
 use chrono::NaiveDate;
@@ -29,6 +29,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
+use crate::mentions::{render_mentions, MentionList};
 use crate::theme::Leading as _;
 use crate::thumbs::{Thumb, Thumbs};
 use crate::editor::{Incoming, MarkdownEditor};
@@ -141,9 +142,7 @@ pub struct TaskView {
     focused_for: Option<String>,
     /// Lo que se recuerda de la lista de a quién nombrar: a quién se bajó
     /// con las flechas, o que se cerró. Qué significa lo dice el core.
-    mention_mark: Option<MentionMark>,
-    /// Para que el marcado no se salga de la vista al bajar por la lista.
-    mention_scroll: ScrollHandle,
+    mentions: MentionList,
     /// En qué tarea se le está poniendo nombre a una etiqueta nueva, y el
     /// nombre. Al abrir otra no se sigue: lo escrito era para aquélla.
     naming_tag: Option<String>,
@@ -330,8 +329,7 @@ impl TaskView {
             comment_promise: "work:task.writeComment",
             page_focus: cx.focus_handle(),
             focused_for: None,
-            mention_mark: None,
-            mention_scroll: ScrollHandle::new(),
+            mentions: MentionList::default(),
             naming_tag: None,
             tag_name,
             _tag_named: tag_named,
@@ -1251,16 +1249,14 @@ impl TaskView {
     /// decide el core.
     fn mention_menu(&self, cx: &App) -> Option<MentionMenu> {
         let (text, cursor) = self.comment_cursor(cx);
-        Backend::core(cx).tasks().mention_menu(&text, cursor, self.internal, self.mention_mark.as_ref())
+        Backend::core(cx).tasks().mention_menu(&text, cursor, self.internal, self.mentions.mark.as_ref())
     }
 
     /// Mueve el marcado de la lista. `false` si no hay lista: la tecla es
     /// entonces de la caja.
     pub(crate) fn move_mention(&mut self, by: i32, cx: &mut Context<Self>) -> bool {
         let Some(menu) = self.mention_menu(cx) else { return false };
-        let mark = cac_core::mention_moved(&menu, by);
-        self.mention_scroll.scroll_to_item(mark.highlighted as usize);
-        self.mention_mark = Some(mark);
+        self.mentions.moved(&menu, by);
         cx.notify();
         true
     }
@@ -1276,7 +1272,7 @@ impl TaskView {
     /// Cierra la lista sin nombrar a nadie. `false` si no hay lista.
     pub(crate) fn close_mentions(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(menu) = self.mention_menu(cx) else { return false };
-        self.mention_mark = Some(cac_core::mention_closed(&menu));
+        self.mentions.closed(&menu);
         cx.notify();
         true
     }
@@ -1285,48 +1281,7 @@ impl TaskView {
     /// alguien escribe su mención.
     fn render_mentions(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let menu = self.mention_menu(cx)?;
-        let highlighted = menu.highlighted as usize;
-        let offered = menu.people;
-        let theme = cx.theme();
-        let (border, popover, hover, muted, radius) = (theme.border, theme.popover, theme.accent, theme.muted_foreground, theme.radius);
-        Some(
-            div()
-                .id("mentions")
-                .test_support()
-                .flex()
-                .flex_col()
-                .p_1()
-                .max_h(px(220.))
-                .overflow_y_scroll()
-                .track_scroll(&self.mention_scroll)
-                .rounded(radius)
-                .border_1()
-                .border_color(border)
-                .bg(popover)
-                .children(offered.into_iter().enumerate().map(|(at, person)| {
-                    let named = person.name != person.username;
-                    let picked = person.clone();
-                    div()
-                        .id(SharedString::from(format!("mention-{}", person.id)))
-                        .test_support()
-                        // El marcado, con el fondo del que se señala con el
-                        // ratón (`bg-accent` en la app de siempre): es a
-                        // quien Enter va a nombrar.
-                        .when(at == highlighted, |this| this.bg(hover))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .leading_sm()
-                        .cursor_pointer()
-                        .hover(move |style| style.bg(hover))
-                        .on_click(cx.listener(move |this, _, window, cx| this.pick_mention(&picked, window, cx)))
-                        .when(named, |this| this.child(person.name.clone()))
-                        .child(div().text_color(muted).child(format!("@{}", person.username)))
-                })),
-        )
+        Some(render_mentions(menu, &self.mentions, std::rc::Rc::new(|this: &mut Self, person, window, cx| this.pick_mention(person, window, cx)), cx))
     }
 
     pub(crate) fn set_internal(&mut self, internal: bool, cx: &mut Context<Self>) {
@@ -2826,9 +2781,9 @@ impl Render for TaskView {
             self.comment_promise = promise;
             // Lo recordado de la lista es de un `@`: cuando deja de
             // escribirse, se olvida.
-            if self.mention_mark.is_some() {
+            if self.mentions.mark.is_some() {
                 let (text, cursor) = self.comment_cursor(cx);
-                self.mention_mark = cac_core::mention_mark_kept(&text, cursor, self.mention_mark.take());
+                self.mentions.keep(&text, cursor);
             }
         }
         let theme = cx.theme();
