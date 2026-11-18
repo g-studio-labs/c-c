@@ -27,6 +27,7 @@ use cac_core::{
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Enter, InputEvent, Textarea, TextareaState};
+use gpui_kit::component::popover::Popover;
 use gpui_kit::component::Disableable;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::text::{TextView, TextViewStyle};
@@ -181,7 +182,66 @@ impl ReadingRows {
         self.rows.iter().position(|row| matches!(row, ReadingRow::Piece(at) if *at == piece))
     }
 
-    fn render_row(&self, row: usize, _window: &mut Window, cx: &mut App) -> AnyElement {
+    /// La marca junto al título de una sección que sostiene alguna decisión
+    /// (`SectionDecisionsMark.tsx`): cuántas y, al abrirla, cuáles; cada una
+    /// lleva a su registro, que es donde está el porqué. Va tras el título,
+    /// así que hay que saber cuánto mide: se mide con su letra.
+    fn render_decisions_mark(&self, at: usize, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+        let piece = &self.pieces[at];
+        let level = piece.heading.filter(|_| !piece.decisions.is_empty())?;
+        let theme = cx.theme();
+        let (muted, border, soft) = (theme.muted_foreground, theme.border, theme.muted);
+        let said = cac_core::text_count(locale(cx), "work:decisions.sectionMark", piece.decisions.len() as i64);
+
+        let title: SharedString = piece.text.lines().next().unwrap_or("").trim_start_matches('#').replace(['*', '_', '`'], "").trim().to_string().into();
+        let size = heading_size(level);
+        let mut font = window.text_style().font();
+        font.weight = FontWeight::SEMIBOLD;
+        let run = TextRun { len: title.len(), font, color: muted, background_color: None, underline: None, strikethrough: None };
+        let width = f32::from(window.text_system().shape_line(title, px(size), &[run], None).width);
+        // `ml-2`, y centrada en el renglón del título, dos píxeles arriba.
+        const MARK_HEIGHT: f32 = 20.;
+        let left = (width + 8.).min(READING_MEASURE - 44.);
+        let top = (size * 1.35 - MARK_HEIGHT) / 2. - 2.;
+
+        let trigger = Button::new(SharedString::from(format!("doc-section-decisions-{at}")))
+            .ghost()
+            .h(px(MARK_HEIGHT))
+            .px_1p5()
+            .rounded_full()
+            .border_1()
+            .border_color(border)
+            .text_size(px(11.))
+            .line_height(px(16.))
+            .font_weight(FontWeight::NORMAL)
+            .text_color(muted)
+            .tooltip(said.clone())
+            .child(div().flex().items_center().gap_0p5().child(Icon::new(Lucide::Gavel).size_3()).child(piece.decisions.len().to_string()));
+        let (decisions, heading) = (piece.decisions.clone(), said.clone());
+        let popover = Popover::new(SharedString::from(format!("doc-section-decisions-list-{at}"))).trigger(trigger).content(move |_, _, _| {
+            div()
+                .w(px(288.))
+                .flex()
+                .flex_col()
+                .child(div().px_2().py_1().leading_xs().text_color(muted).child(heading.clone()))
+                .children(decisions.iter().enumerate().map(|(index, decision)| {
+                    let link = cac_core::decision_record_link(decision);
+                    div()
+                        .id(("doc-section-decision", index))
+                        .w_full()
+                        .rounded(px(8.))
+                        .px_2()
+                        .py_1p5()
+                        .leading_sm()
+                        .hover(move |style| style.bg(soft))
+                        .child(decision.title.clone())
+                        .when_some(link, |this, link| this.cursor_pointer().on_click(move |_, _, cx| DocsView::follow_link(&link, cx)))
+                }))
+        });
+        Some(div().id(SharedString::from(format!("doc-section-mark-{at}"))).aria_label(said).absolute().top(px(top)).left(px(left)).child(popover).test_support().into_any_element())
+    }
+
+    fn render_row(&self, row: usize, window: &mut Window, cx: &mut App) -> AnyElement {
         #[cfg(test)]
         tests::ROWS_BUILT.with(|built| built.borrow_mut().insert(row));
         let inner: AnyElement = match self.rows[row] {
@@ -193,8 +253,10 @@ impl ReadingRows {
                 // debe prestarle su estado a éste.
                 let id = SharedString::from(format!("doc-text-{}-{}-{at}", self.node, self.key));
                 let kind = if piece.wide { "wide" } else { "prose" };
+                let mark = self.render_decisions_mark(at, window, cx);
                 let text = div()
                     .id(SharedString::from(format!("doc-{kind}-{at}")))
+                    .relative()
                     .w_full()
                     .min_w_0()
                     .text_size(px(READING_SIZE))
@@ -203,6 +265,7 @@ impl ReadingRows {
                     // código), a todo lo que da la página.
                     .when(!piece.wide, |this| this.max_w(px(READING_MEASURE)).mx_auto())
                     .child(DocsView::doc_text(id, piece.text.clone(), reading_style(cx)))
+                    .children(mark)
                     .test_support();
                 // El primero dice que hay texto que leer.
                 if at == 0 {
@@ -1367,6 +1430,106 @@ impl DocsView {
             .test_support()
     }
 
+    /// La cabecera del documento (`DocHeader.tsx`: `border-b px-4 py-2`, y
+    /// dentro una fila a `text-xs gap-2`): quién responde de él, cuándo se
+    /// confirmó por última vez, si hay una revisión pedida y la línea
+    /// fijada sobre el tablero; y, si lleva demasiado sin revisar, el aviso
+    /// de por qué. Aquí se lee: cambiar de responsable, fijar la línea y
+    /// firmar la revisión están pintados en su sitio y dicen que todavía no
+    /// están en esta app.
+    fn render_header(header: cac_core::DocHeader, cx: &App) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, foreground, border, primary) = (theme.muted_foreground, theme.foreground, theme.border, theme.primary);
+        let hover = crate::theme::ghost_hover(cx);
+        // `amber-500` y `emerald-500` de Tailwind 4.
+        let amber = Hsla::from(rgb(0xfe9a00));
+        let tone = if header.stale { amber } else { Hsla::from(rgb(0x00bc7d)) };
+        let chip = |id: &'static str, said: &str| div().id(id).aria_label(said.to_string()).flex().flex_none().items_center().gap_1p5().rounded_full().px_2().py_0p5();
+
+        let owner = chip("doc-owner", &header.owner)
+            .border_1()
+            .border_color(border)
+            .map(|this| if header.has_owner { this.text_color(foreground) } else { this.border_dashed().text_color(muted) })
+            .child(Icon::new(Lucide::UserRound).size_3())
+            .child(header.owner.clone())
+            .tooltip(not_yet(cx))
+            .test_support();
+        let reviewed = chip("doc-reviewed", &header.reviewed)
+            .bg(tone.opacity(0.1))
+            .text_color(tone)
+            .child(Icon::new(if header.stale { Lucide::Clock } else { Lucide::CircleCheck }).size_3())
+            .child(header.reviewed.clone())
+            .test_support();
+        // Una revisión pedida, al lado de la frescura, hasta que alguien
+        // firme. La nota —qué cambió, qué mirar— sale al pasar por ella.
+        let requested = header.review_requested.clone().map(|said| {
+            let note = header.review_note.clone();
+            chip("doc-review-requested", &said)
+                .bg(primary.opacity(0.1))
+                .text_color(primary)
+                .child(Icon::new(Lucide::BellRing).size_3())
+                .child(said)
+                .when_some(note, |this, note| this.tooltip(move |window, cx| Tooltip::new(note.clone()).build(window, cx)))
+                .test_support()
+        });
+        let pinned = div()
+            .id("doc-pinned")
+            .aria_label(header.pinned.clone())
+            .ml_auto()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .text_color(muted)
+            .hover(move |style| style.text_color(foreground))
+            .child(Icon::new(Lucide::Pin).size_3().flex_none())
+            .child(div().min_w_0().truncate().child(header.pinned.clone()))
+            .tooltip(not_yet(cx))
+            .test_support();
+        // Los dos botones del aviso (`Button size="sm" className="h-6
+        // text-xs"`, uno con borde y otro fantasma).
+        let small = |id: &'static str, label: String| {
+            div().id(id).h_6().px_2().flex().flex_none().items_center().rounded(px(8.)).leading_xs().font_weight(FontWeight::MEDIUM).hover(move |style| style.bg(hover)).child(label)
+        };
+        let notice = header.stale_notice.clone().map(|said| {
+            div()
+                .id("doc-stale")
+                .aria_label(said.clone())
+                .mt_2()
+                .px_3()
+                .py_2()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(amber.opacity(0.3))
+                .bg(amber.opacity(0.07))
+                .leading_xs()
+                .child(div().text_color(foreground).child(said))
+                .child(
+                    div()
+                        .mt_2()
+                        .flex()
+                        .gap_2()
+                        // Firmar dice que una persona confirmó que sigue
+                        // siendo verdad: sólo se le ofrece a quien puede.
+                        .when(header.can_sign, |this| {
+                            this.child(small("doc-mark-reviewed", tr(cx, "work:docs.markReviewed")).border_1().border_color(border).tooltip(not_yet(cx)).test_support())
+                        })
+                        .child(small("doc-reassign-owner", tr(cx, "work:docs.reassignOwner")).tooltip(not_yet(cx)).test_support()),
+                )
+                .test_support()
+        });
+        div()
+            .id("doc-header")
+            .flex_none()
+            .px_4()
+            .py_2()
+            .border_b_1()
+            .border_color(border)
+            .child(div().flex().flex_wrap().items_center().gap_2().leading_xs().child(owner).child(reviewed).children(requested).child(pinned))
+            .children(notice)
+            .test_support()
+    }
+
     /// Sin nada que leer: por qué, en el centro (`py-12 text-center`), y
     /// cómo empezar a escribirlo, a quien puede.
     fn render_nothing(key: &'static str, editable: bool, cx: &App) -> Div {
@@ -1506,6 +1669,10 @@ impl Render for DocsView {
         // sitio de lo que se lee, con su propio pie.
         let editing = docs.edit.clone();
         let (editable, can_add) = (docs.editable(), docs.can_add_pages());
+        // Quién responde del documento y cuándo se revisó, sobre las
+        // pestañas: es del documento entero, no de lo que se esté mirando.
+        let superadmin = Backend::snapshot(cx).read(cx).session.as_ref().is_some_and(|session| session.superadmin);
+        let doc_header = docs.header(here, superadmin).map(|header| Self::render_header(header, cx));
         let contents = if wide && editing.is_none() { docs.contents() } else { Vec::new() };
 
         // La cabecera (`h-12 gap-2 px-4`): el icono, el nombre del nodo, su
@@ -1780,7 +1947,7 @@ impl Render for DocsView {
             .children(views)
             // Las pestañas son de la portada: una página no las lleva, ni
             // una página nueva que se escribe sobre ella.
-            .when(!on_page && !editing.as_ref().is_some_and(DocEdit::has_title), |this| this.child(tabs))
+            .when(!on_page && !editing.as_ref().is_some_and(DocEdit::has_title), |this| this.children(doc_header).child(tabs))
             .map(|this| match (editor, read) {
                 (Some(editor), _) => this.child(editor),
                 (None, Some((scroll, index_top))) => {
@@ -1843,11 +2010,13 @@ mod tests {
         /// reconoce en él.
         runbook: String,
         runbook_sections: Value,
+        /// El documento en sí (su cabecera); `null` si no la tiene.
+        head: Value,
     }
 
     fn doc(kept: &Kept) -> Value {
         json!({
-            "doc": null, "orgId": "o1", "decisions": [], "attachments": [],
+            "doc": kept.head, "orgId": "o1", "decisions": [], "attachments": [],
             "tabs": [
                 { "key": "overview", "body": kept.body, "bodyHash": format!("h{}", kept.version), "updatedByName": kept.by },
                 { "key": "runbook", "body": kept.runbook, "sections": kept.runbook_sections },
@@ -2375,6 +2544,80 @@ mod tests {
         let (whole, split) = (tall("whole", cx), tall("split", cx));
         assert!(whole > 400., "el texto entero mide {whole}");
         assert!((whole - split).abs() <= 0.5, "de una pieza mide {whole} y a trozos {split}");
+    }
+
+    /// Sobre las pestañas va quién responde del documento, cuándo se
+    /// revisó, la revisión pedida y la línea fijada; si lleva sin revisar,
+    /// el aviso. Firmar sólo se le pinta a quien puede. Una página no la
+    /// lleva, ni un nodo sin documento.
+    ///
+    /// Roturas que atrapa: un documento sin su cabecera; el botón de firmar
+    /// a quien el servidor se lo va a rechazar; la cabecera del documento
+    /// repetida sobre cada página.
+    #[gpui_kit::test]
+    fn the_header_of_the_document_goes_over_its_tabs(cx: &mut TestAppContext) {
+        let (server, kept) = server("member");
+        let (window, _) = open(&server, 1400., cx);
+        assert!(!on_screen(window, "doc-header", cx), "un documento sin cabecera pinta una");
+
+        kept.lock().unwrap().head = json!({
+            "id": "d1", "updatedAt": "2026-06-01T12:00:00Z", "maintainerId": "u1", "maintainerName": "Ana Ruiz", "stale": true,
+            "reviewRequestedAt": "2026-11-16T12:00:00Z", "reviewRequestedByName": "Luis Gil", "reviewRequestNote": "Cambié el runbook",
+            "pinnedLine": "Backend antes que app",
+        });
+        cx.update(|cx| Backend::run(cx, |core| async move { core.docs().open("a").await }));
+        wait_until(cx, "llega la cabecera", |cx| on_screen(window, "doc-header", cx));
+        assert_eq!(label_of(window, "doc-owner", cx), "Ana Ruiz");
+        assert_eq!(label_of(window, "doc-reviewed", cx), "Sin revisar nunca");
+        assert_eq!(label_of(window, "doc-review-requested", cx), "Revisión pedida por Luis Gil · 16/11/26");
+        assert_eq!(label_of(window, "doc-pinned", cx), "Backend antes que app");
+        assert!(label_of(window, "doc-stale", cx).starts_with("Escrito hace"));
+        // Encima de las pestañas, no debajo.
+        let (header, tabs) = (top_of(window, "doc-header", cx), top_of(window, "doc-tab-overview", cx));
+        assert!(header < tabs, "la cabecera está a {header} y las pestañas a {tabs}");
+        assert!(on_screen(window, "doc-reassign-owner", cx));
+        assert!(!on_screen(window, "doc-mark-reviewed", cx), "se le ofrece firmar a quien no puede");
+
+        // A un superadmin sí se le pinta firmar.
+        cx.update(|cx| {
+            let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana", "superadmin": true })).unwrap();
+            Backend::core(cx).sign_in(ana, "access".into(), "refresh".into()).unwrap();
+        });
+        wait_until(cx, "se pinta firmar", |cx| on_screen(window, "doc-mark-reviewed", cx));
+
+        cx.update(|cx| Backend::run(cx, |core| async move { core.docs().open_page("p1").await }));
+        wait_until(cx, "llega la página", |cx| on_screen(window, "doc-page-children", cx));
+        assert!(!on_screen(window, "doc-header", cx), "la cabecera del documento sigue sobre una página");
+        stop(cx);
+    }
+
+    /// Junto al título de una sección que sostiene alguna decisión va su
+    /// marca, con cuántas; las demás no la llevan.
+    ///
+    /// Roturas que atrapa: una sección con decisiones sin su marca; una
+    /// marca en cada título, tenga o no decisiones.
+    #[gpui_kit::test]
+    fn a_section_backed_by_decisions_carries_its_mark(cx: &mut TestAppContext) {
+        let (server, kept) = server("member");
+        {
+            let mut kept = kept.lock().unwrap();
+            kept.runbook = "## Desplegar\n\nCon cuidado.\n\n## Restaurar\n\nDel respaldo.".into();
+            let decision = |id: &str| json!({ "id": id, "title": "Sin colas", "ownerKind": "space", "ownerId": "a", "decidedAt": "2026-11-14T18:00:00Z" });
+            kept.runbook_sections = json!([
+                { "id": "s1", "heading": "Desplegar", "level": 2, "index": 0, "decisions": [decision("d1"), decision("d2")] },
+                { "id": "s2", "heading": "Restaurar", "level": 2, "index": 1 },
+            ]);
+        }
+        let (window, _) = open(&server, 1400., cx);
+        click(window, "doc-tab-runbook", cx);
+        wait_until(cx, "se lee el runbook", |cx| on_screen(window, "doc-prose-1", cx));
+        assert_eq!(label_of(window, "doc-section-mark-0", cx), "2 decisiones sostienen esta sección");
+        assert!(on_screen(window, "doc-section-decisions-0", cx));
+        assert!(!on_screen(window, "doc-section-mark-1", cx), "una sección sin decisiones lleva marca");
+        // Tras el título, en su renglón.
+        let (mark, text) = (span(window, "doc-section-mark-0", cx), span(window, "doc-prose-0", cx));
+        assert!(mark.0 > text.0 + 60. && mark.0 < text.0 + 200., "la marca está a {} del borde del texto", mark.0 - text.0);
+        stop(cx);
     }
 
     /// Un enlace escrito en el texto, al pulsarlo, va a donde apunta: el de

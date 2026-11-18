@@ -14,11 +14,11 @@ use gpui_kit::{AssetSource, Result, SharedString};
 
 // Los de Lucide que la app nombra y los componentes no traen. Al usar uno
 // nuevo, se añade aquí y a `USED`. Guardián: `tests::every_icon_can_be_loaded`.
-gpui_kit::assets::icon_assets!(Extra, [WifiOff, RefreshCw, LogOut, X, Paperclip, Image, Download, Trash, Pencil, Folder, ListChecks, FileText, ChevronsUpDown, Building2, Moon, Languages, PanelLeftClose, PanelLeftOpen, UserRound, KeyRound, Briefcase, MessagesSquare, Server, NotebookPen, Lock, List, SquareKanban, CalendarDays, PanelLeft, ChevronLeft, GripVertical, Plus, Eye, EyeOff, CircleAlert, Flag, Tag, Users, Calendar, FolderInput, Link2, Bot, Gavel, Send, Copy, Share2, ListTree, SquareCheck, Bold, Italic, Code, Heading2, ListOrdered, Quote, Table, GitPullRequest, Activity, FolderPlus, House, Puzzle, ClipboardList, RotateCcwClock]);
+gpui_kit::assets::icon_assets!(Extra, [WifiOff, RefreshCw, LogOut, X, Paperclip, Image, Download, Trash, Pencil, Folder, ListChecks, FileText, ChevronsUpDown, Building2, Moon, Languages, PanelLeftClose, PanelLeftOpen, UserRound, KeyRound, Briefcase, MessagesSquare, Server, NotebookPen, Lock, List, SquareKanban, CalendarDays, PanelLeft, ChevronLeft, GripVertical, Plus, Eye, EyeOff, CircleAlert, Flag, Tag, Users, Calendar, FolderInput, Link2, Bot, Gavel, Send, Copy, Share2, ListTree, SquareCheck, Bold, Italic, Code, Heading2, ListOrdered, Quote, Table, GitPullRequest, Activity, FolderPlus, House, Puzzle, ClipboardList, RotateCcwClock, Clock, CircleCheck, BellRing, Pin]);
 
 /// Los mismos, para la prueba que comprueba que se cargan.
 #[cfg(test)]
-const USED: [Lucide; 62] = [
+const USED: [Lucide; 66] = [
     Lucide::WifiOff,
     Lucide::RefreshCw,
     Lucide::LogOut,
@@ -81,6 +81,10 @@ const USED: [Lucide; 62] = [
     Lucide::Puzzle,
     Lucide::ClipboardList,
     Lucide::RotateCcwClock,
+    Lucide::Clock,
+    Lucide::CircleCheck,
+    Lucide::BellRing,
+    Lucide::Pin,
 ];
 
 pub struct Assets;

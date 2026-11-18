@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::doc_edit::{DocEdit, DocLeave};
+use crate::doc_header::DocInfo;
 use crate::doc_links::{DocJump, DocLinkFailure};
 use crate::doc_pages::{DocPageItem, DocPageView};
 use crate::task::DecisionRef;
@@ -116,6 +117,9 @@ impl DocDecision {
 /// nodo sin documento contesta igual, con las listas vacías.
 #[derive(Debug, Default, Deserialize)]
 struct DocAnswer {
+    /// El documento en sí; `null` si en el nodo no hay nada escrito.
+    #[serde(default)]
+    doc: Option<DocInfo>,
     #[serde(default)]
     tabs: Vec<DocTab>,
     #[serde(default)]
@@ -136,6 +140,9 @@ pub struct DocTarget {
 pub struct DocsState {
     /// `None` es «no se mira documentación».
     pub target: Option<DocTarget>,
+    /// El documento en sí —quién responde de él, cuándo se revisó—, si ya
+    /// existe (ver `doc_header`).
+    pub info: Option<DocInfo>,
     /// La pestaña que se lee, por su clave (`DOC_TABS`).
     pub tab: String,
     pub loading: bool,
@@ -170,6 +177,7 @@ impl Default for DocsState {
     fn default() -> Self {
         Self {
             target: None,
+            info: None,
             tab: DOC_TABS[0].to_string(),
             loading: false,
             error: None,
@@ -475,6 +483,7 @@ impl Docs {
         }
         match answer {
             Ok(answer) => self.update(|state| {
+                state.info = answer.doc;
                 state.tabs = answer.tabs;
                 state.decisions = answer.decisions;
                 state.loading = false;

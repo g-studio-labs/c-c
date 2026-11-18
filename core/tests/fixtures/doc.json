@@ -1,0 +1,22 @@
+{
+  "id": "d1",
+  "createdAt": "2026-06-09T12:00:00Z",
+  "updatedAt": "2026-11-14T20:17:40Z",
+  "orgId": "o1",
+  "ownerKind": "space",
+  "ownerId": "s1",
+  "body": "lo que había antes de las pestañas",
+  "updatedBy": "u1",
+  "updatedByName": "Ana Pérez",
+  "maintainerId": "u1",
+  "maintainerName": "Ana Pérez",
+  "reviewedAt": "2026-09-30T00:00:00Z",
+  "reviewedBy": "u2",
+  "reviewedByName": "Luis Gil",
+  "pinnedLine": "Desplegar: backend antes que app",
+  "reviewRequestedAt": "2026-09-30T00:00:00Z",
+  "reviewRequestedBy": "u2",
+  "reviewRequestedByName": "Luis Gil",
+  "reviewRequestNote": "Cambié el runbook",
+  "stale": true
+}

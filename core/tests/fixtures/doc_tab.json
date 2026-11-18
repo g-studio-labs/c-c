@@ -13,7 +13,17 @@
       "id": "s1",
       "heading": "Desplegar",
       "level": 2,
-      "index": 0
+      "index": 0,
+      "decisions": [
+        {
+          "id": "dec1",
+          "title": "El backend despliega antes que la app",
+          "ownerKind": "space",
+          "ownerId": "s1",
+          "decidedAt": "2026-09-30T00:00:00Z",
+          "supersededById": "dec2"
+        }
+      ]
     }
   ]
 }

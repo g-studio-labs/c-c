@@ -215,6 +215,15 @@ fn headings_of(pieces: &[DocPiece]) -> Vec<DocHeading> {
         .collect()
 }
 
+/// El enlace al registro donde vive una decisión —la pestaña de decisiones
+/// de su nodo—, que es donde está su porqué (`SectionDecisionsMark.tsx`).
+/// `None` si el servidor no dijo de qué nodo es.
+pub fn decision_record_link(decision: &DecisionRef) -> Option<String> {
+    let kind = decision.owner_kind.as_deref().filter(|kind| !kind.is_empty())?;
+    let id = decision.owner_id.as_deref().filter(|id| !id.is_empty())?;
+    Some(format!("/tasks?doc={kind}:{id}&tab=decisions"))
+}
+
 /// Dónde está el título de una entrada del índice respecto a lo que se ve.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
@@ -432,6 +441,22 @@ mod tests {
         assert_eq!(doc_active_entry(&[Above, At { top: 161. }, Below], 800.), Some(0));
         assert_eq!(doc_active_entry(&[Above, At { top: 0. }, At { top: 700. }], 800.), Some(1));
         assert_eq!(doc_active_entry(&[Above, Above, Above], 800.), Some(2));
+    }
+
+    /// Una decisión que sostiene una sección lleva a su registro: las
+    /// decisiones del nodo donde se tomó.
+    ///
+    /// Roturas que atrapa: abrir el registro del nodo que se lee cuando la
+    /// decisión es de otro; un enlace a medias cuando no se sabe de cuál es.
+    #[test]
+    fn a_decision_leads_to_the_record_where_it_lives() {
+        use crate::doc_links::{doc_link, DocLink};
+        use crate::nav::NodeKind;
+        let decision = DecisionRef { id: "d1".into(), owner_kind: Some("folder".into()), owner_id: Some("f1".into()), ..DecisionRef::default() };
+        let link = decision_record_link(&decision).unwrap();
+        assert_eq!(doc_link(&link), DocLink::Doc { kind: NodeKind::Folder, id: "f1".into(), tab: Some("decisions".into()), page: None, section: None });
+        assert_eq!(decision_record_link(&DecisionRef { owner_id: None, ..decision.clone() }), None);
+        assert_eq!(decision_record_link(&DecisionRef { owner_kind: Some(String::new()), ..decision }), None);
     }
 
     /// Un enlace a una sección llega a su trozo: por el id del servidor, o

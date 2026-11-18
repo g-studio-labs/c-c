@@ -121,7 +121,42 @@ func TestTheCoreReadsWhatTheServerWrites(t *testing.T) {
 			BodyHash:      "abc123",
 			UpdatedBy:     "u1",
 			UpdatedByName: "Ana Pérez",
-			Sections:      []DocSectionView{{ID: "s1", Heading: "Desplegar", Level: 2, Index: 0}},
+			// Con una decisión que la sostiene: es lo que el core pinta
+			// junto al título de la sección.
+			Sections: []DocSectionView{{
+				ID: "s1", Heading: "Desplegar", Level: 2, Index: 0,
+				Decisions: []DecisionRef{{
+					ID: "dec1", Title: "El backend despliega antes que la app", OwnerKind: DocOwnerSpace, OwnerID: "s1",
+					DecidedAt: day, SupersededByID: "dec2",
+				}},
+			}},
+		},
+		// El documento en sí (`doc` en el sobre): quién responde de él y
+		// cuándo se confirmó por última vez. Es la cabecera que el core
+		// pinta sobre las pestañas.
+		"doc.json": Doc{
+			BaseModel: BaseModel{
+				ID:        "d1",
+				CreatedAt: time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC),
+				UpdatedAt: time.Date(2026, 11, 14, 20, 17, 40, 0, time.UTC),
+			},
+			OrgID:                 "o1",
+			OwnerKind:             DocOwnerSpace,
+			OwnerID:               "s1",
+			Body:                  "lo que había antes de las pestañas",
+			UpdatedBy:             "u1",
+			UpdatedByName:         "Ana Pérez",
+			MaintainerID:          "u1",
+			MaintainerName:        "Ana Pérez",
+			ReviewedAt:            &day,
+			ReviewedBy:            "u2",
+			ReviewedByName:        "Luis Gil",
+			PinnedLine:            "Desplegar: backend antes que app",
+			ReviewRequestedAt:     &day,
+			ReviewRequestedBy:     "u2",
+			ReviewRequestedByName: "Luis Gil",
+			ReviewRequestNote:     "Cambié el runbook",
+			Stale:                 true,
 		},
 		// Una página del documento, abierta: ella, sus migas, lo que cuelga
 		// de ella y lo que la enlaza. Dentro va también la fila del árbol

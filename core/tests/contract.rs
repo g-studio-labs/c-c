@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 
 use cac_core::{
-    can_transition, canonical_priority, flow_for, open_subtasks_block, DocDecision, DocMark, DocPageView, DocTab, Flow, OpenTask, Organization, Session, SpaceTree, TaskDetail,
+    can_transition, canonical_priority, flow_for, open_subtasks_block, DocDecision, DocInfo, DocMark, DocPageView, DocTab, Flow, OpenTask, Organization, Session, SpaceTree, TaskDetail,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -284,6 +284,9 @@ fn a_doc_tab_and_a_decision_are_read_for_reading() {
         reads_every_field_but(&fixture("doc_tab.json"), &["id", "createdAt", "docId", "updatedBy"]);
     // Sus títulos con identidad: a ellos llega un enlace a una sección.
     assert_eq!((tab.sections[0].id.as_str(), tab.sections[0].heading.as_str(), tab.sections[0].level, tab.sections[0].index), ("s1", "Desplegar", 2, 0));
+    // Y las decisiones que la sostienen, con el nodo donde vive su registro.
+    let decision = &tab.sections[0].decisions[0];
+    assert_eq!((decision.owner_kind.as_deref(), decision.owner_id.as_deref()), (Some("space"), Some("s1")));
     assert_eq!(tab.key, "runbook");
     // Con qué se guarda sin pisar a nadie: si Go lo renombra, todo guardado
     // saldría sin versión y el servidor lo rechazaría.
@@ -301,6 +304,26 @@ fn a_doc_tab_and_a_decision_are_read_for_reading() {
     assert_eq!(decision.title, "La interfaz se construye con GPUI Kit");
     assert_eq!(decision.superseded_by_id.as_deref(), Some("dec2"));
     assert_eq!(decision.decided_at, "2026-09-30T00:00:00Z");
+}
+
+/// Del documento en sí se lee su cabecera: quién responde de él, cuándo se
+/// revisó, si hay una revisión pedida, la línea fijada y si está sin
+/// revisar. Lo demás (de qué nodo es, quién lo tocó) se nombra.
+///
+/// Roturas que atrapa: `maintainerName`, `reviewedAt`, `reviewRequestedAt`
+/// o `stale` renombrados en Go, y una cabecera que dice «sin responsable»
+/// o «nunca revisado» de un documento que tiene las dos cosas.
+#[test]
+fn a_doc_is_read_for_its_header() {
+    let doc: DocInfo = reads_every_field_but(
+        &fixture("doc.json"),
+        &["createdAt", "orgId", "ownerKind", "ownerId", "body", "updatedBy", "updatedByName", "reviewedBy", "reviewRequestedBy"],
+    );
+    assert_eq!((doc.maintainer_id.as_deref(), doc.maintainer_name.as_deref()), (Some("u1"), Some("Ana Pérez")));
+    assert_eq!(doc.reviewed_at.as_deref(), Some("2026-09-30T00:00:00Z"));
+    assert_eq!(doc.review_requested_by_name.as_deref(), Some("Luis Gil"));
+    assert_eq!(doc.review_request_note.as_deref(), Some("Cambié el runbook"));
+    assert!(doc.stale);
 }
 
 /// Una página abierta se lee con lo que se pinta de ella: su texto, sus

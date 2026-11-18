@@ -29,6 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::doc_header::DocInfo;
 use crate::doc_pages::DocPage;
 use crate::docs::{kind_segment, DocDecision, DocTab, Docs, DocsState};
 use crate::error::ApiError;
@@ -308,6 +309,9 @@ impl DocsState {
 /// También dentro de un 409, con lo que hay ahora.
 #[derive(Debug, Default, Deserialize)]
 struct DocAnswer {
+    /// El documento en sí: el primer guardado lo crea.
+    #[serde(default)]
+    doc: Option<DocInfo>,
     #[serde(default)]
     tabs: Vec<DocTab>,
     #[serde(default)]
@@ -660,6 +664,11 @@ impl Docs {
                             };
                             edit.base_hash = answer.tabs.iter().find(|tab| tab.key == key).and_then(|tab| tab.body_hash.clone());
                             edit.base_body = sent_body.clone();
+                            // Guardar es lo que crea el documento: desde
+                            // ahora tiene cabecera.
+                            if answer.doc.is_some() {
+                                state.info = answer.doc;
+                            }
                             state.tabs = answer.tabs;
                             state.decisions = answer.decisions;
                             state.error = None;

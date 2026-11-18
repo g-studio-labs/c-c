@@ -59,6 +59,9 @@ struct World {
     delay: Duration,
     /// Con esto, un guardado contesta 200 sin nada dentro.
     garbled: bool,
+    /// El documento en sí (`doc` en el sobre). No existe hasta que se guarda
+    /// algo en el nodo.
+    head: Option<Value>,
 }
 
 impl World {
@@ -70,7 +73,7 @@ impl World {
                 None => json!({ "key": key, "body": "" }),
             })
             .collect();
-        json!({ "doc": null, "orgId": "o1", "tabs": tabs, "decisions": [], "attachments": [] })
+        json!({ "doc": self.head, "orgId": "o1", "tabs": tabs, "decisions": [], "attachments": [] })
     }
 
     fn page(&self, id: &str) -> Option<Value> {
@@ -135,6 +138,7 @@ fn answer(world: &Mutex<World>, request: &Request) -> ResponseTemplate {
                 refused(409, "doc-conflict", world.doc())
             } else {
                 world.someone_saves_tab(key, sent["body"].as_str().unwrap_or_default(), "Ana Ruiz");
+                world.head = Some(json!({ "id": "d1", "maintainerId": "u1", "maintainerName": "Ana Ruiz", "stale": false }));
                 ok(world.doc())
             }
         }
@@ -305,6 +309,31 @@ async fn saving_a_tab_sends_its_text_and_the_version_it_came_from() {
     assert_eq!(route, "/api/v1/docs/space/a/tabs/runbook");
     assert_eq!(sent, json!({ "body": "pasos" }));
     assert_eq!(docs.state().body(), "pasos");
+}
+
+/// El primer guardado crea el documento, y con él llega su cabecera; al
+/// volver a abrirlo sigue ahí, y la documentación de otro nodo no la hereda.
+///
+/// Roturas que atrapa: escribir en un nodo y seguir sin ver quién responde
+/// de él hasta reabrirlo; leer el documento sin su cabecera; ver sobre un
+/// nodo sin nada escrito el responsable del que se miraba antes.
+#[tokio::test]
+async fn the_header_arrives_with_the_document() {
+    let rig = rig().await;
+    let docs = rig.core.docs();
+    assert_eq!(docs.state().info, None, "un nodo en el que nadie guardó nada no tiene cabecera");
+
+    rig.write("## Qué es\n\nOtra cosa.");
+    docs.save().await;
+    let owner = |core: &Core| core.docs().state().info.and_then(|info| info.maintainer_name);
+    assert_eq!(owner(&rig.core).as_deref(), Some("Ana Ruiz"));
+    assert!(docs.state().header(Locale::Es, false).is_some_and(|header| header.owner == "Ana Ruiz"));
+
+    // Otro nodo no la hereda, y al volver llega con el documento.
+    docs.open("b").await;
+    assert_eq!(docs.state().info, None);
+    docs.open("a").await;
+    assert_eq!(owner(&rig.core).as_deref(), Some("Ana Ruiz"));
 }
 
 /// Si alguien guardó mientras se escribía, el guardado no se aplica, lo
