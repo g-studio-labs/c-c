@@ -1,13 +1,5 @@
-// El catálogo de herramientas del MCP (`mcp::tool_defs`) es un solo `json!`, y
-// con las de etiquetas, responsables y fechas pasó el límite de 128 niveles de
-// macro que trae Rust. Subirlo es lo que pide el propio compilador; partir el
-// catálogo en trozos sólo movería el mismo JSON a más sitios. Con
-// `install_hooks` (5-nov-2026) pasó también de 256.
-#![recursion_limit = "512"]
-
 mod agent_install;
 mod host;
-mod hooks_install;
 mod ansible;
 mod secrets;
 mod op_env;
@@ -15,14 +7,9 @@ mod paste_guard;
 mod api_client;
 mod core_bridge;
 mod crypto_tools;
-mod dropped;
 mod download;
 mod http_client;
-mod image;
 mod notify;
-mod pdf;
-mod mcp;
-mod provision_cli;
 mod media;
 mod notes_export;
 mod pty;
@@ -33,17 +20,27 @@ mod video_frames;
 mod voice;
 mod webview_crash;
 
-/// Entry point for `cac --mcp` (stdio MCP server; see `mcp.rs`).
+/// Entry point for `cac --mcp`. El servidor MCP vive en su propio crate
+/// (`mcp/`, el mismo que compila el binario `cac-mcp`); aquí sólo se le dice
+/// quién lo arranca. La versión que anuncia es la de la app, como siempre: la
+/// release la escribe en este `Cargo.toml` (`app-release.yml`).
 pub fn serve_mcp() {
-    mcp::serve();
+    cac_mcp::serve(cac_mcp::Host::desktop_app(env!("CARGO_PKG_VERSION")));
 }
 
 /// Entry point for `cac provision …`: aplica un playbook de `infra/ansible`
 /// con la config de cac de un servidor, desde una terminal (ver
-/// `provision_cli.rs`). Devuelve el código de salida.
+/// `mcp/src/provision_cli.rs`). Devuelve el código de salida.
 pub fn run_provision_cli(args: Vec<String>) -> i32 {
-    provision_cli::main(args)
+    cac_mcp::provision_cli::main(args)
 }
+
+// Lo que la app comparte con el MCP vive en su crate (`mcp/`), que no depende
+// de Tauri. Aquí entra con los nombres que ya tenía.
+use cac_mcp::files::{free_name, safe_file_name};
+use cac_mcp::op::read as op_read;
+use cac_mcp::ssh_agent::{agent_candidates, probe_agent, resolve_agent_socket, AgentProbe};
+use cac_mcp::{dropped, image};
 
 /// Absolute path of the running executable, so the "Connect Claude Code" modal
 /// can show a command that's correct on this machine.
@@ -138,172 +135,12 @@ fn keychain_delete_ref(server_id: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-// Runs `op read <reference>` and returns the value, with friendly error mapping.
-/// Si el ejecutable de esta app ya no está en disco (el actualizador lo
-/// cambió con la app abierta). En Linux se ve en `/proc/self/exe`.
-fn running_binary_replaced() -> bool {
-    exe_link_says_deleted(std::fs::read_link("/proc/self/exe").ok().as_deref())
-}
-
 /// Para la app: si esta copia quedó vieja tras una actualización. Una
 /// instancia así funciona para casi todo, pero 1Password ya no le habla
 /// (`InvalidClientInfo`): lo que use `op` falla hasta reabrirla.
 #[tauri::command]
 fn binary_replaced() -> bool {
-    running_binary_replaced()
-}
-
-fn exe_link_says_deleted(link: Option<&std::path::Path>) -> bool {
-    link.map(|p| p.to_string_lossy().ends_with(" (deleted)"))
-        .unwrap_or(false)
-}
-
-/// Lee una referencia `op://` en la cuenta de 1Password que la tenga.
-///
-/// Una referencia no dice de qué cuenta es, y con varias abiertas (la
-/// personal y la del trabajo) `op` busca sólo en la de por defecto: el ítem
-/// `op://Private/…` de la personal no se encontraba si la de por defecto era
-/// la del trabajo, que no tiene «Private» (jose, 2-nov-2026, el ensayo de
-/// gstd). Si la de por defecto contesta que no está, se prueba en las demás, y
-/// la que acierta se recuerda para esa bóveda.
-fn op_read(reference: &str) -> Result<String, String> {
-    retry_while_refused(
-        || op_read_across(reference, op_vault_accounts(), op_read_in, op_accounts),
-        OP_REFUSED_ATTEMPTS,
-        std::time::Duration::from_secs(2),
-    )
-}
-
-/// Cuántas veces se insiste cuando 1Password rechaza la conexión.
-const OP_REFUSED_ATTEMPTS: u32 = 3;
-
-/// 1Password rechaza a veces la primera conexión (la app aún no ha abierto
-/// el aviso de aprobación, o acaba de reiniciarse) y a la siguiente contesta:
-/// el 3-nov-2026 una ejecución aprobada murió a los 0,2 s por eso y hubo que
-/// rehacer ensayo y aprobación. Se insiste unas veces, con una pausa, antes
-/// de rendirse; cualquier otro error (sesión caducada, ítem que no existe,
-/// `op` sin instalar) se devuelve a la primera, que insistir no lo arregla.
-fn retry_while_refused(
-    mut read: impl FnMut() -> Result<String, String>,
-    attempts: u32,
-    wait: std::time::Duration,
-) -> Result<String, String> {
-    let mut last = String::new();
-    for i in 0..attempts.max(1) {
-        match read() {
-            Ok(v) => return Ok(v),
-            Err(e) if e.contains("refused the connection") && i + 1 < attempts => {
-                last = e;
-                std::thread::sleep(wait);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Err(last)
-}
-
-/// El cuerpo de `op_read`, con quién lee y quién lista las cuentas por fuera
-/// para probarlo sin 1Password.
-fn op_read_across(
-    reference: &str,
-    learned: &std::sync::Mutex<std::collections::HashMap<String, String>>,
-    read: impl Fn(&str, Option<&str>) -> Result<String, String>,
-    accounts: impl FnOnce() -> Vec<String>,
-) -> Result<String, String> {
-    let vault = reference.trim_start_matches("op://").split('/').next().unwrap_or("").to_string();
-    let remembered = learned.lock().ok().and_then(|m| m.get(&vault).cloned());
-    let first_err = match read(reference, remembered.as_deref()) {
-        Ok(v) => return Ok(v),
-        Err(e) => e,
-    };
-    if !op_not_in_this_account(&first_err) {
-        return Err(first_err);
-    }
-    for account in accounts().into_iter().filter(|a| Some(a.as_str()) != remembered.as_deref()) {
-        if let Ok(v) = read(reference, Some(&account)) {
-            if let Ok(mut m) = learned.lock() {
-                m.insert(vault, account);
-            }
-            return Ok(v);
-        }
-    }
-    Err(format!("{first_err} (not found in any signed-in 1Password account either)"))
-}
-
-/// Lo que contesta `op` cuando la referencia no está en la cuenta que miró:
-/// otra cuenta puede tenerla. Lo demás (sesión, permiso, app cerrada) no se
-/// arregla probando otra cuenta.
-fn op_not_in_this_account(err: &str) -> bool {
-    ["isn't an item", "isn't a vault", "isn't a field", "could not find"].iter().any(|m| err.contains(m))
-}
-
-/// De qué cuenta es cada bóveda, aprendido al leer.
-fn op_vault_accounts() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
-    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::OnceLock::new();
-    M.get_or_init(Default::default)
-}
-
-/// Las cuentas abiertas en `op`, por su dirección (lo que toma `--account`).
-fn op_accounts() -> Vec<String> {
-    let Ok(out) = crate::host::command("op").args(["account", "list", "--format", "json"]).output() else {
-        return Vec::new();
-    };
-    op_account_urls(&String::from_utf8_lossy(&out.stdout))
-}
-
-fn op_account_urls(json: &str) -> Vec<String> {
-    serde_json::from_str::<Vec<serde_json::Value>>(json)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|a| a.get("url").and_then(|u| u.as_str()).map(str::to_string))
-        .filter(|u| !u.is_empty())
-        .collect()
-}
-
-fn op_read_in(reference: &str, account: Option<&str>) -> Result<String, String> {
-    let mut args = vec!["read", "--no-newline", reference];
-    if let Some(a) = account {
-        args.extend(["--account", a]);
-    }
-    let output = crate::host::command("op")
-        .args(&args)
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => "1Password CLI (op) not found. Install from https://developer.1password.com/docs/cli/".to_string(),
-            _ => format!("Failed to execute op: {e}"),
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let msg = if stderr.contains("not currently signed in")
-            || stderr.contains("session expired")
-        {
-            "1Password session expired. Run `op signin` (or open the 1Password desktop app) and try again.".to_string()
-        } else if stderr.contains("connecting to desktop app") && running_binary_replaced() {
-            // 1Password comprueba qué app le llama leyendo su ejecutable, y el de
-            // esta ya no existe: el actualizador lo cambió con la app abierta.
-            // Lo rechaza al instante (`InvalidClientInfo` en su log), y ni
-            // `op signin` ni desbloquear lo arreglan; reabrir la app, sí.
-            "cac was updated while it was open, and 1Password won't talk to the old copy. Quit cac completely, open it again, and retry.".to_string()
-        } else if stderr.contains("connecting to desktop app") {
-            "1Password refused the connection. Unlock the 1Password app and approve the request from cac (on a tiling window manager it waits in the tray icon), then try again.".to_string()
-        } else if stderr.is_empty() {
-            format!("op read exited with status {}", output.status)
-        } else {
-            stderr
-        };
-        return Err(msg);
-    }
-
-    let token = String::from_utf8(output.stdout)
-        .map_err(|e| e.to_string())?
-        .trim()
-        .to_string();
-
-    if token.is_empty() {
-        return Err("1Password returned an empty value for that reference".into());
-    }
-    Ok(token)
+    cac_mcp::op::running_binary_replaced()
 }
 
 /// One place a secret can be filed: an account and one of its vaults.
@@ -536,164 +373,6 @@ pub struct SshAgent {
     /// "ok" (holds keys) · "empty" (answers, no keys — usually locked) ·
     /// "refused" (socket file is there but nothing is listening).
     pub status: String,
-}
-
-/// Outcome of asking one agent for its identities.
-enum AgentProbe {
-    Keys(usize),
-    /// The socket exists but nothing answered — the classic "1Password isn't
-    /// running (or its SSH agent is off)" case, worth reporting differently from
-    /// a socket that simply isn't there.
-    Refused,
-    Missing,
-}
-
-fn home_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(std::path::PathBuf::from)
-}
-
-/// `IdentityAgent` from ~/.ssh/config — the line 1Password's own setup guide
-/// tells people to add, so it's the most reliable hint when it's there.
-fn identity_agent_from_ssh_config() -> Option<String> {
-    let cfg = home_dir()?.join(".ssh").join("config");
-    let text = std::fs::read_to_string(cfg).ok()?;
-    parse_identity_agent(&text).map(|v| expand_tilde(&v))
-}
-
-/// First uncommented `IdentityAgent` value in an ssh_config. Split out from file
-/// access so it can be tested: real configs are full of commented-out variants
-/// (`# IdentityAgent ~/.bitwarden-ssh-agent.sock`) and picking one of those up
-/// would send us at a socket the user deliberately disabled.
-fn parse_identity_agent(text: &str) -> Option<String> {
-    for line in text.lines() {
-        let l = line.trim();
-        if l.starts_with('#') {
-            continue;
-        }
-        let lower = l.to_ascii_lowercase();
-        let Some(rest) = lower.strip_prefix("identityagent") else {
-            continue;
-        };
-        if !rest.starts_with(|c: char| c.is_whitespace() || c == '=') {
-            continue;
-        }
-        let value = l[l.len() - rest.len()..]
-            .trim_start_matches(['=', ' ', '\t'])
-            .trim()
-            .trim_matches('"');
-        if value.is_empty() || value.eq_ignore_ascii_case("none") {
-            continue;
-        }
-        return Some(value.to_string());
-    }
-    None
-}
-
-fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = home_dir() {
-            return home.join(rest).to_string_lossy().to_string();
-        }
-    }
-    path.to_string()
-}
-
-/// Every socket worth trying, most specific first. Existence is checked by the
-/// caller, which also probes each one for keys.
-fn agent_candidates() -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
-
-    if let Some(sock) = std::env::var("SSH_AUTH_SOCK")
-        .ok()
-        .filter(|s| !s.is_empty())
-    {
-        out.push((sock, "Inherited from the environment".into()));
-    }
-    if let Some(sock) = identity_agent_from_ssh_config() {
-        out.push((sock, "IdentityAgent in ~/.ssh/config".into()));
-    }
-    if let Some(home) = home_dir() {
-        #[cfg(target_os = "macos")]
-        out.push((
-            home.join("Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock")
-                .to_string_lossy()
-                .to_string(),
-            "1Password".into(),
-        ));
-        out.push((
-            home.join(".1password/agent.sock")
-                .to_string_lossy()
-                .to_string(),
-            "1Password".into(),
-        ));
-    }
-    #[cfg(target_os = "windows")]
-    out.push((
-        r"\\.\pipe\openssh-ssh-agent".into(),
-        "Windows OpenSSH agent".into(),
-    ));
-    if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR") {
-        let run = std::path::PathBuf::from(run);
-        out.push((
-            run.join("ssh-agent.socket").to_string_lossy().to_string(),
-            "systemd ssh-agent".into(),
-        ));
-        out.push((
-            run.join("keyring/ssh").to_string_lossy().to_string(),
-            "GNOME Keyring".into(),
-        ));
-        out.push((
-            run.join("gcr/ssh").to_string_lossy().to_string(),
-            "GNOME Keyring".into(),
-        ));
-    }
-
-    // Keep the first mention of each socket (earlier = more specific label).
-    let mut seen = std::collections::HashSet::new();
-    out.retain(|(sock, _)| seen.insert(sock.clone()));
-    out
-}
-
-/// The socket to use when the caller didn't pick one: the first candidate that
-/// actually answers with at least one key, else the first that answers at all.
-pub(crate) fn resolve_agent_socket() -> Option<String> {
-    let mut answering: Option<String> = None;
-    for (sock, _) in agent_candidates() {
-        match probe_agent(&sock) {
-            AgentProbe::Keys(n) if n > 0 => return Some(sock),
-            AgentProbe::Keys(_) => {
-                answering.get_or_insert(sock);
-            }
-            _ => continue,
-        }
-    }
-    answering
-}
-
-fn probe_agent(socket: &str) -> AgentProbe {
-    let exists = std::path::Path::new(socket).exists() || socket.starts_with(r"\\.\pipe\");
-    let Ok(out) = crate::host::command("ssh-add")
-        .arg("-l")
-        .env("SSH_AUTH_SOCK", socket)
-        .output()
-    else {
-        return AgentProbe::Missing;
-    };
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if stdout.contains("no identities") || stderr.contains("no identities") {
-        return AgentProbe::Keys(0);
-    }
-    if !out.status.success() {
-        return if exists {
-            AgentProbe::Refused
-        } else {
-            AgentProbe::Missing
-        };
-    }
-    AgentProbe::Keys(stdout.lines().filter(|l| !l.trim().is_empty()).count())
 }
 
 /// Agents the machine actually has, so the UI can let the user choose (a laptop
@@ -1591,32 +1270,6 @@ async fn save_attachment(
     Ok(target.to_string_lossy().to_string())
 }
 
-/// Un nombre que no se sale de la carpeta ni trae caracteres raros.
-fn safe_file_name(name: &str) -> String {
-    let safe: String = name
-        .chars()
-        .filter(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' '))
-        .collect();
-    let safe = safe.trim_start_matches('.').trim().to_string();
-    if safe.is_empty() { "file".into() } else { safe }
-}
-
-/// `nombre.ext`, o `nombre (2).ext` si ya existe: bajar dos veces no pisa nada.
-fn free_name(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    let first = dir.join(name);
-    if !first.exists() {
-        return first;
-    }
-    let (stem, ext) = match name.rsplit_once('.') {
-        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
-        _ => (name.to_string(), String::new()),
-    };
-    (2..)
-        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
-        .find(|p| !p.exists())
-        .expect("siempre hay un número libre")
-}
-
 #[cfg(test)]
 mod keychain_tests {
     use super::*;
@@ -1636,84 +1289,6 @@ mod keychain_tests {
                 .is_none(),
             "keyring está usando su almacén de mentira: faltan las features de plataforma"
         );
-    }
-}
-
-#[cfg(test)]
-mod op_retry_tests {
-    use super::*;
-
-    // Roturas que atrapa: no insistir cuando 1Password rechaza la conexión;
-    // insistir con cualquier otro error (una sesión caducada no se arregla
-    // esperando); insistir sin tope.
-    #[test]
-    fn a_refused_1password_is_asked_again_but_nothing_else_is() {
-        let wait = std::time::Duration::ZERO;
-        let mut calls = 0;
-        let out = retry_while_refused(
-            || {
-                calls += 1;
-                if calls < 3 {
-                    Err("cloudflare_dns_token: 1Password refused the connection. Unlock…".to_string())
-                } else {
-                    Ok("tok".to_string())
-                }
-            },
-            3,
-            wait,
-        );
-        assert_eq!((out.as_deref(), calls), (Ok("tok"), 3), "a la tercera contesta y se toma");
-
-        let mut calls = 0;
-        let out = retry_while_refused(
-            || {
-                calls += 1;
-                Err("1Password session expired. Run `op signin`".to_string())
-            },
-            3,
-            wait,
-        );
-        assert!(out.is_err() && calls == 1, "otro error no se reintenta ({calls} intentos)");
-
-        let mut calls = 0;
-        let out = retry_while_refused(
-            || {
-                calls += 1;
-                Err("1Password refused the connection".to_string())
-            },
-            3,
-            wait,
-        );
-        assert!(out.unwrap_err().contains("refused") && calls == 3, "se rinde tras los intentos ({calls})");
-    }
-}
-
-#[cfg(test)]
-mod save_attachment_tests {
-    use super::*;
-
-    #[test]
-    fn el_nombre_no_se_sale_de_la_carpeta() {
-        assert_eq!(safe_file_name("../../.ssh/id_rsa"), "sshid_rsa");
-        assert!(!safe_file_name("../x").contains('/'));
-        assert!(!safe_file_name("..").starts_with('.'));
-        assert_eq!(safe_file_name("grabacion 2026-10-10.m4a"), "grabacion 2026-10-10.m4a");
-        assert_eq!(safe_file_name("///"), "file");
-    }
-
-    #[test]
-    fn bajar_dos_veces_no_pisa_nada() {
-        let dir = std::env::temp_dir().join(format!("cac-free-name-{}", ephemeral_suffix()));
-        std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(free_name(&dir, "g.m4a"), dir.join("g.m4a"));
-        std::fs::write(dir.join("g.m4a"), b"1").unwrap();
-        assert_eq!(free_name(&dir, "g.m4a"), dir.join("g (2).m4a"));
-        std::fs::write(dir.join("g (2).m4a"), b"2").unwrap();
-        assert_eq!(free_name(&dir, "g.m4a"), dir.join("g (3).m4a"));
-        assert_eq!(free_name(&dir, "sin-ext"), dir.join("sin-ext"));
-        std::fs::write(dir.join("sin-ext"), b"3").unwrap();
-        assert_eq!(free_name(&dir, "sin-ext"), dir.join("sin-ext (2)"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -2101,67 +1676,6 @@ pub fn run() {
 }
 
 #[cfg(test)]
-mod agent_tests {
-    use super::parse_identity_agent;
-
-    #[test]
-    fn picks_the_active_line_and_ignores_commented_ones() {
-        // Shape taken from a real config: two disabled variants around the live one.
-        let cfg = "\
-Host *
-  #  IdentityAgent ~/.bitwarden-ssh-agent.sock
-  IdentityAgent /home/rv/.1password/agent.sock
-  #IdentityAgent none
-";
-        assert_eq!(
-            parse_identity_agent(cfg).as_deref(),
-            Some("/home/rv/.1password/agent.sock")
-        );
-    }
-
-    #[test]
-    fn handles_equals_quotes_and_case() {
-        let cfg = "IdentityAgent=\"~/.1password/agent.sock\"\n";
-        assert_eq!(
-            parse_identity_agent(cfg).as_deref(),
-            Some("~/.1password/agent.sock")
-        );
-        let cfg = "  identityagent   /tmp/a.sock\n";
-        assert_eq!(parse_identity_agent(cfg).as_deref(), Some("/tmp/a.sock"));
-    }
-
-    #[test]
-    fn none_and_lookalikes_are_not_sockets() {
-        // `IdentityAgent none` disables the agent — following it would be wrong.
-        assert_eq!(parse_identity_agent("IdentityAgent none\n"), None);
-        // A different keyword that merely starts the same way.
-        assert_eq!(parse_identity_agent("IdentityAgentFoo /x\n"), None);
-        assert_eq!(
-            parse_identity_agent("IdentityFile ~/.ssh/id_ed25519\n"),
-            None
-        );
-    }
-}
-
-#[cfg(test)]
-mod replaced_binary_tests {
-    use super::exe_link_says_deleted;
-    use std::path::Path;
-
-    // Lo que deja el actualizador: el ejecutable de la app abierta ya no está.
-    #[test]
-    fn a_replaced_appimage_is_noticed() {
-        assert!(exe_link_says_deleted(Some(Path::new(
-            "/home/rv/.cache/tauri_current_app8SWmRl/current_app.AppImage (deleted)"
-        ))));
-        assert!(!exe_link_says_deleted(Some(Path::new(
-            "/home/rv/cac.AppImage"
-        ))));
-        assert!(!exe_link_says_deleted(None));
-    }
-}
-
-#[cfg(test)]
 mod dialog_dir_tests {
     use super::pick_dialog_dir;
 
@@ -2180,58 +1694,5 @@ mod dialog_dir_tests {
         );
         assert_eq!(pick_dialog_dir(&[Some(mount.clone())]), None);
         let _ = std::fs::remove_dir_all(tmp.join(".mount_cacTEST"));
-    }
-}
-
-#[cfg(test)]
-mod op_account_tests {
-    use super::*;
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    const NOT_HERE: &str = "[ERROR] could not read secret 'op://Private/gstd_infra_devops/password': could not get item Private/gstd_infra_devops: \"gstd_infra_devops\" isn't an item in the \"Private\" vault.";
-
-    // Con dos cuentas abiertas, la referencia de la personal se buscaba sólo
-    // en la del trabajo (el ensayo de gstd, 2-nov-2026). Roturas que atrapa:
-    // no probar las demás cuentas; probarlas ante un error que no es «no
-    // está» (una sesión caducada pediría aprobación a cada cuenta); no
-    // recordar la cuenta, y que la siguiente lectura vuelva a dar la vuelta.
-    #[test]
-    fn a_reference_is_read_in_whichever_account_has_it() {
-        let learned = Mutex::new(HashMap::new());
-        let calls = RefCell::new(Vec::new());
-        let read = |r: &str, a: Option<&str>| {
-            calls.borrow_mut().push(a.map(str::to_string));
-            match a {
-                Some("my.1password.com") => Ok(format!("value of {r}")),
-                _ => Err(NOT_HERE.to_string()),
-            }
-        };
-        let accounts = || vec!["dwitmexicosadecv.1password.com".to_string(), "my.1password.com".to_string()];
-        let r = "op://Private/gstd_infra_devops/password";
-        assert_eq!(op_read_across(r, &learned, read, accounts).unwrap(), format!("value of {r}"));
-        assert_eq!(learned.lock().unwrap().get("Private").map(String::as_str), Some("my.1password.com"));
-
-        // La segunda vez va directa a la que la tenía.
-        calls.borrow_mut().clear();
-        op_read_across(r, &learned, read, || panic!("no hacía falta listar cuentas")).unwrap();
-        assert_eq!(*calls.borrow(), vec![Some("my.1password.com".to_string())]);
-
-        // Si no está en ninguna, se dice el error de la primera y que se buscó.
-        let learned = Mutex::new(HashMap::new());
-        let e = op_read_across(r, &learned, |_, _| Err(NOT_HERE.to_string()), accounts).unwrap_err();
-        assert!(e.contains("isn't an item") && e.contains("any signed-in"), "{e}");
-
-        // Otro error no da la vuelta por las cuentas.
-        let e = op_read_across(r, &learned, |_, _| Err("1Password session expired".into()), || panic!("no se prueban otras cuentas")).unwrap_err();
-        assert_eq!(e, "1Password session expired");
-    }
-
-    #[test]
-    fn the_signed_in_accounts_are_read_by_their_address() {
-        let json = r#"[{"url":"my.1password.com","email":"a@b","user_uuid":"U1","account_uuid":"A1"},{"url":"dwitmexicosadecv.1password.com","email":"c@d"}]"#;
-        assert_eq!(op_account_urls(json), vec!["my.1password.com", "dwitmexicosadecv.1password.com"]);
-        assert!(op_account_urls("no es json").is_empty());
     }
 }

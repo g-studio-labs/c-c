@@ -1,7 +1,9 @@
 name: rust platforms
 
 # `cargo check` del lado Rust de la app en macOS y Windows, a mano y antes de
-# una release.
+# una release. Y, aparte, el servidor MCP (`mcp/`, el binario `cac-mcp`)
+# compilado y probado en las dos: en Linux lo hace `mcp.yml` en cada push.
+# Nada de esto publica: ni release, ni etiqueta, ni artefacto.
 #
 # El CI de la app (`app.yml`) corre en Linux, y el código que sólo compila en
 # macOS o Windows (`#[cfg(not(target_os = "linux"))]`) no lo ve nadie hasta
@@ -41,3 +43,36 @@ jobs:
       - name: cargo check
         working-directory: app/src-tauri
         run: cargo check --locked
+
+  # El binario `cac-mcp` en macOS y Windows. No necesita la carpeta de la
+  # página ni nada de Tauri: es su propio crate.
+  mcp:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./mcp -> target"
+
+      - name: cargo build
+        run: cargo build --locked --release
+
+      # Las pruebas que arrancan el binario y le hablan por stdio, y la de que
+      # no enlaza ninguna interfaz. No la suite entera: muchas de las pruebas
+      # de dentro leen el checkout con rutas y programas de Unix (`sh`, `git`
+      # con un remote, los playbooks) y en Windows nunca han corrido.
+      - name: The binary answers over stdio
+        run: cargo test --locked --test stdio --test no_ui

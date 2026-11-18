@@ -19,13 +19,13 @@ use std::path::{Path, PathBuf};
 
 /// Los ficheros, tal como están en el repo.
 pub const HOOK_FILES: &[(&str, &str)] = &[
-    ("cac_hooks.py", include_str!("../../../.claude/hooks/cac_hooks.py")),
-    ("cac-session", include_str!("../../../.claude/hooks/cac-session")),
-    ("cac-prompt", include_str!("../../../.claude/hooks/cac-prompt")),
-    ("cac-edit", include_str!("../../../.claude/hooks/cac-edit")),
-    ("cac-wrote", include_str!("../../../.claude/hooks/cac-wrote")),
-    ("cac-handoff", include_str!("../../../.claude/hooks/cac-handoff")),
-    ("cac-mirror", include_str!("../../../.claude/hooks/cac-mirror")),
+    ("cac_hooks.py", include_str!("../../.claude/hooks/cac_hooks.py")),
+    ("cac-session", include_str!("../../.claude/hooks/cac-session")),
+    ("cac-prompt", include_str!("../../.claude/hooks/cac-prompt")),
+    ("cac-edit", include_str!("../../.claude/hooks/cac-edit")),
+    ("cac-wrote", include_str!("../../.claude/hooks/cac-wrote")),
+    ("cac-handoff", include_str!("../../.claude/hooks/cac-handoff")),
+    ("cac-mirror", include_str!("../../.claude/hooks/cac-mirror")),
 ];
 
 /// Qué se engancha a qué: (evento, matcher, script, timeout en segundos).

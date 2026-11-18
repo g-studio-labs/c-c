@@ -21,59 +21,13 @@
 //! de `Command::new`, y `open_url` / `open_path` en vez del plugin. Fuera de una
 //! AppImage no hay nada que limpiar y esto no cambia nada.
 
-use std::ffi::OsStr;
 use std::process::Command;
 
-/// Lo que la AppImage mete en el entorno y no puede llegar a un programa del
-/// sistema: las variables que apuntan dentro de `$APPDIR` y las de la propia
-/// imagen. Devuelve qué quitar y el `PATH` sin carpetas de la imagen. Fuera de
-/// una AppImage (sin `APPDIR`) no toca nada.
-pub fn appimage_cleanup(env: &[(String, String)]) -> (Vec<String>, Option<String>) {
-    let Some(appdir) = env.iter().find(|(k, _)| k == "APPDIR").map(|(_, v)| v.trim_end_matches('/').to_string()) else {
-        return (vec![], None);
-    };
-    if appdir.is_empty() {
-        return (vec![], None);
-    }
-    let mut remove: Vec<String> = env
-        .iter()
-        .filter(|(k, v)| k != "PATH" && v.contains(&appdir))
-        .map(|(k, _)| k.clone())
-        .collect();
-    for k in ["APPDIR", "APPIMAGE", "ARGV0", "OWD", "PYTHONDONTWRITEBYTECODE"] {
-        if env.iter().any(|(x, _)| x == k) && !remove.iter().any(|r| r == k) {
-            remove.push(k.to_string());
-        }
-    }
-    let path = env.iter().find(|(k, _)| k == "PATH").map(|(_, v)| {
-        v.split(':').filter(|p| !p.is_empty() && !p.starts_with(&appdir)).collect::<Vec<_>>().join(":")
-    });
-    (remove, path)
-}
-
-/// Un programa del sistema, listo para lanzar con el entorno limpio.
-pub fn command(program: impl AsRef<OsStr>) -> Command {
-    let mut cmd = Command::new(program);
-    clean(&mut cmd);
-    cmd
-}
-
-/// Limpia el entorno de un `Command` ya creado.
-pub fn clean(cmd: &mut Command) {
-    let env: Vec<(String, String)> = std::env::vars().collect();
-    clean_with(cmd, &env);
-}
-
-/// `clean` con el entorno dado, en vez del de esta app (para probarlo).
-fn clean_with(cmd: &mut Command, env: &[(String, String)]) {
-    let (remove, path) = appimage_cleanup(env);
-    for k in remove {
-        cmd.env_remove(k);
-    }
-    if let Some(p) = path {
-        cmd.env("PATH", p);
-    }
-}
+// Limpiar el entorno no necesita Tauri y lo usa también el MCP: vive en su
+// crate (`mcp/src/host.rs`). Aquí queda lo que sí es de la app: el pty de la
+// terminal y abrir enlaces y ficheros.
+pub use cac_mcp::host::{appimage_cleanup, command};
+use cac_mcp::host::clean_with;
 
 /// Lo mismo para un `CommandBuilder` de un pty (la terminal).
 pub fn clean_pty(cmd: &mut portable_pty::CommandBuilder) {
@@ -202,37 +156,18 @@ pub fn open_path(path: &std::path::Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
-    }
-
-    /// Roturas que detecta: dejar `LD_LIBRARY_PATH` (el bash del sistema
-    /// cargaría la readline vieja), dejar las de la imagen, tocar lo que no
-    /// apunta a la imagen, o dejar sus carpetas en el PATH.
+    /// Nadie lanza un programa del sistema por fuera de `host`, ni aquí ni en
+    /// el crate del MCP (que corre dentro de la misma AppImage con
+    /// `cac --mcp`). Rotura que detecta: un `Command::new("programa")` nuevo,
+    /// que heredaría el entorno de la imagen y moriría igual que `xdg-open`.
+    /// La misma prueba, con el mismo nombre, vive en `mcp/src/host.rs`: aquella
+    /// es la que corre en el CI.
     #[test]
-    fn inside_an_appimage_everything_that_points_at_it_goes() {
-        let e = env(&[
-            ("APPDIR", "/tmp/.mount_cac.X"),
-            ("APPIMAGE", "/home/rv/cac.AppImage"),
-            ("LD_LIBRARY_PATH", "/tmp/.mount_cac.X/usr/lib:/tmp/.mount_cac.X/lib"),
-            ("XDG_DATA_DIRS", "/tmp/.mount_cac.X/usr/share:/usr/share"),
-            ("PATH", "/tmp/.mount_cac.X/usr/bin:/usr/bin:/bin"),
-            ("HOME", "/home/rv"),
-            ("SSH_AUTH_SOCK", "/home/rv/.1password/agent.sock"),
-        ]);
-        let (remove, path) = appimage_cleanup(&e);
-        for k in ["LD_LIBRARY_PATH", "XDG_DATA_DIRS", "APPDIR", "APPIMAGE"] {
-            assert!(remove.iter().any(|r| r == k), "{k} tiene que quitarse");
-        }
-        for k in ["HOME", "SSH_AUTH_SOCK", "PATH"] {
-            assert!(!remove.iter().any(|r| r == k), "{k} no se toca");
-        }
-        assert_eq!(path.as_deref(), Some("/usr/bin:/bin"));
-    }
-
-    #[test]
-    fn outside_an_appimage_nothing_changes() {
-        assert_eq!(appimage_cleanup(&env(&[("HOME", "/h"), ("PATH", "/usr/bin")])), (vec![], None));
+    fn every_system_program_is_launched_through_here() {
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut bad = cac_mcp::host::unclean_launches(&here.join("src"));
+        bad.extend(cac_mcp::host::unclean_launches(&here.join("../../mcp/src")));
+        assert!(bad.is_empty(), "lanzan un programa sin limpiar el entorno: {bad:#?}");
     }
 
     /// Roturas que detectan: rendirse con el primer programa que no está
@@ -287,30 +222,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Nadie lanza un programa del sistema por fuera de aquí. Rotura que
-    /// detecta: un `Command::new("programa")` nuevo, que heredaría el entorno
-    /// de la imagen y moriría igual que `xdg-open`. Sólo mira el código, no
-    /// las pruebas (lo que va tras `#[cfg(test)]`).
-    #[test]
-    fn every_system_program_is_launched_through_here() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut bad = vec![];
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let p = entry.unwrap().path();
-            if p.extension().and_then(|e| e.to_str()) != Some("rs") || p.ends_with("host.rs") {
-                continue;
-            }
-            let text = std::fs::read_to_string(&p).unwrap();
-            let code = text.split("#[cfg(test)]").next().unwrap_or("");
-            for (i, line) in code.lines().enumerate() {
-                if line.contains("Command::new(\"") || line.contains("CommandBuilder::new(\"") && !code.contains("clean_pty") {
-                    bad.push(format!("{}:{}: {}", p.file_name().unwrap().to_string_lossy(), i + 1, line.trim()));
-                }
-            }
-        }
-        assert!(bad.is_empty(), "lanzan un programa sin limpiar el entorno: {bad:#?}");
-    }
-
     /// Rotura que detecta: pasarle al sistema un `file://` o un esquema
     /// cualquiera que llegue de una página.
     #[test]
@@ -321,38 +232,5 @@ mod tests {
         for bad in ["file:///etc/passwd", "javascript:alert(1)", "/home/rv/.ssh", "smb://x", ""] {
             assert!(!is_openable_url(bad), "{bad}");
         }
-    }
-
-    /// De punta a punta, con un fallo como el que se midió: una variable de la
-    /// imagen que no deja arrancar a la shell. Limpia, la shell arranca.
-    /// Rotura que detecta: que `clean` no le quite al proceso lo de la imagen.
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn a_command_does_not_inherit_the_image_environment() {
-        let dir = std::env::temp_dir().join(format!("cac-host-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // Una «biblioteca» que no es una biblioteca: con ella en
-        // LD_PRELOAD, el cargador se queja al arrancar cualquier programa.
-        let fake = dir.join("libroto.so");
-        std::fs::write(&fake, b"no soy un ELF").unwrap();
-        let appdir = dir.to_string_lossy().to_string();
-        let run = |clean_it: bool| {
-            let mut cmd = Command::new("sh");
-            cmd.arg("-c").arg("exit 0");
-            cmd.env("APPDIR", &appdir).env("LD_PRELOAD", fake.to_string_lossy().to_string());
-            if clean_it {
-                let env = vec![
-                    ("APPDIR".to_string(), appdir.clone()),
-                    ("LD_PRELOAD".to_string(), fake.to_string_lossy().to_string()),
-                ];
-                clean_with(&mut cmd, &env);
-            }
-            cmd.output().unwrap()
-        };
-        let dirty = run(false);
-        assert!(String::from_utf8_lossy(&dirty.stderr).contains("libroto"), "el entorno sucio tenía que romperla: {dirty:?}");
-        let clean = run(true);
-        assert!(clean.status.success() && !String::from_utf8_lossy(&clean.stderr).contains("libroto"), "limpia, la shell no vio la imagen: {clean:?}");
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

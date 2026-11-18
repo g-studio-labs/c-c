@@ -1,7 +1,8 @@
 # cac — lo que hay que saber antes de tocar
 
 Monorepo: `app/` (Tauri 2 + React 19, el cliente de escritorio), `core/` (Rust,
-la lógica que comparten todas las apps, sin interfaz), `backend/` (Go +
+la lógica que comparten todas las apps, sin interfaz), `mcp/` (Rust, el servidor
+MCP y su binario `cac-mcp`, sin interfaz), `backend/` (Go +
 chi + GORM + Postgres, la API en `cac.guz-studio.dev`), `swarm-manage/` (agente
 por host), `infra/`.
 
@@ -145,7 +146,8 @@ mirando la ruta real (un enlace simbólico `foto.png` → `~/.ssh/id_rsa` no
 pasa). Ante algo así, **un log temporal primero** de lo que llega de verdad, no
 hipótesis.
 → Guardianes: `app/src/lib/dropped.test.ts` (lleva el HTML real que entregó
-WebKitGTK) y `dropped::tests` en `app/src-tauri/src/dropped.rs`.
+WebKitGTK) y `dropped::tests` en `mcp/src/dropped.rs` (leer el fichero no
+necesita Tauri y lo usa también el MCP; el comando de la app sigue en `lib.rs`).
 
 **Pegar con el portapapeles sin dueño tumba WebKitGTK 2.54.** Si nadie contesta
 (vacío, la app que copió ya se cerró, CopyQ cambiando de dueño), GTK responde a
@@ -162,10 +164,15 @@ de las suyas, y tras un `pacman -Syu` el `bash` nuevo muere con la `readline`
 vieja (`undefined symbol: rl_trim_arg_from_keyseq`). Así se murió el relanzado
 tras actualizar, el Python de Ansible y, el 21-oct-2026, **todo enlace
 externo**: el plugin `opener` lanza `xdg-open`, que es un script de shell. Todo
-lanzamiento pasa por `host.rs` (`host::command`, `host::open_url`,
-`host::open_path`), nunca por `Command::new("…")` ni por el plugin.
-→ Guardián: `host::tests::every_system_program_is_launched_through_here` (y
-`app/src/lib/platform.test.ts` para los enlaces).
+lanzamiento pasa por `host` (`host::command`, `host::open_url`,
+`host::open_path`), nunca por `Command::new("…")` ni por el plugin. Limpiar el
+entorno vive en `mcp/src/host.rs` (el MCP corre dentro de la misma AppImage con
+`cac --mcp` y lanza `git`, `gs`, `op` y Ansible); abrir enlaces y ficheros, que
+es de la app, en `app/src-tauri/src/host.rs`.
+→ Guardián: `host::tests::every_system_program_is_launched_through_here`, con
+ese nombre en los dos crates y mirando cada uno las fuentes de los dos (el de
+`mcp/` es el que corre en el CI), y `app/src/lib/platform.test.ts` para los
+enlaces.
 
 **Un esquema propio es otro origen.** `cacmedia://` y `cacvideo://` los sirve
 Rust, y para el webview son **otro origen**: un `<img>` carga igual, pero un
@@ -191,9 +198,10 @@ monta en una microtarea, después.
 → Guardianes: `app/src/components/PdfPreview.test.tsx` y
 `app/src/components/markdown/pdf-cards.mount.test.tsx`.
 
-## El CI corre las pruebas de backend, app, transcriptor y agente
+## El CI corre las pruebas de backend, app, transcriptor, agente y MCP
 
-Las cuatro suites corren **por delante** de lo que publican, así que rojo no sale:
+Las cuatro primeras corren **por delante** de lo que publican, así que rojo no
+sale; la del MCP todavía no frena nada, porque todavía no publica nada:
 
 | Workflow | Qué corre | Qué frena |
 |---|---|---|
@@ -201,13 +209,16 @@ Las cuatro suites corren **por delante** de lo que publican, así que rojo no sa
 | `app.yml` | tipos, eslint, la suite **bajo las tres zonas**, y `cargo test` del core (`core/`) | la release: `app-release.yml` lo llama antes de compilar (#69) |
 | `transcriber.yml` | `pytest` | la imagen del worker |
 | `swarm-manage.yml` | `go test` del agente | su imagen (`:vN` desde `swarm-manage/VERSION`) |
+| `mcp.yml` | `cargo test` y el binario `cac-mcp` en release, mirando con `ldd` que no enlaza interfaz | nada todavía: `cac-mcp` no se publica (y la release de la app no lo llama) |
 
 Al encender cada una salió algo que llevaba tiempo escondido: una prueba del
 backend roja desde hacía meses, y en la app un error huérfano de tiptap que hacía
 salir la suite con código 1 con todo en verde (tapado en `test-setup.ts`).
 
-**Sin red sigue** el lado Rust de la app (`app/src-tauri`; el core sí corre), que no tiene pruebas propias en el CI:
-lo único que lo comprueba es que la release compile en las tres plataformas.
+**Sin red sigue** el lado Rust de la app (`app/src-tauri`; el core y el MCP sí
+corren), que no tiene pruebas propias en el CI: lo único que lo comprueba es que
+la release compile en las tres plataformas. Eso incluye `tests/mcp_mode.rs`, la
+prueba de que `cac --mcp` sigue sirviendo: corre en local con la puerta de abajo.
 
 Una release con `app.yml` en rojo **se queda publicada sin instaladores**. El
 actualizador no se entera, así que nadie se la come, pero esa versión ya está
@@ -240,6 +251,39 @@ nunca con `stack deploy`**: un stack que creó el CI de un proyecto no se recrea
 y conserva labels, redes y secrets. Es lo que permite que cada proyecto se sume
 a los despliegues por cac cuando quiera.
 
+## El MCP es su propio crate (`mcp/`), y la app lo usa por ruta
+
+Desde command-and-control-388 el servidor MCP no vive en la app de Tauri: es el
+crate `mcp/` (`cac_mcp`), que compila el binario **`cac-mcp`** sin Tauri, GTK ni
+WebKit. La app depende de él por ruta, así que `cac --mcp` sirve lo mismo desde
+la misma fuente y las instalaciones que apuntan a la app no cambian. **No se
+copia nada entre los dos**: lo que comparten (Ansible, `op read`, el agente SSH,
+comprimir imágenes y PDF, leer un fichero soltado, limpiar el entorno de la
+AppImage) vive en `mcp/src/` y la app lo toma de ahí; en `app/src-tauri` queda
+la capa de Tauri (los comandos `ansible_*`, abrir enlaces).
+
+- **Nada que pinte entra en `mcp/`.** Ni directo ni de la mano de otra
+  dependencia. → Guardián: `mcp/tests/no_ui.rs` (mira `Cargo.toml` y
+  `Cargo.lock`); y `mcp.yml` lo mide sobre el binario con `ldd`.
+- **Quién sirve se dice al arrancar** (`cac_mcp::Host`): el binario anuncia su
+  versión (`mcp/Cargo.toml`) y `cac --mcp` la de la app, como siempre. Y sólo la
+  app se fía de `APPIMAGE` y `OWD`: al binario suelto esas variables le llegan
+  heredadas de otro programa, y vigilaría la AppImage de un editor para avisar
+  de que «cac se actualizó».
+  → Guardianes: `server::tests::only_the_desktop_app_trusts_the_appimage_variables`,
+  `each_host_announces_its_own_version`, `mcp/tests/stdio.rs` (el binario,
+  arrancado de verdad) y `app/src-tauri/tests/mcp_mode.rs` (`cac --mcp`, ídem,
+  contra el mismo catálogo).
+- **El MCP sólo llega a Ansible por `provision_cli::request`**, que sólo ensaya.
+  Ansible está ahora en el mismo crate, así que la frontera es esa prueba y no
+  la distancia. → Guardianes: `server::tests` (la de las tres herramientas de
+  provisioning) y `provision_cli::tests::a_request_only_ever_dry_runs`.
+- Las skills que instala (`mcp/skills/`) y los hooks (`.claude/hooks/`) van
+  dentro del binario con `include_str!`.
+
+Repartir `cac-mcp` (artefactos por plataforma, instalarlo o actualizarlo desde
+la app) **no está hecho**: es el paso siguiente.
+
 ## La puerta de verificación
 
 Entera, antes de dar algo por hecho. Desde la raíz del repo:
@@ -248,6 +292,7 @@ Entera, antes de dar algo por hecho. Desde la raíz del repo:
 (cd app           && npx tsc --noEmit)                            # tipos
 (cd app           && bun run test)                                # eslint + vitest
 (cd core          && cargo test && cargo check --features uniffi) # el core compartido
+(cd mcp           && cargo test && cargo build --release)         # el MCP y su binario
 (cd app/src-tauri && cargo check)                                 # el lado Rust
 (cd backend       && go build ./... && go vet ./... && go test ./...)
 python3 .claude/hooks/hooks_test.py                                 # los hooks de cac
@@ -266,7 +311,7 @@ para quien mira la terminal con qué tarea y qué cambió (`cac-wrote`, en
 escribir el handoff de la tarea que nombran los commits de la sesión (o, sin
 commits que la nombren, la que se tocó en ella). Para el resto de repos, el MCP
 los instala globales con `install_hooks` (scripts embebidos desde aquí, en
-`hooks_install.rs`); en este repo la copia global calla. **Si cambias un hook,
+`mcp/src/hooks_install.rs`); en este repo la copia global calla. **Si cambias un hook,
 sube `# cac-hooks vN` en `cac_hooks.py`**: es lo que hace que se ofrezca
 actualizar la copia global. El mismo `settings.json` está en la
 raíz, en `app/` y en `backend/` porque Claude Code sólo lee el de la carpeta

@@ -16,7 +16,7 @@ import (
 // `get_doc(tab, section)` del MCP.
 //
 // Los títulos se reconocen con las mismas reglas que `sections` del MCP
-// (`app/src-tauri/src/mcp.rs`): de uno a seis `#` y un espacio, y nunca dentro
+// (`mcp/src/server.rs`): de uno a seis `#` y un espacio, y nunca dentro
 // de un bloque de código, donde un `# comentario` no es un título. Si las dos
 // difieren, aquí saldría un título que allí no existe.
 //

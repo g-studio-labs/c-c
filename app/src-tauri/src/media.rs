@@ -17,23 +17,7 @@ use tauri::http::{Request, Response};
 /// frontend builds the platform-correct URL for it.
 pub const SCHEME: &str = "cacmedia";
 
-pub(crate) fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(v) = u8::from_str_radix(&input[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
+pub(crate) use cac_mcp::files::percent_decode;
 
 /// The backend path a `cacmedia://` request is asking for.
 ///

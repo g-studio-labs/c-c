@@ -21,7 +21,7 @@
 //! autorización vigente, y después corre su `verify`.
 
 use crate::ansible::{self, AnsibleEvent, Manifest, PlaybookDef, RunSpec};
-use crate::mcp::{api_get, api_patch, api_post, api_put, cfg, urlencode, Cfg};
+use crate::server::{api_get, api_patch, api_post, api_put, cfg, urlencode, Cfg};
 use serde_json::{json, Value};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};

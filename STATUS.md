@@ -13,6 +13,29 @@ tablero: **App** `ca0bfd49-0909-43eb-8135-bc8ecd0f282c` y **Backend**
 
 ## 🟢 Al día
 
+**17-nov, el MCP es su propio binario, `cac-mcp`** (command-and-control-388), en
+la rama `wt-mcp`, sin fusionar, sin release y **sin repartir todavía**. El
+servidor MCP sale de la app de Tauri a su crate, `mcp/` (como `core/` y
+`desktop/`: sin workspace), que no enlaza Tauri, GTK ni WebKit.
+- **Hecho:** `cac-mcp` sin argumentos sirve MCP por stdio y `--version` dice la
+  suya (empieza en 1.33.0, la de la última app). `cac --mcp` sigue igual para
+  quien ya lo tiene instalado: la app usa el crate por ruta y anuncia su propia
+  versión. Mismas herramientas, mismos esquemas, mismos textos; las pruebas del
+  MCP se mudaron con él y ahora **corren en el CI** (`mcp.yml`), que antes no.
+- **Lo que se mudó con él**, porque lo necesita y no es de Tauri: Ansible y
+  `cac provision` (el binario suelto hace `request_provisioning` entero: el
+  ensayo corre en la máquina), `op read`, el agente SSH, comprimir imágenes y
+  PDF, leer un fichero soltado y limpiar el entorno de la AppImage. La app los
+  usa desde `cac_mcp::…`; en `app/src-tauri` quedan los comandos de Tauri.
+- **Quién sirve:** sólo `cac --mcp` se fía de `APPIMAGE` y `OWD`; el binario
+  suelto vigila su propio ejecutable para avisar de que quedó viejo.
+- **Falta (paso siguiente, no empezado):** publicar `cac-mcp` por plataforma, un
+  instalador de una línea, e instalarlo o actualizarlo desde la app de
+  escritorio. Los textos que dicen «this cac app ships» siguen igual a
+  propósito (no cambiar textos en la extracción) y habrá que revisarlos ahí.
+- **A mano:** `rust-platforms.yml` compila y prueba `cac-mcp` en macOS y
+  Windows; no se ha lanzado.
+
 **17-nov, cac de escritorio nativo en GPUI** (command-and-control-373), en la
 misma rama del core (`command-and-control-366-rust-core`, sin fusionar y sin
 release). Desde el 14-nov todo el trabajo va a esta app y la de Tauri queda
@@ -491,7 +514,7 @@ la App llega con el sha entero, y cac recorta al tag que existe
 **R7 publicada en la v1.6.81:** Ansible desde la app. Pestaña
 «Provisioning» del servidor: se elige la carpeta del repo de Ansible, el
 playbook (de su `cac.playbooks.yml` o de sus carpetas), contra qué host o grupo
-y sus variables. Corre aquí (`src-tauri/src/ansible.rs`): lo de 1Password se lee
+y sus variables. Corre aquí (hoy `mcp/src/ansible.rs`, ver 388): lo de 1Password se lee
 en Rust y se tacha de la salida, y variables y contraseña de sudo van en un
 fichero `0600` (`-e @fichero`), nunca en la línea de comandos. A cac sólo llegan
 nombres, el PLAY RECAP y la cola. Manifests escritos (sin commitear, en sus

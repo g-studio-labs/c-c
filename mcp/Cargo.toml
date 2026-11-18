@@ -1,0 +1,43 @@
+[package]
+name = "cac-mcp"
+# Propia, y no la de la app: este binario se va a repartir solo. Empieza en la
+# de la última release de la app (v1.33.0) porque hasta ahora el MCP anunciaba
+# la versión de la app, y un cliente que la lea no debe verla retroceder.
+# `cac --mcp` sigue anunciando la de la app (`Host::desktop_app`).
+version = "1.33.0"
+license = "AGPL-3.0-or-later"
+description = "El servidor MCP de cac: lo que un agente lee y escribe en cac, por stdio"
+edition = "2021"
+publish = false
+
+[lib]
+name = "cac_mcp"
+
+[[bin]]
+name = "cac-mcp"
+path = "src/main.rs"
+
+# Aquí no entra nada que pinte: ni Tauri, ni GTK, ni WebKit, ni GPUI. Este crate
+# se compila solo, como el binario `cac-mcp`, para máquinas sin la app de
+# escritorio; la app lo usa por ruta para `cac --mcp`, no al revés.
+# Guardián: `tests/no_ui.rs`.
+#
+# Sin workspace a propósito, como `core/` y `desktop/`: cada crate con su
+# `target/` y su `Cargo.lock`.
+[dependencies]
+# Las mismas features que usa la app, para que Cargo compile reqwest una vez
+# cuando lo consume ella.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
+serde = { version = "1", features = ["derive"] }
+# `preserve_order`: el catálogo de herramientas y las respuestas salen en el
+# orden en que están escritos. Sin ella, serde_json ordena las claves y todo lo
+# que el agente lee cambia de sitio.
+serde_json = { version = "1", features = ["preserve_order"] }
+# El manifiesto de playbooks (`cac.playbooks.yml`).
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread", "time"] }
+# `compress_image`.
+image = "0.25"
+webp = "0.3"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "v7"] }

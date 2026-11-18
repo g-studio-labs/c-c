@@ -30,7 +30,7 @@ pub fn path_of(uri: &str) -> Option<PathBuf> {
     if !rest.starts_with('/') {
         return None;
     }
-    Some(PathBuf::from(crate::media::percent_decode(rest)))
+    Some(PathBuf::from(crate::files::percent_decode(rest)))
 }
 
 /// Si esa ruta (ya resuelta) es de un tipo que se adjunta.

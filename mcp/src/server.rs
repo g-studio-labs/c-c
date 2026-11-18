@@ -1,4 +1,5 @@
-//! MCP server mode: `cac --mcp`.
+//! The MCP server: what `cac-mcp` (this crate's binary) and `cac --mcp` (the
+//! desktop app, which uses this crate by path) both serve.
 //!
 //! Exposes cac's reports, tasks, notes and device diagnostics to an MCP client
 //! (Claude Code / Desktop). Speaks JSON-RPC 2.0 over stdio — one JSON object
@@ -3641,7 +3642,7 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                 .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
             // El nombre lo eligió quien subió el adjunto: que no salga de `dir`
             // ni pise lo que ya hay. Los mismos dos que usa la app al bajar.
-            let out = crate::free_name(&dir, &crate::safe_file_name(&name));
+            let out = crate::files::free_name(&dir, &crate::files::safe_file_name(&name));
             std::fs::write(&out, &bytes)
                 .map_err(|e| format!("Could not write {}: {e}", out.display()))?;
             Ok(json!({
@@ -5218,7 +5219,7 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                 let repo = match arg_str(args, "repo") {
                     Some(r) => r,
                     None => {
-                        let dir = context_dir(args, std::env::var("OWD").ok());
+                        let dir = context_dir(args, original_dir(host(), std::env::var("OWD").ok()));
                         let url = git_remote(&dir)?;
                         github_repo_from_remote(&url).ok_or_else(|| {
                             format!("The git remote of {dir} ({url}) is not a GitHub repository. Pass spaceId.")
@@ -5950,7 +5951,8 @@ fn err(id: Value, code: i64, message: String) -> Value {
 /// Tool results are returned as MCP content blocks; `isError` lets the model see
 /// and recover from a failure instead of the transport dying.
 /// La huella del fichero del que arrancó este servidor: la AppImage (`APPIMAGE`)
-/// o el ejecutable. Se toma al arrancar y se compara en cada llamada.
+/// si lo sirve la app de escritorio, o el ejecutable (`cac-mcp`, o la app sin
+/// empaquetar). Se toma al arrancar y se compara en cada llamada.
 ///
 /// Por qué: el MCP lo lanza Claude Code al abrir la sesión y vive con ella. Al
 /// actualizar la app se reemplaza el fichero, pero el proceso sigue siendo el
@@ -5964,13 +5966,18 @@ fn binary_fingerprint(path: &std::path::Path) -> Option<(std::time::SystemTime, 
     Some((m.modified().ok()?, m.len()))
 }
 
-fn binary_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("APPIMAGE").map(std::path::PathBuf::from).or_else(|| std::env::current_exe().ok())
+/// Qué fichero vigilar. `APPIMAGE` sólo cuenta si quien sirve es la app: el
+/// binario `cac-mcp` no es una AppImage, y si la variable le llega es heredada
+/// de otro programa (un editor o una terminal que sí lo son, desde donde se
+/// abrió Claude Code). Vigilar ese fichero avisaría de «cac se actualizó» cada
+/// vez que se actualizara el editor, y callaría cuando se actualizara cac.
+fn binary_path(host: Host, appimage: Option<std::ffi::OsString>, exe: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    appimage.filter(|_| host.packed_as_appimage).map(std::path::PathBuf::from).or(exe)
 }
 
 fn remember_start() {
     STARTED_FROM.get_or_init(|| {
-        let p = binary_path()?;
+        let p = binary_path(host(), std::env::var_os("APPIMAGE"), std::env::current_exe().ok())?;
         let (t, len) = binary_fingerprint(&p)?;
         Some((p, t, len))
     });
@@ -6022,13 +6029,13 @@ fn handle(req: &Value, cfg: &Result<Cfg, String>) -> Option<Value> {
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "cac", "version": env!("CARGO_PKG_VERSION") },
+                "serverInfo": { "name": "cac", "version": host().version },
                 "instructions": instructions(skills_dir().as_deref().map(skill_state))
                     + hooks_note(claude_config_dir().as_deref().map(crate::hooks_install::state))
             }),
         )),
         "ping" => Some(ok(id, json!({}))),
-        "tools/list" => Some(ok(id, json!({ "tools": annotate(tool_defs()) }))),
+        "tools/list" => Some(ok(id, json!({ "tools": tool_catalog() }))),
         "tools/call" => {
             let params = req.get("params").cloned().unwrap_or(json!({}));
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -6653,13 +6660,21 @@ fn move_target(args: &Value) -> Result<Option<String>, String> {
 /// La carpeta cuyo remote lee `get_context` cuando no le dan `path`. Dentro de
 /// una AppImage el proceso **no está en el proyecto**: el AppRun de linuxdeploy
 /// hace `cd $APPDIR/usr` antes de arrancar (lo mismo que mordió a los diálogos
-/// de ficheros, ver `lib.rs`), así que `.` era el montaje y «llama a
+/// de ficheros, ver `app/src-tauri/src/lib.rs`), así que `.` era el montaje y «llama a
 /// `get_context` sin argumentos» fallaba en toda sesión de Linux desde que
 /// existe (22-oct-2026). La carpeta original la deja el runtime en `OWD`.
+///
+/// `OWD`, como `APPIMAGE`, sólo vale cuando quien sirve es la app: al binario
+/// `cac-mcp` suelto Claude Code lo arranca ya en el proyecto, y un `OWD`
+/// heredado de otra AppImage es la carpeta de otro programa (`original_dir`).
 fn context_dir(args: &Value, owd: Option<String>) -> String {
     arg_str(args, "path")
         .or(owd.filter(|d| !d.is_empty()))
         .unwrap_or_else(|| ".".into())
+}
+
+fn original_dir(host: Host, owd: Option<String>) -> Option<String> {
+    owd.filter(|_| host.packed_as_appimage)
 }
 
 fn git_remote(dir: &str) -> Result<String, String> {
@@ -7004,8 +7019,48 @@ fn call_local_tool(name: &str, args: &Value) -> Result<Value, String> {
     }
 }
 
+/// Quién sirve este MCP. El servidor es el mismo; cambia lo que sólo sabe quien
+/// lo arranca.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Host {
+    /// La versión que se anuncia en `initialize` (`serverInfo.version`).
+    pub version: &'static str,
+    /// Si el proceso puede ser una AppImage: sólo entonces `APPIMAGE` y `OWD`
+    /// hablan de este programa y no de otro (ver `binary_path`).
+    pub packed_as_appimage: bool,
+}
+
+impl Host {
+    /// El binario `cac-mcp`: su propia versión, y nunca una AppImage.
+    pub const fn standalone() -> Self {
+        Host { version: env!("CARGO_PKG_VERSION"), packed_as_appimage: false }
+    }
+
+    /// `cac --mcp`: la app de escritorio, con su versión, que en Linux se
+    /// reparte como AppImage.
+    pub const fn desktop_app(version: &'static str) -> Self {
+        Host { version, packed_as_appimage: true }
+    }
+}
+
+static HOST: std::sync::OnceLock<Host> = std::sync::OnceLock::new();
+
+/// Quién sirve. Sin `serve` por delante (las pruebas llaman a `handle`
+/// directamente) es el binario suelto.
+fn host() -> Host {
+    HOST.get().copied().unwrap_or(Host::standalone())
+}
+
+/// El catálogo de herramientas tal como lo contesta `tools/list`. Público para
+/// poder comprobar desde fuera que un programa sirve este servidor y no otro:
+/// es contra lo que comparan las pruebas de `cac-mcp` y de `cac --mcp`.
+pub fn tool_catalog() -> Value {
+    annotate(tool_defs())
+}
+
 /// Runs the stdio loop until EOF. Never writes anything but JSON-RPC to stdout.
-pub fn serve() {
+pub fn serve(host: Host) {
+    let _ = HOST.set(host);
     remember_start();
     let cfg = cfg();
     if let Err(e) = &cfg {
@@ -7267,7 +7322,7 @@ mod tests {
     #[test]
     fn the_backend_and_the_mcp_count_the_same_headings() {
         let fx: Value = serde_json::from_str(include_str!(
-            "../../../backend/internal/core/domain/testdata/headings.json"
+            "../../backend/internal/core/domain/testdata/headings.json"
         ))
         .unwrap();
         for c in fx["cases"].as_array().unwrap() {
@@ -7802,7 +7857,7 @@ mod tests {
         );
         // Y el MCP sólo llega a Ansible por `provision_cli::request`, que sólo
         // ensaya: ni `run_playbook`, ni la ejecución con autorización.
-        let src = include_str!("mcp.rs");
+        let src = include_str!("server.rs");
         let code = src.split("#[cfg(test)]").next().unwrap();
         assert!(code.contains("crate::provision_cli::request("));
         for forbidden in ["run_playbook", "provision_cli::run", "provision_cli::main", "run_grant", "execute("] {
@@ -7818,7 +7873,7 @@ mod tests {
         let run = json!({ "logTail": "TASK [Traefik en 1/1] ***\nfatal: [gstd]: FAILED! => {\"msg\": \"no replicas\"}\nPLAY RECAP ***" });
         assert_eq!(run_failures(&run), json!([{ "host": "gstd", "task": "Traefik en 1/1", "message": "no replicas" }]));
         assert_eq!(run_failures(&json!({})), json!([]));
-        let src = include_str!("mcp.rs");
+        let src = include_str!("server.rs");
         let handler = src.split("\"list_provisioning_runs\" => {").nth(1).unwrap().split("\n        }\n").next().unwrap();
         assert!(handler.contains("\"failures\": run_failures(r)") && handler.contains("\"logTail\": r.get(\"logTail\")"));
         let defs = tool_defs();
@@ -7957,6 +8012,39 @@ mod tests {
         let url = git_remote(here).expect("este checkout tiene remote");
         assert!(github_repo_from_remote(&url).is_some(), "{url}");
         assert!(git_remote("/").is_err());
+    }
+
+    /// `APPIMAGE` y `OWD` sólo hablan de este programa cuando lo sirve la app.
+    /// Roturas que detecta: que el binario `cac-mcp` vigile la AppImage de
+    /// otro programa (avisaría de «cac se actualizó» al actualizarse un editor,
+    /// y callaría al actualizarse él) o lea el remote de la carpeta de ese
+    /// otro programa; y que `cac --mcp` deje de mirar su AppImage, que es lo
+    /// que el actualizador reemplaza (el ejecutable de dentro del montaje no
+    /// cambia nunca).
+    #[test]
+    fn only_the_desktop_app_trusts_the_appimage_variables() {
+        let exe = Some(std::path::PathBuf::from("/usr/local/bin/cac-mcp"));
+        let image = Some(std::ffi::OsString::from("/home/x/Editor.AppImage"));
+        assert_eq!(binary_path(Host::standalone(), image.clone(), exe.clone()), exe);
+        assert_eq!(original_dir(Host::standalone(), Some("/home/x".into())), None);
+
+        let app = Host::desktop_app("9.9.9");
+        assert_eq!(binary_path(app, image, exe.clone()), Some("/home/x/Editor.AppImage".into()));
+        assert_eq!(binary_path(app, None, exe.clone()), exe, "sin empaquetar, la app vigila su ejecutable");
+        assert_eq!(original_dir(app, Some("/home/x/repo".into())).as_deref(), Some("/home/x/repo"));
+    }
+
+    /// Cada quien anuncia su versión: el binario la de este crate, la app la
+    /// suya. Rotura que detecta: que `cac --mcp` pase a anunciar la del crate
+    /// (la release de la app escribe la suya en su `Cargo.toml`, y es la que
+    /// se le dice a quien pregunta qué tiene instalado).
+    #[test]
+    fn each_host_announces_its_own_version() {
+        assert_eq!(Host::standalone().version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(Host::desktop_app("9.9.9").version, "9.9.9");
+        // Sin `serve` por delante, quien sirve es el binario suelto.
+        let res = handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }), &Err("sin token".into())).unwrap();
+        assert_eq!(res["result"]["serverInfo"], json!({ "name": "cac", "version": env!("CARGO_PKG_VERSION") }));
     }
 
     /// Roturas que detecta: volver a leer `.` dentro de la AppImage (el

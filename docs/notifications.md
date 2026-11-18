@@ -252,7 +252,7 @@ dice *qué* pasó y esto dice *quién* lo hizo.
 
 Cómo viaja:
 
-1. El servidor MCP pone `X-Cac-Via: mcp` en cada llamada a cac (`app/src-tauri/src/mcp.rs`).
+1. El servidor MCP pone `X-Cac-Via: mcp` en cada llamada a cac (`mcp/src/server.rs`).
 2. `AuthMiddleware` la lee al contexto (`domain.WithVia`), después de validar el token.
 3. El servicio la saca con `domain.ViaFrom(ctx)` y se la pasa a `Notify`, que es
    un **parámetro** y no un campo escondido: el compilador no se olvida de los

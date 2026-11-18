@@ -1,0 +1,66 @@
+name: mcp
+
+# Las pruebas del servidor MCP (`mcp/`, el binario `cac-mcp`).
+#
+# Hasta command-and-control-388 el MCP vivía dentro de la app de Tauri
+# (`app/src-tauri/src/mcp.rs`) y sus pruebas no corrían en ningún CI:
+# compilarlas pedía WebKit y libwebrtc. Fuera de la app no enlaza ninguna
+# interfaz —lo guarda `tests/no_ui.rs`—, así que corre en un runner limpio.
+#
+# Sólo prueba y compila. **No publica nada**: ni release, ni etiqueta, ni
+# artefacto. Repartir el binario es un paso aparte.
+#
+# En cualquier rama, como `desktop.yml`. Y no sólo con `mcp/`: este crate
+# lleva dentro los hooks (`.claude/hooks`), lee los playbooks de
+# `infra/ansible` y la tabla de títulos del backend en sus pruebas, y su
+# guardián de `host` recorre también las fuentes de la app.
+on:
+  push:
+    paths:
+      - "mcp/**"
+      - "app/src-tauri/src/**"
+      - ".claude/hooks/**"
+      - "infra/ansible/**"
+      - "backend/internal/core/domain/testdata/headings.json"
+      - ".github/workflows/mcp.yml"
+  workflow_dispatch:
+  # Para quien quiera estas pruebas por delante de publicar algo.
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        working-directory: mcp
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Sin bibliotecas del sistema que instalar, a propósito: si un día hace
+      # falta añadir aquí un `apt-get install libgtk…`, es que al MCP le ha
+      # entrado una interfaz.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./mcp -> target"
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --locked --release
+
+      # Lo que promete el crate, medido sobre el binario y no sobre el
+      # manifiesto: ninguna biblioteca de interfaz entre las que carga.
+      - name: The binary links no UI
+        run: |
+          ./target/release/cac-mcp --version
+          ldd target/release/cac-mcp
+          if ldd target/release/cac-mcp | grep -Ei 'gtk|webkit|gdk|libX11|wayland|soup'; then
+            echo "cac-mcp enlaza una biblioteca de interfaz" >&2
+            exit 1
+          fi

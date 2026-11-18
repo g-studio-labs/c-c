@@ -132,7 +132,8 @@ correrla otra vez sin ensayar ni aprobar de nuevo. Antes, un rechazo de
 rechaza la conexión: suele contestar a la segunda. Lo vigilan
 `handler.TestARunThatNeverStartedKeepsTheGrant`,
 `provision_cli::tests::a_run_that_never_started_says_so`,
-`op_retry_tests::a_refused_1password_is_asked_again_but_nothing_else_is` y
+`op::op_retry_tests::a_refused_1password_is_asked_again_but_nothing_else_is` (los
+tres de Rust en `mcp/`) y
 `ServerProvision.test.tsx` («una que muere antes de arrancar Ansible»).
 
 **En la app también.** Con un manifiesto v2, «Aplicar» ya no aplica: ensaya y
@@ -143,6 +144,10 @@ v1, sin `risk`, sigue aplicando directo con su confirmación.)
 Lo vigilan `handler.TestAnAgentAsksAndOnlyAPersonApproves` (y sus hermanas en
 `provisioning_request_test.go`), `domain.TestOnlyACleanReadIsPreAuthorized`,
 `middleware.TestATokenConfiguresButNeverDeploys` (decidir no se abre a un
-token) y, en la app, `provision_cli::tests::a_request_only_ever_dry_runs`,
-`ansible::tests::the_app_rehearses_through_the_check_parameter`, `ServerConfig.test.tsx` («aplicar es ensayar y pedir») y
-`mcp::tests::the_server_config_tools_configure_but_never_apply`.
+token) y, en el crate del MCP (`mcp/`, que es donde vive Ansible desde
+command-and-control-388), `provision_cli::tests::a_request_only_ever_dry_runs`,
+`ansible::tests::the_app_rehearses_through_the_check_parameter` y
+`server::tests::the_server_config_tools_configure_but_never_apply`; en la app,
+`ansible::tests::the_window_command_hands_the_check_parameter_to_the_engine` (el
+comando de la ventana le pasa `check` al motor) y `ServerConfig.test.tsx`
+(«aplicar es ensayar y pedir»).

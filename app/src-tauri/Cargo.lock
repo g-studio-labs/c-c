@@ -125,6 +125,7 @@ dependencies = [
  "blake2",
  "block2",
  "cac-core",
+ "cac-mcp",
  "cpal",
  "crypto_box",
  "cuid2",
@@ -721,6 +722,21 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "unicode-normalization",
+]
+
+[[package]]
+name = "cac-mcp"
+version = "1.33.0"
+dependencies = [
+ "image",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tokio",
+ "uuid",
+ "webp",
 ]
 
 [[package]]
