@@ -987,6 +987,23 @@ mod tests {
                 .respond_with(ResponseTemplate::new(200).set_body_raw(frame.as_bytes().to_vec(), "text/event-stream").set_delay(Duration::from_millis(600)))
                 .up_to_n_times(1),
         );
+        // Como el servidor de verdad: desde que se dijo, las últimas líneas
+        // lo traen. Tras el evento la lista las vuelve a pedir; si el
+        // servidor de mentira contestara siempre lo de antes, esa relectura
+        // borraba la fila nueva, y con la máquina lenta del CI la prueba
+        // miraba después y fallaba.
+        let said_at = std::time::Instant::now() + Duration::from_millis(600);
+        server.mount(
+            get("/api/v1/chat/latest")
+                .respond_with(move |_: &wiremock::Request| {
+                    let mut lines = vec![latest("a", "u2", "Luis Mora", "user", "¿sale **hoy**?"), latest("g", "u1", "Ana Ruiz", "system", "Grabación lista")];
+                    if std::time::Instant::now() >= said_at {
+                        lines.push(latest("b", "u2", "Luis Mora", "user", "ya está subido"));
+                    }
+                    ok(json!(lines))
+                })
+                .with_priority(1),
+        );
         server.install(cx);
         let window = open(cx);
         enter(window, cx);
