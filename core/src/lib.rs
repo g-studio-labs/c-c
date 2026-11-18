@@ -23,6 +23,7 @@ pub mod mywork;
 pub mod nav;
 pub mod orgs;
 pub mod prefs;
+pub mod prose;
 pub mod session;
 pub mod storage;
 pub mod stream;
@@ -61,6 +62,7 @@ pub use mywork::{
 pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClick};
 pub use hue::{hue_index, HUES};
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
+pub use prose::prose_for_painting;
 pub use prefs::{first_spoken, folds_panel, is_dark, shortcut_text, KeysHeld, ThemePreference, WorkLayout};
 pub use session::Session;
 pub use tree::{

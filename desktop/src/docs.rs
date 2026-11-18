@@ -75,12 +75,14 @@ const PIECE_GAP: f32 = 12.;
 const READING_SIZE: f32 = 15.;
 
 /// A qué tamaño se pinta un título de lo que se lee, por su nivel:
-/// `text-lg`, y los 17 y 13 px de `.prose-doc .md-body h2` y `h3`.
+/// `text-lg`, y los 17 y 13 px de `.prose-doc .md-body h2` y `h3`. El de
+/// tercero se le da al pintor como de sexto (`cac_core::prose_for_painting`:
+/// es como sale apagado y en mayúsculas), así que el sexto mide lo mismo.
 fn heading_size(level: u8) -> f32 {
     match level {
         1 => 18.,
         2 => 17.,
-        3 => 13.,
+        3 | 6 => 13.,
         _ => READING_SIZE,
     }
 }
@@ -193,7 +195,9 @@ impl ReadingRows {
         let (muted, border, soft) = (theme.muted_foreground, theme.border, theme.muted);
         let said = cac_core::text_count(locale(cx), "work:decisions.sectionMark", piece.decisions.len() as i64);
 
-        let title: SharedString = piece.text.lines().next().unwrap_or("").trim_start_matches('#').replace(['*', '_', '`'], "").trim().to_string().into();
+        let title = piece.text.lines().next().unwrap_or("").trim_start_matches('#').replace(['*', '_', '`'], "").trim().to_string();
+        // El de tercer nivel se pinta en mayúsculas: se mide como se pinta.
+        let title: SharedString = if level == 3 { title.to_uppercase() } else { title }.into();
         let size = heading_size(level);
         let mut font = window.text_style().font();
         font.weight = FontWeight::SEMIBOLD;
@@ -1241,7 +1245,8 @@ impl DocsView {
     /// Un texto del documento, pintado, con sus enlaces seguidos por
     /// [`Self::follow_link`].
     fn doc_text(id: SharedString, markdown: String, style: TextViewStyle) -> TextView {
-        TextView::markdown(id, markdown).style(style).on_link_click(|url, _, _, cx| Self::follow_link(url, cx))
+        // Un título de tercer nivel, como etiqueta de sección (`.md-body h3`).
+        TextView::markdown(id, cac_core::prose_for_painting(&markdown)).style(style).on_link_click(|url, _, _, cx| Self::follow_link(url, cx))
     }
 
     /// El aviso de que un enlace no se pudo abrir: el de la app de siempre

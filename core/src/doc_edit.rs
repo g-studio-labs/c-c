@@ -319,6 +319,26 @@ impl DocsState {
     }
 }
 
+/// El texto desde su primera línea escrita. Uno que llega con líneas en
+/// blanco delante (escrito desde fuera, o migrado) se lee sin ellas —lo que
+/// se lee va recortado—, y el editor lo abría con dos renglones vacíos
+/// encima (visto en una captura, 18-nov-2026). Se escribe lo que se lee.
+/// La sangría de la primera línea escrita no se toca: puede ser código.
+fn from_first_written_line(body: &str) -> &str {
+    let mut rest = body;
+    while let Some((line, after)) = rest.split_once('\n') {
+        if !line.trim().is_empty() {
+            break;
+        }
+        rest = after;
+    }
+    if rest.trim().is_empty() {
+        ""
+    } else {
+        rest
+    }
+}
+
 /// Lo que contesta el servidor al guardar una pestaña: el documento entero.
 /// También dentro de un 409, con lo que hay ahora.
 #[derive(Debug, Default, Deserialize)]
@@ -434,12 +454,12 @@ impl Docs {
         // `editable` ya dijo que, si se lee una página, llegó.
         let mut edit = match &state.page {
             Some(view) if state.on_page() => {
-                DocEdit::begin(DocEditWhat::Page { id: view.page.id.clone() }, &view.page.title, &view.page.body, view.page.body_hash.clone())
+                DocEdit::begin(DocEditWhat::Page { id: view.page.id.clone() }, &view.page.title, from_first_written_line(&view.page.body), view.page.body_hash.clone())
             }
             _ => {
                 let tab = state.tabs.iter().find(|tab| tab.key == state.tab);
                 let (body, hash) = tab.map(|tab| (tab.body.as_str(), tab.body_hash.clone())).unwrap_or(("", None));
-                DocEdit::begin(DocEditWhat::Tab { key: state.tab.clone() }, "", body, hash)
+                DocEdit::begin(DocEditWhat::Tab { key: state.tab.clone() }, "", from_first_written_line(body), hash)
             }
         };
         if let Some(draft) = draft {
@@ -897,6 +917,22 @@ mod tests {
         let tabs = vec![DocTab { key: "overview".into(), body: "qué es".into(), ..DocTab::default() }];
         assert!(DocsState { loading: true, tabs, ..open() }.editable());
         assert!(!DocsState { page_id: Some("p1".into()), ..open() }.editable());
+    }
+
+    /// El editor abre el texto por su primera línea escrita.
+    ///
+    /// Roturas que atrapa: dos renglones vacíos encima del texto al abrir
+    /// el editor de un documento que los traía; comerse la sangría de la
+    /// primera línea (un bloque de código sangrado deja de serlo); dejar
+    /// espacios sueltos de un texto que no tiene nada escrito.
+    #[test]
+    fn the_editor_opens_at_the_first_written_line() {
+        assert_eq!(from_first_written_line("\n\n# Título\n\ntexto\n"), "# Título\n\ntexto\n");
+        assert_eq!(from_first_written_line("  \n\t\n    código\nmás"), "    código\nmás");
+        assert_eq!(from_first_written_line("sin nada delante\n\n"), "sin nada delante\n\n");
+        assert_eq!(from_first_written_line("\n  \n"), "");
+        assert_eq!(from_first_written_line("   "), "");
+        assert_eq!(from_first_written_line(""), "");
     }
 
     /// Lado a lado sólo donde caben los dos.

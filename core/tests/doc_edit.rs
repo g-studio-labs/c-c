@@ -311,6 +311,32 @@ async fn saving_a_tab_sends_its_text_and_the_version_it_came_from() {
     assert_eq!(docs.state().body(), "pasos");
 }
 
+/// Un texto guardado con líneas en blanco delante se abre en el editor por
+/// su primera línea escrita, y eso solo no cuenta como un cambio.
+///
+/// Roturas que atrapa: abrir el editor con renglones vacíos encima del
+/// texto; dar por cambiado —y preguntar «¿descartar?» al salir— un texto
+/// que nadie tocó.
+#[tokio::test]
+async fn text_saved_with_blank_lines_in_front_opens_at_its_first_line() {
+    let rig = rig().await;
+    rig.world.lock().unwrap().someone_saves_tab("overview", "\n\n## Qué es\n\nEl espacio.", "Luis Gil");
+    rig.world.lock().unwrap().someone_saves_page("p1", "\n\n## Capas\n\nTres.", "Luis Gil");
+    let docs = rig.core.docs();
+    docs.open("a").await;
+    assert!(docs.start_edit());
+    let edit = rig.edit();
+    assert_eq!(edit.body, "## Qué es\n\nEl espacio.");
+    assert!(!edit.is_dirty(), "abrir el editor ya cuenta como un cambio");
+    docs.cancel_edit();
+    assert_eq!(docs.state().edit, None, "salir sin tocar nada preguntó");
+
+    docs.open_page("p1").await;
+    assert!(docs.start_edit());
+    assert_eq!(rig.edit().body, "## Capas\n\nTres.");
+    assert!(!rig.edit().is_dirty());
+}
+
 /// Hay texto que perder cuando el borrador ya no es lo que se leyó; un
 /// editor abierto y sin tocar, o ya guardado, no tiene nada que perder. Y
 /// la pregunta de cerrar la ventana dice lo que se pierde.

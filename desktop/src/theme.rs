@@ -204,7 +204,9 @@ pub fn prose_with_links(
     use gpui_kit::{ParentElement, Styled};
     // `md-body text-sm leading-relaxed` (`Markdown.tsx`).
     gpui_kit::div().leading_sm().line_height(gpui_kit::relative(1.625)).child(
-        gpui_kit::component::text::TextView::markdown(id.into(), text.into())
+        // Un título de tercer nivel, como etiqueta de sección (`.md-body
+        // h3`: pequeño, en mayúsculas y apagado).
+        gpui_kit::component::text::TextView::markdown(id.into(), cac_core::prose_for_painting(&text.into()))
             .style(md_body_style(cx))
             .on_link_click(move |url, _, window, cx| follow(url, window, cx)),
     )
