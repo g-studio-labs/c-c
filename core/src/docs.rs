@@ -1,13 +1,18 @@
 //! La documentación de un nodo, para leerla.
 //!
 //! Cuelga de un nodo del árbol (espacio, carpeta o lista) y tiene cuatro
-//! pestañas fijas. Aquí sólo se lee: escribirla sigue en la app de siempre.
+//! pestañas fijas —la portada— más las páginas que cuelgan de ella (ver
+//! `doc_pages`). Aquí sólo se lee: escribirla sigue en la app de siempre.
 //!
 //! Qué documento hay abierto es también lo que contesta «¿qué está mirando?»
 //! a la regla del clic (`nav::tree_click`): con uno abierto se mira
 //! documentación, y un clic en el árbol abre la de ese nodo.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+
+use crate::doc_pages::{DocPageItem, DocPageView};
 
 use crate::mywork::day_and_month;
 use crate::nav::{docs_reachable_from_scope, Looking, NodeKind, TreeClick};
@@ -106,11 +111,39 @@ pub struct DocsState {
     pub error: Option<String>,
     pub tabs: Vec<DocTab>,
     pub decisions: Vec<DocDecision>,
+    /// Las páginas del documento, en el orden del servidor (por rango).
+    pub pages: Vec<DocPageItem>,
+    /// Por qué no llegó el árbol de páginas, si no llegó.
+    pub pages_error: Option<String>,
+    /// Si la hoja «Páginas» está abierta.
+    pub pages_shown: bool,
+    /// La página que se lee; `None` es la portada.
+    pub page_id: Option<String>,
+    pub page: Option<DocPageView>,
+    pub page_loading: bool,
+    pub page_error: Option<String>,
+    /// Las ramas del árbol de páginas plegadas o desplegadas a mano.
+    pub page_folds: HashMap<String, bool>,
 }
 
 impl Default for DocsState {
     fn default() -> Self {
-        Self { target: None, tab: DOC_TABS[0].to_string(), loading: false, error: None, tabs: Vec::new(), decisions: Vec::new() }
+        Self {
+            target: None,
+            tab: DOC_TABS[0].to_string(),
+            loading: false,
+            error: None,
+            tabs: Vec::new(),
+            decisions: Vec::new(),
+            pages: Vec::new(),
+            pages_error: None,
+            pages_shown: false,
+            page_id: None,
+            page: None,
+            page_loading: false,
+            page_error: None,
+            page_folds: HashMap::new(),
+        }
     }
 }
 
@@ -229,10 +262,11 @@ pub fn doc_headings(markdown: &str) -> Vec<DocHeading> {
 const TABS_WITH_CONTENTS: [&str; 2] = ["overview", "runbook"];
 
 impl DocsState {
-    /// El índice de lo que se lee: sólo donde aporta, y sólo si hay al menos
-    /// dos secciones entre las que saltar.
+    /// El índice de lo que se lee: sólo donde aporta (una página siempre;
+    /// de la portada, dos pestañas), y sólo si hay al menos dos secciones
+    /// entre las que saltar.
     pub fn contents(&self) -> Vec<DocHeading> {
-        if !TABS_WITH_CONTENTS.contains(&self.tab.as_str()) {
+        if !self.on_page() && !TABS_WITH_CONTENTS.contains(&self.tab.as_str()) {
             return Vec::new();
         }
         let headings = doc_headings(self.body());
@@ -258,16 +292,21 @@ impl DocsState {
         }
     }
 
-    /// El texto de la pestaña que se lee. Vacío si no tiene nada escrito, o
-    /// si el nodo todavía no tiene documento.
+    /// El texto de lo que se lee: el de la página abierta o, en la portada,
+    /// el de su pestaña. Vacío si no tiene nada escrito, o si todavía no
+    /// ha llegado.
     pub fn body(&self) -> &str {
+        if self.on_page() {
+            return self.page.as_ref().map(|view| view.page.body.trim()).unwrap_or("");
+        }
         self.tabs.iter().find(|tab| tab.key == self.tab).map(|tab| tab.body.trim()).unwrap_or("")
     }
 
     /// Las decisiones que siguen vigentes, y sólo en su pestaña. Una que otra
     /// dejó sin efecto no se enseña: leerla como vigente es peor que no verla.
     pub fn standing_decisions(&self) -> Vec<DocDecision> {
-        if self.tab != "decisions" {
+        // El registro es de la portada: una página no lo repite.
+        if self.on_page() || self.tab != "decisions" {
             return Vec::new();
         }
         self.decisions.iter().filter(|decision| decision.superseded_by_id.is_none()).cloned().collect()
@@ -277,6 +316,19 @@ impl DocsState {
     /// hay. No es lo mismo «no ha llegado», «se rompió» y «no hay nada
     /// escrito», y una página en blanco no distingue ninguna.
     pub fn empty_reason(&self) -> Option<&'static str> {
+        if self.on_page() {
+            // Una página tiene sus propios motivos: no se pudo abrir, no ha
+            // llegado, o está en blanco.
+            return if self.page_error.is_some() {
+                Some("work:docs.errPage")
+            } else if self.page.is_none() {
+                Some("work:tree.loading")
+            } else if self.body().is_empty() {
+                Some("work:docs.emptyPage")
+            } else {
+                None
+            };
+        }
         if self.loading && self.tabs.is_empty() {
             Some("work:tree.loading")
         } else if self.error.is_some() {
@@ -289,7 +341,7 @@ impl DocsState {
     }
 }
 
-fn kind_segment(kind: NodeKind) -> &'static str {
+pub(crate) fn kind_segment(kind: NodeKind) -> &'static str {
     match kind {
         NodeKind::Space => "space",
         NodeKind::Folder => "folder",
@@ -299,7 +351,7 @@ fn kind_segment(kind: NodeKind) -> &'static str {
 
 /// La documentación de este core.
 pub struct Docs {
-    core: Core,
+    pub(crate) core: Core,
 }
 
 impl Core {
@@ -358,7 +410,7 @@ impl Docs {
         self.core.inner.docs.lock().expect("docs lock").clone()
     }
 
-    fn update(&self, change: impl FnOnce(&mut DocsState)) {
+    pub(crate) fn update(&self, change: impl FnOnce(&mut DocsState)) {
         let state = {
             let mut state = self.core.inner.docs.lock().expect("docs lock");
             change(&mut state);
@@ -367,8 +419,12 @@ impl Docs {
         self.core.inner.listener.docs_changed(state);
     }
 
-    /// Abre la documentación de un nodo y la trae. Un id que no está en el
-    /// árbol no abre nada.
+    /// Abre la documentación de un nodo y la trae, con su árbol de páginas.
+    /// Un id que no está en el árbol no abre nada.
+    ///
+    /// Otro nodo empieza en su portada: la página que se leía es del
+    /// documento que se deja. El mismo nodo otra vez se queda donde estaba
+    /// —la página abierta, las ramas plegadas— y sólo se pone al día.
     pub async fn open(&self, id: &str) {
         let Some((kind, name)) = find_node(&self.core.tree().state().spaces, id) else { return };
         let target = DocTarget { kind, id: id.to_string(), name };
@@ -398,6 +454,14 @@ impl Docs {
                 state.error = Some(error.to_string());
                 state.loading = false;
             }),
+        }
+        self.reload_pages().await;
+        // La página que se leía, al día también; si ya no está en el árbol,
+        // lo de arriba ya volvió a la portada.
+        if let Some(page_id) = self.state().page_id {
+            if self.state().target.as_ref().map(|target| target.id.as_str()) == Some(id) {
+                self.load_page(&page_id).await;
+            }
         }
     }
 

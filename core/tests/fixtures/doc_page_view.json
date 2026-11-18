@@ -1,0 +1,52 @@
+{
+  "page": {
+    "id": "p2",
+    "createdAt": "2026-06-09T12:00:00Z",
+    "updatedAt": "2026-11-14T20:17:40Z",
+    "docId": "d1",
+    "orgId": "o1",
+    "parentId": "p1",
+    "title": "El core compartido",
+    "rank": "0.75",
+    "body": "## Qué es\n\nLa lógica que comparten las apps.",
+    "bodyHash": "abc123",
+    "updatedBy": "u1",
+    "updatedByName": "Ana Pérez",
+    "deletedAt": null,
+    "sections": [
+      {
+        "id": "s1",
+        "heading": "Qué es",
+        "level": 2,
+        "index": 0
+      }
+    ]
+  },
+  "breadcrumb": [
+    {
+      "id": "p1",
+      "title": "Arquitectura"
+    }
+  ],
+  "children": [
+    {
+      "id": "p3",
+      "parentId": "p2",
+      "rank": "0.5",
+      "title": "Los tipos",
+      "hasBody": true,
+      "updatedAt": "2026-11-14T20:17:40Z",
+      "deletedAt": "2026-09-30T00:00:00Z",
+      "subpages": 2
+    }
+  ],
+  "orgId": "o1",
+  "referencedFrom": [
+    {
+      "kind": "tab",
+      "title": "Command and control",
+      "where": "runbook",
+      "link": "/tasks?doc=space:s1\u0026tab=runbook"
+    }
+  ]
+}

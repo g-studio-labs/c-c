@@ -25,6 +25,7 @@ import (
 // Para regenerar a propósito: `UPDATE_CORE_FIXTURES=1 go test ./internal/core/domain -run TestTheCoreReadsWhatTheServerWrites`.
 func TestTheCoreReadsWhatTheServerWrites(t *testing.T) {
 	day := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
+	pageParent, pageID := "p1", "p2"
 	fixtures := map[string]any{
 		"open_task.json": OpenTask{
 			ID:            "0d6bf322-2267-4259-9b81-337575aca792",
@@ -121,6 +122,37 @@ func TestTheCoreReadsWhatTheServerWrites(t *testing.T) {
 			UpdatedBy:     "u1",
 			UpdatedByName: "Ana Pérez",
 			Sections:      []DocSectionView{{ID: "s1", Heading: "Desplegar", Level: 2, Index: 0}},
+		},
+		// Una página del documento, abierta: ella, sus migas, lo que cuelga
+		// de ella y lo que la enlaza. Dentro va también la fila del árbol
+		// (`DocPageTreeItem`), que es lo que contesta la lista de páginas.
+		"doc_page_view.json": DocPageView{
+			Page: &DocPage{
+				BaseModel: BaseModel{
+					ID:        "p2",
+					CreatedAt: time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC),
+					UpdatedAt: time.Date(2026, 11, 14, 20, 17, 40, 0, time.UTC),
+				},
+				DocID:         "d1",
+				OrgID:         "o1",
+				ParentID:      &pageParent,
+				Title:         "El core compartido",
+				Rank:          "0.75",
+				Body:          "## Qué es\n\nLa lógica que comparten las apps.",
+				BodyHash:      "abc123",
+				UpdatedBy:     "u1",
+				UpdatedByName: "Ana Pérez",
+				Sections:      []DocSectionView{{ID: "s1", Heading: "Qué es", Level: 2, Index: 0}},
+			},
+			Breadcrumb: []DocPageCrumb{{ID: "p1", Title: "Arquitectura"}},
+			Children: []DocPageTreeItem{{
+				ID: "p3", ParentID: &pageID, Rank: "0.5", Title: "Los tipos", HasBody: true,
+				UpdatedAt: time.Date(2026, 11, 14, 20, 17, 40, 0, time.UTC), DeletedAt: &day, Subpages: 2,
+			}},
+			OrgID: "o1",
+			ReferencedFrom: []DocBacklink{
+				{Kind: "tab", Title: "Command and control", Where: "runbook", Link: "/tasks?doc=space:s1&tab=runbook"},
+			},
 		},
 		"doc_decision.json": Decision{
 			BaseModel: BaseModel{

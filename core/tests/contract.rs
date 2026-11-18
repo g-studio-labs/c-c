@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 
 use cac_core::{
-    can_transition, canonical_priority, flow_for, open_subtasks_block, DocDecision, DocMark, DocTab, Flow, OpenTask, Organization, Session, SpaceTree, TaskDetail,
+    can_transition, canonical_priority, flow_for, open_subtasks_block, DocDecision, DocMark, DocPageView, DocTab, Flow, OpenTask, Organization, Session, SpaceTree, TaskDetail,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -295,6 +295,33 @@ fn a_doc_tab_and_a_decision_are_read_for_reading() {
     assert_eq!(decision.title, "La interfaz se construye con GPUI Kit");
     assert_eq!(decision.superseded_by_id.as_deref(), Some("dec2"));
     assert_eq!(decision.decided_at, "2026-09-30T00:00:00Z");
+}
+
+/// Una página abierta se lee con lo que se pinta de ella: su texto, sus
+/// migas, sus hijas (la misma fila que la lista de páginas) y lo que la
+/// enlaza. Lo que es de escribirla —el hash, las secciones con identidad—
+/// se deja fuera a propósito y se nombra.
+///
+/// Roturas que atrapa: `parentId`, `breadcrumb`, `children` o
+/// `referencedFrom` renombrados en Go (el árbol sale plano, o la página sin
+/// migas ni hijas, sin que nada falle); un campo nuevo de la fila del árbol
+/// que el core no lee.
+#[test]
+fn a_doc_page_is_read_with_its_trail_its_children_and_what_links_to_it() {
+    let view: DocPageView = reads_every_field_but(
+        &fixture("doc_page_view.json"),
+        &[
+            "orgId", "page.createdAt", "page.docId", "page.orgId", "page.rank", "page.bodyHash", "page.updatedBy", "page.deletedAt",
+            "page.sections",
+        ],
+    );
+    assert_eq!((view.page.id.as_str(), view.page.parent_id.as_deref()), ("p2", Some("p1")));
+    assert!(view.page.body.starts_with("## Qué es"));
+    assert_eq!(view.breadcrumb[0].title, "Arquitectura");
+    let child = &view.children[0];
+    assert_eq!((child.id.as_str(), child.parent_id.as_deref(), child.has_body, child.subpages), ("p3", Some("p2"), true, 2));
+    assert_eq!(view.referenced_from[0].place.as_deref(), Some("runbook"));
+    assert!(view.referenced_from[0].link.ends_with("tab=runbook"));
 }
 
 /// Rotura que atrapa: un campo que el servidor manda y el core no lee (la

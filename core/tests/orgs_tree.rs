@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use cac_core::{
-    doc_key, DocsState, Config, Connection, Core, Listener, Looking, NodeKind, OrgsState, ScopeKind, Session, Storage, TreeClick, TreeRow,
+    doc_key, DocsState, Config, Connection, Core, Listener, Locale, Looking, NodeKind, OrgsState, ScopeKind, Session, Storage, TreeClick, TreeRow,
     TreeState,
 };
 use wiremock::matchers::{method, path, query_param};
@@ -1025,4 +1025,423 @@ async fn a_blank_filter_is_the_usual_tree() {
     assert_eq!(tree.rows_matching("   "), tree.rows());
     assert_eq!(shape(&tree.rows_matching("")), [at("a", 0, false)]);
     assert!(tree.rows()[0].expandable);
+}
+
+// ── Las páginas de un documento ─────────────────────────────────────────
+
+fn page_item(id: &str, parent: Option<&str>, title: &str) -> serde_json::Value {
+    let mut item = serde_json::json!({ "id": id, "rank": "0.5", "title": title, "hasBody": true, "updatedAt": "2026-11-14T20:17:40Z" });
+    if let Some(parent) = parent {
+        item["parentId"] = serde_json::json!(parent);
+    }
+    item
+}
+
+/// El árbol de las pruebas, **en el orden en que lo manda el servidor**, que
+/// no es el alfabético: «Runbooks» va antes que «Arquitectura».
+fn page_tree() -> serde_json::Value {
+    serde_json::json!([
+        page_item("p-run", None, "Runbooks"),
+        page_item("p-arq", None, "Arquitectura"),
+        page_item("p-core", Some("p-arq"), "El core"),
+        page_item("p-app", Some("p-arq"), ""),
+        page_item("p-types", Some("p-core"), "Los tipos"),
+    ])
+}
+
+async fn mount_pages(server: &MockServer, kind: &str, id: &str, pages: serde_json::Value) {
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/docs/{kind}/{id}/pages")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": pages })))
+        .mount(server)
+        .await;
+}
+
+fn page_view(id: &str, title: &str, body: &str, trail: &[(&str, &str)], children: serde_json::Value, links: serde_json::Value) -> serde_json::Value {
+    let trail: Vec<_> = trail.iter().map(|(id, title)| serde_json::json!({ "id": id, "title": title })).collect();
+    serde_json::json!({
+        "page": { "id": id, "title": title, "body": body, "docId": "d1", "orgId": "o1", "updatedAt": "2026-11-14T20:17:40Z" },
+        "breadcrumb": trail, "children": children, "orgId": "o1", "referencedFrom": links,
+    })
+}
+
+async fn mount_page(server: &MockServer, kind: &str, owner: &str, view: serde_json::Value) {
+    let id = view["page"]["id"].as_str().unwrap().to_string();
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/docs/{kind}/{owner}/pages/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": view })))
+        .mount(server)
+        .await;
+}
+
+fn page_shape(state: &DocsState) -> Vec<(String, u32, bool)> {
+    state.page_rows(Locale::Es).into_iter().map(|row| (row.id, row.depth, row.open)).collect()
+}
+
+/// Un nodo con su documento, su árbol de páginas y la página «Los tipos».
+async fn docs_with_pages() -> Rig {
+    let rig = loaded_tree(vec![nested_space("a"), nested_space("b")]).await;
+    mount_doc(&rig.server, "folder", "f-a", doc(&[("overview", "la portada"), ("links", "## Uno\n\n## Dos")], serde_json::json!([]))).await;
+    mount_pages(&rig.server, "folder", "f-a", page_tree()).await;
+    let types = page_view(
+        "p-types",
+        "Los tipos",
+        "  ## Qué son\n\nEspejos.\n\n## Cómo se guardan\n",
+        &[("p-arq", "Arquitectura"), ("p-core", "El core")],
+        serde_json::json!([page_item("p-leaf", Some("p-types"), "")]),
+        serde_json::Value::Null,
+    );
+    mount_page(&rig.server, "folder", "f-a", types).await;
+    rig
+}
+
+/// Abrir un documento trae su árbol de páginas, por la clase y el id del
+/// nodo, y lo pinta en el orden del servidor, con cada página bajo su madre
+/// y todo plegado.
+///
+/// Roturas que atrapa: no pedir las páginas (la hoja sale vacía de un
+/// documento que las tiene); pedir las de una lista para una carpeta;
+/// ordenarlas por título en vez de dejarlas como las manda el servidor;
+/// pintar las hijas a la altura de la raíz, o todas desplegadas; una página
+/// sin título en blanco en vez de «Sin título».
+#[tokio::test]
+async fn a_doc_brings_its_pages_nested_and_in_the_servers_order() {
+    let rig = docs_with_pages().await;
+
+    rig.core.docs().open("f-a").await;
+
+    let state = rig.core.docs().state();
+    assert_eq!(state.pages.len(), 5);
+    assert_eq!(page_shape(&state), [at("p-run", 0, false), at("p-arq", 0, false)]);
+    let rows = state.page_rows(Locale::Es);
+    assert_eq!((rows[0].has_children, rows[1].has_children), (false, true));
+    assert!(!state.on_page() && state.body() == "la portada");
+
+    rig.core.docs().toggle_page("p-arq");
+    let state = rig.core.docs().state();
+    assert_eq!(page_shape(&state), [at("p-run", 0, false), at("p-arq", 0, true), at("p-core", 1, false), at("p-app", 1, false)]);
+    assert_eq!(state.page_rows(Locale::Es)[3].title, "Sin título");
+    assert_eq!(rig.recorder.docs.lock().unwrap().last(), Some(&state), "quien pinta no se enteró");
+
+    rig.core.docs().toggle_page("p-arq");
+    assert_eq!(page_shape(&rig.core.docs().state()).len(), 2, "plegar no pliega");
+}
+
+/// Abrir una página la pide por su id, la deja para leer con su título, sus
+/// migas y sus hijas, cierra la hoja y despliega en el árbol lo que lleva a
+/// ella. Lo que se pliega a mano sigue plegado; y la portada vuelve.
+///
+/// Roturas que atrapa: seguir leyendo la pestaña de la portada con una
+/// página abierta; no marcar en el árbol cuál se lee, o dejarla escondida
+/// tras un chevrón; que la hoja se quede abierta tras elegir; que plegar a
+/// mano no sirva mientras se lee una página de dentro; que «volver» deje la
+/// página puesta.
+#[tokio::test]
+async fn a_page_opens_to_be_read_and_the_tree_unfolds_to_it() {
+    let rig = docs_with_pages().await;
+    rig.core.docs().open("f-a").await;
+    rig.core.docs().show_pages().await;
+    assert!(rig.core.docs().state().pages_shown);
+
+    rig.core.docs().open_page("p-types").await;
+
+    let state = rig.core.docs().state();
+    assert!(state.on_page() && !state.pages_shown && !state.page_loading);
+    assert_eq!(state.body(), "## Qué son\n\nEspejos.\n\n## Cómo se guardan");
+    assert_eq!(state.empty_reason(), None);
+    assert_eq!(state.page_title(Locale::Es).as_deref(), Some("Los tipos"));
+    let trail: Vec<String> = state.page_trail(Locale::Es).into_iter().map(|crumb| crumb.id).collect();
+    assert_eq!(trail, ["p-arq", "p-core"]);
+    let children: Vec<(String, String)> = state.page_children(Locale::Es).into_iter().map(|child| (child.id, child.title)).collect();
+    assert_eq!(children, [("p-leaf".to_string(), "Sin título".to_string())]);
+    assert_eq!(
+        page_shape(&state),
+        [at("p-run", 0, false), at("p-arq", 0, true), at("p-core", 1, true), at("p-types", 2, false), at("p-app", 1, false)]
+    );
+    let active: Vec<String> = state.page_rows(Locale::Es).into_iter().filter(|row| row.active).map(|row| row.id).collect();
+    assert_eq!(active, ["p-types"]);
+    assert_eq!(rig.recorder.docs.lock().unwrap().last(), Some(&state), "quien pinta no se enteró");
+
+    rig.core.docs().toggle_page("p-arq");
+    assert_eq!(page_shape(&rig.core.docs().state()), [at("p-run", 0, false), at("p-arq", 0, false)]);
+
+    rig.core.docs().close_page();
+    let state = rig.core.docs().state();
+    assert!(!state.on_page() && state.page.is_none());
+    assert_eq!(state.body(), "la portada");
+}
+
+/// Una página lleva índice esté la portada en la pestaña que esté, no
+/// repite el registro de decisiones, y mientras llega dice su título y sus
+/// migas con lo que sabe el árbol.
+///
+/// Roturas que atrapa: una página sin índice por haber dejado la portada en
+/// «Enlaces»; las decisiones de la portada bajo cada página; una página sin
+/// nombre ni migas hasta que contesta el servidor; el texto de la página
+/// anterior bajo el título de la que todavía no ha llegado.
+#[tokio::test]
+async fn a_page_has_its_own_contents_and_its_name_before_its_text() {
+    let rig = docs_with_pages().await;
+    let decisions = serde_json::json!([{ "id": "d1", "title": "Vigente", "body": "", "decidedAt": "2026-10-30T00:00:00Z" }]);
+    mount_doc(&rig.server, "space", "a", doc(&[("overview", "portada")], decisions)).await;
+    mount_pages(&rig.server, "space", "a", page_tree()).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/docs/space/a/pages/p-types"))
+        .respond_with(
+            ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(200)).set_body_json(serde_json::json!({
+                "success": true,
+                "data": page_view("p-types", "Los tipos", "## Uno\n\n## Dos", &[("p-arq", "Arquitectura"), ("p-core", "El core")], serde_json::Value::Null, serde_json::Value::Null),
+            })),
+        )
+        .mount(&rig.server)
+        .await;
+    mount_page(&rig.server, "space", "a", page_view("p-run", "Runbooks", "lo de antes", &[], serde_json::Value::Null, serde_json::Value::Null)).await;
+    rig.core.docs().open("a").await;
+    rig.core.docs().show_tab("decisions");
+    assert_eq!(rig.core.docs().state().standing_decisions().len(), 1);
+    rig.core.docs().open_page("p-run").await;
+    assert_eq!(rig.core.docs().state().body(), "lo de antes");
+
+    let docs = rig.core.docs();
+    let opening = tokio::spawn(async move { docs.open_page("p-types").await });
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    let arriving = rig.core.docs().state();
+    assert!(arriving.page_loading && arriving.page.is_none());
+    assert_eq!(arriving.body(), "", "se lee la página anterior bajo el título de la que llega");
+    assert_eq!(arriving.empty_reason(), Some("work:tree.loading"));
+    assert_eq!(arriving.page_title(Locale::Es).as_deref(), Some("Los tipos"));
+    let trail: Vec<String> = arriving.page_trail(Locale::Es).into_iter().map(|crumb| crumb.title).collect();
+    assert_eq!(trail, ["Arquitectura", "El core"]);
+
+    opening.await.unwrap();
+    let state = rig.core.docs().state();
+    assert!(state.standing_decisions().is_empty(), "el registro de la portada sale bajo la página");
+    assert_eq!(state.contents().len(), 2);
+    assert!(state.page_children(Locale::Es).is_empty());
+}
+
+/// Una página en blanco dice que está vacía, y una que no se pudo abrir
+/// dice que no se pudo: ninguna de las dos enseña el texto de la portada ni
+/// el de la página anterior.
+///
+/// Roturas que atrapa: una página rota en blanco, o diciendo «vacía»; el
+/// texto de la página de antes bajo el título de la que falló.
+#[tokio::test]
+async fn an_empty_page_and_a_failed_one_say_which_they_are() {
+    let rig = docs_with_pages().await;
+    mount_page(&rig.server, "folder", "f-a", page_view("p-app", "", "  \n", &[("p-arq", "Arquitectura")], serde_json::json!([]), serde_json::json!([]))).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/docs/folder/f-a/pages/p-run"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({ "success": false, "message": "roto" })))
+        .mount(&rig.server)
+        .await;
+    rig.core.docs().open("f-a").await;
+
+    rig.core.docs().open_page("p-app").await;
+    let state = rig.core.docs().state();
+    assert_eq!(state.empty_reason(), Some("work:docs.emptyPage"));
+    assert_eq!(state.page_title(Locale::Es).as_deref(), Some("Sin título"));
+
+    rig.core.docs().open_page("p-types").await;
+    rig.core.docs().open_page("p-run").await;
+    let state = rig.core.docs().state();
+    assert!(state.on_page() && state.page_error.is_some() && !state.page_loading);
+    assert_eq!(state.empty_reason(), Some("work:docs.errPage"));
+    assert_eq!(state.body(), "", "sigue el texto de la página anterior");
+    assert_eq!(state.page_title(Locale::Es).as_deref(), Some("Runbooks"));
+
+    // Abrir otra que sí llega quita el fallo.
+    rig.core.docs().open_page("p-types").await;
+    assert_eq!(rig.core.docs().state().empty_reason(), None);
+}
+
+/// Una página que deja de existir mientras se lee devuelve a la portada al
+/// volver a traer el árbol; y una que ya no existía al pulsarla dice que no
+/// se pudo abrir y desaparece del árbol.
+///
+/// Roturas que atrapa: seguir leyendo una página que alguien tiró, con un
+/// árbol donde ya no está; pulsar una fila vieja y quedarse en «cargando»
+/// para siempre, o con la fila todavía ofrecida.
+#[tokio::test]
+async fn a_page_that_is_gone_is_not_kept_on_screen() {
+    let rig = docs_with_pages().await;
+    rig.core.docs().open("f-a").await;
+    rig.core.docs().open_page("p-types").await;
+    assert!(rig.core.docs().state().on_page());
+
+    // Alguien tira «El core» con lo que cuelga de ella.
+    rig.server.reset().await;
+    mount_pages(&rig.server, "folder", "f-a", serde_json::json!([page_item("p-run", None, "Runbooks"), page_item("p-arq", None, "Arquitectura")])).await;
+    rig.core.docs().show_pages().await;
+
+    let state = rig.core.docs().state();
+    assert!(!state.on_page() && state.page.is_none(), "sigue en una página que ya no existe");
+    assert_eq!(state.pages.len(), 2);
+    assert!(state.pages_shown);
+
+    // Y una fila de un árbol viejo: el servidor contesta 404.
+    rig.server.reset().await;
+    mount_pages(&rig.server, "folder", "f-a", serde_json::json!([page_item("p-run", None, "Runbooks")])).await;
+    rig.core.docs().open_page("p-arq").await;
+    let state = rig.core.docs().state();
+    assert_eq!(state.empty_reason(), Some("work:docs.errPage"));
+    assert!(!state.page_loading);
+    assert_eq!(page_shape(&state), [at("p-run", 0, false)], "sigue ofreciendo la que no existe");
+    assert_eq!(state.page_title(Locale::Es), None, "le inventa un título a una página de la que no sabe nada");
+
+    // Un árbol que no llega no borra el que había, y lo dice.
+    rig.server.reset().await;
+    rig.core.docs().reload_pages().await;
+    let state = rig.core.docs().state();
+    assert!(state.pages_error.is_some());
+    assert_eq!(state.pages.len(), 1);
+}
+
+/// Otro nodo empieza en su portada, con sus páginas y no las del anterior;
+/// el mismo nodo otra vez se queda en la página que se leía. Y una página
+/// que llega tarde, de un nodo que ya no es el que se mira, no se pone.
+///
+/// Roturas que atrapa: leer la página de una carpeta bajo el nombre de otro
+/// nodo; el árbol de páginas del documento anterior en la hoja del nuevo;
+/// perder la página al volver a pulsar el nodo en que se está, o quedarse
+/// con su texto viejo; una
+/// respuesta lenta que pinta su página encima de la portada de otro nodo.
+#[tokio::test]
+async fn another_node_starts_at_its_home_and_the_same_one_keeps_its_page() {
+    let rig = docs_with_pages().await;
+    mount_doc(&rig.server, "space", "b", doc(&[("overview", "la de b")], serde_json::json!([]))).await;
+    mount_pages(&rig.server, "space", "b", serde_json::json!([page_item("p-b", None, "De b")])).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/docs/folder/f-a/pages/p-core"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(250)).set_body_json(
+            serde_json::json!({ "success": true, "data": page_view("p-core", "El core", "tarde", &[], serde_json::Value::Null, serde_json::Value::Null) }),
+        ))
+        .mount(&rig.server)
+        .await;
+    rig.core.docs().open("f-a").await;
+    rig.core.docs().open_page("p-types").await;
+    rig.core.docs().toggle_page("p-arq");
+
+    rig.core.docs().open("f-a").await;
+    let state = rig.core.docs().state();
+    assert_eq!(state.page_id.as_deref(), Some("p-types"), "volver a abrir el mismo nodo perdió la página");
+    assert!(state.body().starts_with("## Qué son"));
+    assert_eq!(page_shape(&state).len(), 2, "lo plegado a mano se desplegó");
+    let asked = rig.server.received_requests().await.unwrap();
+    let times = asked.iter().filter(|request| request.url.path() == "/api/v1/docs/folder/f-a/pages/p-types").count();
+    assert_eq!(times, 2, "volver a abrir el nodo no puso al día la página que se lee");
+
+    let docs = rig.core.docs();
+    let slow = tokio::spawn(async move { docs.open_page("p-core").await });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    rig.core.docs().open("b").await;
+    slow.await.unwrap();
+
+    let state = rig.core.docs().state();
+    assert_eq!(state.target.as_ref().unwrap().id, "b");
+    assert!(!state.on_page() && state.page.is_none(), "la página de otro nodo se puso encima");
+    assert_eq!(state.body(), "la de b");
+    assert_eq!(page_shape(&state), [at("p-b", 0, false)]);
+    let asked: Vec<String> = rig.server.received_requests().await.unwrap().iter().map(|request| request.url.path().to_string()).collect();
+    assert!(asked.contains(&"/api/v1/docs/space/b/pages".to_string()), "no pidió las páginas del nodo nuevo: {asked:?}");
+}
+
+/// Lo que enlaza a una página se dice como en la app de siempre, y de ello
+/// sólo es un sitio al que ir **otra página de este mismo documento**.
+///
+/// Roturas que atrapa: una pestaña dicha con su clave cruda («runbook») o
+/// sin decir de qué nodo es; ofrecer abrir aquí la página de otro documento
+/// (se pediría a este nodo y fallaría) o una tarea; una página sin título
+/// en blanco; no distinguir una tarea de una página; un ancla (`#…`) tomada
+/// por parte del id de la página, que entonces no existe.
+#[tokio::test]
+async fn what_links_to_a_page_is_said_and_only_a_page_of_this_doc_is_a_place_to_go() {
+    let rig = docs_with_pages().await;
+    let links = serde_json::json!([
+        { "kind": "page", "title": "El core", "where": "Carpeta", "link": "/tasks?doc=folder:f-a&page=p-core" },
+        { "kind": "page", "title": "", "where": "Otro nodo", "link": "/tasks?doc=space:b&page=p-b" },
+        { "kind": "tab", "title": "Carpeta", "where": "runbook", "link": "/tasks?doc=folder:f-a&tab=runbook" },
+        { "kind": "task", "title": "Subir el backend", "where": "tasks", "link": "/tasks?task=t1" },
+    ]);
+    mount_page(&rig.server, "folder", "f-a", page_view("p-run", "Runbooks", "texto", &[], serde_json::json!([]), links)).await;
+    rig.core.docs().open("f-a").await;
+    rig.core.docs().open_page("p-run").await;
+
+    let said: Vec<(bool, String, Option<String>, Option<String>)> =
+        rig.core.docs().state().page_backlinks(Locale::Es).into_iter().map(|row| (row.from_task, row.title, row.place, row.page_id)).collect();
+    // Lo mismo vale para un enlace escrito en el texto de la página.
+    let state = rig.core.docs().state();
+    assert_eq!(state.page_for_link("/tasks?doc=folder:f-a&page=p-core#que-es").as_deref(), Some("p-core"));
+    assert_eq!(state.page_for_link("https://cac.example/tasks?doc=folder:f-a&section=s1&page=p-core").as_deref(), Some("p-core"));
+    for elsewhere in ["/tasks?doc=space:b&page=p-b", "/tasks?doc=folder:f-a&tab=runbook", "/tasks?task=t1", "https://example.com/page=p-core", "/tasks?doc=folder:f-a&page="] {
+        assert_eq!(state.page_for_link(elsewhere), None, "{elsewhere}");
+    }
+    assert_eq!(
+        said,
+        [
+            (false, "El core".to_string(), Some("Carpeta".to_string()), Some("p-core".to_string())),
+            (false, "Sin título".to_string(), Some("Otro nodo".to_string()), None),
+            (false, "Carpeta · Runbook".to_string(), None, None),
+            (true, "Subir el backend".to_string(), Some("tasks".to_string()), None),
+        ]
+    );
+}
+
+/// El árbol de páginas de un nodo que llega tarde, cuando ya se mira otro,
+/// no se pone.
+///
+/// Rotura que atrapa: pulsar dos nodos seguidos y ver en la hoja del
+/// segundo las páginas del primero, que al pulsarlas se piden al que no es.
+#[tokio::test]
+async fn a_late_page_tree_for_another_node_is_dropped() {
+    let rig = loaded_tree(vec![nested_space("a"), nested_space("b")]).await;
+    mount_doc(&rig.server, "space", "a", doc(&[("overview", "la de a")], serde_json::json!([]))).await;
+    mount_doc(&rig.server, "space", "b", doc(&[("overview", "la de b")], serde_json::json!([]))).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/docs/space/a/pages"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(300)).set_body_json(serde_json::json!({ "success": true, "data": page_tree() })))
+        .mount(&rig.server)
+        .await;
+    mount_pages(&rig.server, "space", "b", serde_json::json!([page_item("p-b", None, "De b")])).await;
+
+    let docs = rig.core.docs();
+    let slow = tokio::spawn(async move { docs.open("a").await });
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    assert_eq!(rig.core.docs().state().body(), "la de a", "la prueba no llegó a esperar por las páginas");
+    rig.core.docs().open("b").await;
+    slow.await.unwrap();
+
+    assert_eq!(page_shape(&rig.core.docs().state()), [at("p-b", 0, false)]);
+}
+
+/// Poner al día la página que se lee y que falle no la quita de delante.
+///
+/// Rotura que atrapa: un tropiezo de red al volver a pulsar el nodo cambia
+/// lo que se estaba leyendo por «no se pudo abrir esta página».
+#[tokio::test]
+async fn a_refresh_that_fails_keeps_what_was_being_read() {
+    let rig = loaded_tree(vec![nested_space("a")]).await;
+    mount_doc(&rig.server, "space", "a", doc(&[("overview", "portada")], serde_json::json!([]))).await;
+    mount_pages(&rig.server, "space", "a", page_tree()).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/docs/space/a/pages/p-run"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({ "success": true, "data": page_view("p-run", "Runbooks", "lo leído", &[], serde_json::Value::Null, serde_json::Value::Null) }),
+        ))
+        .up_to_n_times(1)
+        .mount(&rig.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/docs/space/a/pages/p-run"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({ "success": false, "message": "roto" })))
+        .mount(&rig.server)
+        .await;
+    rig.core.docs().open("a").await;
+    rig.core.docs().open_page("p-run").await;
+
+    rig.core.docs().open("a").await;
+
+    let state = rig.core.docs().state();
+    assert_eq!((state.body(), state.empty_reason()), ("lo leído", None));
+    assert!(!state.page_loading);
 }

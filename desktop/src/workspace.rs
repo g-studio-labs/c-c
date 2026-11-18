@@ -125,7 +125,7 @@ impl Workspace {
         let on_focus_lost = cx.on_focus_lost(window, |this, window, cx| window.focus(&this.focus_anchor, cx));
         Self {
             my_work: cx.new(|cx| MyWorkView::new(window, cx)),
-            docs: cx.new(|_| DocsView),
+            docs: cx.new(DocsView::new),
             task: cx.new(|cx| TaskView::new(window, cx)),
             tree_filter: cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)),
             // Como se dejó en esta máquina la última vez.
@@ -1818,6 +1818,286 @@ mod tests {
         wait_until(cx, "sale la decisión vigente", |cx| on_screen(window, "doc-decision-d1", cx));
         assert!(!on_screen(window, "doc-decision-d0", cx), "pinta una decisión que otra dejó sin efecto");
         assert!(!on_screen(window, "doc-empty", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    // ── Las páginas de un documento ─────────────────────────────────────
+
+    fn page_item(id: &str, parent: Option<&str>, title: &str) -> serde_json::Value {
+        let mut item = json!({ "id": id, "rank": "0.5", "title": title, "hasBody": true, "updatedAt": "2026-11-14T20:17:40Z" });
+        if let Some(parent) = parent {
+            item["parentId"] = json!(parent);
+        }
+        item
+    }
+
+    fn page_view(id: &str, title: &str, body: &str, trail: serde_json::Value, children: serde_json::Value, links: serde_json::Value) -> serde_json::Value {
+        json!({
+            "page": { "id": id, "title": title, "body": body, "docId": "d1", "orgId": "o1", "updatedAt": "2026-11-14T20:17:40Z" },
+            "breadcrumb": trail, "children": children, "orgId": "o1", "referencedFrom": links,
+        })
+    }
+
+    /// El servidor de la documentación, con las páginas de la carpeta `f-a`:
+    /// «Runbooks» (vacía) y «Arquitectura», que lleva dentro «El core», que
+    /// lleva dentro «Los tipos». En ese orden, que no es el alfabético. «El
+    /// core» está enlazada desde «Los tipos» y desde una tarea; «Rota» no se
+    /// puede abrir.
+    fn server_with_pages() -> FakeServer {
+        let server = server_with_docs();
+        let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+        let tree = json!([
+            page_item("p-run", None, "Runbooks"),
+            page_item("p-arq", None, "Arquitectura"),
+            page_item("p-core", Some("p-arq"), "El core"),
+            page_item("p-types", Some("p-core"), "Los tipos"),
+            page_item("p-bad", None, "Rota"),
+        ]);
+        server.mount(get("/api/v1/docs/folder/f-a/pages").respond_with(ok(tree)));
+        let links = json!([
+            { "kind": "page", "title": "Los tipos", "where": "Planta", "link": "/tasks?doc=folder:f-a&page=p-types" },
+            { "kind": "task", "title": "Subir el backend", "where": "tasks", "link": "/tasks?task=t1" },
+        ]);
+        let pages = [
+            page_view("p-run", "Runbooks", "", json!([]), json!([]), json!([])),
+            page_view("p-arq", "Arquitectura", "## Capas\n\nTres.", json!([]), json!([page_item("p-core", Some("p-arq"), "El core")]), json!([])),
+            page_view(
+                "p-core",
+                "El core",
+                "## Qué es\n\nLo compartido.",
+                json!([{ "id": "p-arq", "title": "Arquitectura" }]),
+                json!([page_item("p-types", Some("p-core"), "Los tipos")]),
+                links,
+            ),
+            page_view(
+                "p-types",
+                "Los tipos",
+                "Espejos.",
+                json!([{ "id": "p-arq", "title": "Arquitectura" }, { "id": "p-core", "title": "El core" }]),
+                json!([]),
+                json!([]),
+            ),
+        ];
+        for page in pages {
+            let route = format!("/api/v1/docs/folder/f-a/pages/{}", page["page"]["id"].as_str().unwrap());
+            server.mount(get(&route).respond_with(ok(page)));
+        }
+        server
+    }
+
+    fn page_open(cx: &mut TestAppContext) -> Option<String> {
+        cx.update(|cx| Backend::snapshot(cx).read(cx).docs.page_id.clone())
+    }
+
+    fn place_on_screen(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> (f32, f32, f32) {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let bounds = window.try_find(id).expect("no está a la vista").bounds();
+            (f32::from(bounds.origin.x), f32::from(bounds.origin.y), f32::from(bounds.size.width))
+        })
+        .unwrap()
+    }
+
+    /// La documentación de la carpeta, con su hoja «Páginas» abierta.
+    fn open_pages_sheet(window: AnyWindowHandle, cx: &mut TestAppContext) {
+        open_folder_docs(window, cx);
+        wait_until(cx, "llega su documentación", |cx| on_screen(window, "doc-body", cx));
+        click(window, "doc-pages", cx);
+        wait_until(cx, "sale la hoja con sus páginas", |cx| on_screen(window, "doc-page-row-p-arq", cx));
+    }
+
+    /// El botón de páginas abre su árbol —la portada y las páginas en el
+    /// orden del servidor, las de dentro plegadas y con su sangría—, una
+    /// página se abre y se lee con sus migas, su título y lo que tiene
+    /// dentro, sin las pestañas de la portada, y de ella se va a una hija y
+    /// se vuelve a la portada.
+    ///
+    /// Roturas que atrapa: el botón pintado que no hace nada («no vi las
+    /// páginas»); las páginas por orden alfabético; una página de dentro a
+    /// la altura de su madre; que el chevrón abra la página o cierre la
+    /// hoja en vez de desplegar; la hoja que se queda puesta tras elegir;
+    /// las pestañas de la portada sobre una página; migas o hijas que no
+    /// llevan a ningún sitio; no poder volver a la portada; abrir una página
+    /// desde el pie de otra y aparecer a media página, donde se estaba.
+    #[gpui_kit::test]
+    fn the_pages_button_opens_the_tree_and_a_page_is_read(cx: &mut TestAppContext) {
+        let server = server_with_pages();
+        server.install(cx);
+        let window = open(cx);
+        open_pages_sheet(window, cx);
+
+        assert!(on_screen(window, "doc-pages-home", cx), "falta la portada en la hoja");
+        assert!(!on_screen(window, "doc-page-row-p-core", cx), "pinta lo de dentro de una página plegada");
+        let (run, arq) = (place_on_screen(window, "doc-page-row-p-run", cx), place_on_screen(window, "doc-page-row-p-arq", cx));
+        assert!(run.1 < arq.1, "las páginas no salen en el orden del servidor");
+
+        click(window, "doc-page-toggle-p-arq", cx);
+        wait_until(cx, "despliega lo que tiene dentro", |cx| on_screen(window, "doc-page-row-p-core", cx));
+        settle_frames(window, cx);
+        assert!(page_open(cx).is_none(), "el chevrón abrió la página");
+        assert!(on_screen(window, "doc-pages-sheet", cx), "desplegar cerró la hoja");
+        let (outer, inner) = (place_on_screen(window, "doc-page-toggle-p-arq", cx), place_on_screen(window, "doc-page-toggle-p-core", cx));
+        assert_eq!(inner.0 - outer.0, 12., "la de dentro no va sangrada bajo su madre");
+
+        click(window, "doc-page-row-p-core", cx);
+        wait_until(cx, "se lee la página", |cx| on_screen(window, "doc-page-child-p-types", cx));
+        assert!(!on_screen(window, "doc-pages-sheet", cx), "la hoja sigue puesta tras elegir");
+        assert!(!on_screen(window, "doc-tab-overview", cx), "las pestañas de la portada siguen sobre la página");
+        // `doc-scroll-<página>`: cada página lleva su propio desplazamiento.
+        for id in ["doc-page-title", "doc-body", "doc-page-crumb-home", "doc-page-crumb-p-arq", "doc-scroll-p-core"] {
+            assert!(on_screen(window, id, cx), "falta {id}");
+        }
+
+        click(window, "doc-page-child-p-types", cx);
+        wait_until(cx, "abre la de dentro", |cx| on_screen(window, "doc-page-crumb-p-core", cx));
+        click(window, "doc-page-crumb-p-arq", cx);
+        wait_until(cx, "la miga lleva a su página", |cx| on_screen(window, "doc-page-child-p-core", cx));
+        assert_eq!(page_open(cx).as_deref(), Some("p-arq"));
+
+        click(window, "doc-page-crumb-home", cx);
+        wait_until(cx, "vuelve a la portada", |cx| on_screen(window, "doc-tab-overview", cx));
+        assert!(!on_screen(window, "doc-page-title", cx) && page_open(cx).is_none());
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// La hoja tapa la ventana entera, con su panel de 320 px a la derecha,
+    /// y se cierra con la equis, con Escape, pulsando fuera o eligiendo la
+    /// portada.
+    ///
+    /// Roturas que atrapa: una hoja que deja el panel lateral al aire (se
+    /// pulsa otro nodo con ella abierta); una hoja de la que no se sale sin
+    /// elegir una página; Escape sin efecto por no tener el foco.
+    #[gpui_kit::test]
+    fn the_pages_sheet_covers_the_window_and_closes_four_ways(cx: &mut TestAppContext) {
+        let server = server_with_pages();
+        server.install(cx);
+        let window = open(cx);
+        open_pages_sheet(window, cx);
+        let shown = |cx: &mut TestAppContext| cx.update(|cx| Backend::snapshot(cx).read(cx).docs.pages_shown);
+        let reopen = |cx: &mut TestAppContext| {
+            click(window, "doc-pages", cx);
+            wait_until(cx, "vuelve a salir la hoja", |cx| on_screen(window, "doc-pages-sheet", cx));
+        };
+
+        let (veil, sheet) = (place_on_screen(window, "doc-pages-veil", cx), place_on_screen(window, "doc-pages-sheet", cx));
+        assert_eq!((veil.0, veil.1, veil.2), (0., 0., 1100.), "el velo no tapa la ventana entera");
+        assert_eq!((sheet.0, sheet.2), (780., 320.), "el panel no está a la derecha con su ancho");
+
+        click(window, "doc-pages-close", cx);
+        wait_until(cx, "la equis la cierra", |cx| !on_screen(window, "doc-pages-sheet", cx));
+
+        reopen(cx);
+        press(window, "escape", cx);
+        wait_until(cx, "Escape la cierra", |cx| !shown(cx));
+
+        reopen(cx);
+        // El centro del velo cae fuera del panel, que es el tercio derecho.
+        click(window, "doc-pages-veil", cx);
+        wait_until(cx, "pulsar fuera la cierra", |cx| !shown(cx));
+
+        reopen(cx);
+        click(window, "doc-page-row-p-run", cx);
+        wait_until(cx, "abre la página", |cx| on_screen(window, "doc-page-title", cx));
+        reopen(cx);
+        click(window, "doc-pages-home", cx);
+        wait_until(cx, "la portada cierra la hoja y la página", |cx| !shown(cx) && page_open(cx).is_none());
+        assert!(on_screen(window, "doc-tab-overview", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Lo que la app de siempre tiene alrededor de las páginas y aquí
+    /// todavía no se hace está pintado en su sitio: crear, la papelera y el
+    /// menú en la hoja; editar, el historial, tirarla y «página nueva
+    /// dentro» en una página; las plantillas y «escribirlo» en una vacía. Y
+    /// una que no se pudo abrir lo dice, sin pie ni secciones de una página
+    /// que no hay.
+    ///
+    /// Roturas que atrapa: dejar fuera esas piezas por no tener aún qué
+    /// hacer con ellas; ofrecer «editar» en una página vacía; una página
+    /// rota en blanco, o con el pie y «páginas dentro» de otra, o con el
+    /// pie del registro de decisiones de la portada.
+    #[gpui_kit::test]
+    fn what_is_not_here_yet_around_pages_is_painted(cx: &mut TestAppContext) {
+        let server = server_with_pages();
+        server.install(cx);
+        let window = open(cx);
+        open_pages_sheet(window, cx);
+        for id in ["doc-pages-new", "doc-pages-trash", "doc-page-new-p-arq", "doc-page-menu-p-arq"] {
+            assert!(on_screen(window, id, cx), "falta {id}");
+        }
+        assert!(!on_screen(window, "doc-pages-error", cx), "dice que el árbol falló cuando llegó");
+        // La portada, en el registro: su pie es «apuntar una decisión», que
+        // no es de ninguna página.
+        cx.update(|cx| Backend::core(cx).docs().show_tab("decisions"));
+
+        click(window, "doc-page-row-p-arq", cx);
+        wait_until(cx, "se lee la página", |cx| on_screen(window, "doc-page-child-p-core", cx));
+        for id in ["doc-edit", "doc-page-history", "doc-page-trash", "doc-page-new-child", "doc-page-children"] {
+            assert!(on_screen(window, id, cx), "falta {id}");
+        }
+        assert!(!on_screen(window, "doc-page-backlinks", cx), "«referenciado desde» sin nada que la enlace");
+
+        cx.update(|cx| Backend::run(cx, |core| async move { core.docs().open_page("p-run").await }));
+        wait_until(cx, "la vacía ofrece por dónde empezar", |cx| on_screen(window, "doc-page-template-component", cx));
+        for id in ["doc-empty", "doc-page-template-procedure", "doc-write", "doc-page-history", "doc-page-children"] {
+            assert!(on_screen(window, id, cx), "falta {id}");
+        }
+        assert!(!on_screen(window, "doc-edit", cx), "ofrece editar lo que no está escrito");
+
+        cx.update(|cx| Backend::run(cx, |core| async move { core.docs().open_page("p-bad").await }));
+        wait_until(cx, "la rota dice que no se pudo", |cx| page_open(cx).as_deref() == Some("p-bad") && on_screen(window, "doc-empty", cx));
+        wait_until(cx, "y no sigue cargando", |cx| cx.update(|cx| !Backend::snapshot(cx).read(cx).docs.page_loading));
+        assert!(on_screen(window, "doc-page-crumb-home", cx), "de una página rota no se puede volver");
+        for id in ["doc-foot", "doc-page-children", "doc-page-template-component", "doc-body", "doc-record-decision"] {
+            assert!(!on_screen(window, id, cx), "una página que no se abrió pinta {id}");
+        }
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Un árbol de páginas que no llegó se dice en la hoja, con la portada
+    /// todavía a mano.
+    ///
+    /// Rotura que atrapa: una hoja con sólo «Portada», igual que la de un
+    /// documento sin páginas, cuando lo que pasó es que no se pudieron traer.
+    #[gpui_kit::test]
+    fn a_page_tree_that_did_not_arrive_is_said(cx: &mut TestAppContext) {
+        // Este servidor no tiene la ruta de las páginas: contesta 404.
+        let server = server_with_docs();
+        server.install(cx);
+        let window = open(cx);
+        open_folder_docs(window, cx);
+        wait_until(cx, "llega su documentación", |cx| on_screen(window, "doc-body", cx));
+
+        click(window, "doc-pages", cx);
+
+        wait_until(cx, "la hoja dice que no llegaron", |cx| on_screen(window, "doc-pages-error", cx));
+        assert!(on_screen(window, "doc-pages-home", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// De lo que enlaza a una página, otra página de este documento se abre
+    /// al pulsarla; una tarea, que todavía no se abre desde aquí, no.
+    ///
+    /// Roturas que atrapa: «referenciado desde» que no se pinta; un enlace
+    /// a una página hermana que no lleva a ella; pulsar una tarea y perder
+    /// la página que se leía.
+    #[gpui_kit::test]
+    fn a_page_of_this_doc_that_links_here_opens_and_a_task_does_not(cx: &mut TestAppContext) {
+        let server = server_with_pages();
+        server.install(cx);
+        let window = open(cx);
+        open_folder_docs(window, cx);
+        wait_until(cx, "llega su documentación", |cx| on_screen(window, "doc-body", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.docs().open_page("p-core").await }));
+        wait_until(cx, "sale lo que la enlaza", |cx| on_screen(window, "doc-page-backlinks", cx));
+
+        click(window, "doc-page-backlink-1", cx);
+        settle_frames(window, cx);
+        assert_eq!(page_open(cx).as_deref(), Some("p-core"), "pulsar una tarea sacó de la página");
+
+        click(window, "doc-page-backlink-0", cx);
+        wait_until(cx, "abre la página que la enlaza", |cx| page_open(cx).as_deref() == Some("p-types"));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
