@@ -2,8 +2,9 @@
 //!
 //! Un documento es una portada con cuatro pestañas fijas más las páginas que
 //! haga falta, anidadas sin límite. Aquí se leen: el árbol, cuál está
-//! abierta, de dónde cuelga y qué pasa cuando deja de existir. Crearlas,
-//! moverlas o tirarlas sigue en la app de siempre.
+//! abierta, de dónde cuelga y qué pasa cuando deja de existir. Crearlas y
+//! escribirlas es de `doc_edit`; moverlas o tirarlas sigue en la app de
+//! siempre.
 //!
 //! El orden del árbol es **el de la lista que manda el servidor**, que ya la
 //! ordena por rango: aquí no se ordena nada (ver `doc-pages.store.ts`).
@@ -12,6 +13,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::doc_edit::DocLeave;
 use crate::docs::{kind_segment, Docs, DocsState, DOC_TABS};
 use crate::error::ApiError;
 use crate::texts::{text, Locale};
@@ -90,6 +92,9 @@ pub struct DocPage {
     /// Markdown.
     #[serde(default)]
     pub body: String,
+    /// De qué versión es lo que se lee (ver `DocTab::body_hash`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -342,11 +347,20 @@ impl Docs {
     }
 
     /// Abre una página del documento abierto y la trae. Elegirla cierra la
-    /// hoja. Sin documento abierto no hace nada.
+    /// hoja. Sin documento abierto no hace nada. Con texto sin guardar,
+    /// pregunta antes.
     pub async fn open_page(&self, page_id: &str) {
         if self.state().target.is_none() || page_id.is_empty() {
             return;
         }
+        if self.held_back(DocLeave::Page { id: page_id.to_string() }) {
+            return;
+        }
+        self.show_page(page_id).await;
+    }
+
+    /// Lo mismo, sin preguntar: para la página que se acaba de crear.
+    pub(crate) async fn show_page(&self, page_id: &str) {
         self.update(|state| {
             // La de antes no se enseña mientras llega ésta: se leería bajo
             // un título que no es el suyo.
@@ -394,9 +408,13 @@ impl Docs {
         }
     }
 
-    /// De vuelta a la portada. También cierra la hoja: es elegir algo en ella.
+    /// De vuelta a la portada. También cierra la hoja: es elegir algo en
+    /// ella. Con texto sin guardar en una página, pregunta antes.
     pub fn close_page(&self) {
         let state = self.state();
+        if state.page_id.is_some() && self.held_back(DocLeave::Home) {
+            return;
+        }
         if state.page_id.is_some() || state.pages_shown {
             self.update(|state| {
                 state.page_id = None;

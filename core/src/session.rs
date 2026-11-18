@@ -230,7 +230,13 @@ impl Core {
 
     /// Sale, **también en el servidor**: revoca el refresh y los que salieron
     /// de él. Mejor esfuerzo: sin red se sale igual en local.
+    ///
+    /// Con documentación a medio escribir no se sale: se pregunta antes
+    /// (`doc_edit`), y salir es lo que se hace si contestan que sí.
     pub async fn logout(&self) {
+        if self.docs().held_back(crate::doc_edit::DocLeave::LogOut) {
+            return;
+        }
         if let Some(held) = self.held() {
             let _ = self
                 .send("POST", "/api/v1/auth/logout", None, Some(&held.refresh_token))

@@ -505,7 +505,7 @@ impl Tree {
         let docs = self.core.docs();
         let Some(target) = docs.state().target else { return };
         match node_name(&spaces, target.kind, &target.id) {
-            None => docs.close(),
+            None => docs.close_now(),
             Some(name) if name != target.name => docs.open(&target.id).await,
             Some(_) => {}
         }

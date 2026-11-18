@@ -135,13 +135,14 @@ pub struct MarkdownEditor {
     take_files: Option<TakeFiles>,
     attaching: bool,
     placeholder: Option<SharedString>,
+    fill: bool,
 }
 
 impl MarkdownEditor {
     /// `prefix` nombra sus piezas: el campo es `<prefix>-input` y cada botón
     /// `<prefix>-bold`, `<prefix>-attach`…
     pub fn new(prefix: &'static str, state: &Entity<TextareaState>) -> Self {
-        Self { prefix, state: state.clone(), attach: None, take_files: None, attaching: false, placeholder: None }
+        Self { prefix, state: state.clone(), attach: None, take_files: None, attaching: false, placeholder: None, fill: false }
     }
 
     /// Con esto la barra lleva el clip: lo que hace al pulsarlo, y qué se
@@ -160,6 +161,14 @@ impl MarkdownEditor {
     /// siempre («Escribe en markdown…»), como `MarkdownEditor.tsx`.
     pub fn placeholder(mut self, text: impl Into<SharedString>) -> Self {
         self.placeholder = Some(text.into());
+        self
+    }
+
+    /// La caja ocupa todo el alto que le dé quien la pone, y lo escrito se
+    /// desliza dentro: para escribir un documento, no un comentario. El
+    /// campo tiene que ser de filas fijas (sin `auto_grow`).
+    pub fn fill(mut self) -> Self {
+        self.fill = true;
         self
     }
 
@@ -218,7 +227,8 @@ impl RenderOnce for MarkdownEditor {
         let hint = tr(cx, if self.attach.is_some() { "common:editor.hintFiles" } else { "common:editor.hint" });
         bar = bar.child(div().ml_auto().pl_2().leading_xs().text_color(muted).child(hint));
 
-        let field = Textarea::new(&self.state).appearance(false).bordered(false).when_some(self.take_files.clone(), |this, take| {
+        let fill = self.fill;
+        let field = Textarea::new(&self.state).appearance(false).bordered(false).when(fill, |this| this.h(relative(1.))).when_some(self.take_files.clone(), |this, take| {
             this.on_paste(move |item, window, cx| {
                 let files = pasted(item);
                 if files.is_empty() {
@@ -247,6 +257,7 @@ impl RenderOnce for MarkdownEditor {
             .id(SharedString::from(format!("{prefix}-editor")))
             .flex()
             .flex_col()
+            .when(fill, |this| this.flex_1().min_h_0())
             .rounded(px(8.))
             .border_1()
             .border_color(border)
@@ -281,10 +292,23 @@ impl RenderOnce for MarkdownEditor {
                     .id(SharedString::from(format!("{prefix}-input")))
                     .relative()
                     .px(px(2.))
-                    .when(blank, |this| this.mb(px(-6.)))
+                    .when(fill, |this| this.flex_1().min_h_0())
+                    .when(blank && !fill, |this| this.mb(px(-6.)))
                     .child(field)
                     .children(example.map(|example| {
-                        div().absolute().left_3().right_3().bottom(px(14.)).truncate().leading_sm().line_height(px(20.)).text_color(muted.opacity(0.6)).child(example)
+                        div()
+                            .absolute()
+                            .left_3()
+                            .right_3()
+                            // En la caja que crece, el ejemplo cae en su
+                            // única línea; en la que llena el alto, arriba,
+                            // donde está el cursor.
+                            .map(|this| if fill { this.top(px(8.)) } else { this.bottom(px(14.)) })
+                            .truncate()
+                            .leading_sm()
+                            .line_height(px(20.))
+                            .text_color(muted.opacity(0.6))
+                            .child(example)
                     }))
                     .test_support(),
             )

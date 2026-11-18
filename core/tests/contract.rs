@@ -272,7 +272,8 @@ fn a_priority_has_the_name_the_api_speaks() {
 /// La marca de un documento se lee entera.
 ///
 /// De una pestaña y de una decisión el core lee lo que hace falta para
-/// leerlas; lo demás es para editarlas, y se nombra aquí campo por campo.
+/// leerlas y, de la pestaña, la versión de su texto (para guardarla); lo
+/// demás se nombra aquí campo por campo.
 ///
 /// Rotura que atrapa: renombrar en Go el cuerpo, la clave de la pestaña o
 /// quién dejó sin efecto una decisión, y que la pantalla salga vacía o enseñe
@@ -280,8 +281,11 @@ fn a_priority_has_the_name_the_api_speaks() {
 #[test]
 fn a_doc_tab_and_a_decision_are_read_for_reading() {
     let tab: DocTab =
-        reads_every_field_but(&fixture("doc_tab.json"), &["id", "createdAt", "docId", "bodyHash", "updatedBy", "sections"]);
+        reads_every_field_but(&fixture("doc_tab.json"), &["id", "createdAt", "docId", "updatedBy", "sections"]);
     assert_eq!(tab.key, "runbook");
+    // Con qué se guarda sin pisar a nadie: si Go lo renombra, todo guardado
+    // saldría sin versión y el servidor lo rechazaría.
+    assert_eq!(tab.body_hash.as_deref(), Some("abc123"));
     assert!(tab.body.starts_with("## Desplegar"));
     assert_eq!(tab.updated_by_name.as_deref(), Some("Ana Pérez"));
 
@@ -299,8 +303,8 @@ fn a_doc_tab_and_a_decision_are_read_for_reading() {
 
 /// Una página abierta se lee con lo que se pinta de ella: su texto, sus
 /// migas, sus hijas (la misma fila que la lista de páginas) y lo que la
-/// enlaza. Lo que es de escribirla —el hash, las secciones con identidad—
-/// se deja fuera a propósito y se nombra.
+/// enlaza, y la versión de su texto, con la que se guarda. Las secciones
+/// con identidad se dejan fuera a propósito y se nombran.
 ///
 /// Roturas que atrapa: `parentId`, `breadcrumb`, `children` o
 /// `referencedFrom` renombrados en Go (el árbol sale plano, o la página sin
@@ -311,12 +315,13 @@ fn a_doc_page_is_read_with_its_trail_its_children_and_what_links_to_it() {
     let view: DocPageView = reads_every_field_but(
         &fixture("doc_page_view.json"),
         &[
-            "orgId", "page.createdAt", "page.docId", "page.orgId", "page.rank", "page.bodyHash", "page.updatedBy", "page.deletedAt",
+            "orgId", "page.createdAt", "page.docId", "page.orgId", "page.rank", "page.updatedBy", "page.deletedAt",
             "page.sections",
         ],
     );
     assert_eq!((view.page.id.as_str(), view.page.parent_id.as_deref()), ("p2", Some("p1")));
     assert!(view.page.body.starts_with("## Qué es"));
+    assert_eq!(view.page.body_hash.as_deref(), Some("abc123"));
     assert_eq!(view.breadcrumb[0].title, "Arquitectura");
     let child = &view.children[0];
     assert_eq!((child.id.as_str(), child.parent_id.as_deref(), child.has_body, child.subpages), ("p3", Some("p2"), true, 2));

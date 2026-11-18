@@ -20,11 +20,16 @@ impl Core {
     /// Cambia de organización y trae lo suyo. Una que no es de esta persona
     /// no se acepta, y entonces no se pide nada.
     pub async fn switch_org(&self, org_id: &str) -> bool {
+        // Con documentación a medio escribir no se cambia: se pregunta antes
+        // (`doc_edit`), y cambiar es lo que se hace si contestan que sí.
+        if self.docs().held_back(crate::doc_edit::DocLeave::Org { id: org_id.to_string() }) {
+            return false;
+        }
         if !self.orgs().set_current(org_id) {
             return false;
         }
         // El documento y la tarea abiertos son de la organización que se deja.
-        self.docs().close();
+        self.docs().close_now();
         self.tasks().close();
         self.load_current_org().await;
         true

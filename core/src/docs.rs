@@ -2,7 +2,7 @@
 //!
 //! Cuelga de un nodo del árbol (espacio, carpeta o lista) y tiene cuatro
 //! pestañas fijas —la portada— más las páginas que cuelgan de ella (ver
-//! `doc_pages`). Aquí sólo se lee: escribirla sigue en la app de siempre.
+//! `doc_pages`). Aquí se lee; escribirla es de `doc_edit`.
 //!
 //! Qué documento hay abierto es también lo que contesta «¿qué está mirando?»
 //! a la regla del clic (`nav::tree_click`): con uno abierto se mira
@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::doc_edit::{DocEdit, DocLeave};
 use crate::doc_pages::{DocPageItem, DocPageView};
 
 use crate::mywork::day_and_month;
@@ -33,6 +34,10 @@ pub struct DocTab {
     /// Markdown.
     #[serde(default)]
     pub body: String,
+    /// De qué versión es lo que se lee: quien guarda lo devuelve
+    /// (`baseHash`), y si el servidor ya tiene otra, no se pisa.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,6 +129,10 @@ pub struct DocsState {
     pub page_error: Option<String>,
     /// Las ramas del árbol de páginas plegadas o desplegadas a mano.
     pub page_folds: HashMap<String, bool>,
+    /// Si quien mira puede escribir en este documento: ver `Docs::open`.
+    pub can_edit: bool,
+    /// Lo que se está escribiendo, si se escribe algo (ver `doc_edit`).
+    pub edit: Option<DocEdit>,
 }
 
 impl Default for DocsState {
@@ -143,6 +152,8 @@ impl Default for DocsState {
             page_loading: false,
             page_error: None,
             page_folds: HashMap::new(),
+            can_edit: false,
+            edit: None,
         }
     }
 }
@@ -392,15 +403,23 @@ impl Core {
     /// no cambia de qué nodo se habla. También desde la de una carpeta, que
     /// desde el 17-nov-2026 acota como las demás (command-and-control-382):
     /// antes se volvía a lo que hubiera puesto, fuera de quien fuera.
+    ///
+    /// Con texto sin guardar no se va: se pregunta (`doc_edit`).
     pub fn back_to_tasks(&self) {
         let Some(target) = self.docs().state().target else { return };
-        self.docs().close();
+        if self.docs().held_back(DocLeave::Tasks { layout: None }) {
+            return;
+        }
+        self.docs().close_now();
         self.tree().click(&target.id, Looking::Tasks);
     }
 
     /// «Mi trabajo» entero: sin ámbito y sin documento abierto.
     pub fn show_all_work(&self) {
-        self.docs().close();
+        if self.docs().held_back(DocLeave::AllWork) {
+            return;
+        }
+        self.docs().close_now();
         self.my_work().set_scope(None);
     }
 }
@@ -424,16 +443,31 @@ impl Docs {
     ///
     /// Otro nodo empieza en su portada: la página que se leía es del
     /// documento que se deja. El mismo nodo otra vez se queda donde estaba
-    /// —la página abierta, las ramas plegadas— y sólo se pone al día.
+    /// —la página abierta, las ramas plegadas, lo que se esté escribiendo— y
+    /// sólo se pone al día.
+    ///
+    /// Con texto sin guardar no se cambia de nodo: se pregunta (`doc_edit`).
     pub async fn open(&self, id: &str) {
         let Some((kind, name)) = find_node(&self.core.tree().state().spaces, id) else { return };
+        let other_node = self.state().target.as_ref().map(|target| target.id.as_str()) != Some(id);
+        if other_node && self.held_back(DocLeave::Node { id: id.to_string() }) {
+            return;
+        }
         let target = DocTarget { kind, id: id.to_string(), name };
+        // Quién puede escribir aquí: quien puede cambiar el árbol de la
+        // organización que se mira (`can_edit_tree`). Un `viewer` lee.
+        let can_edit = self.core.tree().can_edit();
         self.update(|state| {
             // El documento de otro nodo no se enseña mientras llega éste:
             // se leería bajo un nombre que no es el suyo.
             if state.target.as_ref() != Some(&target) {
-                *state = DocsState { target: Some(target), ..DocsState::default() };
+                // El mismo nodo con otro nombre (se renombró) no se lleva
+                // lo que se estaba escribiendo en él. De otro nodo no queda
+                // nada que llevarse: lo de arriba ya preguntó.
+                let edit = state.edit.take();
+                *state = DocsState { target: Some(target), edit, ..DocsState::default() };
             }
+            state.can_edit = can_edit;
             state.loading = true;
             state.error = None;
         });
@@ -465,17 +499,31 @@ impl Docs {
         }
     }
 
+    /// Cierra la documentación. Con texto sin guardar, pregunta antes.
     pub fn close(&self) {
+        if !self.held_back(DocLeave::Close) {
+            self.close_now();
+        }
+    }
+
+    /// La cierra sin preguntar: para cuando ya se preguntó, o cuando el
+    /// nodo del que era ya no existe.
+    pub(crate) fn close_now(&self) {
         if self.state().target.is_some() {
             self.update(|state| *state = DocsState::default());
         }
     }
 
-    /// Cambia de pestaña. Una clave que no es de las cuatro no hace nada.
+    /// Cambia de pestaña. Una clave que no es de las cuatro no hace nada, y
+    /// la que ya se lee tampoco. Con texto sin guardar, pregunta antes.
     pub fn show_tab(&self, key: &str) {
-        if DOC_TABS.contains(&key) {
-            self.update(|state| state.tab = key.to_string());
+        if !DOC_TABS.contains(&key) || self.state().tab == key {
+            return;
         }
+        if self.held_back(DocLeave::Tab { key: key.to_string() }) {
+            return;
+        }
+        self.update(|state| state.tab = key.to_string());
     }
 }
 

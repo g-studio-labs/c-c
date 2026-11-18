@@ -1,16 +1,28 @@
-//! La documentación de un nodo, para leerla: sus cuatro pestañas (la
-//! portada), en la de decisiones el registro vigente, y las páginas que
-//! cuelgan de ella.
+//! La documentación de un nodo: sus cuatro pestañas (la portada), en la de
+//! decisiones el registro vigente, y las páginas que cuelgan de ella. Se lee
+//! y se escribe.
 //!
 //! Qué documento hay abierto, qué pestaña o qué página, qué se lee, qué
 //! parte es prosa, cómo es el árbol de páginas y por qué está vacío lo dice
 //! el core. Aquí sólo se pinta, con las medidas de
 //! `app/src/components/docs/DocTabs.tsx`, `DocPagesSheet.tsx`,
-//! `DocPagesBranch.tsx`, `PageRow.tsx` y `DocPageView.tsx`. Escribirla sigue
-//! en la app de siempre.
+//! `DocPagesBranch.tsx`, `PageRow.tsx` y `DocPageView.tsx`.
+//!
+//! Escribir es el editor de markdown de la app (`editor.rs`) a todo el alto,
+//! con el documento ya pintado al lado, que cambia con cada tecla; en una
+//! ventana estrecha se ve uno u otro. No es el tiptap de la app de siempre:
+//! se escribe el markdown tal cual (decidido con jose, 18-nov-2026). El
+//! borrador, si hay algo sin guardar, qué se manda, qué pasa cuando alguien
+//! guardó en medio y qué se pregunta antes de perder texto lo dice el core
+//! (`cac_core::doc_edit`): aquí están las cajas, que le cuentan cada tecla.
 
-use cac_core::{DocBacklinkRow, DocBlock, DocDecision, DocHeading, DocPageLink, DocPageRow, DocsState, WorkLayout, DOC_TABS};
+use cac_core::task::Question;
+use cac_core::{DocBacklinkRow, DocBlock, DocDecision, DocEdit, DocEditWhat, DocHeading, DocPageLink, DocPageRow, DocsState, WorkLayout, DOC_TABS};
 use gpui_kit::assets::IconName as Lucide;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Enter, InputEvent, Textarea, TextareaState};
+use gpui_kit::component::Disableable;
+use gpui_kit::component::Sizable;
 use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, IconName};
@@ -18,6 +30,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
+use crate::editor::MarkdownEditor;
 use crate::theme::Leading as _;
 use crate::lang::{locale, tr};
 
@@ -47,12 +60,29 @@ const PAGES_SHEET_WIDTH: f32 = 320.;
 /// `DocPageView.tsx`).
 const PAGE_TEMPLATES: [(&str, Lucide); 2] = [("component", Lucide::Puzzle), ("procedure", Lucide::ClipboardList)];
 
+/// Las cajas donde se escribe. Se crean la primera vez que se abre el
+/// editor: hacen falta con la ventana delante.
+struct EditBoxes {
+    title: Entity<TextareaState>,
+    body: Entity<TextareaState>,
+    /// Lo que cuenta cada tecla al core. Vive lo que vivan las cajas.
+    _heard: [Subscription; 2],
+}
+
 pub struct DocsView {
     /// El foco de la hoja «Páginas»: con él, Escape la cierra.
     sheet_focus: FocusHandle,
     /// Si la hoja ya estaba abierta en el pintado anterior: el foco se le da
     /// una vez, al abrirse.
     sheet_was_shown: bool,
+    boxes: Option<EditBoxes>,
+    /// De qué sesión de escritura (`DocEdit::session`) es el texto que hay
+    /// en las cajas: se pone una vez al abrirse el editor, no en cada tecla.
+    loaded_session: Option<u64>,
+    /// El foco de la pregunta (¿descartar?, ¿guardar encima?): con él,
+    /// Escape la contesta que no.
+    question_focus: FocusHandle,
+    was_asking: bool,
 }
 
 /// `text-xs font-semibold uppercase text-muted-foreground`: el título de
@@ -115,7 +145,470 @@ fn reading_style(cx: &App) -> TextViewStyle {
 
 impl DocsView {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        Self { sheet_focus: cx.focus_handle(), sheet_was_shown: false }
+        Self {
+            sheet_focus: cx.focus_handle(),
+            sheet_was_shown: false,
+            boxes: None,
+            loaded_session: None,
+            question_focus: cx.focus_handle(),
+            was_asking: false,
+        }
+    }
+
+    fn answer(yes: bool, cx: &App) {
+        Backend::run(cx, move |core| async move { core.docs().answer(yes).await });
+    }
+
+    fn save(cx: &App) {
+        Backend::run(cx, |core| async move { core.docs().save().await });
+    }
+
+    /// Las cajas del editor, con el texto de esta sesión de escritura. Lo
+    /// que hay que escribir en ellas lo dice el core una vez, al abrirse;
+    /// desde ahí son ellas las que le cuentan cada tecla.
+    fn boxes_for(&mut self, edit: &DocEdit, window: &mut Window, cx: &mut Context<Self>) -> (Entity<TextareaState>, Entity<TextareaState>) {
+        let boxes = self.boxes.get_or_insert_with(|| {
+            let untitled = tr(cx, "work:docs.untitled");
+            let title = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 3).placeholder(untitled));
+            // De filas fijas: llena el alto que le den y se desliza dentro.
+            let body = cx.new(|cx| TextareaState::new(window, cx));
+            let heard = [
+                cx.subscribe(&title, |_, title, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        Backend::core(cx).docs().draft_title(&title.read(cx).value());
+                    }
+                }),
+                cx.subscribe(&body, |_, body, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        Backend::core(cx).docs().draft_body(&body.read(cx).value());
+                    }
+                }),
+            ];
+            EditBoxes { title, body, _heard: heard }
+        });
+        let (title, body) = (boxes.title.clone(), boxes.body.clone());
+        if self.loaded_session != Some(edit.session) {
+            self.loaded_session = Some(edit.session);
+            title.update(cx, |input, cx| input.set_value(edit.title.clone(), window, cx));
+            body.update(cx, |input, cx| input.set_value(edit.body.clone(), window, cx));
+            // Una página nueva empieza por su título; lo demás, por el texto.
+            let first = if matches!(edit.what, DocEditWhat::NewPage { .. }) { &title } else { &body };
+            first.update(cx, |input, cx| input.focus(window, cx));
+        }
+        (title, body)
+    }
+
+    /// Un botón pequeño con borde (`Button size="sm" variant="outline"
+    /// className="h-6 text-xs"`): los del aviso de choque y el conmutador.
+    fn outline_button(id: &'static str, label: String, active: bool, cx: &App) -> Stateful<Div> {
+        let theme = cx.theme();
+        let (border, accent, foreground, muted) = (theme.border, theme.accent, theme.foreground, theme.muted_foreground);
+        div()
+            .id(id)
+            .h_6()
+            .px_2()
+            .flex()
+            .flex_none()
+            .items_center()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(border)
+            .leading_xs()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(if active { foreground } else { muted })
+            .when(active, |this| this.bg(accent))
+            .cursor_pointer()
+            .hover(move |style| style.bg(accent).text_color(foreground))
+            .child(label)
+    }
+
+    /// El aviso de que alguien guardó en medio (`DocTabs.tsx`: `rounded-md
+    /// border border-destructive/40 bg-destructive/[.07] px-3 py-2
+    /// text-xs`). Lo escrito sigue en la caja; aquí se decide qué pasa con
+    /// lo que hay guardado, y las dos salidas que pierden algo preguntan.
+    fn render_conflict(edit: &DocEdit, cx: &App) -> Option<impl IntoElement> {
+        let said = edit.conflict_phrase(locale(cx))?;
+        let theme = cx.theme();
+        let (danger, foreground, muted) = (theme.danger, theme.foreground, theme.muted_foreground);
+        let showing = edit.showing_theirs;
+        Some(
+            div()
+                .id("doc-conflict")
+                .flex_none()
+                .mx_6()
+                .mb_2()
+                .px_3()
+                .py_2()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(danger.opacity(0.4))
+                .bg(danger.opacity(0.07))
+                .leading_xs()
+                .child(div().font_weight(FontWeight::MEDIUM).text_color(foreground).child(tr(cx, "work:docs.conflict")))
+                .child(div().mt_0p5().text_color(muted).child(said))
+                .child(
+                    div()
+                        .mt_2()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            Self::outline_button("doc-conflict-see", tr(cx, if showing { "work:docs.seeMine" } else { "work:docs.seeTheirs" }), showing, cx)
+                                .on_click(move |_, _, cx| Backend::core(cx).docs().show_theirs(!showing))
+                                .test_support(),
+                        )
+                        .child(
+                            Self::outline_button("doc-conflict-load", tr(cx, "work:docs.discardAndReload"), false, cx)
+                                .on_click(|_, _, cx| Backend::core(cx).docs().ask_load_theirs())
+                                .test_support(),
+                        )
+                        .child(
+                            Self::outline_button("doc-conflict-overwrite", tr(cx, "work:docs.overwrite"), false, cx)
+                                .on_click(|_, _, cx| Backend::core(cx).docs().ask_overwrite())
+                                .test_support(),
+                        ),
+                )
+                .test_support(),
+        )
+    }
+
+    /// El editor: arriba qué se escribe (y, en una página, su título); en
+    /// medio la caja y, al lado, el documento ya pintado; abajo, guardar y
+    /// cancelar donde estaba «Editar».
+    fn render_editor(&mut self, docs: &DocsState, edit: &DocEdit, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let (title_box, body_box) = self.boxes_for(edit, window, cx);
+        let theme = cx.theme();
+        let (muted, border, danger, warning) = (theme.muted_foreground, theme.border, theme.danger, theme.warning);
+        let here = locale(cx);
+        let node = docs.target.as_ref().map(|target| target.id.clone()).unwrap_or_default();
+        // Lado a lado si caben los dos; si no, uno u otro.
+        let side = cac_core::doc_editor_side_by_side(f32::from(window.viewport_size().width));
+        let (shows_box, shows_preview) = (side || !edit.previewing, side || edit.previewing);
+
+        let switch = (!side).then(|| {
+            let previewing = edit.previewing;
+            div()
+                .id("doc-edit-switch")
+                .ml_auto()
+                .flex()
+                .flex_none()
+                .gap_1()
+                .child(
+                    Self::outline_button("doc-edit-show-box", tr(cx, "work:docs.write"), !previewing, cx)
+                        .on_click(|_, _, cx| Backend::core(cx).docs().show_preview(false))
+                        .test_support(),
+                )
+                .child(
+                    Self::outline_button("doc-edit-show-preview", tr(cx, "work:docs.preview"), previewing, cx)
+                        .on_click(|_, _, cx| Backend::core(cx).docs().show_preview(true))
+                        .test_support(),
+                )
+                .test_support()
+        });
+        // Qué se escribe: una página nueva lo dice; una que ya existe, con
+        // sus migas; una pestaña, con su pestaña marcada en la fila de arriba.
+        let heading = docs.edit_heading(here).map(|heading| div().id("doc-editing-what").aria_label(heading.clone()).leading_xs().text_color(muted).child(heading).test_support());
+        let trail = matches!(edit.what, DocEditWhat::Page { .. }).then(|| {
+            let name = docs.target.as_ref().map(|target| target.name.clone()).unwrap_or_default();
+            Self::render_page_head(name, docs.page_trail(here), None, cx)
+        });
+        let for_enter = body_box.clone();
+        let title = edit.has_title().then(|| {
+            div()
+                .id("doc-edit-title")
+                // Enter en el título baja al texto: un título es una línea.
+                .capture_action(move |_: &Enter, window, cx| {
+                    for_enter.update(cx, |input, cx| input.focus(window, cx));
+                    cx.stop_propagation();
+                })
+                // El campo trae 4 px de margen por dentro: sin esto el título
+                // no cae en la vertical de las migas y de la caja.
+                .ml(px(-4.))
+                .child(
+                    Textarea::new(&title_box)
+                        .appearance(false)
+                        .bordered(false)
+                        .xsmall()
+                        // `text-2xl font-semibold`, como el título que se lee.
+                        .text_size(px(24.))
+                        .line_height(px(32.))
+                        .font_weight(FontWeight::SEMIBOLD),
+                )
+                .test_support()
+        });
+        // Sin nada que decir encima (una pestaña, en una ventana ancha) no
+        // hay cabecera: las cajas suben.
+        let head = (heading.is_some() || trail.is_some() || switch.is_some()).then(|| {
+            div()
+                .flex_none()
+                .px_6()
+                .pb_2()
+                .flex()
+                .flex_col()
+                .child(div().flex().items_center().gap_2().child(div().min_w_0().flex_1().children(heading).children(trail)).children(switch))
+                .children(title)
+        });
+        // Encima de cada caja, qué es (`text-[11px] uppercase`): lo que se
+        // escribe y cómo queda. Así las dos empiezan a la misma altura.
+        let pane_label = move |id: &'static str, said: String, tone: Hsla| {
+            div().id(id).aria_label(said.clone()).flex_none().text_size(px(11.)).text_color(tone).child(said.to_uppercase()).test_support()
+        };
+
+        let placeholder = if edit.has_title() { tr(cx, "common:editor.writeInMarkdown") } else { tr(cx, "work:docs.placeholder") };
+        // Lo que se pinta al lado es un solo texto que se desliza por
+        // dentro, y no los trozos de lo que se lee: así sólo se maqueta lo
+        // que cabe en la caja. Con los trozos, cada tecla volvía a maquetar
+        // el documento entero, y en uno de 3.000 líneas eso son 115 ms por
+        // cuadro (medido el 18-nov-2026): se escribía a tirones.
+        let previewed = edit.preview().trim().to_string();
+        let theirs = edit.showing_theirs && edit.conflict.is_some();
+        let preview_label = tr(cx, if theirs { "work:docs.theirsLabel" } else { "work:docs.preview" });
+        let preview = div()
+            .id("doc-edit-preview")
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(pane_label("doc-edit-preview-label", preview_label, if theirs { danger } else { muted }))
+            .child(
+                div()
+                    .id("doc-edit-preview-frame")
+                    .flex_1()
+                    .min_h_0()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(if theirs { danger.opacity(0.4) } else { border })
+                    .p_4()
+                    .map(|this| {
+                        if previewed.is_empty() {
+                            this.child(div().id("doc-edit-preview-empty").leading_sm().text_color(muted).child(tr(cx, "work:docs.emptyTab")).test_support())
+                        } else {
+                            // Su propio id: el estado de lo que se lee no es
+                            // el de lo que se escribe, ni lo propio el de lo
+                            // que guardó otro.
+                            let id = SharedString::from(format!("doc-edit-preview-{node}-{}", if theirs { "theirs" } else { "draft" }));
+                            this.child(
+                                div()
+                                    .id("doc-edit-preview-text")
+                                    .size_full()
+                                    .text_size(px(15.))
+                                    .line_height(relative(1.75))
+                                    .child(Self::doc_text(id, previewed, reading_style(cx)).scrollable(true))
+                                    .test_support(),
+                            )
+                        }
+                    })
+                    .test_support(),
+            )
+            .test_support();
+        let panes = div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .gap_4()
+            .px_6()
+            .pb_4()
+            .when(shows_box, |this| {
+                this.child(
+                    div()
+                        .id("doc-edit-box")
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(pane_label("doc-edit-box-label", tr(cx, "work:docs.write"), muted))
+                        .child(MarkdownEditor::new("doc-edit", &body_box).fill().placeholder(placeholder))
+                        .test_support(),
+                )
+            })
+            .when(shows_preview, |this| this.child(preview));
+
+        // El pie, donde estaba «Editar»: guardar, cancelar y en qué está lo
+        // escrito. Con un choque a la vista «Guardar» se apaga: primero hay
+        // que decidir arriba qué pasa con lo que hay guardado.
+        let status = edit.status(here).map(|said| {
+            div().id("doc-edit-status").aria_label(said.clone()).leading_xs().text_color(if edit.saving { warning } else { muted }).child(said).test_support()
+        });
+        let failed = edit.error_phrase(here).map(|said| {
+            div()
+                .id("doc-edit-error")
+                .aria_label(said.clone())
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap_1()
+                .leading_xs()
+                .text_color(danger)
+                .child(Icon::new(Lucide::CircleAlert).size_3().flex_none())
+                .child(said)
+                .test_support()
+        });
+        let foot = div()
+            .id("doc-foot")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .px_4()
+            .py_2()
+            .border_t_1()
+            .border_color(border)
+            .child(
+                Button::new("doc-save")
+                    .primary()
+                    .small()
+                    .h_7()
+                    .px_2p5()
+                    .label(tr(cx, "work:docs.save"))
+                    .disabled(!edit.can_save())
+                    .loading(edit.saving)
+                    .on_click(|_, _, cx| Self::save(cx)),
+            )
+            .child(ghost_button("doc-cancel", Lucide::X, tr(cx, "work:docs.cancel"), cx).cursor_pointer().on_click(|_, _, cx| Backend::core(cx).docs().cancel_edit()).test_support())
+            .children(status)
+            .children(failed);
+
+        div()
+            .id("doc-editor")
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            // Ctrl+S (Cmd en un Mac) guarda, se esté en la caja que se esté.
+            .on_key_down(|event: &KeyDownEvent, _, cx| {
+                let held = event.keystroke.modifiers;
+                if held.secondary(cx) && !held.shift && !held.alt && event.keystroke.key == "s" {
+                    Self::save(cx);
+                    cx.stop_propagation();
+                }
+            })
+            .pt_4()
+            .children(head)
+            .children(Self::render_conflict(edit, cx))
+            .child(panes)
+            .child(foot)
+            .test_support()
+            .into_any_element()
+    }
+
+    /// La pregunta antes de perder o pisar texto, sobre toda la ventana: el
+    /// diálogo de `ConfirmDialog.tsx`, con las medidas de la pregunta de una
+    /// tarea (`task.rs`). El primer botón es el que pierde algo y va en
+    /// rojo; Escape, la equis y el otro botón dejan todo como estaba. Enter
+    /// no contesta: lo que se pregunta aquí no se deshace.
+    fn render_question(&mut self, question: Question, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (background, foreground, muted, soft, border, danger) =
+            (theme.background, theme.foreground, theme.muted_foreground, theme.muted, theme.border, theme.danger);
+        let (rest, over) = if theme.is_dark() { (0.2, 0.3) } else { (0.1, 0.2) };
+        if !self.was_asking {
+            self.question_focus.focus(window, cx);
+        }
+        let card = div()
+            .id("doc-ask")
+            .test_support()
+            .track_focus(&self.question_focus)
+            .on_key_down(|event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    Self::answer(false, cx);
+                }
+                // Ninguna tecla llega a lo de debajo mientras se pregunta.
+                cx.stop_propagation();
+            })
+            .relative()
+            .w_full()
+            .max_w(px(384.))
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_4()
+            .rounded(px(14.))
+            .border_1()
+            .border_color(foreground.opacity(0.1))
+            .bg(background)
+            .shadow_2xl()
+            .leading_sm()
+            .text_color(foreground)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("doc-ask-title")
+                            .aria_label(question.title.clone())
+                            .pr_6()
+                            .text_size(rems(1.))
+                            .line_height(rems(1.25))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(question.title)
+                            .test_support(),
+                    )
+                    .child(div().id("doc-ask-body").aria_label(question.body.clone()).text_color(muted).child(question.body).test_support()),
+            )
+            .child(
+                div()
+                    .mx(px(-16.))
+                    .mb(px(-16.))
+                    .p_4()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .rounded_b(px(14.))
+                    .border_t_1()
+                    .border_color(border)
+                    .bg(soft.opacity(0.5))
+                    .child(Button::new("doc-ask-no").outline().small().h_8().px_2p5().label(question.cancel).on_click(|_, _, cx| Self::answer(false, cx)))
+                    .child(
+                        // `variant="destructive"`: lo que pierde algo.
+                        div()
+                            .id("doc-ask-yes")
+                            .h_8()
+                            .px_2p5()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .rounded(px(8.))
+                            .bg(danger.opacity(rest))
+                            .leading_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(danger)
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(danger.opacity(over)))
+                            .on_click(|_, _, cx| Self::answer(true, cx))
+                            .child(question.confirm)
+                            .test_support(),
+                    ),
+            )
+            .child(
+                div().absolute().top_2().right_2().child(
+                    Button::new("doc-ask-close").ghost().xsmall().size_7().p_0().child(Icon::new(Lucide::X).size_4()).on_click(|_, _, cx| Self::answer(false, cx)),
+                ),
+            );
+        let size = window.viewport_size();
+        // Sobre toda la ventana, como la hoja: mientras se pregunta tampoco
+        // se pulsa el árbol de al lado.
+        deferred(
+            anchored().position(Point::default()).child(
+                div()
+                    .id("doc-ask-veil")
+                    .w(size.width)
+                    .h(size.height)
+                    .occlude()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p_4()
+                    .bg(gpui_kit::black().opacity(0.35))
+                    .child(card),
+            ),
+        )
+        .with_priority(2)
     }
 
     fn open_page(id: String, cx: &App) {
@@ -123,11 +616,19 @@ impl DocsView {
     }
 
     /// Un botón de una fila del árbol de páginas que sólo sale al pasar el
-    /// ratón por ella (`hidden size-5 … group-hover:grid`), y que todavía no
-    /// hace nada aquí: lo dice al pasar por él.
-    fn row_action(id: SharedString, icon: impl Into<Icon>, label: String, group: SharedString, cx: &App) -> impl IntoElement {
+    /// ratón por ella (`hidden size-5 … group-hover:grid`). Con `run` hace
+    /// eso al pulsarlo; sin él todavía no hace nada aquí, y lo dice al pasar
+    /// por él.
+    fn row_action(
+        id: SharedString,
+        icon: impl Into<Icon>,
+        label: String,
+        group: SharedString,
+        run: Option<Box<dyn Fn(&mut App)>>,
+        cx: &App,
+    ) -> impl IntoElement {
         let background = cx.theme().background;
-        let hint = format!("{label} · {}", tr(cx, "common:misc.notInThisApp"));
+        let hint = if run.is_some() { label } else { format!("{label} · {}", tr(cx, "common:misc.notInThisApp")) };
         div()
             .id(id)
             .size_5()
@@ -140,8 +641,21 @@ impl DocsView {
             .group_hover(group, |style| style.opacity(1.))
             .hover(move |style| style.bg(background))
             .child(icon.into().size_3())
+            .when_some(run, |this, run| {
+                this.cursor_pointer().on_click(move |_, _, cx| {
+                    // El botón no es la fila: pulsarlo no abre la página.
+                    cx.stop_propagation();
+                    run(cx);
+                })
+            })
             .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
             .test_support()
+    }
+
+    /// Lo que hace «+» en una fila: empezar una página nueva dentro de ésa
+    /// (o en la portada). No crea nada: la página existe al guardarla.
+    fn new_page_in(parent: Option<String>) -> Option<Box<dyn Fn(&mut App)>> {
+        Some(Box::new(move |cx| Backend::core(cx).docs().new_page(parent.as_deref())))
     }
 
     /// La caja de una fila de la hoja (`group flex h-7 items-center gap-1
@@ -175,7 +689,7 @@ impl DocsView {
 
     /// Una página en el árbol (`PageRow.tsx`): el chevrón si tiene algo
     /// dentro, su icono y su título, y al pasar el ratón «+» y su menú.
-    fn render_page_row(row: DocPageRow, cx: &App) -> impl IntoElement {
+    fn render_page_row(row: DocPageRow, can_add: bool, cx: &App) -> impl IntoElement {
         let group = SharedString::from(format!("doc-page-group-{}", row.id));
         let (open_id, toggle_id) = (row.id.clone(), row.id.clone());
         let menu_label = cac_core::text_with(locale(cx), "work:docs.pageMenu", &[("title", &row.title)]);
@@ -208,8 +722,18 @@ impl DocsView {
                     .child(Icon::new(Lucide::FileText).size_3p5().flex_none())
                     .child(div().min_w_0().truncate().child(row.title)),
             )
-            .child(Self::row_action(SharedString::from(format!("doc-page-new-{}", row.id)), Lucide::Plus, tr(cx, "work:docs.newSubpage"), group.clone(), cx))
-            .child(Self::row_action(SharedString::from(format!("doc-page-menu-{}", row.id)), IconName::Ellipsis, menu_label, group, cx))
+            // Quien sólo puede mirar no ve cómo crear.
+            .when(can_add, |this| {
+                this.child(Self::row_action(
+                    SharedString::from(format!("doc-page-new-{}", row.id)),
+                    Lucide::Plus,
+                    tr(cx, "work:docs.newSubpage"),
+                    group.clone(),
+                    Self::new_page_in(Some(row.id.clone())),
+                    cx,
+                ))
+            })
+            .child(Self::row_action(SharedString::from(format!("doc-page-menu-{}", row.id)), IconName::Ellipsis, menu_label, group, None, cx))
             .test_support()
     }
 
@@ -221,6 +745,7 @@ impl DocsView {
         let (sidebar, sidebar_foreground, border, muted) = (theme.sidebar, theme.sidebar_foreground, theme.border, theme.muted_foreground);
         let hover = crate::theme::ghost_hover(cx);
         let rows = docs.page_rows(locale(cx));
+        let can_add = docs.can_add_pages();
         let home_group = SharedString::from("doc-pages-home-group");
         let (home_hint, close_hint) = (tr(cx, "work:docs.homeHint"), tr(cx, "work:docs.close"));
 
@@ -238,8 +763,10 @@ impl DocsView {
                     .child(Icon::new(Lucide::House).size_3p5().flex_none())
                     .child(div().min_w_0().truncate().child(tr(cx, "work:docs.home"))),
             )
-            .child(Self::row_action("doc-pages-new".into(), Lucide::Plus, tr(cx, "work:docs.newPage"), home_group.clone(), cx))
-            .child(Self::row_action("doc-pages-trash".into(), Lucide::Trash, tr(cx, "work:docs.trash"), home_group, cx))
+            .when(can_add, |this| {
+                this.child(Self::row_action("doc-pages-new".into(), Lucide::Plus, tr(cx, "work:docs.newPage"), home_group.clone(), Self::new_page_in(None), cx))
+            })
+            .child(Self::row_action("doc-pages-trash".into(), Lucide::Trash, tr(cx, "work:docs.trash"), home_group, None, cx))
             .test_support();
 
         let panel = div()
@@ -283,7 +810,7 @@ impl DocsView {
                     .test_support(),
             )
             .child(home)
-            .children(rows.into_iter().map(|row| Self::render_page_row(row, cx)))
+            .children(rows.into_iter().map(|row| Self::render_page_row(row, can_add, cx)))
             // El árbol no llegó: se dice, en vez de una hoja vacía que
             // parece un documento sin páginas.
             .when(docs.pages_error.is_some(), |this| {
@@ -358,16 +885,18 @@ impl DocsView {
     }
 
     /// Una página vacía ofrece por dónde empezar: dos plantillas y
-    /// «Escribirlo». Ninguna de las tres está todavía en esta app.
-    fn render_empty_page(said: impl IntoElement, cx: &App) -> Div {
+    /// «Escribirlo». Una plantilla deja su texto en la caja; no se guarda
+    /// hasta que se pulse guardar (la app de siempre la guarda al elegirla).
+    /// A quien sólo puede mirar no se le ofrece nada: sólo se le dice que
+    /// está vacía.
+    fn render_empty_page(said: impl IntoElement, can_write: bool, cx: &App) -> Div {
         let theme = cx.theme();
         let (muted, border, accent) = (theme.muted_foreground, theme.border, theme.accent);
-        div()
-            .py_8()
-            .flex()
-            .flex_col()
-            .items_center()
-            .child(said)
+        let block = div().py_8().flex().flex_col().items_center().child(said);
+        if !can_write {
+            return block;
+        }
+        block
             .child(div().mt_4().w_full().max_w(px(512.)).flex().gap_2().children(PAGE_TEMPLATES.map(|(key, icon)| {
                 div()
                     .id(SharedString::from(format!("doc-page-template-{key}")))
@@ -389,20 +918,31 @@ impl DocsView {
                             .child(tr(cx, &format!("work:pageTemplates.{key}.name"))),
                     )
                     .child(div().mt_1().leading_xs().text_color(muted).child(tr(cx, &format!("work:pageTemplates.{key}.hint"))))
-                    .tooltip(not_yet(cx))
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        Backend::core(cx).docs().start_from_template(key, locale(cx));
+                    })
                     .test_support()
             })))
-            .child(ghost_button("doc-write", Lucide::Pencil, tr(cx, "work:docs.writeIt"), cx).mt_3().tooltip(not_yet(cx)).test_support())
+            .child(
+                ghost_button("doc-write", Lucide::Pencil, tr(cx, "work:docs.writeIt"), cx)
+                    .mt_3()
+                    .cursor_pointer()
+                    .on_click(|_, _, cx| {
+                        Backend::core(cx).docs().start_edit();
+                    })
+                    .test_support(),
+            )
     }
 
     /// Lo que va bajo el texto de una página: las que tiene dentro, siempre
     /// (dice qué hay sin mirar el árbol), y lo que la enlaza, si algo lo
     /// hace.
-    fn render_page_tail(children: Vec<DocPageLink>, backlinks: Vec<DocBacklinkRow>, cx: &App) -> impl IntoElement {
+    fn render_page_tail(page_id: String, can_add: bool, children: Vec<DocPageLink>, backlinks: Vec<DocBacklinkRow>, cx: &App) -> impl IntoElement {
         let theme = cx.theme();
         let (muted, border, primary) = (theme.muted_foreground, theme.border, theme.primary);
         let hover = crate::theme::ghost_hover(cx);
-        let new_hint = format!("{} · {}", tr(cx, "work:docs.newSubpage"), tr(cx, "common:misc.notInThisApp"));
+        let new_hint = tr(cx, "work:docs.newSubpage");
         let inside = div()
             .id("doc-page-children")
             .mt_10()
@@ -412,20 +952,24 @@ impl DocsView {
             .flex()
             .flex_col()
             .child(
-                div().mb_2().flex().items_center().gap_2().child(section_title(tr(cx, "work:docs.childPages"), muted)).child(
-                    div()
-                        .id("doc-page-new-child")
-                        .size_6()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(8.))
-                        .hover(move |style| style.bg(hover))
-                        .child(Icon::new(Lucide::Plus).size_3p5())
-                        .tooltip(move |window, cx| Tooltip::new(new_hint.clone()).build(window, cx))
-                        .test_support(),
-                ),
+                div().mb_2().flex().items_center().gap_2().child(section_title(tr(cx, "work:docs.childPages"), muted)).when(can_add, |this| {
+                    this.child(
+                        div()
+                            .id("doc-page-new-child")
+                            .size_6()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(8.))
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(hover))
+                            .child(Icon::new(Lucide::Plus).size_3p5())
+                            .on_click(move |_, _, cx| Backend::core(cx).docs().new_page(Some(&page_id)))
+                            .tooltip(move |window, cx| Tooltip::new(new_hint.clone()).build(window, cx))
+                            .test_support(),
+                    )
+                }),
             )
             .child(div().flex().flex_col().items_start().gap_1().children(children.into_iter().map(|child| {
                 let id = child.id.clone();
@@ -526,6 +1070,18 @@ impl DocsView {
             )
     }
 
+    /// Un texto del documento, pintado, con sus enlaces: uno a otra página
+    /// de este documento la abre aquí; lo demás, como siempre.
+    fn doc_text(id: SharedString, markdown: String, style: TextViewStyle) -> TextView {
+        TextView::markdown(id, markdown).style(style).on_link_click(|url, _, _, cx| {
+            if let Some(page) = Backend::snapshot(cx).read(cx).docs.page_for_link(url) {
+                Self::open_page(page, cx);
+            } else if crate::theme::leads_somewhere(url) {
+                cx.open_url(url);
+            }
+        })
+    }
+
     /// Lo que se lee, trozo a trozo: la prosa en su medida y centrada, y lo
     /// ancho (tablas, código) a todo lo que da la página.
     fn render_blocks(blocks: Vec<DocBlock>, node: &str, tab: &str, cx: &App) -> impl IntoElement {
@@ -535,15 +1091,7 @@ impl DocsView {
                 // Un id por nodo, pestaña y trozo: el del texto anterior no
                 // debe prestarle su estado a éste.
                 let id = SharedString::from(format!("doc-text-{node}-{tab}-{index}"));
-                let text = TextView::markdown(id, block.text).style(style.clone()).on_link_click(|url, _, _, cx| {
-                    // Un enlace a otra página de este documento la abre
-                    // aquí; lo demás, como siempre.
-                    if let Some(page) = Backend::snapshot(cx).read(cx).docs.page_for_link(url) {
-                        Self::open_page(page, cx);
-                    } else if crate::theme::leads_somewhere(url) {
-                        cx.open_url(url);
-                    }
-                });
+                let text = Self::doc_text(id, block.text, style.clone());
                 let kind = if block.wide { "wide" } else { "prose" };
                 div()
                     .id(SharedString::from(format!("doc-{kind}-{index}")))
@@ -601,7 +1149,11 @@ impl Render for DocsView {
         let on_decisions = docs.tab == "decisions";
         let width = window.viewport_size().width;
         let (wide, hints) = (width >= px(WIDE_WINDOW), width >= px(HINTS_FROM));
-        let contents = if wide { docs.contents() } else { Vec::new() };
+        // Lo que se escribe, si se escribe algo: entonces el editor ocupa el
+        // sitio de lo que se lee, con su propio pie.
+        let editing = docs.edit.clone();
+        let (editable, can_add) = (docs.editable(), docs.can_add_pages());
+        let contents = if wide && editing.is_none() { docs.contents() } else { Vec::new() };
 
         // La cabecera (`h-12 gap-2 px-4`): el icono, el nombre del nodo, su
         // id para copiar y, al final, las páginas, compartir y cerrar.
@@ -656,6 +1208,7 @@ impl Render for DocsView {
                     .child(
                         icon_button("doc-close", Lucide::X)
                             .cursor_pointer()
+                            // Con texto sin guardar, el core pregunta antes.
                             .on_click(|_, _, cx| Backend::core(cx).back_to_tasks())
                             .tooltip(move |window, cx| Tooltip::new(close_hint.clone()).build(window, cx))
                             .test_support(),
@@ -693,9 +1246,10 @@ impl Render for DocsView {
                             .when_some(layout, |this, layout| {
                                 this.cursor_pointer().hover(move |style| style.text_color(foreground)).on_click(move |_, _, cx| {
                                     // De vuelta a las tareas del mismo nodo,
-                                    // en la vista que se pulsó.
-                                    let _ = Backend::core(cx).set_work_layout(layout);
-                                    Backend::core(cx).back_to_tasks();
+                                    // en la vista que se pulsó. Con texto
+                                    // sin guardar, el core pregunta antes y
+                                    // la vista no cambia hasta contestar.
+                                    Backend::core(cx).back_to_tasks_in(layout);
                                 })
                             })
                             .child(tr(cx, &format!("work:board.view.{view}")))
@@ -732,7 +1286,7 @@ impl Render for DocsView {
         }));
 
         // Sin nada que leer: por qué, en el centro (`py-12 text-center`), y
-        // cómo empezar a escribirlo, que todavía no está aquí.
+        // cómo empezar a escribirlo, a quien puede.
         let nothing = empty.map(|key| {
             let said = div().id("doc-empty").test_support().leading_sm().text_color(muted).child(tr(cx, key));
             let block = div().py_12().flex().flex_col().items_center().text_center();
@@ -741,10 +1295,20 @@ impl Render for DocsView {
                     .child(Icon::new(Lucide::Gavel).size_5().mb_2().text_color(muted))
                     .child(said)
                     .child(div().mt_1().max_w(px(384.)).leading_xs().text_color(muted).child(tr(cx, "work:decisions.emptyWhy"))),
-                "work:docs.emptyPage" => Self::render_empty_page(said, cx),
-                "work:docs.emptyTab" => block.child(said).child(
-                    ghost_button("doc-write", Lucide::Pencil, tr(cx, "work:docs.writeIt"), cx).mt_3().border_1().border_color(border).tooltip(not_yet(cx)).test_support(),
-                ),
+                "work:docs.emptyPage" => Self::render_empty_page(said, editable, cx),
+                "work:docs.emptyTab" => block.child(said).when(editable, |this| {
+                    this.child(
+                        ghost_button("doc-write", Lucide::Pencil, tr(cx, "work:docs.writeIt"), cx)
+                            .mt_3()
+                            .border_1()
+                            .border_color(border)
+                            .cursor_pointer()
+                            .on_click(|_, _, cx| {
+                                Backend::core(cx).docs().start_edit();
+                            })
+                            .test_support(),
+                    )
+                }),
                 _ => block.child(said),
             }
         });
@@ -755,7 +1319,10 @@ impl Render for DocsView {
         // Una página lleva encima sus migas y su título, y debajo —cuando
         // ya llegó— lo que tiene dentro y lo que la enlaza.
         let page_head = on_page.then(|| Self::render_page_head(name.clone(), docs.page_trail(here), docs.page_title(here), cx));
-        let page_tail = docs.page.is_some().then(|| Self::render_page_tail(docs.page_children(here), docs.page_backlinks(here), cx));
+        let page_tail = docs
+            .page
+            .as_ref()
+            .map(|view| Self::render_page_tail(view.page.id.clone(), can_add, docs.page_children(here), docs.page_backlinks(here), cx));
         let reading = div()
             .min_w_0()
             .flex_1()
@@ -779,15 +1346,23 @@ impl Render for DocsView {
             .children(page_tail);
 
         // El pie (`border-t px-4 py-2`): en el registro, apuntar una
-        // decisión; en lo demás, si hay texto, editarlo. Ninguna de las dos
-        // está todavía en esta app.
+        // decisión, que todavía no está en esta app; en lo demás, si hay
+        // texto y quien mira puede escribir, editarlo.
+        let edit_button = || {
+            ghost_button("doc-edit", Lucide::Pencil, tr(cx, "work:docs.edit"), cx)
+                .cursor_pointer()
+                .on_click(|_, _, cx| {
+                    Backend::core(cx).docs().start_edit();
+                })
+                .test_support()
+        };
         let foot_bar = || div().id("doc-foot").flex().flex_none().items_center().gap_2().px_4().py_2().border_t_1().border_color(border);
         let foot = if docs.page.is_some() {
             // El de una página (`DocPageView.tsx`): editar si hay texto, su
             // historial y, al fondo, mandarla a la papelera.
             Some(
                 foot_bar()
-                    .when(!blocks.is_empty(), |this| this.child(ghost_button("doc-edit", Lucide::Pencil, tr(cx, "work:docs.edit"), cx).tooltip(not_yet(cx)).test_support()))
+                    .when(!blocks.is_empty() && editable, |this| this.child(edit_button()))
                     .child(
                         ghost_button("doc-page-history", Lucide::RotateCcwClock, tr(cx, "work:docs.history"), cx).h_6().gap_1p5().leading_xs().tooltip(not_yet(cx)).test_support(),
                     )
@@ -797,8 +1372,8 @@ impl Render for DocsView {
             None
         } else if on_decisions {
             Some(foot_bar().child(ghost_button("doc-record-decision", Lucide::Gavel, tr(cx, "work:decisions.record"), cx).tooltip(not_yet(cx)).test_support()))
-        } else if !blocks.is_empty() {
-            Some(foot_bar().child(ghost_button("doc-edit", Lucide::Pencil, tr(cx, "work:docs.edit"), cx).tooltip(not_yet(cx)).test_support()))
+        } else if !blocks.is_empty() && editable {
+            Some(foot_bar().child(edit_button()))
         } else {
             None
         };
@@ -806,6 +1381,19 @@ impl Render for DocsView {
         // La hoja «Páginas», encima de todo mientras está abierta.
         let sheet = docs.pages_shown.then(|| self.render_pages_sheet(&docs, window, cx));
         self.sheet_was_shown = docs.pages_shown;
+        // El editor, en el sitio de lo que se lee y de su pie.
+        let editor = editing.as_ref().map(|edit| self.render_editor(&docs, edit, window, cx));
+        // Y la pregunta antes de perder texto, encima de todo.
+        let question = editing.as_ref().and_then(|edit| edit.question(here));
+        let asking = question.is_some();
+        let question = question.map(|question| self.render_question(question, window, cx));
+        if self.was_asking && !asking {
+            // Contestada: el foco vuelve a la caja, si se sigue escribiendo.
+            if let (Some(boxes), true) = (&self.boxes, editing.is_some()) {
+                boxes.body.update(cx, |input, cx| input.focus(window, cx));
+            }
+        }
+        self.was_asking = asking;
         // Cada página empieza arriba: la que se abre desde el pie de otra no
         // hereda lo que se había bajado en ella.
         let scroll_id = docs.page_id.as_ref().map(|id| SharedString::from(format!("doc-scroll-{id}"))).unwrap_or_else(|| "doc-scroll".into());
@@ -820,22 +1408,643 @@ impl Render for DocsView {
             .text_color(foreground)
             .child(header)
             .children(views)
-            // Las pestañas son de la portada: una página no las lleva.
-            .when(!on_page, |this| this.child(tabs))
-            .child(
-                div().id(scroll_id).flex_1().min_h_0().overflow_y_scroll().p_6().child(
-                    div()
-                        .w_full()
-                        .max_w(px(if wide { WIDE_PAGE_WIDTH } else { PAGE_WIDTH }))
-                        .mx_auto()
-                        .flex()
-                        .when(wide, |this| this.gap_8())
-                        .child(reading)
-                        .when(!contents.is_empty(), |this| this.child(Self::render_contents(contents, cx))),
-                )
-                .test_support(),
-            )
-            .children(foot)
+            // Las pestañas son de la portada: una página no las lleva, ni
+            // una página nueva que se escribe sobre ella.
+            .when(!on_page && !editing.as_ref().is_some_and(DocEdit::has_title), |this| this.child(tabs))
+            .map(|this| match editor {
+                Some(editor) => this.child(editor),
+                None => this
+                    .child(
+                        div().id(scroll_id).flex_1().min_h_0().overflow_y_scroll().p_6().child(
+                            div()
+                                .w_full()
+                                .max_w(px(if wide { WIDE_PAGE_WIDTH } else { PAGE_WIDTH }))
+                                .mx_auto()
+                                .flex()
+                                .when(wide, |this| this.gap_8())
+                                .child(reading)
+                                .when(!contents.is_empty(), |this| this.child(Self::render_contents(contents, cx))),
+                        )
+                        .test_support(),
+                    )
+                    .children(foot),
+            })
             .children(sheet)
+            .children(question)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Sin `use super::*`: ver la nota en `shell.rs`.
+    use super::DocsView;
+    use crate::backend::Backend;
+    use crate::testing::{ok, sign_in, wait_until, FakeServer};
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{px, size, AnyWindowHandle, AppContext, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowOptions};
+    use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex};
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, Request, ResponseTemplate};
+
+    /// El resumen del espacio `a` tal como lo tiene el servidor: su texto,
+    /// su versión y quién lo dejó así.
+    struct Kept {
+        body: String,
+        version: u32,
+        by: &'static str,
+    }
+
+    fn doc(kept: &Kept) -> Value {
+        json!({
+            "doc": null, "orgId": "o1", "decisions": [], "attachments": [],
+            "tabs": [
+                { "key": "overview", "body": kept.body, "bodyHash": format!("h{}", kept.version), "updatedByName": kept.by },
+                { "key": "runbook", "body": "" },
+            ],
+        })
+    }
+
+    fn page(id: &str, parent: Option<&str>, title: &str, body: &str) -> Value {
+        json!({ "id": id, "parentId": parent, "title": title, "body": body, "bodyHash": "h1" })
+    }
+
+    /// Un servidor con la documentación del espacio `a`, que guarda como el
+    /// de verdad: rechaza con 409, y lo que hay dentro, el guardado que no
+    /// trae la versión vigente. Dos páginas: `p1`, escrita, y dentro `p2`,
+    /// en blanco. Quien entra tiene ese papel en la organización.
+    fn server(role: &str) -> (FakeServer, Arc<Mutex<Kept>>) {
+        let server = FakeServer::start();
+        let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+        let org = json!({ "id": "o1", "name": "G Studio", "slug": "g", "role": role, "memberCount": 2, "createdAt": "2026-06-09T12:00:00Z", "timezone": "" });
+        let space = json!({
+            "id": "a", "orgId": "o1", "name": "Producto", "color": "#888", "folders": [], "people": [],
+            "lists": [{ "id": "l-a", "name": "Lista", "openCount": 1, "taskCount": 1 }],
+        });
+        server.mount(get("/api/v1/organizations/").respond_with(ok(json!([org]))));
+        server.mount(get("/api/v1/task-spaces/").respond_with(ok(json!([space]))));
+        server.mount(get("/api/v1/docs/").respond_with(ok(json!({}))));
+        server.mount(get("/api/v1/tasks/").respond_with(ok(json!([]))));
+
+        let kept = Arc::new(Mutex::new(Kept { body: "## Qué es\n\nEl espacio.".into(), version: 1, by: "Luis Gil" }));
+        let (read, written) = (kept.clone(), kept.clone());
+        server.mount(get("/api/v1/docs/space/a").respond_with(move |_: &Request| ok(doc(&read.lock().unwrap()))));
+        server.mount(Mock::given(method("PUT")).and(path("/api/v1/docs/space/a/tabs/overview")).respond_with(move |request: &Request| {
+            let sent: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+            let mut kept = written.lock().unwrap();
+            if sent["baseHash"].as_str() != Some(format!("h{}", kept.version).as_str()) {
+                return ResponseTemplate::new(409).set_body_json(json!({ "success": false, "error": "doc-conflict", "data": doc(&kept) }));
+            }
+            *kept = Kept { body: sent["body"].as_str().unwrap_or_default().into(), version: kept.version + 1, by: "Ana Ruiz" };
+            ok(doc(&kept))
+        }));
+        let tree = json!([
+            { "id": "p1", "title": "Arquitectura", "hasBody": true },
+            { "id": "p2", "parentId": "p1", "title": "", "hasBody": false },
+        ]);
+        server.mount(get("/api/v1/docs/space/a/pages").respond_with(ok(tree)));
+        let view = |page: Value| ok(json!({ "page": page, "breadcrumb": [], "children": [], "referencedFrom": [] }));
+        server.mount(get("/api/v1/docs/space/a/pages/p1").respond_with(view(page("p1", None, "Arquitectura", "## Capas\n\nTres."))));
+        server.mount(get("/api/v1/docs/space/a/pages/p2").respond_with(view(page("p2", Some("p1"), "", ""))));
+        server.mount(get("/api/v1/docs/space/a/pages/new1").respond_with(view(page("new1", Some("p1"), "Los tipos", ""))));
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path("/api/v1/docs/space/a/pages"))
+                .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": page("new1", Some("p1"), "Los tipos", "") }))),
+        );
+        server.mount(
+            Mock::given(method("PUT")).and(path_regex("^/api/v1/docs/space/a/pages/")).respond_with(ok(page("p2", Some("p1"), "", "guardada"))),
+        );
+        (server, kept)
+    }
+
+    /// La documentación del espacio `a` abierta en una ventana de ese ancho,
+    /// con la vista sola: lo de alrededor (el árbol, el riel) no entra aquí.
+    fn open(server: &FakeServer, width: f32, cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<DocsView>) {
+        server.install(cx);
+        sign_in(cx);
+        let (window, view) = cx.update(|cx| {
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds { origin: Point::default(), size: size(px(width), px(760.)) })),
+                ..WindowOptions::default()
+            };
+            let (window, view) = gpui_kit::open_window(options, cx, |_, cx| {
+                cx.new(|cx| {
+                    // Quien pone esta vista (el espacio de trabajo) es quien
+                    // la repinta cuando el core cambia; aquí va sola.
+                    cx.observe(&Backend::snapshot(cx), |_, _, cx| cx.notify()).detach();
+                    DocsView::new(cx)
+                })
+            })
+            .expect("open test window");
+            (gpui_kit::AnyWindowHandle::from(window), view)
+        });
+        cx.update(|cx| {
+            Backend::run(cx, |core| async move {
+                core.orgs().load().await;
+                core.tree().load("o1").await;
+                core.docs().open("a").await;
+            })
+        });
+        wait_until(cx, "llega la documentación del espacio", |cx| on_screen(window, "doc-body", cx));
+        (window, view)
+    }
+
+    fn on_screen(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> bool {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find(id).is_some()
+        })
+        .unwrap()
+    }
+
+    fn click(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(id, cx);
+        })
+        .unwrap();
+    }
+
+    fn label_of(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> String {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.find(id).label().unwrap_or_default().to_string()
+        })
+        .unwrap()
+    }
+
+    /// Dónde está una pieza: su borde izquierdo y su ancho.
+    fn span(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> (f32, f32) {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let bounds = window.find(id).bounds();
+            (f32::from(bounds.origin.x), f32::from(bounds.size.width))
+        })
+        .unwrap()
+    }
+
+    /// Escribe eso en la caja (o en el título), como quien la pulsa y teclea.
+    fn type_in(window: AnyWindowHandle, id: &str, text: &str, cx: &mut TestAppContext) {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(id, cx);
+            window.input(text, cx);
+        })
+        .unwrap();
+    }
+
+    /// Lo que hay en la caja del texto y en la del título.
+    fn boxes(view: &Entity<DocsView>, cx: &mut TestAppContext) -> (String, String) {
+        cx.update(|cx| {
+            let boxes = view.read(cx).boxes.as_ref().expect("el editor no se ha abierto nunca");
+            (boxes.title.read(cx).value().to_string(), boxes.body.read(cx).value().to_string())
+        })
+    }
+
+    /// El borrador que tiene el core, si se escribe algo.
+    fn draft(cx: &mut TestAppContext) -> Option<cac_core::DocEdit> {
+        cx.update(|cx| Backend::snapshot(cx).read(cx).docs.edit.clone())
+    }
+
+    /// Lo que se le mandó al servidor que no fue leer: verbo, ruta y cuerpo.
+    fn writes(server: &FakeServer) -> Vec<(String, String, Value)> {
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.method.as_str() != "GET")
+            .map(|request| (request.method.to_string(), request.url.path().to_string(), serde_json::from_slice(&request.body).unwrap_or(Value::Null)))
+            .collect()
+    }
+
+    fn stop(cx: &mut TestAppContext) {
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// «Editar» abre la caja con el texto que había y, al lado, el
+    /// documento pintado; lo que se teclea llega al borrador (que es lo que
+    /// se pinta al lado) y «Guardar» lo manda con su versión y vuelve a leer.
+    ///
+    /// Roturas que atrapa: un «Editar» que no hace nada; una caja en blanco
+    /// sobre un documento escrito (guardarla lo borraría); teclear sin que
+    /// el borrador se entere (la vista previa no cambia y «Guardar» sigue
+    /// apagado); la caja y la vista previa una encima de otra en una
+    /// ventana ancha; un «Guardar» que no guarda.
+    #[gpui_kit::test]
+    fn editing_shows_the_box_beside_the_document_and_saving_sends_what_was_typed(cx: &mut TestAppContext) {
+        let (server, _) = server("member");
+        let (window, view) = open(&server, 1400., cx);
+
+        click(window, "doc-edit", cx);
+        wait_until(cx, "sale el editor", |cx| on_screen(window, "doc-editor", cx));
+        assert!(!on_screen(window, "doc-body", cx), "lo que se lee sigue debajo del editor");
+        assert_eq!(boxes(&view, cx).1, "## Qué es\n\nEl espacio.");
+        assert!(!on_screen(window, "doc-editing-what", cx), "una pestaña ya dice cuál es en su fila");
+        assert!(!on_screen(window, "doc-edit-status", cx), "dice «sin guardar» sin haber tocado nada");
+
+        // Lado a lado: la caja a la izquierda, lo pintado a la derecha.
+        let (box_left, box_width) = span(window, "doc-edit-box", cx);
+        let (preview_left, preview_width) = span(window, "doc-edit-preview", cx);
+        assert!(box_left + box_width <= preview_left + 1., "la vista previa no está al lado de la caja");
+        assert!(box_width > 300. && preview_width > 300., "uno de los dos se quedó sin sitio: {box_width} y {preview_width}");
+        assert!(on_screen(window, "doc-edit-preview-text", cx), "al lado no hay nada pintado");
+        assert!(!on_screen(window, "doc-edit-switch", cx), "con sitio para los dos no hace falta elegir");
+        // La caja llena el alto: es para escribir un documento, no una nota.
+        // Se mide el campo, no su marco: un campo de dos filas dentro de un
+        // marco alto enseñaría dos renglones del documento.
+        let tall = cx.update(|cx| f32::from(view.read(cx).boxes.as_ref().unwrap().body.read(cx).input_bounds().size.height));
+        assert!(tall > 400., "el campo mide {tall} de alto en una ventana de 760");
+
+        type_in(window, "doc-edit-input", "X", cx);
+        wait_until(cx, "lo tecleado llega al borrador", |cx| draft(cx).is_some_and(|edit| edit.body.contains('X')));
+        assert_eq!(label_of(window, "doc-edit-status", cx), "Cambios sin guardar");
+        // La siguiente tecla cae detrás de la anterior: pintar no vuelve a
+        // poner el texto en la caja ni le mueve el cursor.
+        cx.update_window(window, |_, window, cx| window.input("Y", cx)).unwrap();
+        wait_until(cx, "la segunda tecla llega al borrador", |cx| draft(cx).is_some_and(|edit| edit.body.contains('Y')));
+        let typed = boxes(&view, cx).1;
+        assert!(typed.contains("XY"), "la segunda tecla no cayó detrás de la primera: {typed:?}");
+        assert_eq!(draft(cx).map(|edit| edit.body), Some(typed.clone()), "el borrador no es lo que hay en la caja");
+
+        click(window, "doc-save", cx);
+        wait_until(cx, "guardado, se vuelve a leer", |cx| draft(cx).is_none() && on_screen(window, "doc-body", cx));
+        assert_eq!(writes(&server), [("PUT".to_string(), "/api/v1/docs/space/a/tabs/overview".to_string(), json!({ "body": typed, "baseHash": "h1" }))]);
+        assert!(!on_screen(window, "doc-editor", cx));
+        stop(cx);
+    }
+
+    /// En una ventana estrecha se ve la caja o la vista previa, con su
+    /// conmutador; lo escrito sigue ahí al volver.
+    ///
+    /// Roturas que atrapa: partir en dos una ventana donde no caben; un
+    /// conmutador que no cambia nada; perder lo tecleado al ir a mirar cómo
+    /// queda.
+    #[gpui_kit::test]
+    fn a_narrow_window_shows_the_box_or_the_preview(cx: &mut TestAppContext) {
+        let (server, _) = server("member");
+        let (window, view) = open(&server, 800., cx);
+        click(window, "doc-edit", cx);
+        wait_until(cx, "sale el editor", |cx| on_screen(window, "doc-editor", cx));
+
+        assert!(on_screen(window, "doc-edit-box", cx) && !on_screen(window, "doc-edit-preview", cx));
+        type_in(window, "doc-edit-input", "X", cx);
+        wait_until(cx, "lo tecleado llega al borrador", |cx| draft(cx).is_some_and(|edit| edit.is_dirty()));
+        let typed = boxes(&view, cx).1;
+
+        click(window, "doc-edit-show-preview", cx);
+        wait_until(cx, "se ve la vista previa", |cx| on_screen(window, "doc-edit-preview", cx));
+        assert!(!on_screen(window, "doc-edit-box", cx));
+        assert!(on_screen(window, "doc-edit-preview-text", cx));
+
+        click(window, "doc-edit-show-box", cx);
+        wait_until(cx, "vuelve la caja", |cx| on_screen(window, "doc-edit-box", cx));
+        assert!(!on_screen(window, "doc-edit-preview", cx));
+        assert_eq!(boxes(&view, cx).1, typed);
+
+        // Ctrl+S (Cmd en un Mac) guarda desde la caja.
+        cx.update_window(window, |_, window, cx| {
+            window.click("doc-edit-input", cx);
+            window.press("secondary-s", cx);
+        })
+        .unwrap();
+        wait_until(cx, "guardado con el teclado", |cx| draft(cx).is_none());
+        assert_eq!(writes(&server).len(), 1);
+        assert_eq!(writes(&server)[0].2["body"], typed);
+        stop(cx);
+    }
+
+    /// Salir con texto sin guardar pregunta en pantalla: «Seguir editando»
+    /// y Escape dejan todo como estaba; «Descartar» se va. Sin cambios,
+    /// «Cancelar» cierra sin preguntar.
+    ///
+    /// Roturas que atrapa: cambiar de pestaña y perder lo escrito sin
+    /// aviso; una pregunta que no se pinta (el clic parece no hacer nada);
+    /// un Escape que descarta; un «Descartar» que no se va; preguntar a
+    /// quien no tocó nada.
+    #[gpui_kit::test]
+    fn leaving_with_unsaved_text_asks_on_screen(cx: &mut TestAppContext) {
+        let (server, _) = server("member");
+        let (window, view) = open(&server, 1400., cx);
+        let tab = |cx: &mut TestAppContext| cx.update(|cx| Backend::snapshot(cx).read(cx).docs.tab.clone());
+
+        click(window, "doc-edit", cx);
+        wait_until(cx, "sale el editor", |cx| on_screen(window, "doc-editor", cx));
+        click(window, "doc-cancel", cx);
+        wait_until(cx, "sin cambios, cancelar cierra", |cx| !on_screen(window, "doc-editor", cx));
+        assert!(!on_screen(window, "doc-ask", cx), "preguntó a quien no tocó nada");
+
+        click(window, "doc-edit", cx);
+        wait_until(cx, "sale el editor", |cx| on_screen(window, "doc-editor", cx));
+        type_in(window, "doc-edit-input", "X", cx);
+        wait_until(cx, "lo tecleado llega al borrador", |cx| draft(cx).is_some_and(|edit| edit.is_dirty()));
+        let typed = boxes(&view, cx).1;
+
+        click(window, "doc-tab-runbook", cx);
+        wait_until(cx, "pregunta antes de irse", |cx| on_screen(window, "doc-ask", cx));
+        assert_eq!(label_of(window, "doc-ask-title", cx), "¿Descartar lo que has escrito?");
+        assert_eq!(tab(cx), "overview", "se fue sin esperar la respuesta");
+        click(window, "doc-ask-no", cx);
+        wait_until(cx, "la pregunta se quita", |cx| !on_screen(window, "doc-ask", cx));
+        assert_eq!((tab(cx), boxes(&view, cx).1), ("overview".to_string(), typed.clone()));
+        // Y se sigue escribiendo sin tener que pulsar la caja otra vez.
+        cx.update_window(window, |_, window, cx| window.input("Z", cx)).unwrap();
+        wait_until(cx, "lo siguiente cae en la caja", |cx| draft(cx).is_some_and(|edit| edit.body.contains('Z')));
+        let typed = boxes(&view, cx).1;
+
+        // La equis de la pregunta también es un no.
+        click(window, "doc-cancel", cx);
+        wait_until(cx, "cancelar pregunta", |cx| on_screen(window, "doc-ask", cx));
+        click(window, "doc-ask-close", cx);
+        wait_until(cx, "la equis la quita", |cx| !on_screen(window, "doc-ask", cx));
+        assert_eq!(boxes(&view, cx).1, typed, "la equis descartó lo escrito");
+
+        click(window, "doc-cancel", cx);
+        wait_until(cx, "cancelar también pregunta", |cx| on_screen(window, "doc-ask", cx));
+        cx.update_window(window, |_, window, cx| window.press("enter", cx)).unwrap();
+        cx.run_until_parked();
+        assert!(on_screen(window, "doc-ask", cx) && draft(cx).is_some(), "Enter descartó lo escrito");
+        cx.update_window(window, |_, window, cx| window.press("escape", cx)).unwrap();
+        wait_until(cx, "Escape contesta que no", |cx| !on_screen(window, "doc-ask", cx));
+        assert_eq!(boxes(&view, cx).1, typed, "Escape descartó lo escrito");
+        assert!(on_screen(window, "doc-editor", cx));
+
+        click(window, "doc-tab-runbook", cx);
+        wait_until(cx, "pregunta otra vez", |cx| on_screen(window, "doc-ask", cx));
+        click(window, "doc-ask-yes", cx);
+        wait_until(cx, "con un sí, se va", |cx| tab(cx) == "runbook" && !on_screen(window, "doc-editor", cx));
+        assert!(writes(&server).is_empty(), "descartar guardó algo");
+        stop(cx);
+    }
+
+    /// Si alguien guardó en medio, se dice en pantalla, lo escrito sigue en
+    /// la caja, al lado se puede mirar lo que hay ahora, y guardar encima
+    /// pregunta antes.
+    ///
+    /// Roturas que atrapa: un choque que no se ve (parece guardado); perder
+    /// lo tecleado; un «ver lo que hay ahora» que sigue enseñando lo propio
+    /// sin decir de quién es; pisar al otro sin preguntar.
+    #[gpui_kit::test]
+    fn a_conflict_is_said_and_the_text_stays(cx: &mut TestAppContext) {
+        let (server, kept) = server("member");
+        let (window, view) = open(&server, 1400., cx);
+        click(window, "doc-edit", cx);
+        wait_until(cx, "sale el editor", |cx| on_screen(window, "doc-editor", cx));
+        type_in(window, "doc-edit-input", "X", cx);
+        wait_until(cx, "lo tecleado llega al borrador", |cx| draft(cx).is_some_and(|edit| edit.is_dirty()));
+        let typed = boxes(&view, cx).1;
+        *kept.lock().unwrap() = Kept { body: "lo de Luis".into(), version: 2, by: "Luis Gil" };
+
+        assert!(!on_screen(window, "doc-conflict", cx));
+        click(window, "doc-save", cx);
+        wait_until(cx, "se dice el choque", |cx| on_screen(window, "doc-conflict", cx));
+        assert_eq!(boxes(&view, cx).1, typed, "lo tecleado no sobrevivió al choque");
+        assert_eq!(kept.lock().unwrap().body, "lo de Luis");
+        assert_eq!(label_of(window, "doc-edit-preview-label", cx), "Vista previa");
+
+        // «Guardar» está apagado: pulsarlo no manda nada más.
+        click(window, "doc-save", cx);
+        cx.run_until_parked();
+        assert_eq!(writes(&server).len(), 1);
+
+        click(window, "doc-conflict-see", cx);
+        wait_until(cx, "al lado, lo que hay guardado", |cx| label_of(window, "doc-edit-preview-label", cx) == "Lo que hay guardado ahora");
+        assert_eq!(boxes(&view, cx).1, typed);
+
+        click(window, "doc-conflict-overwrite", cx);
+        wait_until(cx, "guardar encima pregunta", |cx| on_screen(window, "doc-ask", cx));
+        assert_eq!(label_of(window, "doc-ask-title", cx), "¿Guardar tu texto encima del que hay?");
+        assert_eq!(writes(&server).len(), 1, "pisó al otro sin esperar la respuesta");
+        click(window, "doc-ask-yes", cx);
+        wait_until(cx, "guardado encima", |cx| draft(cx).is_none());
+        assert_eq!(writes(&server)[1].2, json!({ "body": typed, "baseHash": "h2" }));
+        assert_eq!(kept.lock().unwrap().body, typed);
+        stop(cx);
+    }
+
+    /// Tras un choque, «descartar el mío y recargar» pregunta y, con un sí,
+    /// deja a la vista lo que hay guardado.
+    ///
+    /// Rotura que atrapa: un botón que tira lo escrito sin preguntar, o que
+    /// pregunta y luego no hace nada.
+    #[gpui_kit::test]
+    fn loading_theirs_asks_and_then_reads_what_is_saved(cx: &mut TestAppContext) {
+        let (server, kept) = server("member");
+        let (window, view) = open(&server, 1400., cx);
+        click(window, "doc-edit", cx);
+        wait_until(cx, "sale el editor", |cx| on_screen(window, "doc-editor", cx));
+        type_in(window, "doc-edit-input", "X", cx);
+        wait_until(cx, "lo tecleado llega al borrador", |cx| draft(cx).is_some_and(|edit| edit.is_dirty()));
+        let typed = boxes(&view, cx).1;
+        *kept.lock().unwrap() = Kept { body: "lo de Luis".into(), version: 2, by: "Luis Gil" };
+        click(window, "doc-save", cx);
+        wait_until(cx, "se dice el choque", |cx| on_screen(window, "doc-conflict", cx));
+
+        click(window, "doc-conflict-load", cx);
+        wait_until(cx, "descartar pregunta", |cx| on_screen(window, "doc-ask", cx));
+        assert_eq!(boxes(&view, cx).1, typed, "lo tiró sin esperar la respuesta");
+        click(window, "doc-ask-yes", cx);
+        wait_until(cx, "se lee lo que hay guardado", |cx| draft(cx).is_none() && on_screen(window, "doc-body", cx));
+        assert_eq!(cx.update(|cx| Backend::snapshot(cx).read(cx).docs.body().to_string()), "lo de Luis");
+        stop(cx);
+    }
+
+    /// Un guardado que falla lo dice junto a los botones y deja la caja
+    /// como estaba.
+    ///
+    /// Rotura que atrapa: un fallo mudo, con el editor abierto y sin saber
+    /// si se guardó.
+    #[gpui_kit::test]
+    fn a_failed_save_is_said_next_to_the_buttons(cx: &mut TestAppContext) {
+        let (server, _) = server("member");
+        let (window, view) = open(&server, 1400., cx);
+        click(window, "doc-tab-runbook", cx);
+        wait_until(cx, "el runbook vacío ofrece escribirlo", |cx| on_screen(window, "doc-write", cx));
+        click(window, "doc-write", cx);
+        wait_until(cx, "sale el editor", |cx| on_screen(window, "doc-editor", cx));
+        type_in(window, "doc-edit-input", "pasos", cx);
+        wait_until(cx, "lo tecleado llega al borrador", |cx| draft(cx).is_some_and(|edit| edit.body == "pasos"));
+
+        // El servidor de mentira no sabe guardar el runbook: contesta 404.
+        assert!(!on_screen(window, "doc-edit-error", cx));
+        click(window, "doc-save", cx);
+        wait_until(cx, "se dice el fallo", |cx| on_screen(window, "doc-edit-error", cx));
+        assert_eq!(label_of(window, "doc-edit-error", cx), "No se pudo guardar esta sección");
+        assert_eq!(boxes(&view, cx).1, "pasos");
+        assert!(on_screen(window, "doc-editor", cx));
+        stop(cx);
+    }
+
+    /// Quien sólo puede mirar no ve cómo escribir: ni «Editar», ni
+    /// «Escribirlo», ni las plantillas, ni los «+» de las páginas.
+    ///
+    /// Rotura que atrapa: ofrecerle a un `viewer` un editor cuyo guardado
+    /// no le corresponde.
+    #[gpui_kit::test]
+    fn a_viewer_sees_no_way_to_write(cx: &mut TestAppContext) {
+        let (server, _) = server("viewer");
+        let (window, _) = open(&server, 1400., cx);
+        assert!(!on_screen(window, "doc-edit", cx));
+        click(window, "doc-tab-runbook", cx);
+        wait_until(cx, "el runbook vacío lo dice", |cx| on_screen(window, "doc-empty", cx));
+        assert!(!on_screen(window, "doc-write", cx));
+
+        click(window, "doc-pages", cx);
+        wait_until(cx, "sale la hoja con sus páginas", |cx| on_screen(window, "doc-page-row-p1", cx));
+        assert!(!on_screen(window, "doc-pages-new", cx) && !on_screen(window, "doc-page-new-p1", cx));
+        assert!(on_screen(window, "doc-page-menu-p1", cx), "lo que sólo está pintado no se quita");
+
+        // Una página escrita, sin «Editar»; lo que sólo está pintado sigue.
+        click(window, "doc-page-row-p1", cx);
+        wait_until(cx, "llega la página escrita", |cx| on_screen(window, "doc-page-children", cx) && on_screen(window, "doc-body", cx));
+        assert!(!on_screen(window, "doc-edit", cx) && !on_screen(window, "doc-page-new-child", cx));
+        assert!(on_screen(window, "doc-page-history", cx));
+
+        click(window, "doc-pages", cx);
+        wait_until(cx, "sale la hoja otra vez", |cx| on_screen(window, "doc-page-row-p1", cx));
+        click(window, "doc-page-toggle-p1", cx);
+        wait_until(cx, "se despliega", |cx| on_screen(window, "doc-page-row-p2", cx));
+        click(window, "doc-page-row-p2", cx);
+        wait_until(cx, "la página vacía lo dice", |cx| on_screen(window, "doc-page-children", cx) && on_screen(window, "doc-empty", cx));
+        for id in ["doc-write", "doc-page-template-component", "doc-page-new-child", "doc-edit"] {
+            assert!(!on_screen(window, id, cx), "un viewer ve {id}");
+        }
+        stop(cx);
+    }
+
+    /// El «+» de una página en la hoja abre el editor de una página nueva
+    /// dentro de ella, sin crear nada; al guardar se crea con su título y
+    /// de quién cuelga.
+    ///
+    /// Roturas que atrapa: un «+» que abre la página en vez de crear dentro;
+    /// crearla al pulsar; la hoja encima del editor; un título que no llega
+    /// al servidor.
+    #[gpui_kit::test]
+    fn the_plus_of_a_page_starts_a_new_one_inside_it(cx: &mut TestAppContext) {
+        let (server, _) = server("member");
+        let (window, view) = open(&server, 1400., cx);
+        click(window, "doc-pages", cx);
+        wait_until(cx, "sale la hoja con sus páginas", |cx| on_screen(window, "doc-page-row-p1", cx));
+
+        // El «+» sale al pasar el ratón por su fila.
+        cx.update_window(window, |_, window, cx| {
+            window.hover("doc-page-row-p1", cx);
+            window.click("doc-page-new-p1", cx);
+        })
+        .unwrap();
+        wait_until(cx, "sale el editor de la página nueva", |cx| on_screen(window, "doc-edit-title", cx));
+        assert!(!on_screen(window, "doc-pages-sheet", cx), "la hoja sigue encima");
+        assert_eq!(label_of(window, "doc-editing-what", cx), "Página nueva dentro");
+        assert_eq!(draft(cx).map(|edit| edit.what), Some(cac_core::DocEditWhat::NewPage { parent_id: Some("p1".into()) }));
+        assert!(cx.update(|cx| !Backend::snapshot(cx).read(cx).docs.on_page()), "el «+» abrió la página en vez de empezar una dentro");
+        assert!(!on_screen(window, "doc-tab-overview", cx), "una página nueva no lleva las pestañas de la portada");
+        assert!(writes(&server).is_empty(), "se creó al pulsar");
+
+        // El título tiene el foco: se escribe sin pulsar nada antes.
+        cx.update_window(window, |_, window, cx| window.input("Los tipos", cx)).unwrap();
+        wait_until(cx, "el título llega al borrador", |cx| draft(cx).is_some_and(|edit| edit.title == "Los tipos"));
+        assert_eq!(boxes(&view, cx).0, "Los tipos");
+        // Enter en el título baja al texto, no parte el título.
+        cx.update_window(window, |_, window, cx| {
+            window.press("enter", cx);
+            window.input("Qué son", cx);
+        })
+        .unwrap();
+        wait_until(cx, "el texto llega al borrador", |cx| draft(cx).is_some_and(|edit| edit.body == "Qué son"));
+        assert_eq!(boxes(&view, cx).0, "Los tipos");
+        click(window, "doc-save", cx);
+        wait_until(cx, "creada", |_| !writes(&server).is_empty());
+        assert_eq!(
+            writes(&server),
+            [("POST".to_string(), "/api/v1/docs/space/a/pages".to_string(), json!({ "title": "Los tipos", "parentId": "p1", "body": "Qué son" }))]
+        );
+        wait_until(cx, "se abre la nueva", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).docs.page_id.as_deref() == Some("new1")));
+        stop(cx);
+    }
+
+    /// «Editar» en una página trae su título y su texto a las cajas, con
+    /// sus migas encima, y cambiarle el título manda sólo el título.
+    ///
+    /// Roturas que atrapa: abrir la caja del título en blanco sobre una
+    /// página que tiene uno (guardar se lo quitaría); un cambio de título
+    /// que no llega al servidor, o que arrastra el texto consigo.
+    #[gpui_kit::test]
+    fn editing_a_page_brings_its_title_and_its_text(cx: &mut TestAppContext) {
+        let (server, _) = server("member");
+        let (window, view) = open(&server, 1400., cx);
+        cx.update(|cx| Backend::run(cx, |core| async move { core.docs().open_page("p1").await }));
+        wait_until(cx, "llega la página", |cx| on_screen(window, "doc-page-children", cx));
+
+        click(window, "doc-edit", cx);
+        wait_until(cx, "sale el editor", |cx| on_screen(window, "doc-editor", cx));
+        assert_eq!(boxes(&view, cx), ("Arquitectura".to_string(), "## Capas\n\nTres.".to_string()));
+        assert!(on_screen(window, "doc-page-trail", cx), "no dice de dónde cuelga lo que se escribe");
+        assert!(!on_screen(window, "doc-editing-what", cx));
+
+        type_in(window, "doc-edit-title", "X", cx);
+        wait_until(cx, "el título llega al borrador", |cx| draft(cx).is_some_and(|edit| edit.title.contains('X')));
+        let title = boxes(&view, cx).0;
+        click(window, "doc-save", cx);
+        wait_until(cx, "guardado", |_| !writes(&server).is_empty());
+        assert_eq!(writes(&server), [("PUT".to_string(), "/api/v1/docs/space/a/pages/p1".to_string(), json!({ "title": title }))]);
+        stop(cx);
+    }
+
+    /// En una página en blanco, una plantilla abre el editor con su texto
+    /// sin guardar nada, y «Escribirlo» lo abre vacío; «Página nueva
+    /// dentro», al pie, empieza una dentro de la que se lee.
+    ///
+    /// Roturas que atrapa: una plantilla que no hace nada, o que se guarda
+    /// sola; el «+» del pie creando en la portada.
+    #[gpui_kit::test]
+    fn an_empty_page_offers_where_to_start(cx: &mut TestAppContext) {
+        let (server, _) = server("member");
+        let (window, view) = open(&server, 1400., cx);
+        cx.update(|cx| Backend::run(cx, |core| async move { core.docs().open_page("p2").await }));
+        wait_until(cx, "la página vacía ofrece por dónde empezar", |cx| on_screen(window, "doc-page-template-procedure", cx));
+
+        click(window, "doc-page-template-procedure", cx);
+        wait_until(cx, "sale el editor con la plantilla", |cx| on_screen(window, "doc-editor", cx));
+        let (title, body) = boxes(&view, cx);
+        assert_eq!(title, "");
+        assert!(body.starts_with("## Cuándo se hace"), "la plantilla no está en la caja: {body:?}");
+        // Al lado se pinta lo que hay en la caja, no lo guardado (nada).
+        assert!(on_screen(window, "doc-edit-preview-text", cx) && !on_screen(window, "doc-edit-preview-empty", cx));
+        assert_eq!(label_of(window, "doc-edit-status", cx), "Cambios sin guardar");
+        assert!(writes(&server).is_empty(), "la plantilla se guardó sola");
+        click(window, "doc-cancel", cx);
+        wait_until(cx, "una plantilla sin guardar también se pregunta", |cx| on_screen(window, "doc-ask", cx));
+        click(window, "doc-ask-yes", cx);
+        wait_until(cx, "descartada", |cx| !on_screen(window, "doc-editor", cx));
+
+        click(window, "doc-write", cx);
+        wait_until(cx, "sale el editor en blanco", |cx| on_screen(window, "doc-editor", cx));
+        assert_eq!(boxes(&view, cx).1, "");
+        assert!(on_screen(window, "doc-edit-preview-empty", cx), "sin nada escrito, al lado se dice que no hay nada");
+        click(window, "doc-cancel", cx);
+        wait_until(cx, "sin nada escrito, cancelar cierra", |cx| !on_screen(window, "doc-editor", cx));
+
+        click(window, "doc-page-new-child", cx);
+        wait_until(cx, "sale el editor de la página nueva", |cx| on_screen(window, "doc-edit-title", cx));
+        assert_eq!(draft(cx).map(|edit| edit.what), Some(cac_core::DocEditWhat::NewPage { parent_id: Some("p2".into()) }));
+        click(window, "doc-cancel", cx);
+        wait_until(cx, "sin nada escrito, cancelar cierra", |cx| !on_screen(window, "doc-editor", cx));
+
+        // Y el «+» de la portada, en la hoja, empieza una sin madre.
+        click(window, "doc-pages", cx);
+        wait_until(cx, "sale la hoja", |cx| on_screen(window, "doc-pages-home", cx));
+        cx.update_window(window, |_, window, cx| {
+            window.hover("doc-pages-home", cx);
+            window.click("doc-pages-new", cx);
+        })
+        .unwrap();
+        wait_until(cx, "sale el editor de la página nueva", |cx| on_screen(window, "doc-edit-title", cx));
+        assert_eq!(draft(cx).map(|edit| edit.what), Some(cac_core::DocEditWhat::NewPage { parent_id: None }));
+        assert_eq!(label_of(window, "doc-editing-what", cx), "Página nueva");
+        stop(cx);
     }
 }
