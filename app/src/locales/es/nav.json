@@ -91,5 +91,27 @@
     "goTo": "Ir a",
     "channels": "Canales",
     "directs": "Directos"
+  },
+  "mcp": {
+    "lead": "Claude Code habla con cac a través de cac-mcp, un programa pequeño que vive en esta máquina. Aquí se instala y se mantiene al día; nada se actualiza solo.",
+    "looking": "Mirando si está instalado…",
+    "missing": "cac-mcp no está instalado en esta máquina.",
+    "installed": "Instalado: v{{version}}",
+    "newer": "Hay una versión nueva: v{{version}}",
+    "current": "Es la última versión.",
+    "unknownLatest": "No se pudo comprobar si hay una versión más nueva.",
+    "install": "Instalar",
+    "update": "Actualizar a v{{version}}",
+    "downloading": "Descargando…",
+    "downloadingPercent": "Descargando… {{percent}} %",
+    "verifying": "Comprobando la suma…",
+    "installing": "Instalando…",
+    "done": "cac-mcp v{{version}} está instalado. Vale desde la próxima sesión de Claude Code: /mcp → cac → reconectar, o abre una nueva.",
+    "failed": "No se pudo instalar, y lo que había sigue como estaba.",
+    "command": "Orden para registrarlo (Claude Code)",
+    "tokenHelp": "Pon tu token personal donde dice {{placeholder}}. Se crea en la app de cac de siempre (menú de la cuenta → Conectar Claude Code); esta app todavía no crea tokens, y nunca los enseña.",
+    "copy": "Copiar la orden",
+    "copied": "Copiada",
+    "updateAvailable": "Hay una versión nueva de cac-mcp"
   }
 }

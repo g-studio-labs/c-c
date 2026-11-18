@@ -17,6 +17,7 @@ mod backend;
 mod board;
 mod brand;
 mod calendar;
+mod connect;
 mod docs;
 mod editor;
 mod files;
@@ -90,7 +91,8 @@ fn main() {
         eprintln!("cac: esta máquina no dice dónde guardar los datos de su usuario");
         std::process::exit(1);
     };
-    let mut config = Config::new(platform::server_url(var));
+    let server_url = platform::server_url(var);
+    let mut config = Config::new(server_url.clone());
     config.client = Some("desktop".to_string());
     let system_language = platform::system_language(platform::Os::current(), var, platform::preferred_languages);
 
@@ -107,6 +109,9 @@ fn main() {
             std::process::exit(1);
         }
         theme::apply_preference(cx);
+        // Para «Conectar Claude Code»: dónde está `cac-mcp` en esta máquina y
+        // de dónde se baja. Lo decide el MCP (`cac_mcp::update`).
+        cx.set_global(connect::McpSetup { machine: cac_mcp::update::Machine::from_env(), server_url: server_url.clone() });
 
         let options = identity::main_window_options(cx);
         if spike {

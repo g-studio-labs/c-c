@@ -14,6 +14,8 @@ on:
     paths:
       - "desktop/**"
       - "core/**"
+      # «Conectar Claude Code» instala `cac-mcp` con la lógica de `mcp/`.
+      - "mcp/**"
       - ".github/workflows/desktop.yml"
   workflow_dispatch:
   # Para `desktop-release.yml`: las mismas pruebas, por delante de empaquetar.

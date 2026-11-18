@@ -10,6 +10,10 @@ build = "build.rs"
 [dependencies]
 # La lógica. Aquí no se decide nada: toda regla va al core con su prueba.
 cac-core = { path = "../core" }
+# Sólo `cac_mcp::update`: instalar y actualizar el binario `cac-mcp` con la
+# misma lógica que `cac-mcp update` y que `scripts/install-mcp.sh`, en vez de
+# una copia. El servidor MCP no corre dentro de esta app.
+cac-mcp = { path = "../mcp" }
 # GPUI y sus componentes. Versión **exacta**: cada release puede cambiar la API
 # de GPUI por debajo (su propio manifiesto lo avisa), así que subirla es una
 # tarea aparte, no algo que pasa con un `cargo update`.

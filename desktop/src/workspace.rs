@@ -16,6 +16,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
+use crate::connect::{ConnectClosed, ConnectView};
 use crate::theme::Leading as _;
 use crate::docs::DocsView;
 use crate::lang::{locale, tr};
@@ -109,6 +110,15 @@ pub struct Workspace {
     naming: Option<NameField>,
     /// Por qué no se pudo borrar lo último que se pidió borrar.
     tree_problem: Option<String>,
+    /// «Conectar Claude Code»: instalar `cac-mcp` y mantenerlo al día. Vive
+    /// con la app y no sólo mientras se ve: es quien sabe si hay una versión
+    /// nueva, y eso enciende el punto del menú de la cuenta.
+    pub(crate) connect: Entity<ConnectView>,
+    connect_open: bool,
+    /// El menú de la cuenta, abierto. Lo lleva esta vista y no el menú para
+    /// poder cerrarlo al abrir desde él algo que va encima.
+    account_menu_open: bool,
+    _on_connect: [Subscription; 2],
 }
 
 impl Workspace {
@@ -123,6 +133,17 @@ impl Workspace {
         let focus_anchor = cx.focus_handle();
         window.focus(&focus_anchor, cx);
         let on_focus_lost = cx.on_focus_lost(window, |this, window, cx| window.focus(&this.focus_anchor, cx));
+        let connect = cx.new(ConnectView::new);
+        let on_connect = [
+            // Lo que sabe cambia desde otro hilo (mirar la máquina, instalar):
+            // el punto del menú se repinta con ello.
+            cx.observe(&connect, |_, _, cx| cx.notify()),
+            cx.subscribe_in(&connect, window, |this, _, _: &ConnectClosed, window, cx| {
+                this.connect_open = false;
+                window.focus(&this.focus_anchor, cx);
+                cx.notify();
+            }),
+        ];
         Self {
             my_work: cx.new(|cx| MyWorkView::new(window, cx)),
             docs: cx.new(DocsView::new),
@@ -136,7 +157,24 @@ impl Workspace {
             _on_focus_lost: on_focus_lost,
             naming: None,
             tree_problem: None,
+            connect,
+            connect_open: false,
+            account_menu_open: false,
+            _on_connect: on_connect,
         }
+    }
+
+    /// Abre «Conectar Claude Code» encima de todo, y cierra el menú desde el
+    /// que se pidió.
+    fn open_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.account_menu_open = false;
+        self.connect_open = true;
+        let focus = self.connect.update(cx, |connect, cx| {
+            connect.opened(cx);
+            connect.focus_handle(cx)
+        });
+        window.focus(&focus, cx);
+        cx.notify();
     }
 
     /// Abre el campo para nombrar algo en el árbol, con el foco puesto. Al
@@ -473,7 +511,25 @@ impl Workspace {
         );
         // A la derecha del avatar, que es donde hay sitio; la ventana lo
         // sube lo que no cabe hacia abajo.
-        Popover::new("account-popover").appearance(false).anchor(Anchor::LeftCenter).offset(px(8.)).trigger(trigger).content(move |_, _, cx| {
+        let update_ready = self.connect.read(cx).update_available();
+        let this = cx.entity().downgrade();
+        let opener = this.clone();
+        let menu = Popover::new("account-popover")
+            .appearance(false)
+            .anchor(Anchor::LeftCenter)
+            .offset(px(8.))
+            .open(self.account_menu_open)
+            .on_open_change(move |open, _, cx| {
+                this.update(cx, |this, cx| {
+                    this.account_menu_open = *open;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .trigger(trigger);
+        menu.content(move |_, _, cx| {
+            let opener = opener.clone();
+            let update_hint = tr(cx, "nav:mcp.updateAvailable");
             let here = locale(cx);
             let theme_chosen = Backend::core(cx).theme();
             let themes = [
@@ -525,7 +581,28 @@ impl Workspace {
                 .child(Self::options_row("account-language", Lucide::Languages, cac_core::text(here, "nav:account.language"), languages, cx))
                 .child(Self::pending_row("account-profile", Lucide::UserRound, tr(cx, "nav:profile.title"), cx))
                 .child(Self::pending_row("account-password", Lucide::KeyRound, tr(cx, "nav:account.changePassword"), cx))
-                .child(Self::pending_row("account-connect", Lucide::Bot, tr(cx, "nav:account.connectMcp"), cx))
+                .child(
+                    Self::account_row("account-connect", Lucide::Bot, tr(cx, "nav:account.connectMcp"), false, cx)
+                        .cursor_pointer()
+                        // Hay un `cac-mcp` más nuevo que el instalado: el
+                        // punto lo dice sin abrir nada.
+                        .when(update_ready, |row| {
+                            row.child(div().flex_1()).child(
+                                div()
+                                    .id("account-connect-update")
+                                    .flex_none()
+                                    .size(px(8.))
+                                    .rounded_full()
+                                    .bg(primary)
+                                    .tooltip(move |window, cx| Tooltip::new(update_hint.clone()).build(window, cx))
+                                    .test_support(),
+                            )
+                        })
+                        .on_click(move |_, window, cx| {
+                            opener.update(cx, |this, cx| this.open_connect(window, cx)).ok();
+                        })
+                        .test_support(),
+                )
                 .child(Self::pending_row("account-notifications", Lucide::Bell, tr(cx, "nav:account.notifications"), cx))
                 .child(rule())
                 .child(
@@ -1351,7 +1428,9 @@ impl Render for Workspace {
                     // La tarea abierta es una página sobre todo lo demás, no
                     // un cajón al lado: lo que tapa no recibe el ratón. El
                     // aviso de conexión sigue a la vista, encima.
-                    .children(task.map(|task| div().id("task-over").absolute().inset_0().occlude().child(task))),
+                    .children(task.map(|task| div().id("task-over").absolute().inset_0().occlude().child(task)))
+                    // «Conectar Claude Code», encima de todo lo demás.
+                    .children(self.connect_open.then(|| div().id("connect-over").absolute().inset_0().child(self.connect.clone()))),
             )
     }
 }
@@ -2296,6 +2375,121 @@ mod tests {
         click(window, "org-switch", cx);
         wait_until(cx, "el menú se abre", |cx| on_screen(window, "org-create", cx));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// «Claude Code», en el menú de la cuenta, abre la ventana que instala
+    /// `cac-mcp` y lo mantiene al día: dice que no está y lo instala donde el
+    /// script, enseña la orden para registrarlo sin ningún token, avisa con
+    /// un punto en el menú cuando hay una versión nueva y la instala, y una
+    /// descarga cuya suma no es la publicada se rechaza diciéndolo.
+    ///
+    /// La release es de mentira y está en esta máquina; la carpeta donde se
+    /// instala es temporal.
+    ///
+    /// Roturas que atrapa: una entrada que sigue sin hacer nada; el menú
+    /// abierto encima de la ventana; ofrecer «Instalar» con el binario ya
+    /// puesto, o no ofrecer nada cuando hay versión nueva; un botón que no
+    /// instala, o que da por hecho lo que no se instaló; un punto que no sale
+    /// o que no se apaga al actualizar; una orden que apunta a otro binario o
+    /// que lleva un token; un fallo que se queda mudo o que rompe lo
+    /// instalado; un Escape que no cierra.
+    #[gpui_kit::test]
+    #[cfg(target_os = "linux")]
+    fn claude_code_in_the_account_menu_installs_and_updates_the_mcp_binary(cx: &mut TestAppContext) {
+        use crate::connect::{McpSetup, Work};
+        use cac_mcp::update::{fake::FakeReleases, Machine};
+
+        let releases = FakeReleases::start();
+        releases.announce("1.34.0");
+        releases.publish("1.34.0", b"#!/bin/sh\necho 'cac-mcp 1.34.0'\n");
+        let scratch = std::env::temp_dir().join(format!("cac-desktop-connect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let binary = scratch.join("home").join(".local").join("bin").join("cac-mcp");
+        let machine = Machine {
+            source: releases.source(),
+            state_dir: Some(scratch.join("state")),
+            look_in: vec![binary.clone()],
+            install_to: Some(binary.clone()),
+        };
+
+        let server = server();
+        server.install(cx);
+        cx.update(|cx| cx.set_global(McpSetup { machine, server_url: "https://cac.example".into() }));
+        let (window, workspace) = open_with_view(1100., cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        let work = |cx: &mut TestAppContext| cx.update(|cx| workspace.read(cx).connect.read(cx).work.clone());
+        let open_menu = |cx: &mut TestAppContext| {
+            click(window, "account-menu", cx);
+            wait_until(cx, "el menú se abre", |cx| on_screen(window, "account-connect", cx));
+        };
+        let open_connect = |cx: &mut TestAppContext| {
+            open_menu(cx);
+            click(window, "account-connect", cx);
+            wait_until(cx, "la ventana se abre", |cx| on_screen(window, "connect-dialog", cx));
+            assert!(!on_screen(window, "account-log-out", cx), "el menú se quedó abierto encima de la ventana");
+        };
+        let close = |cx: &mut TestAppContext| {
+            press(window, "escape", cx);
+            wait_until(cx, "Escape la cierra", |cx| !on_screen(window, "connect-dialog", cx));
+        };
+
+        // No está: se dice, y se ofrece instalarlo.
+        wait_until(cx, "se mira la máquina al entrar", |cx| cx.update(|cx| workspace.read(cx).connect.read(cx).status.is_some()));
+        open_menu(cx);
+        assert!(!on_screen(window, "account-connect-update", cx), "el punto sale sin nada que actualizar");
+        click(window, "account-connect", cx);
+        wait_until(cx, "la ventana se abre", |cx| on_screen(window, "connect-dialog", cx));
+        assert!(!on_screen(window, "account-log-out", cx), "el menú se quedó abierto encima de la ventana");
+        wait_until(cx, "dice que no está", |cx| on_screen(window, "connect-missing", cx));
+        assert!(!on_screen(window, "connect-installed", cx));
+
+        // La orden apunta a donde va a quedar, con el sitio del token marcado.
+        click(window, "connect-copy", cx);
+        let copied = cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
+        assert_eq!(copied, format!("claude mcp add cac -e CAC_URL=https://cac.example -e CAC_TOKEN=PASTE_YOUR_TOKEN -- \"{}\"", binary.display()));
+
+        click(window, "connect-run", cx);
+        wait_until(cx, "se instala", |cx| on_screen(window, "connect-done", cx));
+        assert_eq!(std::fs::read(&binary).unwrap(), b"#!/bin/sh\necho 'cac-mcp 1.34.0'\n");
+        assert!(on_screen(window, "connect-installed", cx) && on_screen(window, "connect-current", cx));
+        assert!(!on_screen(window, "connect-run", cx), "ya instalado y al día, sigue ofreciendo instalar");
+        close(cx);
+
+        // Sale una versión nueva: al volver a mirar, el punto y el botón.
+        releases.announce("1.35.0");
+        releases.publish("1.35.0", b"#!/bin/sh\necho 'cac-mcp 1.35.0'\n");
+        open_connect(cx);
+        wait_until(cx, "dice que hay una nueva", |cx| on_screen(window, "connect-newer", cx));
+        assert!(!on_screen(window, "connect-done", cx), "el «instalado» de antes sigue a la vista");
+        close(cx);
+        open_menu(cx);
+        assert!(on_screen(window, "account-connect-update", cx), "hay versión nueva y el menú no lo dice");
+        click(window, "account-connect", cx);
+        wait_until(cx, "la ventana se abre", |cx| on_screen(window, "connect-run", cx));
+        click(window, "connect-run", cx);
+        wait_until(cx, "se actualiza", |cx| on_screen(window, "connect-done", cx));
+        assert_eq!(std::fs::read(&binary).unwrap(), b"#!/bin/sh\necho 'cac-mcp 1.35.0'\n");
+        close(cx);
+        open_menu(cx);
+        assert!(!on_screen(window, "account-connect-update", cx), "actualizado, y el punto sigue");
+        click(window, "account-connect", cx);
+        wait_until(cx, "la ventana se abre", |cx| on_screen(window, "connect-dialog", cx));
+        close(cx);
+
+        // Lo que se baja no es lo que se publicó: se rechaza y se dice.
+        releases.announce("1.36.0");
+        releases.publish("1.36.0", b"#!/bin/sh\necho 'cac-mcp 1.36.0'\n");
+        releases.put(&format!("/download/mcp-v1.36.0/{}", cac_mcp::update::this_platform_asset().unwrap()), "manipulado");
+        open_connect(cx);
+        wait_until(cx, "dice que hay una nueva", |cx| on_screen(window, "connect-run", cx));
+        click(window, "connect-run", cx);
+        wait_until(cx, "el fallo se dice", |cx| on_screen(window, "connect-problem", cx));
+        assert!(matches!(work(cx), Work::Failed(reason) if reason.contains("checksum mismatch")), "{:?}", work(cx));
+        assert_eq!(std::fs::read(&binary).unwrap(), b"#!/bin/sh\necho 'cac-mcp 1.35.0'\n", "una descarga rechazada tocó lo instalado");
+        assert!(on_screen(window, "connect-run", cx), "tras un fallo no se puede reintentar");
+
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+        let _ = std::fs::remove_dir_all(scratch);
     }
 
     /// El menú de la cuenta ofrece los tres temas y los tres idiomas a la
