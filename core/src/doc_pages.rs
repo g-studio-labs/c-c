@@ -13,7 +13,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::doc_edit::DocLeave;
+use crate::doc_edit::{DocEditWhat, DocLeave};
 use crate::docs::{kind_segment, DocSection, Docs, DocsState, DOC_TABS};
 use crate::error::ApiError;
 use crate::texts::{text, Locale};
@@ -371,6 +371,13 @@ impl Docs {
         }
         match answer {
             Ok(view) => self.update(|state| {
+                // Si es la que se escribe y ya no es la que se leyó, se
+                // avisa; el texto no se toca (`changed_underneath`).
+                if let Some(edit) = &mut state.edit {
+                    if matches!(&edit.what, DocEditWhat::Page { id } if id == &view.page.id) {
+                        edit.changed_underneath(&view.page.body, view.page.body_hash.clone(), view.page.updated_by_name.clone());
+                    }
+                }
                 state.page = Some(view);
                 state.page_loading = false;
                 state.page_error = None;

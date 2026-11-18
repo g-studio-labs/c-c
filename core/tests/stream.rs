@@ -181,6 +181,41 @@ async fn a_dropped_stream_comes_back_and_catches_up() {
     assert!(statuses.contains(&Connection::Down), "{statuses:?}");
 }
 
+/// Al volver el stream también se pone al día el documento abierto: lo que
+/// otro guardó durante el corte no llegó de ninguna otra manera.
+///
+/// Rotura que atrapa: seguir leyendo —o escribiendo encima de— lo de antes
+/// del corte hasta que se cierre y se vuelva a abrir el documento.
+#[tokio::test]
+async fn a_stream_that_comes_back_refreshes_the_open_document() {
+    let rig = rig().await;
+    mount_my_work(&rig.server, vec![]).await;
+    let get = |route: &str, data: serde_json::Value| {
+        Mock::given(method("GET")).and(path(route.to_string())).respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true, "data": data })))
+    };
+    let space = json!({ "id": "a", "orgId": "o1", "name": "Espacio", "color": "#888", "people": [], "folders": [], "lists": [] });
+    get("/api/v1/task-spaces/", json!([space])).mount(&rig.server).await;
+    get("/api/v1/docs/", json!({})).mount(&rig.server).await;
+    get("/api/v1/docs/space/a", json!({ "doc": null, "tabs": [{ "key": "overview", "body": "Lo de siempre." }], "decisions": [] })).mount(&rig.server).await;
+    get("/api/v1/docs/space/a/pages", json!([])).mount(&rig.server).await;
+    rig.core.tree().load("o1").await;
+    rig.core.docs().open("a").await;
+    assert_eq!(rig.core.docs().state().body(), "Lo de siempre.");
+    let before = hits(&rig.server, "GET", "/api/v1/docs/space/a").await;
+    // Un cuerpo que se acaba: para el core, un stream que se cortó.
+    Mock::given(method("GET")).and(path("/api/v1/events")).respond_with(stream_of("")).mount(&rig.server).await;
+
+    rig.core.stream().start();
+    for _ in 0..200 {
+        if hits(&rig.server, "GET", "/api/v1/docs/space/a").await > before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    rig.core.stream().stop();
+    assert!(hits(&rig.server, "GET", "/api/v1/docs/space/a").await > before, "al volver el stream no se volvió a pedir el documento");
+}
+
 /// Un 401 se arregla renovando la sesión, y el stream vuelve con el token
 /// nuevo sin que nadie de fuera haga nada.
 ///

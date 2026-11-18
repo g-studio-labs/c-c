@@ -2857,6 +2857,36 @@ mod tests {
         stop(cx);
     }
 
+    /// Si el documento cambia debajo mientras se escribe —lo guardó otra
+    /// persona, o un agente—, al ponerse al día sale el aviso de choque y lo
+    /// que hay en la caja no se toca.
+    ///
+    /// Roturas que atrapa: el texto de la caja cambiado por el del servidor
+    /// con el cursor dentro; ningún aviso hasta que se intenta guardar.
+    #[gpui_kit::test]
+    fn a_change_underneath_is_said_without_touching_the_box(cx: &mut TestAppContext) {
+        let (server, kept) = server("member");
+        let (window, view) = open(&server, 1400., cx);
+        click(window, "doc-edit", cx);
+        wait_until(cx, "sale el editor", |cx| on_screen(window, "doc-editor", cx));
+        type_in(window, "doc-edit-input", "X", cx);
+        wait_until(cx, "lo tecleado llega al borrador", |cx| draft(cx).is_some_and(|edit| edit.is_dirty()));
+        let typed = boxes(&view, cx).1;
+
+        *kept.lock().unwrap() = Kept { body: "lo de Luis".into(), version: 2, by: "Luis Gil", ..Kept::default() };
+        assert!(!on_screen(window, "doc-conflict", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.docs().refresh().await }));
+        wait_until(cx, "se dice que cambió debajo", |cx| on_screen(window, "doc-conflict", cx));
+        assert_eq!(boxes(&view, cx).1, typed, "ponerse al día tocó lo escrito");
+        assert!(on_screen(window, "doc-editor", cx));
+        assert!(writes(&server).is_empty());
+        // Y lo que hay guardado se puede mirar al lado.
+        click(window, "doc-conflict-see", cx);
+        wait_until(cx, "al lado, lo que hay guardado", |cx| label_of(window, "doc-edit-preview-label", cx) == "Lo que hay guardado ahora");
+        assert_eq!(boxes(&view, cx).1, typed);
+        stop(cx);
+    }
+
     /// Tras un choque, «descartar el mío y recargar» pregunta y, con un sí,
     /// deja a la vista lo que hay guardado.
     ///

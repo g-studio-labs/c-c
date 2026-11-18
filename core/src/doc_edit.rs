@@ -195,6 +195,19 @@ impl DocEdit {
         }
     }
 
+    /// Llegó del servidor lo que hay ahora de esto que se escribe. Si ya no
+    /// es la versión de la que salió el borrador, alguien guardó en medio:
+    /// se dice con el aviso de choque —lo suyo queda a mano para mirarlo— y
+    /// **el texto no se toca**, se haya escrito algo o no. Mientras viaja un
+    /// guardado propio no se mira: su respuesta es la que lo dice.
+    pub(crate) fn changed_underneath(&mut self, body: &str, hash: Option<String>, by_name: Option<String>) {
+        if self.saving || hash == self.base_hash {
+            return;
+        }
+        // Si ya había choque y volvió a cambiar, el aviso enseña lo último.
+        self.conflict = Some(DocConflict { body: body.to_string(), hash, by_name });
+    }
+
     /// Si se escribe una página (que lleva título) y no una pestaña.
     pub fn has_title(&self) -> bool {
         !matches!(self.what, DocEditWhat::Tab { .. })
@@ -651,6 +664,8 @@ impl Docs {
         }
         match outcome {
             Ok(saved) => {
+                // Lo que se leyera antes de este guardado ya es viejo.
+                self.core.inner.doc_saves.fetch_add(1, Ordering::SeqCst);
                 let mut created = None;
                 self.update(|state| {
                     let Some(edit) = &mut state.edit else { return };

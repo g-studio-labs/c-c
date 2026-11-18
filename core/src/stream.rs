@@ -287,6 +287,9 @@ impl Stream {
                 work.load(state.org_id).await;
             }
             core.tasks().refresh().await;
+            // El documento abierto también: lo que se escriba en él no se
+            // toca (`Docs::refresh`).
+            core.docs().refresh().await;
         });
         // Los contadores aparte, para que no esperen a «Mi trabajo».
         let core = self.core.clone();

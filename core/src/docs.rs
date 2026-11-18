@@ -9,10 +9,12 @@
 //! documentación, y un clic en el árbol abre la de ese nodo.
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::doc_edit::{DocEdit, DocLeave};
+use crate::doc_edit::{DocEdit, DocEditWhat, DocLeave};
 use crate::doc_header::DocInfo;
 use crate::doc_links::{DocJump, DocLinkFailure};
 use crate::doc_pages::{DocPageItem, DocPageView};
@@ -475,6 +477,7 @@ impl Docs {
             state.error = None;
         });
         let path = format!("/api/v1/docs/{}/{id}", kind_segment(kind));
+        let saves = self.core.inner.doc_saves.load(Ordering::SeqCst);
         let answer = self.core.get::<DocAnswer>(&path).await;
         // Si mientras tanto se abrió otro, o se cerró, esta respuesta ya no
         // es de lo que se mira.
@@ -482,12 +485,7 @@ impl Docs {
             return;
         }
         match answer {
-            Ok(answer) => self.update(|state| {
-                state.info = answer.doc;
-                state.tabs = answer.tabs;
-                state.decisions = answer.decisions;
-                state.loading = false;
-            }),
+            Ok(answer) => self.install(answer, saves),
             Err(error) => self.update(|state| {
                 state.error = Some(error.to_string());
                 state.loading = false;
@@ -501,6 +499,74 @@ impl Docs {
                 self.load_page(&page_id).await;
             }
         }
+    }
+
+    /// Pone en el estado un documento que acaba de llegar.
+    ///
+    /// **Lo que se está escribiendo no se toca.** Si la pestaña que se
+    /// escribe ya no es la que se leyó, se dice con el aviso de choque
+    /// (`DocEdit::changed_underneath`) y el texto se queda donde estaba.
+    ///
+    /// `saves` es cuántos guardados iban cuando se pidió: si desde entonces
+    /// salió otro, esta lectura trae lo de antes de él y no se pone.
+    fn install(&self, answer: DocAnswer, saves: u64) {
+        if self.core.inner.doc_saves.load(Ordering::SeqCst) != saves {
+            self.update(|state| state.loading = false);
+            return;
+        }
+        *self.core.inner.doc_read_at.lock().expect("doc read lock") = Some(Instant::now());
+        self.update(|state| {
+            if let Some(edit) = &mut state.edit {
+                if let DocEditWhat::Tab { key } = &edit.what {
+                    let theirs = answer.tabs.iter().find(|tab| &tab.key == key).cloned().unwrap_or_default();
+                    edit.changed_underneath(&theirs.body, theirs.body_hash, theirs.updated_by_name);
+                }
+            }
+            state.info = answer.doc;
+            state.tabs = answer.tabs;
+            state.decisions = answer.decisions;
+            state.loading = false;
+            state.error = None;
+        });
+    }
+
+    /// Vuelve a pedir el documento abierto **sin** vaciarlo ni moverse de
+    /// donde se lee: su texto, su cabecera, su árbol de páginas y la página
+    /// abierta. Es lo que lo mantiene al día cuando lo cambia otro —una
+    /// persona, o un agente por MCP—.
+    ///
+    /// Un fallo deja lo que había: sigue siendo lo último que se supo. Y lo
+    /// que se está escribiendo no se toca nunca (ver `install`).
+    ///
+    /// El servidor no avisa de que un documento cambió (no hay evento para
+    /// ello, 18-nov-2026), así que esto se llama al recuperar el stream y
+    /// al volver a la ventana (`came_back`).
+    pub async fn refresh(&self) {
+        let Some(target) = self.state().target else { return };
+        let path = format!("/api/v1/docs/{}/{}", kind_segment(target.kind), target.id);
+        let saves = self.core.inner.doc_saves.load(Ordering::SeqCst);
+        let Ok(answer) = self.core.get::<DocAnswer>(&path).await else { return };
+        if self.state().target.as_ref().map(|now| now.id.as_str()) != Some(target.id.as_str()) {
+            return;
+        }
+        self.install(answer, saves);
+        self.reload_pages().await;
+        if let Some(page_id) = self.state().page_id {
+            if self.state().target.as_ref().map(|now| now.id.as_str()) == Some(target.id.as_str()) {
+                self.load_page(&page_id).await;
+            }
+        }
+    }
+
+    /// Se volvió a la ventana: el documento abierto se pone al día, salvo
+    /// que se acabe de leer (`Config::doc_fresh_for`). Mientras se estaba en
+    /// otra ventana pudo cambiarlo cualquiera, y nadie lo avisa.
+    pub async fn came_back(&self) {
+        let read_at = *self.core.inner.doc_read_at.lock().expect("doc read lock");
+        if read_at.is_some_and(|at| at.elapsed() < self.core.inner.config.doc_fresh_for) {
+            return;
+        }
+        self.refresh().await;
     }
 
     /// Cierra la documentación. Con texto sin guardar, pregunta antes.

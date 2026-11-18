@@ -19,7 +19,7 @@ enum Screen {
 pub struct Shell {
     gate: Gate,
     screen: Screen,
-    _subscription: Subscription,
+    _subscriptions: [Subscription; 2],
 }
 
 impl Shell {
@@ -35,8 +35,16 @@ impl Shell {
             }
             cx.notify();
         });
+        // Al volver a la ventana, el documento abierto se pone al día: lo
+        // pudo cambiar cualquiera mientras se estaba en otra, y el servidor
+        // no avisa de ello. Cuándo hace falta lo dice el core.
+        let on_return = cx.observe_window_activation(window, |_, window, cx| {
+            if window.is_window_active() {
+                Backend::run(cx, |core| async move { core.docs().came_back().await });
+            }
+        });
         let now = gate(snapshot.read(cx).session.as_ref());
-        Self { gate: now, screen: Self::screen_for(now, window, cx), _subscription: subscription }
+        Self { gate: now, screen: Self::screen_for(now, window, cx), _subscriptions: [subscription, on_return] }
     }
 
     /// Siempre una pantalla recién hecha: al salir, la contraseña que se
@@ -202,6 +210,55 @@ mod tests {
 
         wait_until(cx, "la app se abre tras cambiarla", |cx| on_screen(window, "open", cx));
         assert_eq!(server.hits("/api/v1/auth/change-password"), 1);
+    }
+
+    /// Al volver a la ventana se pone al día el documento abierto; al irse
+    /// de ella, no.
+    ///
+    /// Rotura que atrapa: volver de otra ventana —donde un agente acaba de
+    /// reescribir el runbook— y seguir leyendo el de antes.
+    #[gpui_kit::test]
+    fn coming_back_to_the_window_refreshes_the_open_document(cx: &mut TestAppContext) {
+        let server = FakeServer::start();
+        login_answers(&server, false);
+        let get = |route: &str, data: serde_json::Value| {
+            Mock::given(method("GET")).and(path(route.to_string())).respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true, "data": data })))
+        };
+        let org = json!({ "id": "o1", "name": "G Studio", "slug": "g", "role": "member", "memberCount": 2, "createdAt": "2026-06-09T12:00:00Z", "timezone": "" });
+        let space = json!({ "id": "a", "orgId": "o1", "name": "Producto", "color": "#888", "folders": [], "people": [], "lists": [] });
+        server.mount(get("/api/v1/organizations/", json!([org])));
+        server.mount(get("/api/v1/task-spaces/", json!([space])));
+        server.mount(get("/api/v1/docs/space/a", json!({ "doc": null, "tabs": [{ "key": "overview", "body": "Lo de siempre." }], "decisions": [] })));
+        server.mount(get("/api/v1/docs/space/a/pages", json!([])));
+        // Sin rato de gracia: lo leído hace un instante ya no vale por reciente.
+        server.install_with(cx, |config| config.doc_fresh_for = std::time::Duration::ZERO);
+        let (window, _) = open(cx);
+        type_and_send(window, cx);
+        wait_until(cx, "la app se abre", |cx| on_screen(window, "open", cx));
+        cx.update(|cx| {
+            Backend::run(cx, |core| async move {
+                core.orgs().load().await;
+                core.tree().load("o1").await;
+                core.docs().open("a").await;
+            })
+        });
+        wait_until(cx, "llega el documento", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).docs.body() == "Lo de siempre."));
+
+        let leave = |cx: &mut TestAppContext| {
+            gpui_kit::VisualTestContext::from_window(window.into(), cx).deactivate_window();
+            cx.run_until_parked();
+        };
+        // Se sale, se vuelve —y entonces se pide—, y se sale otra vez.
+        leave(cx);
+        let read = server.hits("/api/v1/docs/space/a");
+        cx.update_window(window, |_, window, _| window.activate_window()).unwrap();
+        wait_until(cx, "al volver se vuelve a pedir", |_| server.hits("/api/v1/docs/space/a") > read);
+        let read = server.hits("/api/v1/docs/space/a");
+        leave(cx);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        cx.run_until_parked();
+        assert_eq!(server.hits("/api/v1/docs/space/a"), read, "irse de la ventana volvió a pedir el documento");
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
     /// Salir vuelve a la pantalla de entrar, vacía, y lo dice al servidor.

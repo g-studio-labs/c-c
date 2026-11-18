@@ -102,6 +102,9 @@ pub struct Config {
     pub client: Option<String>,
     /// El plazo de cada petición.
     pub request_timeout: Duration,
+    /// Cuánto vale por reciente un documento que se acaba de leer: al
+    /// volver a la ventana no se vuelve a pedir si se leyó hace menos.
+    pub doc_fresh_for: Duration,
     /// Cuánto silencio aguanta el stream de eventos antes de darlo por
     /// muerto. El servidor manda un ping cada 25 s: dos sin llegar.
     pub stream_silence: Duration,
@@ -119,6 +122,7 @@ impl Config {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             client: None,
             request_timeout: Duration::from_secs(12),
+            doc_fresh_for: Duration::from_secs(5),
             stream_silence: Duration::from_secs(60),
             stream_backoff: Duration::from_secs(1),
             stream_grace: Duration::from_secs(45),
@@ -145,6 +149,12 @@ pub(crate) struct Inner {
     pub(crate) orgs: Mutex<OrgsState>,
     pub(crate) tree: Mutex<TreeState>,
     pub(crate) docs: Mutex<DocsState>,
+    /// Cuándo se leyó del servidor el documento abierto: ver
+    /// `Docs::came_back`.
+    pub(crate) doc_read_at: Mutex<Option<std::time::Instant>>,
+    /// Cuántos guardados de documentación han salido bien: una lectura que
+    /// se pidió antes de uno y llega después trae lo de antes, y no cuenta.
+    pub(crate) doc_saves: std::sync::atomic::AtomicU64,
     pub(crate) task: Mutex<TaskState>,
     pub(crate) counters: Mutex<counters::CountersData>,
     /// Cuántas veces se ha pedido volver a contar cada cosa: ver
@@ -177,6 +187,8 @@ impl Core {
                 orgs: Mutex::new(OrgsState::default()),
                 tree: Mutex::new(TreeState::default()),
                 docs: Mutex::new(DocsState::default()),
+                doc_read_at: Mutex::new(None),
+                doc_saves: std::sync::atomic::AtomicU64::new(0),
                 task: Mutex::new(TaskState::default()),
                 counters: Mutex::new(counters::CountersData::default()),
                 counter_reloads: Default::default(),
