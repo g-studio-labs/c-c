@@ -2569,7 +2569,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "install_hooks",
-            "description": "Install (or update) the cac hooks for Claude Code on this machine, for every repository: at start the project's map and what is in progress, a prompt that names a task or a server brings where it was left and what already bit there, editing a file brings the incidents its tests guard, each write to cac shows a line in the terminal, and stopping asks for the task's handoff. Writes the scripts shipped inside this cac app to hooks/cac/ in the Claude Code config folder and adds their entries to its settings.json, leaving every other hook as it is; installing twice changes nothing. Needs python3. ASK THE USER FIRST; call it only when they agreed. It takes effect in the next session. Needs no scope; it never touches cac.",
+            "description": "Install (or update) the cac hooks for Claude Code on this machine, for every repository: at start the project's map and what is in progress, a prompt that names a task or a server brings where it was left and what already bit there, editing a file brings the incidents its tests guard, each write to cac shows a line in the terminal, and stopping asks for the task's handoff. Writes the scripts shipped inside this MCP server to hooks/cac/ in the Claude Code config folder and adds their entries to its settings.json, leaving every other hook as it is; installing twice changes nothing. Needs python3. ASK THE USER FIRST; call it only when they agreed. It takes effect in the next session. Needs no scope; it never touches cac.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2579,7 +2579,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "install_skill",
-            "description": "Install (or update) the cac skills for Claude Code on this machine: cac-work (how to find a repository's place in cac, read its docs before starting, register the work as a task, record decisions and keep it all up to date) cac-consolidar (the weekly pass that proposes what to promote, record or retire) and cac-catch-up (the catch-up that brings into a space what happened outside, in Jira and Notion, since the last time). Writes three fixed files, skills/cac-work/SKILL.md, skills/cac-consolidar/SKILL.md and skills/cac-catch-up/SKILL.md in the Claude Code config folder, with the text shipped inside this cac app — nothing is downloaded. ASK THE USER FIRST; call it only when they agreed. It takes effect in the next session. Needs no scope; it never touches cac.",
+            "description": "Install (or update) the cac skills for Claude Code on this machine: cac-work (how to find a repository's place in cac, read its docs before starting, register the work as a task, record decisions and keep it all up to date) cac-consolidar (the weekly pass that proposes what to promote, record or retire) and cac-catch-up (the catch-up that brings into a space what happened outside, in Jira and Notion, since the last time). Writes three fixed files, skills/cac-work/SKILL.md, skills/cac-consolidar/SKILL.md and skills/cac-catch-up/SKILL.md in the Claude Code config folder, with the text shipped inside this MCP server — nothing is downloaded. ASK THE USER FIRST; call it only when they agreed. It takes effect in the next session. Needs no scope; it never touches cac.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -6002,6 +6002,63 @@ fn stale_note_for(path: &std::path::Path, t: std::time::SystemTime, len: u64) ->
     )
 }
 
+/// Avisar de una versión nueva de `cac-mcp`. Sólo existe cuando sirve el
+/// binario suelto y no se pidió callar (`watch_for_updates`).
+struct UpdateWatch {
+    state_dir: std::path::PathBuf,
+    /// La última versión que se sabe, cuando el hilo de fondo termina.
+    latest: std::sync::Arc<std::sync::OnceLock<Option<String>>>,
+    /// Ya se le dijo al agente en esta sesión.
+    told: std::sync::atomic::AtomicBool,
+}
+
+static UPDATE_WATCH: std::sync::OnceLock<UpdateWatch> = std::sync::OnceLock::new();
+
+/// Pregunta de fondo por la última versión, si toca (una vez al día; ver
+/// `crate::update::latest_known`). En un hilo aparte y sin esperar a nadie: el
+/// servidor contesta `initialize` y las herramientas igual de rápido con red,
+/// sin red o con GitHub colgado, y si el proceso termina antes, el hilo muere
+/// con él.
+///
+/// Devuelve si se puso a vigilar: no lo hace cuando sirve la app (`cac
+/// --mcp`), cuando se pidió no preguntar, ni sin carpeta donde recordarlo
+/// (preguntaría a la red en cada arranque).
+fn watch_for_updates(host: Host, disabled: bool, source: crate::update::Source, state_dir: Option<std::path::PathBuf>) -> bool {
+    let Some(state_dir) = state_dir.filter(|_| host.updates_itself && !disabled) else {
+        return false;
+    };
+    let latest = std::sync::Arc::new(std::sync::OnceLock::new());
+    if UPDATE_WATCH.set(UpdateWatch { state_dir: state_dir.clone(), latest: latest.clone(), told: false.into() }).is_err() {
+        return false;
+    }
+    std::thread::spawn(move || {
+        let _ = latest.set(crate::update::latest_known(&source, &state_dir, crate::update::now()));
+    });
+    true
+}
+
+fn update_note_for(latest: Option<&str>) -> Option<String> {
+    crate::update::update_note(host().version, latest, std::env::current_exe().ok().as_deref())
+}
+
+/// Al conectar: lo que ya se supiera de un arranque anterior. Sólo lee un
+/// fichero pequeño; la red es cosa del hilo de fondo.
+fn update_note_at_start() -> Option<String> {
+    let watch = UPDATE_WATCH.get()?;
+    let known = crate::update::read_checked(&watch.state_dir)?.latest;
+    let note = update_note_for(known.as_deref())?;
+    watch.told.store(true, std::sync::atomic::Ordering::Relaxed);
+    Some(note)
+}
+
+/// En una llamada: lo que el hilo de fondo acaba de saber, si al conectar no
+/// se sabía. Una sola vez por sesión, y sin tocar el disco ni la red.
+fn update_note_once() -> Option<String> {
+    let watch = UPDATE_WATCH.get()?;
+    let note = update_note_for(watch.latest.get()?.as_deref())?;
+    (!watch.told.swap(true, std::sync::atomic::Ordering::Relaxed)).then_some(note)
+}
+
 fn tool_result(value: Result<Value, String>) -> Value {
     match value {
         Ok(v) => json!({
@@ -6032,6 +6089,7 @@ fn handle(req: &Value, cfg: &Result<Cfg, String>) -> Option<Value> {
                 "serverInfo": { "name": "cac", "version": host().version },
                 "instructions": instructions(skills_dir().as_deref().map(skill_state))
                     + hooks_note(claude_config_dir().as_deref().map(crate::hooks_install::state))
+                    + &update_note_at_start().map(|note| format!("\n\n{note}")).unwrap_or_default()
             }),
         )),
         "ping" => Some(ok(id, json!({}))),
@@ -6055,7 +6113,9 @@ fn handle(req: &Value, cfg: &Result<Cfg, String>) -> Option<Value> {
             };
             CURRENT_CALL.with(|c| *c.borrow_mut() = None);
             let mut out = tool_result(res);
-            if let Some(note) = stale_binary_note() {
+            // El de «hay una versión nueva» sólo si no se dijo al conectar, y
+            // una vez; el de «este binario ya no es el de disco», siempre.
+            for note in [stale_binary_note(), update_note_once()].into_iter().flatten() {
                 if let Some(c) = out.get_mut("content").and_then(|c| c.as_array_mut()) {
                     c.push(json!({ "type": "text", "text": note }));
                 }
@@ -6783,7 +6843,7 @@ fn hooks_note(state: Option<crate::hooks_install::HooksState>) -> &'static str {
              one sentence; if they agree, call install_hooks. Do not install them without asking."
         }
         Some(HooksState::Outdated) => {
-            "\n\nThe cac hooks installed on this machine are older than the ones this cac app ships. At a natural \
+            "\n\nThe cac hooks installed on this machine are older than the ones this MCP server ships. At a natural \
              pause, offer the user to update them in one sentence; if they agree, call install_hooks."
         }
         _ => "",
@@ -6854,7 +6914,7 @@ fn instructions(state: Option<SkillState>) -> String {
              install_skill. Do not install it without asking, and do not bring it up again if they decline.",
         ),
         Some(SkillState::Outdated) => s.push_str(
-            "\n\nThe installed cac-work skill is older than the one this cac app ships. At a natural pause, offer the \
+            "\n\nThe installed cac-work skill is older than the one this MCP server ships. At a natural pause, offer the \
              user to update it in one sentence; if they agree, call install_skill.",
         ),
         _ => {}
@@ -6871,7 +6931,7 @@ fn install_skill(dir: &std::path::Path, dry_run: bool) -> Result<Value, String> 
     if let (Some(h), Some(v)) = (had, ship) {
         if h > v {
             return Err(format!(
-                "{} already has v{h}, newer than the v{v} this app ships; left as it is.",
+                "{} already has v{h}, newer than the v{v} this MCP server ships; left as it is.",
                 path.display()
             ));
         }
@@ -7028,18 +7088,23 @@ pub struct Host {
     /// Si el proceso puede ser una AppImage: sólo entonces `APPIMAGE` y `OWD`
     /// hablan de este programa y no de otro (ver `binary_path`).
     pub packed_as_appimage: bool,
+    /// Si este programa se actualiza a sí mismo: sólo el binario suelto, que
+    /// se instala y se reemplaza solo (`crate::update`). A `cac --mcp` lo
+    /// actualiza la app, con su actualizador; ahí ni se pregunta por versiones
+    /// de `cac-mcp` ni se avisa de ellas.
+    pub updates_itself: bool,
 }
 
 impl Host {
     /// El binario `cac-mcp`: su propia versión, y nunca una AppImage.
     pub const fn standalone() -> Self {
-        Host { version: env!("CARGO_PKG_VERSION"), packed_as_appimage: false }
+        Host { version: env!("CARGO_PKG_VERSION"), packed_as_appimage: false, updates_itself: true }
     }
 
     /// `cac --mcp`: la app de escritorio, con su versión, que en Linux se
     /// reparte como AppImage.
     pub const fn desktop_app(version: &'static str) -> Self {
-        Host { version, packed_as_appimage: true }
+        Host { version, packed_as_appimage: true, updates_itself: false }
     }
 }
 
@@ -7062,6 +7127,7 @@ pub fn tool_catalog() -> Value {
 pub fn serve(host: Host) {
     let _ = HOST.set(host);
     remember_start();
+    watch_for_updates(host, crate::update::checks_disabled(), crate::update::Source::from_env(), crate::update::state_dir());
     let cfg = cfg();
     if let Err(e) = &cfg {
         eprintln!("[cac-mcp] {e}");
@@ -8032,6 +8098,27 @@ mod tests {
         assert_eq!(binary_path(app, image, exe.clone()), Some("/home/x/Editor.AppImage".into()));
         assert_eq!(binary_path(app, None, exe.clone()), exe, "sin empaquetar, la app vigila su ejecutable");
         assert_eq!(original_dir(app, Some("/home/x/repo".into())).as_deref(), Some("/home/x/repo"));
+    }
+
+    /// Sólo el binario suelto pregunta por versiones de `cac-mcp`: a `cac
+    /// --mcp` lo actualiza la app, y decirle a su agente que corra `cac-mcp
+    /// update` sería mandarle a actualizar un programa que no es el que
+    /// sirve. Tampoco se pregunta si se pidió callar o si no hay dónde
+    /// recordarlo. Roturas que atrapa: avisar (y salir a la red) dentro de la
+    /// app; ignorar la variable; preguntar en cada arranque por no tener
+    /// carpeta. El caso en que sí vigila lo prueba `tests/updates.rs` con el
+    /// binario.
+    #[test]
+    fn only_the_standalone_binary_watches_for_its_own_updates() {
+        let nowhere = || crate::update::Source { version_url: "http://127.0.0.1:9/VERSION".into(), download_base: "http://127.0.0.1:9".into() };
+        let dir = std::env::temp_dir().join(format!("cac-no-watch-{}", std::process::id()));
+        assert!(Host::standalone().updates_itself);
+        assert!(!Host::desktop_app("9.9.9").updates_itself);
+        assert!(!watch_for_updates(Host::desktop_app("9.9.9"), false, nowhere(), Some(dir.clone())));
+        assert!(!watch_for_updates(Host::standalone(), true, nowhere(), Some(dir.clone())));
+        assert!(!watch_for_updates(Host::standalone(), false, nowhere(), None));
+        assert!(!dir.exists(), "sin vigilar no se apunta nada");
+        assert!(update_note_at_start().is_none() && update_note_once().is_none());
     }
 
     /// Cada quien anuncia su versión: el binario la de este crate, la app la

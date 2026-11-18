@@ -1,0 +1,215 @@
+name: mcp release
+
+# Publica `cac-mcp`, el servidor MCP de cac, como binarios sueltos: una release
+# de este mismo repo con la etiqueta `mcp-vX.Y.Z`, un fichero por plataforma y
+# su `SHA256SUMS`. De ahí los bajan `scripts/install-mcp.sh`, `install-mcp.ps1`,
+# `cac-mcp update` y la app de escritorio (`mcp/src/update.rs`).
+#
+# **Sólo a mano.** No hay disparador por tag ni por push: cortar una release es
+# una decisión que se toma cada vez (`gh workflow run mcp-release.yml`, desde
+# `main`). La versión es la de `mcp/VERSION`, que es también lo que leen los
+# instalados para saber que hay una nueva: se sube ahí y en `mcp/Cargo.toml`,
+# se empuja a `main`, y se lanza esto.
+#
+# **Nunca se marca como «latest».** El actualizador de la app de Tauri lee
+# `releases/latest/download/latest.json`: si una release del MCP fuese la
+# última, esa dirección daría 404 y **nadie actualizaría la app**. Por eso el
+# único paso que publica lleva `--latest=false`, y por eso los instaladores del
+# MCP no usan `releases/latest` sino `mcp/VERSION`.
+# Guardián: `mcp/tests/release.rs`.
+#
+# **Una versión publicada no se re-corta.** Si la etiqueta o la release ya
+# existen, esto se niega antes de compilar nada: quien instaló esa versión
+# tiene esos bytes y esa suma. Se arregla y sale la siguiente.
+#
+# Nada va firmado: en este proyecto no hay certificados de Apple ni de Windows.
+# La suma protege de una descarga rota o cambiada por el camino, no de alguien
+# que pueda publicar en este repo.
+on:
+  workflow_dispatch:
+
+# Sólo leer. El permiso de escritura lo tiene un único trabajo, el que publica.
+permissions:
+  contents: read
+
+jobs:
+  # Las pruebas del MCP por delante de compilar nada que se vaya a repartir: el
+  # mismo trabajo que corre en cada push.
+  test:
+    uses: ./.github/workflows/mcp.yml
+
+  # Qué versión sale, y si puede salir.
+  version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: read
+        name: Read mcp/VERSION and refuse a version that is already out
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "Las releases del MCP salen de main (esto corre en $GITHUB_REF): mcp/VERSION se lee de main." >&2
+            exit 1
+          fi
+          version="$(tr -d ' \t\r\n' < mcp/VERSION)"
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "mcp/VERSION no es X.Y.Z: '$version'" >&2
+            exit 1
+          fi
+          manifest="$(sed -n 's/^version = "\(.*\)"$/\1/p' mcp/Cargo.toml | head -n 1)"
+          if [ "$manifest" != "$version" ]; then
+            echo "mcp/VERSION dice $version y mcp/Cargo.toml dice $manifest." >&2
+            exit 1
+          fi
+          tag="mcp-v$version"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "La etiqueta $tag ya existe. Una versión publicada no se re-corta: sube mcp/VERSION." >&2
+            exit 1
+          fi
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "La release $tag ya existe. Una versión publicada no se re-corta: sube mcp/VERSION." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [test, version]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Estático, con musl: el mismo fichero corre en cualquier Linux
+          # x86_64, sea cual sea su glibc (o sin ella, como Alpine). El MCP usa
+          # rustls con sus raíces dentro, así que no pide OpenSSL ni
+          # certificados del sistema.
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            asset: cac-mcp-linux-x86_64
+            binary: cac-mcp
+            runs: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: cac-mcp-macos-arm64
+            binary: cac-mcp
+            runs: true
+          # Cruzado desde la máquina de Apple Silicon. No se arranca aquí: la
+          # máquina puede no tener Rosetta.
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset: cac-mcp-macos-x86_64
+            binary: cac-mcp
+            runs: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: cac-mcp-windows-x86_64.exe
+            binary: cac-mcp.exe
+            runs: true
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # `ring` y `libwebp` compilan C: para musl hace falta su compilador.
+      - name: musl toolchain
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # En Windows la biblioteca de C va dentro del .exe: lo pide
+      # `mcp/.cargo/config.toml`, que Cargo lee por compilar desde `mcp/`.
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./mcp -> target"
+          key: ${{ matrix.target }}
+
+      - name: Build
+        working-directory: mcp
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Collect
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir dist
+          cp "mcp/target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.asset }}"
+
+      # El binario que se va a repartir arranca y dice la versión que se publica.
+      - name: It runs and says its version
+        if: matrix.runs
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          said="$("dist/${{ matrix.asset }}" --version | head -n 1 | tr -d '\r')"
+          if [ "$said" != "cac-mcp $VERSION" ]; then
+            echo "el binario dice '$said' y se publica $VERSION" >&2
+            exit 1
+          fi
+
+      - name: The Linux binary is static
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          file "dist/${{ matrix.asset }}"
+          if ! file "dist/${{ matrix.asset }}" | grep -Eq 'static(ally|-pie) linked'; then
+            echo "cac-mcp para Linux no es estático" >&2
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # El único trabajo que puede escribir en el repo.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          for asset in cac-mcp-linux-x86_64 cac-mcp-macos-arm64 cac-mcp-macos-x86_64 cac-mcp-windows-x86_64.exe; do
+            test -s "$asset" || { echo "falta $asset" >&2; exit 1; }
+          done
+          sha256sum cac-mcp-linux-x86_64 cac-mcp-macos-arm64 cac-mcp-macos-x86_64 cac-mcp-windows-x86_64.exe > SHA256SUMS
+          cat SHA256SUMS
+
+      # `--latest=false` no es un detalle: ver la cabecera. Y sin etiqueta
+      # previa: la crea la propia release, en el commit que se compiló.
+      - name: Publish the release, never as latest
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="mcp-v$VERSION"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "La release $tag ya existe. Una versión publicada no se re-corta." >&2
+            exit 1
+          fi
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false --title "cac-mcp $VERSION" --notes "El servidor MCP de cac, suelto. Instalar: curl -fsSL https://raw.githubusercontent.com/g-studio-labs/c-c/main/scripts/install-mcp.sh | sh (Windows: irm https://raw.githubusercontent.com/g-studio-labs/c-c/main/scripts/install-mcp.ps1 | iex). Actualizar: cac-mcp update." cac-mcp-linux-x86_64 cac-mcp-macos-arm64 cac-mcp-macos-x86_64 cac-mcp-windows-x86_64.exe SHA256SUMS

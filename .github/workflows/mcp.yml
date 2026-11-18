@@ -8,7 +8,8 @@ name: mcp
 # interfaz —lo guarda `tests/no_ui.rs`—, así que corre en un runner limpio.
 #
 # Sólo prueba y compila. **No publica nada**: ni release, ni etiqueta, ni
-# artefacto. Repartir el binario es un paso aparte.
+# artefacto. Repartir el binario es `mcp-release.yml`, que llama a éste por
+# delante y sólo corre a mano.
 #
 # En cualquier rama, como `desktop.yml`. Y no sólo con `mcp/`: este crate
 # lleva dentro los hooks (`.claude/hooks`), lee los playbooks de
@@ -18,6 +19,9 @@ on:
   push:
     paths:
       - "mcp/**"
+      - "scripts/install-mcp.sh"
+      - "scripts/install-mcp.ps1"
+      - ".github/workflows/mcp-release.yml"
       - "app/src-tauri/src/**"
       - ".claude/hooks/**"
       - "infra/ansible/**"
@@ -62,5 +66,43 @@ jobs:
           ldd target/release/cac-mcp
           if ldd target/release/cac-mcp | grep -Ei 'gtk|webkit|gdk|libX11|wayland|soup'; then
             echo "cac-mcp enlaza una biblioteca de interfaz" >&2
+            exit 1
+          fi
+
+  # El binario de Linux que se reparte es estático (musl): se compila aquí en
+  # cada push igual que en `mcp-release.yml`, para que una dependencia que no
+  # compile con musl se vea el día que entra y no el día de la release.
+  static:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        working-directory: mcp
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./mcp -> target"
+          key: x86_64-unknown-linux-musl
+
+      - name: Build
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl
+
+      - name: It runs and is static
+        run: |
+          ./target/x86_64-unknown-linux-musl/release/cac-mcp --version
+          file target/x86_64-unknown-linux-musl/release/cac-mcp
+          if ! file target/x86_64-unknown-linux-musl/release/cac-mcp | grep -Eq 'static(ally|-pie) linked'; then
+            echo "cac-mcp con musl no es estático" >&2
             exit 1
           fi

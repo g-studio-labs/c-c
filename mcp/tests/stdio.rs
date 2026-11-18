@@ -19,6 +19,10 @@ fn binary() -> Command {
         .env("CAC_URL", "http://127.0.0.1:9")
         .env("CLAUDE_CONFIG_DIR", &scratch)
         .env("HOME", &scratch)
+        // Arrancar el servidor pregunta por la última versión: aquí, a nadie.
+        // Las pruebas que miran eso (`tests/updates.rs`) ponen su servidor.
+        .env("CAC_MCP_NO_UPDATE_CHECK", "1")
+        .env("CAC_MCP_STATE_DIR", scratch.join("state"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
