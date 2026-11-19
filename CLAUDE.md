@@ -321,7 +321,12 @@ actualiza quien lo pide.
 
 ## La puerta de verificación
 
-Entera, antes de dar algo por hecho. Desde la raíz del repo:
+Entera, antes de dar algo por hecho. Desde la raíz del repo, o sólo lo que
+puede romper lo que tocaste con `scripts/test-changed.sh` (mira el diff
+contra la rama de arriba y corre esas suites enteras; `--plan` dice cuáles,
+`--quick` acota el escritorio a los módulos tocados para una primera pasada).
+Lo que depende de qué está escrito en el script y guardado en
+`app/src/lib/test-changed.test.ts`:
 
 ```sh
 (cd app           && npx tsc --noEmit)                            # tipos
