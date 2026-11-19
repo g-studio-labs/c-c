@@ -16,6 +16,8 @@ on:
       - "core/**"
       # «Conectar Claude Code» instala `cac-mcp` con la lógica de `mcp/`.
       - "mcp/**"
+      # El motor de llamadas: lo enlaza la app en Linux.
+      - "voice/**"
       - ".github/workflows/desktop.yml"
   workflow_dispatch:
   # Para `desktop-release.yml`: las mismas pruebas, por delante de empaquetar.
@@ -24,7 +26,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # LiveKit (el motor de voz) suma unos ocho minutos en frío: descarga
+    # libwebrtc precompilada y enlaza contra ella.
+    timeout-minutes: 60
 
     defaults:
       run:
@@ -42,7 +46,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "./desktop -> target"
+          workspaces: |
+            ./desktop -> target
+            ./voice -> target
+
+      # El motor de voz, aparte y antes: sus pruebas no necesitan audio ni red.
+      - name: Test the voice engine
+        working-directory: voice
+        run: cargo test --locked
 
       - name: Test
         run: cargo test --locked

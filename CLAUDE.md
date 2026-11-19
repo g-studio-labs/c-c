@@ -333,7 +333,8 @@ Lo que depende de qué está escrito en el script y guardado en
 (cd app           && bun run test)                                # eslint + vitest
 (cd core          && cargo test && cargo check --features uniffi) # el core compartido
 (cd mcp           && cargo test && cargo build --release)         # el MCP, su binario y los scripts de instalar
-(cd desktop       && cargo test --locked)                         # la app nativa (usa mcp/ por ruta)
+(cd voice         && cargo test --locked)                         # el motor de llamadas (LiveKit), sin audio ni red
+(cd desktop       && cargo test --locked)                         # la app nativa (usa mcp/ y, en Linux, voice/ por ruta)
 (cd app/src-tauri && cargo check)                                 # el lado Rust
 (cd backend       && go build ./... && go vet ./... && go test ./...)
 python3 .claude/hooks/hooks_test.py                                 # los hooks de cac

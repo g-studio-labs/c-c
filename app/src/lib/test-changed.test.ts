@@ -68,6 +68,11 @@ describe("test-changed.sh", () => {
     ]);
   });
 
+  it("el motor de voz arrastra al escritorio, que lo enlaza", () => {
+    expect(plan("voice/src/engine.rs")).toEqual(["cd voice && cargo test --locked", "cd desktop && cargo test --locked"]);
+    expect(quick("voice/src/engine.rs", "desktop/src/voice.rs")).toContain("cd desktop && cargo test --locked");
+  });
+
   it("el dominio de Go escribe los fixtures del core", () => {
     expect(plan("backend/internal/core/domain/core_contract_test.go")).toEqual([
       "cd backend && go test ./internal/core/domain/",

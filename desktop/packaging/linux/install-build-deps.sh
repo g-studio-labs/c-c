@@ -5,10 +5,13 @@
 # aquí no hay webview. Vive en un script porque la usan dos workflows
 # (`desktop.yml` para probar y `desktop-release.yml` para empaquetar): con dos
 # copias, la que se queda vieja es la que construye el instalador.
+#
+# `libglib2.0-dev` es del motor de voz (`voice/`): libwebrtc usa GLib para
+# capturar la pantalla, y sin GTK nadie más la trae (ver `voice/build.rs`).
 
 set -euo pipefail
 
 sudo apt-get update
 sudo apt-get install -y gcc g++ clang libfontconfig-dev libwayland-dev \
   libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev libasound2-dev \
-  vulkan-validationlayers libvulkan1
+  vulkan-validationlayers libvulkan1 libglib2.0-dev
