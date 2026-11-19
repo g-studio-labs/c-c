@@ -1,0 +1,36 @@
+# Prueba de viabilidad: llamadas (voz, vídeo, cámara, pantalla) en la app
+# nativa, con GPUI y el SDK de LiveKit para Rust (command-and-control-419).
+#
+# Crate aparte, como `spikes/block-editor/` y `spikes/voice-native/`: `livekit`
+# arrastra libwebrtc precompilado y no entra en `desktop/` hasta que esta prueba
+# diga que vale. El informe es el `README.md`.
+[package]
+name = "calls-native-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-or-later"
+description = "Prueba de viabilidad: llamadas en la app nativa de GPUI con LiveKit"
+
+# Fuera de cualquier workspace: es una prueba suelta.
+[workspace]
+
+[dependencies]
+# Las mismas versiones exactas que `desktop/` (su Cargo.lock se copió aquí).
+gpui-kit = "=0.9.1"
+# La última, decidido por jose (19-nov): la 0.8.3 es la del motor de Tauri.
+# rustls y no native-tls: lo mismo que el resto de la app.
+livekit = { version = "0.12", features = ["rustls-tls-native-roots"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "signal"] }
+# Lo que ya trae GPUI por dentro: el fotograma de `RenderImage` es un
+# `image::Frame`, y el canal que despierta a la vista.
+image = { version = "0.25", default-features = false }
+futures = "0.3"
+# Paso 2, la llamada (`call.rs`): las mismas versiones que el motor de Tauri
+# para el micrófono, los altavoces y la cámara.
+cpal = "0.18.2"
+nokhwa = { version = "0.10.11", features = ["input-native"] }
+# La puerta de invitados del backend. rustls, como el resto: la misma 0.12 que
+# ya arrastra `livekit`, así no se compila otra.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
