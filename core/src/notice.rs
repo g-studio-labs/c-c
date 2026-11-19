@@ -182,10 +182,11 @@ pub fn channel_notice(event: &ChatMessageEvent, viewer: &Viewer) -> Option<Notic
     (followed && viewer.open != Some(&here)).then_some(NoticeKind::ChannelMessage)
 }
 
-/// Si un mensaje privado se avisa: si no es de uno mismo y no se tiene esa
-/// conversación delante.
+/// Si un mensaje privado se avisa: si no es una corrección, no es de uno
+/// mismo y no se tiene esa conversación delante. (La marca de corrección la
+/// manda el servidor desde el 19-nov-2026; antes la delataba sólo la hora.)
 pub fn direct_notice(event: &DmMessageEvent, viewer: &Viewer) -> Option<NoticeKind> {
-    if event.conversation_id.is_empty() || event.actor_id == viewer.me {
+    if event.edited || event.conversation_id.is_empty() || event.actor_id == viewer.me {
         return None;
     }
     let here = Conversation::Direct { conversation_id: event.conversation_id.clone() };
@@ -479,18 +480,20 @@ mod tests {
         assert_eq!(channel_notice(&others, &elsewhere), None, "mencionar o responder a otro no es a mí");
     }
 
-    /// La regla de un directo. Roturas que atrapa: avisar de lo propio, o de
-    /// la conversación que se tiene delante; callar uno por tener delante
-    /// otra.
+    /// La regla de un directo. Roturas que atrapa: avisar de lo propio, de
+    /// una corrección, o de la conversación que se tiene delante; callar uno
+    /// por tener delante otra.
     #[test]
     fn what_a_direct_announces() {
-        let event = DmMessageEvent { conversation_id: "c1".into(), message_id: "d1".into(), actor_id: "u2".into(), author_name: "Bea".into() };
+        let event = DmMessageEvent { conversation_id: "c1".into(), message_id: "d1".into(), actor_id: "u2".into(), author_name: "Bea".into(), edited: false };
         let c1 = Conversation::Direct { conversation_id: "c1".into() };
         let c2 = Conversation::Direct { conversation_id: "c2".into() };
         assert_eq!(direct_notice(&event, &Viewer { me: "u1", open: None, following: None }), Some(NoticeKind::Direct));
         assert_eq!(direct_notice(&event, &Viewer { me: "u1", open: Some(&c2), following: None }), Some(NoticeKind::Direct));
         assert_eq!(direct_notice(&event, &Viewer { me: "u1", open: Some(&c1), following: None }), None);
         assert_eq!(direct_notice(&event, &Viewer { me: "u2", open: None, following: None }), None);
+        let edited = DmMessageEvent { edited: true, ..event };
+        assert_eq!(direct_notice(&edited, &Viewer { me: "u1", open: None, following: None }), None, "una corrección no");
     }
 
     fn announcement(kind: NoticeKind, place: &str, author: &str, preview: &str) -> Announcement {

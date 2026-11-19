@@ -295,6 +295,9 @@ pub struct DmMessageEvent {
     pub message_id: String,
     pub actor_id: String,
     pub author_name: String,
+    /// Una corrección o un retiro, no un mensaje nuevo. Desde el 19-nov-2026
+    /// (command-and-control-418); antes no venía y se tomaba por nuevo.
+    pub edited: bool,
 }
 
 #[cfg(test)]
