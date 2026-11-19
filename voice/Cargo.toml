@@ -1,0 +1,33 @@
+# El motor de voz de la app nativa (command-and-control-427).
+#
+# Crate propio y sin interfaz: entra a una sala de LiveKit, publica el
+# micrófono procesado, mezcla a los demás en una sola salida y cuenta lo que
+# pasa por un `Fn(EngineEvent)`. Quien lo pinte (GPUI) vive en otro sitio.
+# Portado del spike `spikes/calls-native/` (ya en LiveKit 0.12) y del motor de
+# Tauri (`app/src-tauri/src/voice.rs`, en 0.8.3). Sin vídeo ni pantalla.
+[package]
+name = "cac-voice"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-or-later"
+description = "Motor de voz de cac: LiveKit + cpal, con el estado en la instancia"
+
+# Fuera de cualquier workspace, como los spikes: `livekit` arrastra libwebrtc
+# precompilado y su propio `Cargo.lock`.
+[workspace]
+
+[dependencies]
+# La misma que el spike de llamadas (decidido por jose, 19-nov). rustls y no
+# native-tls: lo mismo que el resto de la app.
+livekit = { version = "0.12", features = ["rustls-tls-native-roots"] }
+# Las mismas que el motor de Tauri para el micrófono y los altavoces.
+cpal = "0.18.2"
+# Las mismas features que el spike, para que la caché de `target/` le valga
+# (cambiar las de tokio recompila todo lo que cuelga de él, LiveKit incluido).
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "signal"] }
+futures = "0.3"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+# El metadata de la sala (el aviso de grabación) es JSON que escribe el backend.
+serde_json = "1"
