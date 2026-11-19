@@ -119,6 +119,16 @@ impl Engine {
         }
     }
 
+    /// La supresión de ruido para la próxima llamada (y la que haya en curso,
+    /// si hay): quien la apagó para tocar música no tiene que entrar con ella
+    /// puesta y apagarla dentro.
+    pub fn set_noise_suppression(&self, on: bool) {
+        self.shared.noise_suppression.store(on, Ordering::Relaxed);
+        if let Some(call) = self.current_call() {
+            call.set_noise_suppression(on);
+        }
+    }
+
     /// La llamada en curso, si hay.
     pub fn current_call(&self) -> Option<Call> {
         self.shared.current.lock().unwrap().upgrade().map(|inner| Call { inner })
