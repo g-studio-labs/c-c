@@ -845,6 +845,7 @@ impl Workspace {
         let not_yet = tr(cx, "common:misc.notInThisApp");
         let unread = Backend::snapshot(cx).read(cx).counters.notifications;
         let bell_hint = counted_label(&tr(cx, "common:last.notifications"), unread);
+        let inbox_open = self.inbox.open;
         // El `span` de la campana en `AppLayout.tsx`: `absolute -right-0.5
         // -top-0.5 flex min-w-4 items-center justify-center rounded-full
         // bg-primary px-1 text-[10px] font-medium text-primary-foreground`.
@@ -918,7 +919,9 @@ impl Workspace {
                     .child(Icon::new(Lucide::Bell).small())
                     .children(bell_count)
                     .aria_label(bell_hint.clone())
-                    .tooltip(move |window, cx| Tooltip::new(bell_hint.clone()).build(window, cx))
+                    // Con el panel abierto el globo de ayuda sobra, y se
+                    // quedaba encima de su cabecera tapando «Marcar todo leído».
+                    .when(!inbox_open, |this| this.tooltip(move |window, cx| Tooltip::new(bell_hint.clone()).build(window, cx)))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_inbox(cx)))
                     .test_support(),
             )
