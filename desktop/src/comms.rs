@@ -938,7 +938,9 @@ mod tests {
         let window = open(cx);
         wait_until(cx, "el árbol y las tareas llegan", |cx| on_screen(window, "tree-a", cx) && on_screen(window, "work-empty", cx));
         assert!(!on_screen(window, "comms-panel", cx) && !on_screen(window, "conversation", cx));
-        assert_eq!(label(window, "rail-comms", cx), "Comunicación (6)");
+        // Lo pendiente llega después del árbol: leerlo de golpe daba «(2)» en
+        // un CI lento (command-and-control-436).
+        wait_until(cx, "el riel cuenta lo pendiente de comunicación", |cx| label(window, "rail-comms", cx) == "Comunicación (6)");
 
         enter(window, cx);
         assert!(!on_screen(window, "tree-everything", cx) && !on_screen(window, "tree-a", cx), "el árbol sigue debajo de la lista");
