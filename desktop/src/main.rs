@@ -26,6 +26,7 @@ mod docs;
 mod editor;
 mod files;
 mod identity;
+mod inbox;
 mod lang;
 mod mentions;
 mod message_actions;

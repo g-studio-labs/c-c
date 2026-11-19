@@ -38,6 +38,7 @@ pub mod texts;
 pub mod transport;
 pub mod tree;
 pub mod hue;
+pub mod inbox;
 pub mod tree_rows;
 pub mod workspace;
 
@@ -79,6 +80,7 @@ pub use mywork::{
     ToneCount, WeekSummary, WeekView, CALENDAR_TONES,
 };
 pub use notice::{channel_notice, direct_notice, Announcement, NoticeKind, NoticeTarget, Notices, Viewer};
+pub use inbox::{group_key_of, inbox_panel, link_target, time_ago, GroupTally, Inbox, InboxFeed, InboxGroup, InboxIcon, InboxItem, InboxPanel, InboxRow, InboxState, InboxTab, InboxTarget, InboxTone, INBOX_TABS};
 pub use notice_sound::{render, tone_for, Chime, Tone, TONE_GAP};
 pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClick};
 pub use hue::{hue_index, HUES};
@@ -189,6 +191,10 @@ pub(crate) struct Inner {
     pub(crate) comms_reloads: std::sync::atomic::AtomicU64,
     pub(crate) chat: Mutex<chat::ChatData>,
     pub(crate) notices: Mutex<notice::NoticeData>,
+    pub(crate) inbox: Mutex<inbox::InboxData>,
+    /// Cuántas veces se ha pedido volver a traer la bandeja: ver
+    /// `Inbox::reload_soon`.
+    pub(crate) inbox_reloads: std::sync::atomic::AtomicU64,
     /// Cuál de las aperturas de una conversación es la vigente: ver
     /// `Chat::open`.
     pub(crate) chat_turn: std::sync::atomic::AtomicU64,
@@ -234,6 +240,8 @@ impl Core {
                 comms_reloads: std::sync::atomic::AtomicU64::new(0),
                 chat: Mutex::new(chat::ChatData::default()),
                 notices: Mutex::new(notice::NoticeData::default()),
+                inbox: Mutex::new(inbox::InboxData::default()),
+                inbox_reloads: std::sync::atomic::AtomicU64::new(0),
                 chat_turn: std::sync::atomic::AtomicU64::new(0),
                 chat_reloads: std::sync::atomic::AtomicU64::new(0),
                 chat_reads: std::sync::atomic::AtomicU64::new(0),

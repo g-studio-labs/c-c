@@ -17,7 +17,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use cac_core::{
-    Announcement, ApiError, CommsState, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, OrgsState, Session, Storage,
+    Announcement, ApiError, CommsState, InboxState, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, OrgsState, Session, Storage,
     TaskState, ThreadState, TreeState,
 };
 use gpui_kit::{App, AppContext, Entity, Global};
@@ -35,6 +35,7 @@ enum CoreEvent {
     Comms(CommsState),
     Thread(ThreadState),
     Connection(ConnectionState),
+    Inbox(InboxState),
     /// No es estado: un aviso del sistema que enseñar (`notifier`).
     Announce(Announcement),
 }
@@ -81,6 +82,9 @@ impl Listener for Forwarder {
     fn connection_changed(&self, state: ConnectionState) {
         self.send(CoreEvent::Connection(state));
     }
+    fn inbox_changed(&self, state: InboxState) {
+        self.send(CoreEvent::Inbox(state));
+    }
     fn announce(&self, announcement: Announcement) {
         self.send(CoreEvent::Announce(announcement));
     }
@@ -106,6 +110,8 @@ pub struct Snapshot {
     /// cuando cambia, y no en cada aviso de cualquier otra cosa.
     pub thread_revision: u64,
     pub connection: ConnectionState,
+    /// La bandeja de la campana, desde que se abrió el panel.
+    pub inbox: InboxState,
 }
 
 impl Snapshot {
@@ -124,6 +130,7 @@ impl Snapshot {
                 self.thread_revision += 1;
             }
             CoreEvent::Connection(state) => self.connection = state,
+            CoreEvent::Inbox(state) => self.inbox = state,
             // No llega aquí: lo enseña `notifier` sin pasar por el estado.
             CoreEvent::Announce(_) => {}
         }

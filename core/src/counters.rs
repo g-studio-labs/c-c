@@ -272,6 +272,17 @@ impl Counters {
         }
     }
 
+    /// La cuenta de la campana, sabida por la bandeja al leer algo: baja ya,
+    /// sin esperar a volver a preguntar. Sólo si es de la organización que se
+    /// mira.
+    pub(crate) fn set_notifications(&self, org_id: &str, unread: i64) {
+        self.update(|data| {
+            if data.state.org_id.as_deref() == Some(org_id) {
+                data.state.notifications = Some(unread);
+            }
+        });
+    }
+
     /// Vuelve a contar lo sin leer de los canales ya: tras seguir o
     /// silenciar uno, que el servidor cuenta distinto.
     pub(crate) async fn reload_channels(&self) {

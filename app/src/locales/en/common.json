@@ -15,7 +15,13 @@
   },
   "time": {
     "never": "never",
-    "now": "now"
+    "now": "now",
+    "minutesAgo_one": "1 minute ago",
+    "minutesAgo_other": "{{count}} minutes ago",
+    "hoursAgo_one": "1 hour ago",
+    "hoursAgo_other": "{{count}} hours ago",
+    "daysAgo_one": "1 day ago",
+    "daysAgo_other": "{{count}} days ago"
   },
   "presence": {
     "activeRecently": "active recently",

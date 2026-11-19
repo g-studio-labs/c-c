@@ -127,6 +127,8 @@ pub struct Workspace {
     /// poder cerrarlo al abrir desde él algo que va encima.
     account_menu_open: bool,
     _on_connect: [Subscription; 2],
+    /// El panel de la campana.
+    pub(crate) inbox: crate::inbox::InboxPanelState,
 }
 
 impl Workspace {
@@ -173,6 +175,7 @@ impl Workspace {
             _on_focus_lost: on_focus_lost,
             naming: None,
             tree_problem: None,
+            inbox: Default::default(),
             connect,
             connect_open: false,
             account_menu_open: false,
@@ -545,6 +548,7 @@ impl Workspace {
             .trigger(trigger);
         menu.content(move |_, _, cx| {
             let opener = opener.clone();
+            let inbox_opener = opener.clone();
             let update_hint = tr(cx, "nav:mcp.updateAvailable");
             let here = locale(cx);
             let theme_chosen = Backend::core(cx).theme();
@@ -619,7 +623,23 @@ impl Workspace {
                         })
                         .test_support(),
                 )
-                .child(Self::pending_row("account-notifications", Lucide::Bell, tr(cx, "nav:account.notifications"), cx))
+                .child({
+                    // El mismo panel que la campana.
+                    let opener = inbox_opener.clone();
+                    Self::account_row("account-notifications", Lucide::Bell, tr(cx, "nav:account.notifications"), false, cx)
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            opener
+                                .update(cx, |this, cx| {
+                                    this.account_menu_open = false;
+                                    if !this.inbox.open {
+                                        this.toggle_inbox(cx);
+                                    }
+                                })
+                                .ok();
+                        })
+                        .test_support()
+                })
                 .child(rule())
                 .child(
                     div()
@@ -814,9 +834,9 @@ impl Workspace {
     }
 
     /// La barra de arriba de la app de siempre: el buscador en el centro y
-    /// la campana a la derecha (`AppLayout.tsx`). Ninguno de los dos abre
-    /// todavía nada en esta app, y lo dicen al pasar el ratón; la campana ya
-    /// cuenta lo que hay sin leer.
+    /// la campana a la derecha (`AppLayout.tsx`). El buscador todavía no
+    /// abre nada en esta app, y lo dice al pasar el ratón; la campana cuenta
+    /// lo que hay sin leer y abre su panel (`inbox.rs`).
     fn render_top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (border, muted, surface, hover, foreground) = (theme.border, theme.muted_foreground, theme.muted, theme.accent, theme.foreground);
@@ -824,7 +844,7 @@ impl Workspace {
         let mono = theme.mono_font_family.clone();
         let not_yet = tr(cx, "common:misc.notInThisApp");
         let unread = Backend::snapshot(cx).read(cx).counters.notifications;
-        let bell_hint = format!("{} · {}", counted_label(&tr(cx, "common:last.notifications"), unread), not_yet);
+        let bell_hint = counted_label(&tr(cx, "common:last.notifications"), unread);
         // El `span` de la campana en `AppLayout.tsx`: `absolute -right-0.5
         // -top-0.5 flex min-w-4 items-center justify-center rounded-full
         // bg-primary px-1 text-[10px] font-medium text-primary-foreground`.
@@ -894,10 +914,12 @@ impl Workspace {
                     .rounded(px(8.))
                     .text_color(muted)
                     .hover(move |style| style.bg(hover).text_color(foreground))
+                    .cursor_pointer()
                     .child(Icon::new(Lucide::Bell).small())
                     .children(bell_count)
                     .aria_label(bell_hint.clone())
                     .tooltip(move |window, cx| Tooltip::new(bell_hint.clone()).build(window, cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_inbox(cx)))
                     .test_support(),
             )
             .test_support()
@@ -1409,6 +1431,12 @@ impl Render for Workspace {
             // queda con esa tecla para la negrita (`editor.rs` corta ahí la
             // subida). Qué pulsación es la del panel lo dice el core.
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                // Escape cierra el panel de la campana, que no tiene el foco.
+                if this.inbox.open && event.keystroke.key == "escape" {
+                    this.close_inbox(cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 let held = event.keystroke.modifiers;
                 let held = cac_core::KeysHeld { secondary: held.secondary(cx), shift: held.shift, alt: held.alt };
                 if cac_core::folds_panel(&event.keystroke.key, held) {
@@ -1449,6 +1477,8 @@ impl Render for Workspace {
                             .child(self.render_top_bar(cx))
                             .child(div().flex_1().min_h_0().overflow_hidden().child(main)),
                     )
+                    // El panel de la campana, por encima de todo lo de abajo.
+                    .children(self.render_inbox(cx))
                     // Suelto y con el ratón en el riel o en él: asomado por
                     // encima de la vista, sin empujarla.
                     .when(peeking, |this| {
@@ -3172,7 +3202,7 @@ mod tests {
         assert_eq!(label(window, "rail-comms-count", cx), "99+");
         assert_eq!(label(window, "rail-platform-count", cx), "1");
         assert_eq!(label(window, "rail-organization-count", cx), "3");
-        assert_eq!(label(window, "notifications-bell", cx), "Notificaciones (12) · Todavía no está en esta app");
+        assert_eq!(label(window, "notifications-bell", cx), "Notificaciones (12)");
         assert_eq!(label(window, "rail-comms", cx), "Comunicación (120)");
         assert_eq!(label(window, "rail-platform", cx), "Plataforma (1) · Todavía no está en esta app");
         assert_eq!(label(window, "rail-organization", cx), "Organización (3) · Todavía no está en esta app");
@@ -3209,7 +3239,7 @@ mod tests {
             assert!(!on_screen(window, id, cx), "{id} se pinta sin nada que contar");
         }
         assert_eq!(label(window, "rail-comms", cx), "Comunicación");
-        assert_eq!(label(window, "notifications-bell", cx), "Notificaciones · Todavía no está en esta app");
+        assert_eq!(label(window, "notifications-bell", cx), "Notificaciones");
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 }

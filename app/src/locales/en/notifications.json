@@ -67,6 +67,8 @@
   "wrote": "{{who}} wrote",
   "wroteToYou": "{{who}} wrote to you",
   "newDirect": "New direct message",
+  "directCount_one": "New message",
+  "directCount_other": "{{count}} new messages",
   "push": {
     "title": "Notifications on this device",
     "enable": "Turn on",

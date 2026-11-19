@@ -67,6 +67,8 @@
   "wrote": "{{who}} escribió",
   "wroteToYou": "{{who}} te escribió",
   "newDirect": "Mensaje directo nuevo",
+  "directCount_one": "Mensaje nuevo",
+  "directCount_other": "{{count}} mensajes nuevos",
   "push": {
     "title": "Avisos en este dispositivo",
     "enable": "Encender",

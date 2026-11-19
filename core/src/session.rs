@@ -159,6 +159,7 @@ impl Core {
         self.counters().clear();
         self.comms().clear();
         self.notices().clear();
+        self.inbox().clear();
         self.chat().clear();
         self.inner.listener.session_changed(None);
     }

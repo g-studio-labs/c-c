@@ -302,6 +302,9 @@ impl Stream {
         // se dijo mientras no estaba.
         let core = self.core.clone();
         tokio::spawn(async move { core.chat().refresh().await });
+        // Y la bandeja, si se ha mirado.
+        let core = self.core.clone();
+        tokio::spawn(async move { core.inbox().refresh().await });
     }
 
     fn dispatch(&self, event: ServerEvent) {
@@ -328,6 +331,7 @@ impl Stream {
         // Después de la lista: decide con la conversación que se tiene delante
         // y con lo que se sigue.
         self.core.notices().server_event(&event);
+        self.core.inbox().server_event(&event);
         self.core.inner.listener.server_event(event);
     }
 }

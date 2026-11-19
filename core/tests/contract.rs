@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 
 use cac_core::{
-    ChatLatest, ChatMessage, ChatUnread, DmMessage, DmReadEvent, DmSummary, Person,
+    ChatLatest, ChatMessage, ChatUnread, DmMessage, DmReadEvent, DmSummary, InboxFeed, Person,
     can_transition, canonical_priority, flow_for, open_subtasks_block, DocDecision, DocInfo, DocMark, DocPageView, DocTab, Flow, OpenTask, Organization, Session, SpaceTree, TaskDetail,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -438,4 +438,20 @@ fn a_file_uploaded_to_a_conversation_is_read_whole() {
     assert_eq!(shot.url, "/api/v1/task-spaces/e8bd6d46-a9ab-494e-ac29-de84d80a55f4/chat/attachments/f1/raw");
     let notes: cac_core::ChatFile = reads_every_field(&fixture("dm_attachment.json"));
     assert_eq!((notes.conversation_id.as_str(), notes.url.as_str(), notes.bytes), ("c1", "/api/v1/dm/c1/attachments/f2/raw", Some(4096)));
+}
+
+/// La bandeja de la campana, entera: cada aviso con su clase, su enlace, si
+/// lo escribió un agente y su conversación, y la cuenta por conversación.
+/// `updatedAt` no se lee: la bandeja no se edita, sólo se marca leída.
+///
+/// Rotura que atrapa: que en Go se renombre `groupKey`, `readAt`, `via` o
+/// los campos de la cuenta y el panel pliegue mal, enseñe leído lo que no o
+/// cuente lo cargado, sin que nada falle.
+#[test]
+fn the_inbox_is_read_whole() {
+    let feed: InboxFeed = reads_every_field_but(&fixture("notification_feed.json"), &["items[0].updatedAt"]);
+    let item = &feed.items[0];
+    assert_eq!((item.kind.as_str(), item.via.as_deref(), item.group_key.as_deref()), ("chat:mention", Some("mcp"), Some("chat:e8bd6d46-a9ab-494e-ac29-de84d80a55f4")));
+    assert!(item.read_at.is_some());
+    assert_eq!((feed.unread, feed.groups[0].total, feed.groups[0].unread), (3, 5, 3));
 }

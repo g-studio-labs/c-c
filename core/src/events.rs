@@ -7,6 +7,7 @@ use crate::chat::ThreadState;
 use crate::comms::CommsState;
 use crate::counters::CountersState;
 use crate::docs::DocsState;
+use crate::inbox::InboxState;
 use crate::mywork::MyWorkState;
 use crate::notice::Announcement;
 use crate::orgs::OrgsState;
@@ -50,6 +51,10 @@ pub trait Listener: Send + Sync {
     /// La conversación que se tiene delante cambió: se eligió otra, llegó
     /// su página, llegó un mensaje, o el otro leyó.
     fn thread_changed(&self, _state: ThreadState) {}
+
+    /// La bandeja de la campana cambió: llegó, se leyó algo, o se cambió de
+    /// organización.
+    fn inbox_changed(&self, _state: InboxState) {}
 
     /// La conexión con el servidor cambió: para el aviso de «sin conexión».
     fn connection_changed(&self, _state: ConnectionState) {}

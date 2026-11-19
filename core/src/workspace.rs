@@ -83,5 +83,7 @@ impl Core {
         let _ = my_work.await;
         let _ = counters.await;
         let _ = comms.await;
+        // La bandeja es de la organización: si se ha mirado, la de ésta.
+        self.inbox().refresh().await;
     }
 }
