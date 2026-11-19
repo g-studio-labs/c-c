@@ -1,14 +1,15 @@
 //! Lo que el motor le cuenta a quien lo pinta.
 //!
 //! El mismo vocabulario que `VoiceEvent` del motor de Tauri
-//! (`app/src-tauri/src/voice.rs`), sin los de vídeo, y con la misma forma al
-//! serializar (`{"kind":"joined", …}`) por si algún día viaja.
+//! (`app/src-tauri/src/voice.rs`), con la misma forma al serializar
+//! (`{"kind":"joined", …}`) por si algún día viaja.
 
 use std::sync::Arc;
 
 use serde::Serialize;
 
 use crate::recording::recording_event;
+use crate::video::VideoSource;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -33,6 +34,10 @@ pub enum EngineEvent {
     /// Se está grabando, o se dejó de grabar. `id`, `by` y `since` vacíos
     /// cuando `active` es falso.
     Recording { active: bool, id: String, by: String, since: String },
+    /// La cámara o la pantalla de alguien se encendió o se apagó. Silenciar
+    /// una pista de vídeo cuenta como apagarla. Los fotogramas no viajan por
+    /// aquí: se toman de `Call::video`.
+    Video { identity: String, source: VideoSource, enabled: bool },
     /// La sala te soltó. El micrófono sigue abierto hasta que quien lo
     /// recibe llama a `Call::leave` (como en Tauri: decide la interfaz).
     /// Colgar con `Call::leave` **no** lo emite.
@@ -105,5 +110,7 @@ mod tests {
     fn events_serialize_like_tauri() {
         let json = serde_json::to_string(&EngineEvent::SelfSpeaking { speaking: true }).unwrap();
         assert_eq!(json, r#"{"kind":"selfSpeaking","speaking":true}"#);
+        let json = serde_json::to_string(&EngineEvent::Video { identity: "u-ana".into(), source: VideoSource::Screen, enabled: true }).unwrap();
+        assert_eq!(json, r#"{"kind":"video","identity":"u-ana","source":"screen","enabled":true}"#);
     }
 }

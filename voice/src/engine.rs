@@ -15,8 +15,9 @@ use livekit::track::{LocalAudioTrack, LocalTrack, RemoteTrack, TrackKind, TrackS
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_source::{AudioSourceOptions, RtcAudioSource};
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
-use livekit::webrtc::prelude::RtcAudioTrack;
+use livekit::webrtc::prelude::{RtcAudioTrack, RtcVideoTrack, VideoRotation};
 use livekit::webrtc::stats::RtcStats;
+use livekit::webrtc::video_stream::native::NativeVideoStream;
 use livekit::{Room, RoomEvent, RoomOptions};
 use serde::Serialize;
 use tokio::runtime::Handle;
@@ -31,6 +32,7 @@ use crate::events::{arrival_events, EngineEvent, EventSink, Peer};
 use crate::mixer::TrackQueue;
 use crate::output::Playback;
 use crate::recording::recording_event;
+use crate::video::{self, Feed, TrackChange, VideoFeeds, VideoSource};
 
 /// Cada cuánto se mide la latencia: un número para mirar de reojo.
 const LATENCY_EVERY: Duration = Duration::from_secs(5);
@@ -180,6 +182,7 @@ impl Engine {
         };
 
         let playback = Arc::new(Playback::new(mixer));
+        let video = VideoFeeds::default();
         let inner = Arc::new(CallInner {
             engine: self.shared.clone(),
             handle: handle.clone(),
@@ -194,11 +197,12 @@ impl Engine {
             deaf: AtomicBool::new(false),
             left: AtomicBool::new(false),
             tasks: Mutex::new(Vec::new()),
+            video: video.clone(),
         });
         *self.shared.current.lock().unwrap() = Arc::downgrade(&inner);
 
         sink(EngineEvent::Connected { identity });
-        let listening = handle.spawn(listen(events, Arc::downgrade(&room), playback, self.shared.clone(), sink.clone(), handle.clone()));
+        let listening = handle.spawn(listen(events, Arc::downgrade(&room), playback, video, self.shared.clone(), sink.clone(), handle.clone()));
         let latency = handle.spawn(measure_latency(Arc::downgrade(&room), sink));
         inner.tasks.lock().unwrap().extend([listening, latency]);
         Ok(Call { inner })
@@ -241,6 +245,8 @@ struct CallInner {
     deaf: AtomicBool,
     left: AtomicBool,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// El vídeo de los demás (`video.rs`).
+    video: VideoFeeds,
 }
 
 impl Call {
@@ -294,6 +300,12 @@ impl Call {
         }
     }
 
+    /// El vídeo de los demás: sus últimos fotogramas, a qué tamaño se ven y si
+    /// alguien mira. Los encendidos y apagados llegan como `EngineEvent::Video`.
+    pub fn video(&self) -> VideoFeeds {
+        self.inner.video.clone()
+    }
+
     /// Colgar. Idempotente: colgar dos veces no es un error (pasa de verdad,
     /// la ventana se cierra mientras alguien pulsa el botón). No emite
     /// `Disconnected`.
@@ -342,6 +354,8 @@ impl CallInner {
         }
         self.capture.lock().unwrap().take();
         self.playback.close();
+        // La última cara de esta sala no se enseña en la siguiente.
+        self.video.clear();
         let mut current = self.engine.current.lock().unwrap();
         if std::ptr::eq(current.as_ptr(), self) {
             *current = Weak::new();
@@ -370,6 +384,9 @@ impl Drop for CallInner {
 struct Receiving {
     playback: Arc<Playback>,
     tracks: HashMap<String, (TrackQueue, JoinHandle<()>)>,
+    video: VideoFeeds,
+    /// Las pistas de vídeo que se están recibiendo: de quién, qué, y su tarea.
+    videos: HashMap<String, (String, VideoSource, JoinHandle<()>)>,
 }
 
 impl Receiving {
@@ -378,12 +395,16 @@ impl Receiving {
             task.abort();
             self.playback.mixer.remove_track(&queue);
         }
+        if let Some((identity, source, task)) = self.videos.remove(sid) {
+            task.abort();
+            self.video.close(&identity, source);
+        }
     }
 }
 
 impl Drop for Receiving {
     fn drop(&mut self) {
-        let sids: Vec<String> = self.tracks.keys().cloned().collect();
+        let sids: Vec<String> = self.tracks.keys().chain(self.videos.keys()).cloned().collect();
         for sid in sids {
             self.remove(&sid);
         }
@@ -391,9 +412,21 @@ impl Drop for Receiving {
 }
 
 /// Los eventos de la sala, traducidos a `EngineEvent`, y lo que dicen los
-/// demás, a la mezcla. Portado de `listen_to_events` (voice.rs) sin vídeo.
-async fn listen(mut events: mpsc::UnboundedReceiver<RoomEvent>, room: Weak<Room>, playback: Arc<Playback>, engine: Arc<Shared>, sink: EventSink, handle: Handle) {
-    let mut receiving = Receiving { playback: playback.clone(), tracks: HashMap::new() };
+/// demás, a la mezcla y a sus casillas de vídeo. Portado de
+/// `listen_to_events` (voice.rs).
+#[allow(clippy::too_many_arguments)]
+async fn listen(mut events: mpsc::UnboundedReceiver<RoomEvent>, room: Weak<Room>, playback: Arc<Playback>, video: VideoFeeds, engine: Arc<Shared>, sink: EventSink, handle: Handle) {
+    let mut receiving = Receiving { playback: playback.clone(), tracks: HashMap::new(), video: video.clone(), videos: HashMap::new() };
+    // Un vídeo que se enciende o se apaga, contado y, si se apaga, sin su
+    // último fotograma.
+    let tell = |identity: String, change: Option<(VideoSource, bool)>| {
+        if let Some((source, enabled)) = change {
+            if !enabled {
+                video.blank(&identity, source);
+            }
+            sink(EngineEvent::Video { identity, source, enabled });
+        }
+    };
     while let Some(event) = events.recv().await {
         match event {
             // Los que ya estaban: ver `arrival_events`.
@@ -413,12 +446,19 @@ async fn listen(mut events: mpsc::UnboundedReceiver<RoomEvent>, room: Weak<Room>
             }
             RoomEvent::RoomMetadataChanged { metadata, .. } => sink(recording_event(&metadata)),
             RoomEvent::ParticipantConnected(p) => sink(EngineEvent::Joined { identity: p.identity().to_string(), name: p.name() }),
-            RoomEvent::ParticipantDisconnected(p) => sink(EngineEvent::Left { identity: p.identity().to_string() }),
+            RoomEvent::ParticipantDisconnected(p) => {
+                video.forget_person(p.identity().as_str());
+                sink(EngineEvent::Left { identity: p.identity().to_string() })
+            }
             RoomEvent::ActiveSpeakersChanged { speakers } => sink(EngineEvent::Speaking { identities: speakers.iter().map(|s| s.identity().to_string()).collect() }),
             RoomEvent::TrackMuted { participant, publication } | RoomEvent::TrackUnmuted { participant, publication } => {
                 if publication.kind() == TrackKind::Audio {
                     sink(EngineEvent::Muted { identity: participant.identity().to_string(), muted: publication.is_muted() });
                 }
+                // Un vídeo silenciado está apagado: es como apaga la cámara el
+                // navegador (ver `video::video_change`).
+                let change = if publication.is_muted() { TrackChange::Muted } else { TrackChange::Unmuted };
+                tell(participant.identity().to_string(), video::video_change(publication.kind(), publication.source(), change));
             }
             // Publica un micrófono estando ya dentro (se reconectó, cambió de
             // dispositivo): su estado de partida otra vez.
@@ -433,7 +473,28 @@ async fn listen(mut events: mpsc::UnboundedReceiver<RoomEvent>, room: Weak<Room>
                 receiving.remove(&sid);
                 receiving.tracks.insert(sid, played);
             }
-            RoomEvent::TrackUnsubscribed { publication, .. } => receiving.remove(&publication.sid().to_string()),
+            RoomEvent::TrackSubscribed { track: RemoteTrack::Video(track), publication, participant } => {
+                let sid = publication.sid().to_string();
+                let identity = participant.identity().to_string();
+                let change = video::video_change(TrackKind::Video, publication.source(), TrackChange::Subscribed { muted: publication.is_muted() });
+                if let Some((source, _)) = change {
+                    receiving.remove(&sid);
+                    let feed = video.open(&identity, source);
+                    video.track_publication(&identity, source, publication.clone());
+                    let task = receive_video(&handle, track.rtc_track(), feed, video.clone());
+                    receiving.videos.insert(sid, (identity.clone(), source, task));
+                }
+                tell(identity, change);
+            }
+            RoomEvent::TrackUnsubscribed { publication, participant, .. } => {
+                receiving.remove(&publication.sid().to_string());
+                tell(participant.identity().to_string(), video::video_change(publication.kind(), publication.source(), TrackChange::Unsubscribed));
+            }
+            // Dejó de compartir: el SDK no siempre manda antes `TrackUnsubscribed`.
+            RoomEvent::TrackUnpublished { publication, participant } => {
+                receiving.remove(&publication.sid().to_string());
+                tell(participant.identity().to_string(), video::video_change(publication.kind(), publication.source(), TrackChange::Unpublished));
+            }
             RoomEvent::Disconnected { reason } => sink(EngineEvent::Disconnected { reason: format!("{reason:?}") }),
             _ => {}
         }
@@ -463,6 +524,24 @@ fn play_track(handle: &Handle, playback: &Arc<Playback>, chosen_output: Option<S
         mixer.remove_track(&mine);
     });
     (queue, task)
+}
+
+/// Lo que llega de una pista de vídeo, a su casilla: cada fotograma se
+/// convierte en esta tarea al tamaño en que se ve, y se queda sólo el último.
+///
+/// Cola de **uno** (la de `NativeVideoStream::new`): si convertir se
+/// retrasa, el SDK guarda el fotograma más nuevo y tira los de en medio, que
+/// es lo que se quiere en una llamada. El spike usaba `queue_size_frames:
+/// Some(0)`, que es **sin tope**, para contar todo lo que llegaba; aquí
+/// crecería sin fin con la máquina cargada.
+fn receive_video(handle: &Handle, track: RtcVideoTrack, feed: Arc<Feed>, video: VideoFeeds) -> JoinHandle<()> {
+    handle.spawn(async move {
+        let mut incoming = NativeVideoStream::new(track);
+        while let Some(frame) = incoming.next().await {
+            let rotation: VideoRotation = frame.rotation;
+            video.offer(&feed, |(box_w, box_h)| video::convert(&*frame.buffer, rotation, box_w, box_h));
+        }
+    })
 }
 
 /// La latencia de verdad: el ida y vuelta que mide WebRTC sobre el camino que

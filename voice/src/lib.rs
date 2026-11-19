@@ -3,7 +3,8 @@
 //! Entra a una sala de LiveKit, publica el micrófono procesado (eco, paso
 //! alto, ruido), mezcla a los demás en una sola salida —que es también la
 //! referencia del cancelador de eco— y cuenta lo que pasa por un
-//! `Fn(EngineEvent)`. Sin interfaz, sin vídeo ni pantalla.
+//! `Fn(EngineEvent)`. Recibe el vídeo de los demás (cámara y pantalla) y lo
+//! deja listo para pintar; no publica vídeo. Sin interfaz.
 //!
 //! ```ignore
 //! let engine = Engine::new();
@@ -30,6 +31,7 @@ mod events;
 mod mixer;
 mod output;
 mod recording;
+mod video;
 
 pub use capture::InputFormat;
 pub use devices::{Device, DeviceKind, Devices};
@@ -37,11 +39,12 @@ pub use engine::{Call, Engine, MicLevel};
 pub use error::{JoinError, VoiceError};
 pub use events::{EngineEvent, EventSink};
 pub use recording::{recording_from_metadata, RecordingSignal};
+pub use video::{FrameWake, VideoFeeds, VideoFrame, VideoSource};
 
 #[cfg(test)]
 mod tests {
     /// Las fuentes del crate, para leerlas.
-    const SOURCES: [(&str, &str); 10] = [
+    const SOURCES: [(&str, &str); 11] = [
         ("lib.rs", include_str!("lib.rs")),
         ("capture.rs", include_str!("capture.rs")),
         ("devices.rs", include_str!("devices.rs")),
@@ -52,6 +55,7 @@ mod tests {
         ("mixer.rs", include_str!("mixer.rs")),
         ("output.rs", include_str!("output.rs")),
         ("recording.rs", include_str!("recording.rs")),
+        ("video.rs", include_str!("video.rs")),
     ];
 
     /// Ni un global: ni `static` (las constantes sí), ni `thread_local!`, ni
