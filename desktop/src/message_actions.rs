@@ -146,9 +146,11 @@ impl ChatView {
                 // Flota sobre el borde de arriba del mensaje: dentro de un
                 // mensaje corto taparía lo que dice.
                 .absolute()
-                .top(px(-12.))
+                .top(px(-16.))
                 .right_2()
                 .flex()
+                .gap_0p5()
+                .p_0p5()
                 .rounded_md()
                 .border_1()
                 .border_color(border)
@@ -158,16 +160,16 @@ impl ChatView {
                 .child(
                     Button::new(SharedString::from(format!("thread-reply-{id}")))
                         .ghost()
-                        .xsmall()
-                        .icon(Icon::new(Lucide::CornerUpLeft))
+                        .small()
+                        .icon(Icon::new(Lucide::CornerUpLeft).size_4())
                         .tooltip(tr(cx, "chat:reply"))
                         .on_click(cx.listener(move |this, _, window, cx| this.reply_to(&replied, window, cx))),
                 )
                 .child(
                     Button::new(SharedString::from(format!("thread-react-{id}")))
                         .ghost()
-                        .xsmall()
-                        .icon(Icon::new(Lucide::HeartPlus))
+                        .small()
+                        .icon(Icon::new(Lucide::HeartPlus).size_4())
                         .tooltip(tr(cx, "chat:react"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.picking = if this.picking.as_deref() == Some(reacted.as_str()) { None } else { Some(reacted.clone()) };
@@ -178,16 +180,16 @@ impl ChatView {
                     this.child(
                         Button::new(SharedString::from(format!("thread-edit-{id}")))
                             .ghost()
-                            .xsmall()
-                            .icon(Icon::new(Lucide::Pencil))
+                            .small()
+                            .icon(Icon::new(Lucide::Pencil).size_4())
                             .tooltip(tr(cx, "chat:edit"))
                             .on_click(cx.listener(move |this, _, window, cx| this.start_edit(edited.clone(), window, cx))),
                     )
                     .child(
                         Button::new(SharedString::from(format!("thread-withdraw-{id}")))
                             .ghost()
-                            .xsmall()
-                            .icon(Icon::new(Lucide::Trash))
+                            .small()
+                            .icon(Icon::new(Lucide::Trash).size_4())
                             .tooltip(tr(cx, "chat:withdraw"))
                             .on_click(cx.listener(move |this, _, window, cx| this.ask_withdraw(withdrawn.clone(), window, cx))),
                     )
