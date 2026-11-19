@@ -232,6 +232,39 @@ func TestTheCoreReadsWhatTheServerWrites(t *testing.T) {
 			Unread: 3,
 			Groups: []GroupTally{{Key: "chat:e8bd6d46-a9ab-494e-ac29-de84d80a55f4", Label: "#producto", Total: 5, Unread: 3}},
 		},
+		// La voz (`core/src/voice.rs`, `voice_ring.rs`): el pase de un canal y
+		// el de una reunión, y el timbre que entra y su cancelación. Van con
+		// todos los campos: el core entra con lo que dicen.
+		"voice_token_response.json": VoiceTokenResponse{
+			URL:       "wss://rtc.example.com",
+			Token:     "lk-token",
+			Room:      "voice:e8bd6d46-a9ab-494e-ac29-de84d80a55f4",
+			OrgID:     "35d32154-922f-47dc-a6d9-051d4e78ae8a",
+			SpaceName: "Producto",
+			MovedTo:   &MovedCall{InviteID: "inv1", Title: "Con el cliente"},
+			SessionID: "cs1",
+		},
+		"meet_token_response.json": MeetTokenResponse{
+			URL:       "wss://rtc.example.com",
+			Token:     "lk-token",
+			Room:      "meet:inv1",
+			OrgID:     "35d32154-922f-47dc-a6d9-051d4e78ae8a",
+			SpaceID:   &pageParent,
+			InviteID:  "inv1",
+			Title:     "Con el cliente",
+			SessionID: "cs1",
+		},
+		"voice_ring.json": VoiceRing{
+			RingID:    "ring1",
+			SpaceID:   "e8bd6d46-a9ab-494e-ac29-de84d80a55f4",
+			OrgID:     "35d32154-922f-47dc-a6d9-051d4e78ae8a",
+			SpaceName: "Producto",
+			From:      VoiceCaller{ID: "u2", Name: "Luis Mora"},
+			ExpiresAt: day,
+			InviteID:  &pageID,
+			Title:     "Con el cliente",
+		},
+		"voice_ring_cancel.json": VoiceRingCancel{SpaceID: "e8bd6d46-a9ab-494e-ac29-de84d80a55f4", From: "u2", InviteID: &pageID},
 		"chat_unread.json": ChatUnread{SpaceID: "e8bd6d46-a9ab-494e-ac29-de84d80a55f4", Count: 4},
 		"dm_summary.json": DMSummary{
 			ConversationID: "c1",

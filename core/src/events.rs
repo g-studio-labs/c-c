@@ -15,6 +15,7 @@ use crate::tree::TreeState;
 use crate::session::Session;
 use crate::stream::{ConnectionState, ServerEvent};
 use crate::task::TaskState;
+use crate::voice::VoiceState;
 
 pub trait Listener: Send + Sync {
     /// La sesión cambió: alguien entró, salió, o el servidor la dio por
@@ -55,6 +56,10 @@ pub trait Listener: Send + Sync {
     /// La bandeja de la campana cambió: llegó, se leyó algo, o se cambió de
     /// organización.
     fn inbox_changed(&self, _state: InboxState) {}
+
+    /// La voz cambió: la sala en la que estás, quién habla, el timbre, o
+    /// quién anda por los canales.
+    fn voice_changed(&self, _state: VoiceState) {}
 
     /// La conexión con el servidor cambió: para el aviso de «sin conexión».
     fn connection_changed(&self, _state: ConnectionState) {}

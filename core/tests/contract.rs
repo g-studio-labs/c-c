@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 
 use cac_core::{
     ChatLatest, ChatMessage, ChatUnread, DmMessage, DmReadEvent, DmSummary, InboxFeed, Person,
+    IncomingRing, MeetToken, VoiceToken,
     can_transition, canonical_priority, flow_for, open_subtasks_block, DocDecision, DocInfo, DocMark, DocPageView, DocTab, Flow, OpenTask, Organization, Session, SpaceTree, TaskDetail,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -454,4 +455,25 @@ fn the_inbox_is_read_whole() {
     assert_eq!((item.kind.as_str(), item.via.as_deref(), item.group_key.as_deref()), ("chat:mention", Some("mcp"), Some("chat:e8bd6d46-a9ab-494e-ac29-de84d80a55f4")));
     assert!(item.read_at.is_some());
     assert_eq!((feed.unread, feed.groups[0].total, feed.groups[0].unread), (3, 5, 3));
+}
+
+/// La voz: el pase de un canal (con la mudanza), el de una reunión, y el
+/// timbre que entra, enteros. Roturas que atrapa: un campo renombrado en Go
+/// que el core deja de leer —una mudanza que no se sigue, un timbre sin
+/// organización que te lleva a la que no es—.
+#[test]
+fn voice_entries_and_rings_are_read_whole() {
+    let channel: VoiceToken = reads_every_field(&fixture("voice_token_response.json"));
+    assert_eq!(channel.moved_to.unwrap().invite_id, "inv1");
+    assert_eq!((channel.org_id.as_str(), channel.session_id.as_str()), ("35d32154-922f-47dc-a6d9-051d4e78ae8a", "cs1"));
+
+    let meeting: MeetToken = reads_every_field(&fixture("meet_token_response.json"));
+    assert_eq!((meeting.invite_id.as_str(), meeting.space_id.as_deref()), ("inv1", Some("p1")));
+
+    let ring: IncomingRing = reads_every_field(&fixture("voice_ring.json"));
+    assert_eq!((ring.from.id.as_str(), ring.org_id.as_str(), ring.invite_id.as_deref()), ("u2", "35d32154-922f-47dc-a6d9-051d4e78ae8a", Some("p2")));
+    assert_eq!(ring.expires_at, "2026-09-30T00:00:00Z");
+
+    // La cancelación sólo se lee por `from`: quien llamaba, o quien rechaza.
+    assert!(keys(&fixture("voice_ring_cancel.json")).contains("from"));
 }

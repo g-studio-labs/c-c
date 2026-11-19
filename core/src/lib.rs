@@ -40,6 +40,9 @@ pub mod tree;
 pub mod hue;
 pub mod inbox;
 pub mod tree_rows;
+pub mod ring_tone;
+pub mod voice;
+pub mod voice_ring;
 pub mod workspace;
 
 use std::sync::{Arc, Mutex};
@@ -116,6 +119,11 @@ pub use task::{assignee_choices, retitled, shown_name, tag_choices, tag_color_fo
 pub use task::{can_change_comment, is_agent_note, says_something, task_sheet, SheetActivity, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, StatusChoice, TaskSheet};
 pub use texts::{error_phrase, pick_locale, text, text_count, text_count_unit, text_with, Locale};
 pub use transport::Reply;
+pub use ring_tone::{render_ring, ring_cycle, RingTone};
+pub use voice::{
+    disconnect_reason, join_names, person_initials, voice_error_phrase, voice_room_name, voice_status, voice_tiles, VoiceTile, IncomingRing, MeetToken, MovedCall, OccupancyWatch, OutgoingRing, Voice, VoiceCaller, VoiceEngine, VoiceError, VoiceEvent, VoiceFuture,
+    VoicePeer, VoicePhase, VoiceRecording, VoiceState, VoiceToken,
+};
 
 /// Con qué servidor habla el core y cómo se presenta.
 #[derive(Debug, Clone)]
@@ -139,6 +147,13 @@ pub struct Config {
     /// Cuánto puede faltar el stream antes de avisar a quien mira. Menos que
     /// esto es una reconexión de las normales.
     pub stream_grace: Duration,
+    /// Cada cuánto se pregunta quién anda por la voz de los canales, mientras
+    /// alguien lo mira.
+    pub voice_presence_every: Duration,
+    /// Cuánto suena un timbre que sale antes de rendirse. **Tiene que
+    /// coincidir con `service.TimbreTTL` del backend**, que pone el
+    /// `expiresAt` del que entra.
+    pub ring_for: Duration,
 }
 
 impl Config {
@@ -151,6 +166,8 @@ impl Config {
             stream_silence: Duration::from_secs(60),
             stream_backoff: Duration::from_secs(1),
             stream_grace: Duration::from_secs(45),
+            voice_presence_every: Duration::from_secs(15),
+            ring_for: Duration::from_secs(20),
         }
     }
 }
@@ -210,6 +227,13 @@ pub(crate) struct Inner {
     /// Cuántas recargas de «Mi trabajo» se han pedido: la que espera su
     /// respiro sólo carga si sigue siendo la última.
     pub(crate) my_work_reloads: std::sync::atomic::AtomicU64,
+    pub(crate) voice: Mutex<voice::VoiceData>,
+    /// Qué entrada a una sala es la vigente: ver `Voice::join_channel`.
+    pub(crate) voice_turn: std::sync::atomic::AtomicU64,
+    /// Qué ronda de preguntas por la ocupación es la vigente.
+    pub(crate) occupancy_turn: std::sync::atomic::AtomicU64,
+    /// Qué timbre que sale es el vigente: su reloj sólo lo rinde si lo es.
+    pub(crate) ring_turn: std::sync::atomic::AtomicU64,
 }
 
 impl Core {
@@ -248,6 +272,10 @@ impl Core {
                 connection: Mutex::new(ConnectionState::default()),
                 stream_turn: std::sync::atomic::AtomicU64::new(0),
                 my_work_reloads: std::sync::atomic::AtomicU64::new(0),
+                voice: Mutex::new(voice::VoiceData::default()),
+                voice_turn: std::sync::atomic::AtomicU64::new(0),
+                occupancy_turn: std::sync::atomic::AtomicU64::new(0),
+                ring_turn: std::sync::atomic::AtomicU64::new(0),
             }),
         };
         let held = core.load_held();

@@ -1,0 +1,12 @@
+{
+  "url": "wss://rtc.example.com",
+  "token": "lk-token",
+  "room": "voice:e8bd6d46-a9ab-494e-ac29-de84d80a55f4",
+  "orgId": "35d32154-922f-47dc-a6d9-051d4e78ae8a",
+  "spaceName": "Producto",
+  "movedTo": {
+    "inviteId": "inv1",
+    "title": "Con el cliente"
+  },
+  "sessionId": "cs1"
+}

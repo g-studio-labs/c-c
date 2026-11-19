@@ -1,0 +1,10 @@
+{
+  "url": "wss://rtc.example.com",
+  "token": "lk-token",
+  "room": "meet:inv1",
+  "orgId": "35d32154-922f-47dc-a6d9-051d4e78ae8a",
+  "spaceId": "p1",
+  "inviteId": "inv1",
+  "title": "Con el cliente",
+  "sessionId": "cs1"
+}

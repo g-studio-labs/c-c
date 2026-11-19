@@ -1,0 +1,13 @@
+{
+  "ringId": "ring1",
+  "spaceId": "e8bd6d46-a9ab-494e-ac29-de84d80a55f4",
+  "orgId": "35d32154-922f-47dc-a6d9-051d4e78ae8a",
+  "spaceName": "Producto",
+  "from": {
+    "id": "u2",
+    "name": "Luis Mora"
+  },
+  "expiresAt": "2026-09-30T00:00:00Z",
+  "inviteId": "p2",
+  "title": "Con el cliente"
+}

@@ -144,6 +144,11 @@ fn embedded() -> &'static Catalogs {
 
 /// El texto de una clave (`common:misc.signIn`; sin espacio es `common`), en
 /// ese idioma o, si ahí falta, en inglés.
+/// Si el catálogo tiene esa clave (en inglés, que las tiene todas).
+pub(crate) fn has_text(key: &str) -> bool {
+    embedded().lookup(Locale::En, key).is_some()
+}
+
 pub fn text(locale: Locale, key: &str) -> String {
     embedded().text(locale, key)
 }

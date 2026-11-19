@@ -307,6 +307,13 @@ impl Stream {
         tokio::spawn(async move { core.inbox().refresh().await });
     }
 
+    /// Un evento que llegó por otro camino que este stream: un push al
+    /// teléfono (el timbre lo manda también así), o una prueba. Se reparte
+    /// igual que si hubiera llegado aquí.
+    pub fn deliver(&self, event: ServerEvent) {
+        self.dispatch(event);
+    }
+
     fn dispatch(&self, event: ServerEvent) {
         if event.event == "ping" {
             return;
@@ -332,6 +339,7 @@ impl Stream {
         // y con lo que se sigue.
         self.core.notices().server_event(&event);
         self.core.inbox().server_event(&event);
+        self.core.voice().server_event(&event);
         self.core.inner.listener.server_event(event);
     }
 }
