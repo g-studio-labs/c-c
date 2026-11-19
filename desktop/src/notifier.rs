@@ -34,7 +34,7 @@ pub fn install(cx: &mut App) {
 }
 
 /// Enseña un aviso que el core decidió dar.
-pub fn show(announcement: Announcement, cx: &mut App) {
+pub(crate) fn show(announcement: Announcement, cx: &mut App) {
     let language = locale(cx);
     let tag = SharedString::from(announcement.tag.clone());
     let notification = SystemNotification {
@@ -43,8 +43,11 @@ pub fn show(announcement: Announcement, cx: &mut App) {
         body: announcement.body(language).into(),
         actions: Vec::new(),
     };
+    let kind = announcement.kind;
     cx.global_mut::<Notifier>().targets.insert(tag, announcement.target);
     cx.show_system_notification(notification);
+    // Después de enseñarlo: un tono sin aviso no dice de qué es.
+    crate::sound::after_notice(kind, cx);
 }
 
 /// Se pulsó un aviso: la ventana al frente, y su conversación delante.

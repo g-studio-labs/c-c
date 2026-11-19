@@ -21,6 +21,10 @@ gpui-kit = "=0.9.1"
 # El core habla con el servidor sobre tokio, y GPUI tiene su propio ejecutor:
 # el escritorio le pone al core un runtime aparte (ver `backend.rs`).
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+# El tono de los avisos (`sound.rs`). La misma que la voz de la app de Tauri,
+# sin más: las muestras las calcula el core, no hay nada que decodificar. En
+# Linux habla ALSA (`libasound`, que el paquete pide solo con `$auto`).
+cpal = "0.18.2"
 # Para oír a GPUI: qué tarjeta elige, con qué pinta. Sin un `log` instalado en
 # el proceso esas líneas se tiran.
 log = "0.4"

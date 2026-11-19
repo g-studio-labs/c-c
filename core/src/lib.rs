@@ -26,6 +26,7 @@ pub mod events;
 pub mod mywork;
 pub mod nav;
 pub mod notice;
+pub mod notice_sound;
 pub mod orgs;
 pub mod prefs;
 pub mod prose;
@@ -78,6 +79,7 @@ pub use mywork::{
     ToneCount, WeekSummary, WeekView, CALENDAR_TONES,
 };
 pub use notice::{channel_notice, direct_notice, Announcement, NoticeKind, NoticeTarget, Notices, Viewer};
+pub use notice_sound::{render, tone_for, Chime, Tone, TONE_GAP};
 pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClick};
 pub use hue::{hue_index, HUES};
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};

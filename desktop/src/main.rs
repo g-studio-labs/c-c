@@ -36,6 +36,7 @@ mod notifier;
 mod platform;
 mod prompt;
 mod shell;
+mod sound;
 mod spike;
 mod task;
 mod theme;
@@ -117,6 +118,7 @@ fn main() {
             eprintln!("cac: no se pudo arrancar: {error}");
             std::process::exit(1);
         }
+        sound::install(Arc::new(sound::Speaker::new()), cx);
         theme::apply_preference(cx);
         // Para «Conectar Claude Code»: dónde está `cac-mcp` en esta máquina y
         // de dónde se baja. Lo decide el MCP (`cac_mcp::update`).
