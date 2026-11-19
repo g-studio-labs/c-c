@@ -42,6 +42,11 @@ mod spike;
 mod task;
 mod theme;
 mod thumbs;
+mod voice;
+#[cfg(target_os = "linux")]
+mod voice_engine;
+mod voice_ring;
+mod voice_settings;
 mod workspace;
 #[cfg(test)]
 mod testing;
@@ -120,6 +125,16 @@ fn main() {
             std::process::exit(1);
         }
         sound::install(Arc::new(sound::Speaker::new()), cx);
+        // La voz, donde ya hay motor (Linux). En los demás, el core dice que
+        // esta app todavía no tiene llamadas.
+        #[cfg(target_os = "linux")]
+        {
+            let core = backend::Backend::core(cx);
+            let live = Arc::new(voice_engine::LiveVoice::new(core.clone()));
+            cx.set_global(voice_engine::Devices(live.engine()));
+            core.set_voice_engine(live);
+            voice_settings::restore_choices(cx);
+        }
         theme::apply_preference(cx);
         // Para «Conectar Claude Code»: dónde está `cac-mcp` en esta máquina y
         // de dónde se baja. Lo decide el MCP (`cac_mcp::update`).

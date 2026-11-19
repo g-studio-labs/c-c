@@ -120,8 +120,9 @@ pub use task::{can_change_comment, is_agent_note, says_something, task_sheet, Sh
 pub use texts::{error_phrase, pick_locale, text, text_count, text_count_unit, text_with, Locale};
 pub use transport::Reply;
 pub use ring_tone::{render_ring, ring_cycle, RingTone};
+pub use voice_ring::{ring_clock, ring_tone_now};
 pub use voice::{
-    disconnect_reason, join_names, person_initials, voice_error_phrase, voice_room_name, voice_status, voice_tiles, VoiceTile, IncomingRing, MeetToken, MovedCall, OccupancyWatch, OutgoingRing, Voice, VoiceCaller, VoiceEngine, VoiceError, VoiceEvent, VoiceFuture,
+    disconnect_reason, join_names, DeviceChoices, person_initials, voice_error_phrase, voice_room_name, voice_status, voice_tiles, VoiceTile, IncomingRing, MeetToken, MovedCall, OccupancyWatch, OutgoingRing, Voice, VoiceCaller, VoiceEngine, VoiceError, VoiceEvent, VoiceFuture,
     VoicePeer, VoicePhase, VoiceRecording, VoiceState, VoiceToken,
 };
 

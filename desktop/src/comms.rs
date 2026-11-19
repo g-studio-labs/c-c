@@ -147,6 +147,16 @@ impl CommsView {
             None => Icon::new(if row.general { Lucide::Megaphone } else { Lucide::Hash }).size_4().flex_none().into_any_element(),
         };
         let badge = row.badge.clone().map(|text| pill(format!("{id}-badge"), text, cx));
+        // Quién anda por la voz de un canal: el altavoz con cuántos, antes del
+        // contador, y sus nombres colgando de la fila.
+        let space_id = match &row.conversation {
+            Conversation::Channel { space_id } => Some(space_id.clone()),
+            Conversation::Direct { .. } => None,
+        };
+        let in_voice = space_id.as_deref().and_then(|space| crate::voice::occupancy_count(space, cx));
+        let voice_people = space_id.as_deref().and_then(|space| crate::voice::occupancy_list(space, cx));
+        let badge = (in_voice.is_some() || badge.is_some())
+            .then(|| div().ml_auto().flex().flex_none().items_center().gap_1p5().children(in_voice).children(badge));
         let two_lines = row.preview.is_some() || row.time.is_some();
         // Las palomitas de lo propio, delante del texto, como en WhatsApp.
         let ticks = row.ticks.map(|read| {
@@ -217,7 +227,11 @@ impl CommsView {
             .when(!row.active, |this| this.text_color(muted).hover(move |style| style.bg(hover).text_color(foreground)))
             .cursor_pointer()
             .on_click(move |_, _, cx| {
-                Backend::core(cx).comms().select(conversation.clone());
+                // Con la sala abierta, elegir una conversación es ir a
+                // leerla: la sala se minimiza y la llamada sigue.
+                let core = Backend::core(cx);
+                core.voice().close_stage();
+                core.comms().select(conversation.clone());
             })
             .aria_label(row.name.clone())
             .aria_selected(row.active)
@@ -226,10 +240,14 @@ impl CommsView {
             .test_support();
         // La sala general, separada de los canales de los espacios
         // (`mb-1 border-b border-sidebar-border pb-1`).
+        let line = match voice_people {
+            Some(people) => div().flex().flex_col().child(line).child(people).into_any_element(),
+            None => line.into_any_element(),
+        };
         if row.set_apart {
             div().flex().flex_col().mb_1().pb_1().border_b_1().border_color(border).child(line).into_any_element()
         } else {
-            line.into_any_element()
+            line
         }
     }
 
@@ -547,6 +565,12 @@ pub fn conversation(thread: &Entity<crate::chat::ChatView>, cx: &App) -> AnyElem
                 .test_support(),
         )
         .children(around)
+        // La puerta de la voz, al lado del nombre como en `ChannelView.tsx`:
+        // la conversación hablada es del canal, no otra pantalla.
+        .when_some(match &Backend::snapshot(cx).read(cx).comms.selected {
+            Some(Conversation::Channel { space_id }) => Some(space_id.clone()),
+            _ => None,
+        }, |this, space_id| this.child(crate::voice::voice_bar(&space_id, cx)))
         .children(follow)
         // `ml-auto text-xs text-muted-foreground` (`DMThread.tsx`).
         .when(direct, |this| this.child(div().id("conversation-private").ml_auto().flex_none().leading_xs().text_color(muted).child(tr(cx, "chat:private")).test_support()))

@@ -70,5 +70,14 @@
   "minimize": "Minimize",
   "joiningRoom": "Joining {{room}}…",
   "invite": "Invite",
-  "you": "You"
+  "you": "You",
+  "ringing": "Ringing {{name}}",
+  "didNotAnswer": "did not answer",
+  "callingFor": "Calling · {{clock}}",
+  "ringAgain": "Ring again",
+  "cancelRing": "Cancel",
+  "declineCall": "Decline",
+  "callingYouToChannel": "Calling you to #{{channel}}",
+  "isCalling": "{{name}} is calling",
+  "voiceCallIn": "Voice call in #{{channel}}"
 }

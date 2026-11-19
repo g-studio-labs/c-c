@@ -129,6 +129,20 @@ pub struct Workspace {
     _on_connect: [Subscription; 2],
     /// El panel de la campana.
     pub(crate) inbox: crate::inbox::InboxPanelState,
+    /// Mientras se está en comunicación se pregunta quién anda por la voz
+    /// de los canales; al irse, se deja de preguntar.
+    occupancy: Option<cac_core::OccupancyWatch>,
+    /// La sala estaba a la vista en el último pintado: abrirla pliega el
+    /// panel y cerrarla lo devuelve (`useEncogerEnLlamada.ts`).
+    stage_was_shown: bool,
+    /// El panel se plegó por la sala, y nadie lo ha tocado desde entonces:
+    /// al cerrarla vuelve. Si se abre a mano durante la llamada, esto deja
+    /// de mandar.
+    folded_for_call: bool,
+    /// Los ajustes de audio de la sala.
+    pub(crate) voice_settings: crate::voice_settings::SettingsState,
+    /// El timbre: a quién llamar, el aviso de uno nuevo, el reloj.
+    pub(crate) ring: crate::voice_ring::RingUi,
 }
 
 impl Workspace {
@@ -176,6 +190,11 @@ impl Workspace {
             naming: None,
             tree_problem: None,
             inbox: Default::default(),
+            occupancy: None,
+            stage_was_shown: false,
+            folded_for_call: false,
+            voice_settings: Default::default(),
+            ring: Default::default(),
             connect,
             connect_open: false,
             account_menu_open: false,
@@ -363,6 +382,8 @@ impl Workspace {
     /// siga ahí, que es lo que se acaba de pedir.
     pub(crate) fn toggle_panel(&mut self, cx: &mut Context<Self>) {
         self.panel_pinned = !self.panel_pinned;
+        // Tocado a mano: la sala ya no lo devuelve al cerrarse.
+        self.folded_for_call = false;
         // Se recuerda en esta máquina. Si no se pudo guardar, el panel hace
         // igual lo que se le pidió: sólo no se acordará al volver a abrir.
         let _ = Backend::core(cx).set_panel_pinned(self.panel_pinned);
@@ -973,6 +994,8 @@ impl Workspace {
             )
             .child(Self::pending_module("rail-platform", Lucide::Server, "nav:module.platform", Some(servers), cx))
             .child(div().flex_1())
+            // Con el panel plegado, la llamada en curso queda como un punto.
+            .when(!self.panel_pinned, |this| this.children(crate::voice::mini_dot(cx)))
             .child(Self::pending_module("rail-organization", Lucide::Building2, "nav:rail.organization", Some(invitations), cx))
             .child(self.render_account(cx))
     }
@@ -1310,7 +1333,10 @@ impl Workspace {
                     ),
             );
         if on_comms {
-            return panel.child(self.comms.clone()).into_any_element();
+            return panel
+                .child(div().flex_1().min_h_0().flex().flex_col().child(self.comms.clone()))
+                .children(crate::voice::mini(cx))
+                .into_any_element();
         }
         panel
             .child(
@@ -1398,18 +1424,72 @@ impl Workspace {
                     .flex_col()
                     .children(tree),
             )
+            // La llamada en curso, al pie: se queda al navegar.
+            .children(crate::voice::mini(cx))
             .into_any_element()
     }
 }
 
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (on_comms, stage_shown) = {
+            let snapshot = Backend::snapshot(cx).read(cx);
+            let voice = &snapshot.voice;
+            (snapshot.comms.on_screen, snapshot.comms.on_screen && voice.stage_open && voice.phase != cac_core::VoicePhase::Out)
+        };
+        // Quién anda por la voz, sólo mientras se mira comunicación.
+        if on_comms && self.occupancy.is_none() {
+            self.occupancy = Some(Backend::within(cx, |core| core.voice().watch_occupancy()));
+        } else if !on_comms {
+            self.occupancy = None;
+        }
+        // Abrir la sala pliega el panel, que roba el ancho que se viene a
+        // mirar; cerrarla lo devuelve como estaba. Sin guardarlo: es de esta
+        // llamada, no una preferencia.
+        if stage_shown && !self.stage_was_shown && self.panel_pinned {
+            self.panel_pinned = false;
+            self.folded_for_call = true;
+        }
+        if !stage_shown && self.stage_was_shown && self.folded_for_call {
+            self.panel_pinned = true;
+            self.folded_for_call = false;
+        }
+        self.stage_was_shown = stage_shown;
+        // Lo que cuelga de la sala se cierra con ella.
+        if !stage_shown {
+            self.voice_settings.open = false;
+            self.ring.invite_open = false;
+        }
+        let voice = Backend::snapshot(cx).read(cx).voice.clone();
+        self.sync_ring(&voice, cx);
+        let stage: Option<AnyElement> = if stage_shown {
+            let settings_button = crate::voice_settings::available(cx).then(|| {
+                let open = self.voice_settings.open;
+                crate::voice::round_button("voice-settings-toggle", Lucide::SlidersHorizontal, tr(cx, "common:voice.settings"), open, cx)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_voice_settings(cx)))
+                    .test_support()
+                    .into_any_element()
+            });
+            let extras = crate::voice::StageExtras {
+                settings_button,
+                settings_panel: self.render_voice_settings(cx),
+                invite_button: (voice.space_id.is_some() || voice.meet_id.is_some()).then(|| self.invite_button(cx)),
+                invite_panel: self.render_invite(cx),
+                ring_row: self.render_ring_row(&voice, cx),
+            };
+            Some(crate::voice::stage(extras, cx))
+        } else {
+            None
+        };
+        let incoming = self.render_incoming(&voice, cx);
         let snapshot = Backend::snapshot(cx).read(cx);
         let lasting = snapshot.connection.lasting;
         // Con un documento abierto se lee documentación; si no, las tareas.
-        // En comunicación, la conversación; volver a «Trabajo» deja lo que
-        // se estuviera mirando allí.
-        let main: AnyElement = if snapshot.comms.on_screen {
+        // En comunicación, la conversación —o la sala, si está abierta—;
+        // volver a «Trabajo» deja lo que se estuviera mirando allí.
+        let main: AnyElement = if let Some(stage) = stage {
+            stage
+        } else if snapshot.comms.on_screen {
             crate::comms::conversation(&self.chat, cx)
         } else if snapshot.docs.target.is_some() {
             self.docs.clone().into_any_element()
@@ -1508,7 +1588,9 @@ impl Render for Workspace {
                     .children(task.map(|task| div().id("task-over").absolute().inset_0().occlude().child(task)))
                     // «Conectar Claude Code», encima de todo lo demás.
                     .children(self.connect_open.then(|| div().id("connect-over").absolute().inset_0().child(self.connect.clone())))
-                    .children(picker.map(|picker| div().id("new-conversation-over").absolute().inset_0().child(picker))),
+                    .children(picker.map(|picker| div().id("new-conversation-over").absolute().inset_0().child(picker)))
+                    // Quien te llama, encima de todo, estés donde estés.
+                    .children(incoming),
             )
     }
 }

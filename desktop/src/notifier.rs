@@ -25,6 +25,22 @@ struct Notifier {
     targets: HashMap<SharedString, NoticeTarget>,
 }
 
+/// Te llaman: el aviso del sistema, sin sonido propio (ya suena el timbre).
+/// Pulsarlo trae la app al frente, donde está la tarjeta para entrar.
+pub(crate) fn show_ring(ring: &cac_core::IncomingRing, cx: &mut App) {
+    let language = locale(cx);
+    let body = match &ring.invite_id {
+        Some(_) => cac_core::text_with(language, "calls:callingYouTo", &[("title", &ring.title)]),
+        None => cac_core::text_with(language, "calls:voiceCallIn", &[("channel", &ring.space_name)]),
+    };
+    cx.show_system_notification(SystemNotification {
+        tag: SharedString::from(format!("ring:{}", ring.ring_id)),
+        title: cac_core::text_with(language, "calls:isCalling", &[("name", &ring.from.name)]).into(),
+        body: body.into(),
+        actions: Vec::new(),
+    });
+}
+
 impl Global for Notifier {}
 
 /// Lo prepara al arrancar: sin esto, pulsar un aviso no llega a nadie.
@@ -52,11 +68,16 @@ pub(crate) fn show(announcement: Announcement, cx: &mut App) {
 
 /// Se pulsó un aviso: la ventana al frente, y su conversación delante.
 fn respond(response: SystemNotificationResponse, cx: &mut App) {
-    let Some(target) = cx.try_global::<Notifier>().and_then(|notifier| notifier.targets.get(&response.tag).cloned()) else { return };
+    let ring = response.tag.starts_with("ring:");
+    let target = cx.try_global::<Notifier>().and_then(|notifier| notifier.targets.get(&response.tag).cloned());
+    if target.is_none() && !ring {
+        return;
+    }
     cx.activate(true);
     if let Some(window) = cx.active_window().or_else(|| cx.windows().first().copied()) {
         let _ = window.update(cx, |_, window, _| window.activate_window());
     }
+    let Some(target) = target else { return };
     Backend::run(cx, move |core| async move {
         core.notices().open(target).await;
     });

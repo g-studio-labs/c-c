@@ -63,7 +63,8 @@
     "pickScreenLead": "Tienes más de una. Elige la que verán los demás.",
     "screenN": "Pantalla {{n}}",
     "more": "Más opciones",
-    "leaveShort": "Salir"
+    "leaveShort": "Salir",
+    "isMuted": "{{name}} tiene el micrófono silenciado"
   },
   "count": {
     "members_one": "{{count}} miembro",
@@ -678,7 +679,11 @@
     "noiseSuppressionHint": "Quita el ventilador y el teclado. Apágala para música o un instrumento.",
     "mermaidError": "El diagrama tiene un error:",
     "mermaidDiagram": "Diagrama",
-    "openLinkFailed": "No se pudo abrir el enlace"
+    "openLinkFailed": "No se pudo abrir el enlace",
+    "speaker": "Altavoz",
+    "noSpeaker": "No se encontró ningún altavoz",
+    "lookingForDevices": "Buscando dispositivos…",
+    "systemDefault": "El del sistema"
   },
   "calendar": {
     "undated_one": "{{count}} sin fecha",

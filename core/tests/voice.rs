@@ -279,6 +279,7 @@ async fn failures_say_what_and_where() {
     assert_eq!(now.phase, VoicePhase::Out);
     assert!(now.recording.is_none(), "el punto rojo se va con la llamada");
     assert_eq!(now.error.unwrap().code, "voice-joined-elsewhere");
+    wait_until("el motor suelta el micrófono", || rig.engine.calls().last().map(String::as_str) == Some("leave")).await;
     rig.core.voice().engine_event(VoiceEvent::Joined { identity: "u9".into(), name: "Nadie".into() });
     assert!(state(&rig).people.is_empty(), "fuera de la sala no se escucha al motor");
 }
@@ -496,4 +497,36 @@ async fn a_refused_entry_says_why() {
     assert_eq!((error.code.as_str(), error.space_id.as_deref()), ("voice-unconfigured", Some("x")));
     assert_eq!(cac_core::voice_error_phrase(&error, cac_core::Locale::Es), "La voz no está montada en este servidor.");
     assert!(rig.engine.calls().is_empty(), "sin pase no se llama al motor");
+}
+
+/// A quién se ofrece llamar: la gente de la organización menos tú y quien ya
+/// está dentro.
+/// Rotura que atrapa: ofrecer llamar a quien te está oyendo, o a ti.
+#[tokio::test]
+async fn you_can_ring_whoever_is_not_inside() {
+    let rig = rig().await;
+    let people = json!([{ "id": "u1", "username": "ana" }, { "id": "u2", "username": "luis" }, { "id": "u3", "username": "eva", "name": "Eva Paz" }]);
+    Mock::given(method("GET")).and(path("/api/v1/users/search")).respond_with(ok(people)).mount(&rig.server).await;
+    rig.core.comms().load_people().await;
+    rig.core.voice().join_channel("a", None, None).await;
+    rig.core.voice().engine_event(VoiceEvent::Joined { identity: "u2".into(), name: "Luis".into() });
+    let ids: Vec<String> = rig.core.voice().invitable().into_iter().map(|person| person.id).collect();
+    assert_eq!(ids, ["u3"]);
+}
+
+/// El micrófono y el altavoz elegidos se recuerdan en esta máquina, cada uno
+/// por su lado.
+/// Roturas que atrapa: olvidarlos al reiniciar; que elegir el altavoz borre
+/// el micrófono.
+#[tokio::test]
+async fn chosen_devices_are_remembered() {
+    let rig = rig().await;
+    rig.core.voice().choose_device(false, Some("alsa:mic".into()));
+    rig.core.voice().choose_device(true, Some("alsa:speaker".into()));
+    let again = Core::new(Config::new(rig.server.uri()), rig.storage.clone(), Arc::new(Quiet)).unwrap();
+    let choices = again.voice().device_choices();
+    assert_eq!((choices.input.as_deref(), choices.output.as_deref()), (Some("alsa:mic"), Some("alsa:speaker")));
+    again.voice().choose_device(false, None);
+    assert_eq!(again.voice().device_choices().output.as_deref(), Some("alsa:speaker"));
+    assert_eq!(again.voice().device_choices().input, None);
 }

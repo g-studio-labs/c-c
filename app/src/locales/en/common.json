@@ -63,7 +63,8 @@
     "pickScreenLead": "You have more than one. Pick the one the others will see.",
     "screenN": "Screen {{n}}",
     "more": "More options",
-    "leaveShort": "Leave"
+    "leaveShort": "Leave",
+    "isMuted": "{{name}} is muted"
   },
   "count": {
     "members_one": "{{count}} member",
@@ -678,7 +679,11 @@
     "noiseSuppressionHint": "Removes fans and typing. Turn it off for music or an instrument.",
     "mermaidError": "The diagram has an error:",
     "mermaidDiagram": "Diagram",
-    "openLinkFailed": "Couldn't open the link"
+    "openLinkFailed": "Couldn't open the link",
+    "speaker": "Speaker",
+    "noSpeaker": "No speaker found",
+    "lookingForDevices": "Looking for devices…",
+    "systemDefault": "System default"
   },
   "calendar": {
     "undated_one": "{{count}} with no date",

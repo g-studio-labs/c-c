@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use cac_core::{
     Announcement, ApiError, CommsState, InboxState, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, OrgsState, Session, Storage,
-    TaskState, ThreadState, TreeState,
+    TaskState, ThreadState, TreeState, VoiceState,
 };
 use gpui_kit::{App, AppContext, Entity, Global};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
@@ -36,6 +36,7 @@ enum CoreEvent {
     Thread(ThreadState),
     Connection(ConnectionState),
     Inbox(InboxState),
+    Voice(VoiceState),
     /// No es estado: un aviso del sistema que enseñar (`notifier`).
     Announce(Announcement),
 }
@@ -85,6 +86,9 @@ impl Listener for Forwarder {
     fn inbox_changed(&self, state: InboxState) {
         self.send(CoreEvent::Inbox(state));
     }
+    fn voice_changed(&self, state: VoiceState) {
+        self.send(CoreEvent::Voice(state));
+    }
     fn announce(&self, announcement: Announcement) {
         self.send(CoreEvent::Announce(announcement));
     }
@@ -112,6 +116,9 @@ pub struct Snapshot {
     pub connection: ConnectionState,
     /// La bandeja de la campana, desde que se abrió el panel.
     pub inbox: InboxState,
+    /// La voz: la sala en la que estás, el timbre y quién anda por los
+    /// canales.
+    pub voice: VoiceState,
 }
 
 impl Snapshot {
@@ -131,6 +138,7 @@ impl Snapshot {
             }
             CoreEvent::Connection(state) => self.connection = state,
             CoreEvent::Inbox(state) => self.inbox = state,
+            CoreEvent::Voice(state) => self.voice = state,
             // No llega aquí: lo enseña `notifier` sin pasar por el estado.
             CoreEvent::Announce(_) => {}
         }
@@ -164,6 +172,7 @@ impl Backend {
             session: core.session(),
             my_work: core.my_work().state(),
             orgs: core.orgs().state(),
+            voice: core.voice().state(),
             ..Snapshot::default()
         });
 
@@ -194,6 +203,15 @@ impl Backend {
     /// Para lo que el core contesta sin esperar (una regla, un filtro).
     pub fn core(cx: &App) -> Core {
         cx.global::<Backend>().core.clone()
+    }
+
+    /// Para lo que el core arranca por su cuenta desde una llamada que no
+    /// espera (empezar a preguntar cada poco quién anda por la voz): se le
+    /// pide dentro del runtime, que es donde viven sus tareas.
+    pub fn within<T>(cx: &App, work: impl FnOnce(Core) -> T) -> T {
+        let backend = cx.global::<Backend>();
+        let _inside = backend.runtime.enter();
+        work(backend.core.clone())
     }
 
     /// Le pide algo al core que tarda (la red). Corre en el runtime de la

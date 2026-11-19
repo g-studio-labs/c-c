@@ -49,12 +49,42 @@ fn ring_route(state: &VoiceState) -> Option<String> {
     state.space_id.as_ref().map(|space| format!("/api/v1/task-spaces/{space}/voice/ring"))
 }
 
+/// Qué tono tiene que estar sonando ahora: el de te llaman, el de estás
+/// llamando, o ninguno. Te llaman va antes (es lo que pide una respuesta), y
+/// ninguno suena si estás sordo: quien se ensordece ha pedido que el
+/// ordenador se calle. El de estás llamando se calla al rendirse.
+pub fn ring_tone_now(state: &VoiceState) -> Option<crate::ring_tone::RingTone> {
+    use crate::ring_tone::RingTone;
+    if state.deaf {
+        return None;
+    }
+    if state.incoming.is_some() {
+        return Some(RingTone::Incoming);
+    }
+    state.outgoing.as_ref().filter(|ring| !ring.unanswered).map(|_| RingTone::Outgoing)
+}
+
+/// Cuánto lleva sonando un timbre, como un reloj: «0:07», «1:12».
+pub fn ring_clock(started_at: &str, now: DateTime<Utc>) -> String {
+    let seconds = DateTime::parse_from_rfc3339(started_at).map(|at| (now - at.with_timezone(&Utc)).num_seconds().max(0)).unwrap_or(0);
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
 /// Cuánto falta para una hora RFC 3339; nada si ya pasó o no se entiende.
 fn until(at: &str) -> Duration {
     DateTime::parse_from_rfc3339(at).ok().and_then(|at| (at.with_timezone(&Utc) - Utc::now()).to_std().ok()).unwrap_or_default()
 }
 
 impl Voice {
+    /// A quién se puede llamar a esta sala: la gente de la organización que
+    /// no está ya dentro. Llamar a quien te está oyendo es un pitido gratis
+    /// para los dos.
+    pub fn invitable(&self) -> Vec<crate::comms_wire::Person> {
+        let state = self.state();
+        let inside: Vec<&str> = state.people.iter().map(|peer| peer.identity.as_str()).chain(state.me.as_deref()).collect();
+        self.core.comms().people("").into_iter().filter(|person| !inside.contains(&person.id.as_str())).collect()
+    }
+
     fn next_ring_turn(&self) -> u64 {
         self.core.inner.ring_turn.fetch_add(1, Ordering::SeqCst) + 1
     }
@@ -224,6 +254,33 @@ impl Voice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Qué tono suena. Roturas que atrapa: sonar ensordecido; seguir
+    /// sonando «llamando» tras rendirse; que el de llamar tape al de te
+    /// llaman.
+    #[test]
+    fn which_ring_sounds() {
+        use crate::ring_tone::RingTone;
+        let out = OutgoingRing { user_id: "u2".into(), name: "Luis".into(), started_at: String::new(), unanswered: false };
+        let mut state = VoiceState { outgoing: Some(out.clone()), ..VoiceState::default() };
+        assert_eq!(ring_tone_now(&state), Some(RingTone::Outgoing));
+        state.incoming = Some(IncomingRing::default());
+        assert_eq!(ring_tone_now(&state), Some(RingTone::Incoming));
+        state.deaf = true;
+        assert_eq!(ring_tone_now(&state), None);
+        let gave_up = VoiceState { outgoing: Some(OutgoingRing { unanswered: true, ..out }), ..VoiceState::default() };
+        assert_eq!(ring_tone_now(&gave_up), None);
+        assert_eq!(ring_tone_now(&VoiceState::default()), None);
+    }
+
+    /// El reloj del timbre. Rotura que atrapa: segundos sin el cero delante.
+    #[test]
+    fn the_ring_clock() {
+        let now = DateTime::parse_from_rfc3339("2026-11-19T10:01:12Z").unwrap().with_timezone(&Utc);
+        assert_eq!(ring_clock("2026-11-19T10:01:05Z", now), "0:07");
+        assert_eq!(ring_clock("2026-11-19T10:00:00Z", now), "1:12");
+        assert_eq!(ring_clock("no es una hora", now), "0:00");
+    }
 
     /// A dónde va el timbre. Rotura que atrapa: llamar «al canal» desde una
     /// reunión que cuelga de él.

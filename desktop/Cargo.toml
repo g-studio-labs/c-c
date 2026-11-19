@@ -42,6 +42,13 @@ chrono = { version = "0.4", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 # El icono y los datos del `.exe` (ver `build.rs`). Sólo existe en Windows.
+# El motor de voz (LiveKit 0.12 y cpal), sólo en Linux por ahora: macOS y
+# Windows se abren en la fase de empaquetar las llamadas
+# (command-and-control-426). Allí el core contesta que esta app todavía no
+# tiene llamadas. Trae libwebrtc precompilada, que se descarga al compilar.
+[target.'cfg(target_os = "linux")'.dependencies]
+cac-voice = { path = "../voice" }
+
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.34"
 

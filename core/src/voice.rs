@@ -36,6 +36,17 @@ use crate::Core;
 
 /// Bajo qué clave se guarda si se quiere la supresión de ruido.
 const NOISE_KEY: &str = "voice-noise-suppression";
+/// Y el micrófono y el altavoz elegidos a mano.
+const DEVICES_KEY: &str = "voice-devices";
+
+/// El micrófono y el altavoz elegidos a mano en esta máquina, por el id que
+/// les da el motor. `None` es «el del sistema».
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DeviceChoices {
+    pub input: Option<String>,
+    pub output: Option<String>,
+}
 
 /// Lo que devuelve el motor cuando tarda.
 pub type VoiceFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -725,6 +736,25 @@ impl Voice {
         }
     }
 
+    /// Lo elegido en esta máquina, para dárselo al motor al arrancar: quien
+    /// corrigió el micrófono una vez no tiene que hacerlo cada día.
+    pub fn device_choices(&self) -> DeviceChoices {
+        self.core.inner.storage.get(DEVICES_KEY).and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default()
+    }
+
+    /// Apunta un micrófono (`output: false`) o un altavoz elegido a mano.
+    pub fn choose_device(&self, output: bool, id: Option<String>) {
+        let mut choices = self.device_choices();
+        if output {
+            choices.output = id;
+        } else {
+            choices.input = id;
+        }
+        if let Ok(raw) = serde_json::to_string(&choices) {
+            let _ = self.core.inner.storage.set(DEVICES_KEY, &raw);
+        }
+    }
+
     pub fn clear_error(&self) {
         self.change(|state| state.error = None);
     }
@@ -773,6 +803,11 @@ impl Voice {
                     let error = disconnect_reason(&reason).map(|code| VoiceError { message: code.clone(), code, space_id });
                     *state = VoiceState { error, ..state.outside() };
                 });
+                // La sala soltó, pero el micrófono del motor sigue abierto
+                // hasta que se le diga: fuera de una sala no se publica nada.
+                if let (Some(engine), Ok(runtime)) = (self.engine(), tokio::runtime::Handle::try_current()) {
+                    runtime.spawn(async move { engine.leave().await });
+                }
                 self.occupancy_soon();
             }
         }

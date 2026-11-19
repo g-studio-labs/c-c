@@ -974,6 +974,12 @@ impl Render for ChatView {
                         )
                     }),
             )
+            // Se está hablando en este canal y tú no estás: encima de lo que
+            // se escribe, como `VozEnCurso` en `ChannelView.tsx`.
+            .children(match &conversation {
+                Some(Conversation::Channel { space_id }) => crate::voice::in_call_banner(space_id, cx),
+                _ => None,
+            })
             .child(self.render_composer(window, cx))
             .children(self.render_viewer(window, cx))
             .test_support()
