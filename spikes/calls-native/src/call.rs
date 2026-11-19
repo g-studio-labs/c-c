@@ -589,12 +589,37 @@ fn start_capture(source: NativeAudioSource, handle: Handle, mute: bool) -> Resul
             handle.spawn(async move {
                 let mut processor = Processor::new();
                 let mut warned = false;
+                // Para medir lo que suena raro: `CALLS_NO_APM=1` publica la voz
+                // sin el procesado (eco, ruido, paso alto), y `CALLS_DUMP_DIR`
+                // guarda lo que entra del micrófono (`capta.s16`) y lo que se
+                // manda (`manda.s16`): PCM de 16 bits, 48 kHz, mono.
+                let bypass = std::env::var_os("CALLS_NO_APM").is_some();
+                let dump = std::env::var_os("CALLS_DUMP_DIR").map(std::path::PathBuf::from);
+                let mut dumps = dump.and_then(|dir| {
+                    std::fs::create_dir_all(&dir).ok()?;
+                    Some((std::fs::File::create(dir.join("capta.s16")).ok()?, std::fs::File::create(dir.join("manda.s16")).ok()?))
+                });
+                let bytes = |frame: &[i16]| frame.iter().flat_map(|s| s.to_le_bytes()).collect::<Vec<u8>>();
+                if bypass {
+                    eprintln!("micrófono: sin procesado (CALLS_NO_APM)");
+                }
                 while let Some(mut frame) = frames_rx.recv().await {
-                    if let Err(e) = processor.process_frame(&mut frame, take_reference()) {
-                        if !warned {
-                            eprintln!("micrófono: trama sin procesar: {e}");
-                            warned = true;
+                    if let Some((raw, _)) = dumps.as_mut() {
+                        use std::io::Write;
+                        let _ = raw.write_all(&bytes(&frame));
+                    }
+                    let reference = take_reference();
+                    if !bypass {
+                        if let Err(e) = processor.process_frame(&mut frame, reference) {
+                            if !warned {
+                                eprintln!("micrófono: trama sin procesar: {e}");
+                                warned = true;
+                            }
                         }
+                    }
+                    if let Some((_, sent)) = dumps.as_mut() {
+                        use std::io::Write;
+                        let _ = sent.write_all(&bytes(&frame));
                     }
                     PEAK_PERMILLE.fetch_max(peak_permille(&frame), Ordering::Relaxed);
                     let rtc_frame = AudioFrame { data: frame.into(), sample_rate: SAMPLE_RATE, num_channels: CHANNELS, samples_per_channel: SAMPLES_PER_FRAME as u32 };

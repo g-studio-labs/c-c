@@ -4,18 +4,24 @@ Tarea: `command-and-control-419` (pasos 420–425). Plan aprobado por jose el
 19-nov-2026: servidor de **producción**, alcance **todo** (voz, ver vídeo,
 cámara, pantalla), **LiveKit 0.12**.
 
-**Estado: pasos 0 y 1 hechos; 2–4 escritos y compilando, sin probar (necesitan
-a jose al otro lado); 5, este informe, a medias.**
+**Estado: hecha (19-nov-2026).** Pasos 0–4 medidos, los 2–4 contra producción
+con jose al otro lado en la app de Tauri; este informe es el paso 5.
 
-## Veredicto provisional
+## Veredicto
 
-Pintar vídeo en vivo en GPUI en Linux **es viable** por el camino que usa Zed
-fuera de macOS: cada fotograma se convierte con libyuv a BGRA en la tarea de su
-pista, se sube al atlas de la gráfica con `img(ImageSource::Render(..))`, y el
-anterior se tira con `window.drop_image`. Con eso la memoria queda plana durante
-10 minutos con 4 vídeos, y la CPU es baja (0,6 núcleos con 4 × 720p30). Falta
-medir los fotogramas por segundo en una pantalla de verdad: la virtual no
-presenta más de 21 por segundo ni con la ventana vacía.
+**Las llamadas son viables en la app nativa.** Voz de ida y vuelta, ver la
+cámara y la pantalla de otro, y publicar cámara y pantalla funcionan con
+LiveKit 0.12 dentro de GPUI, en Linux X11, contra el servidor de producción.
+
+La incógnita, pintar vídeo en vivo, se resuelve por el camino que usa Zed fuera
+de macOS: cada fotograma se convierte con libyuv a BGRA en la tarea de su pista,
+se sube al atlas de la gráfica con `img(ImageSource::Render(..))` y el anterior
+se tira con `window.drop_image`. En la pantalla real, **9 vídeos 720p a 30 fps
+se pintan enteros con 0,74 núcleos**, y la memoria queda plana durante 10
+minutos. El techo conocido: un vídeo **1080p a 60 fps se queda en 42 fps**.
+
+Lo que queda sin cerrar está en «Riesgos»: la calidad de la voz con dos
+máquinas, compartir pantalla en Wayland, macOS y Windows.
 
 ## Cómo se ejecuta
 
@@ -87,7 +93,23 @@ se repiten: sólo cuenta convertir, subir y pintar.
   ~3,6 MB (720p) dos veces. Aguanta lo medido; el camino sin copias (dma-buf)
   pediría parchear GPUI y queda fuera.
 
-## Pasos 2–4 · La llamada (`call.rs`, sin probar)
+## Paso 1 bis · En la pantalla real
+
+X11, monitores a 180 y 144 Hz, NVIDIA RTX 3060.
+
+| caso | fps de cada vídeo | perdidos/s | CPU (núcleos) |
+|---|---|---|---|
+| ventana vacía pintando sin parar | 177 repintados/s | — | 0,15 |
+| 4 × 720p30 | 30,0 | 0 | 0,53 |
+| 9 × 720p30 | 29,8 | 0,2 | 0,74 |
+| 1 × 1080p60 | **41,8** | 18 | 0,29 |
+
+El techo de 1080p60 es subir ~8 MB por fotograma al atlas creando una textura
+cada vez. Cámaras a 720p y pantallas a 1080p hasta ~30 fps entran de sobra. El
+camino sin copias (dma-buf, que 0.12 ya expone con `get_dmabuf_fd`) lo subiría,
+pero pide parchear GPUI.
+
+## Pasos 2–4 · La llamada (`call.rs`)
 
 Entra a una **reunión de producción como invitado** (`guest:<id>`): así no hace
 falta otra cuenta ni la sesión de nadie, y no choca con la identidad de quien
@@ -113,12 +135,74 @@ Tauri sólo se cambiaba la fuente local y los demás probablemente ven la imagen
 congelada); el vídeo que llega se convierte entero (cola sin tope) para contar
 de verdad lo que llega.
 
-Sin probar y fuera del alcance de esta máquina: compartir pantalla en Wayland
-(portal), enchufar y desenchufar dispositivos a media llamada, macOS y Windows.
+Para medir el audio: `CALLS_NO_APM=1` publica sin procesado y
+`CALLS_DUMP_DIR=<dir>` guarda lo que capta el micrófono y lo que se manda
+(`capta.s16`, `manda.s16`: PCM de 16 bits, 48 kHz, mono).
 
-## Lo que falta
+### Lo medido el 19-nov con jose (reunión «Prueba con claude», producción)
 
-- Medir fps en la pantalla de verdad (paso 1, con jose delante).
-- Pasos 2–4 con jose al otro lado: que se oye y se le oye, que el eco se cancela
-  con altavoces, que se ve y se le ve, y las medidas con vídeo real.
-- Paso 5: costes por fase y recomendación final.
+| qué | resultado |
+|---|---|
+| Entrar como invitado | pide entrar, espera, jose admite, entra. Cuatro veces seguidas sin fallo; sale limpio con Ctrl+C |
+| Voz | se oye en los dos sentidos; 100 tramas/s publicadas, 0 huecos de reproducción, **0,07 núcleos** |
+| Ver la cámara de jose | 10–15 fps (lo que manda Tauri), todas pintadas, convertir 0,4–1,2 ms |
+| Ver su pantalla | 20–21 fps, todas pintadas, 0 perdidas, convertir 2–4 ms |
+| Ver las dos a la vez | **0,35–0,41 núcleos**, ~370 MB residentes |
+| Publicar cámara (1280×720 MJPEG) y pantalla (HDMI-0, 1080×1920) | jose las ve en Tauri; cámara ~10 fps (la webcam con esa luz); **1,0–1,3 núcleos** publicando las dos |
+
+**La voz en una sola máquina no sirve para juzgar la calidad.** Con la prueba y
+Tauri en el mismo equipo, compartiendo micrófono y auriculares, la voz de jose
+le vuelve:
+- **con el cancelador de eco** suena robótica: recortó más de 20 dB el 18 % de
+  las tramas con voz, porque lo que reproduce (la voz de jose que llega de
+  Tauri) es casi lo que capta el micrófono (su voz en vivo) y lo toma por eco;
+- **sin él** suena limpia pero con eco, su voz de vuelta.
+
+Ninguna de las dos cosas pasa entre dos máquinas; eso queda por comprobar.
+
+## Riesgos
+
+- **Calidad de voz con dos personas en dos máquinas: sin comprobar.** Es la
+  primera prueba de la fase de voz.
+- **Ruidos sueltos.** El supresor de WebRTC quita ruido constante (ventilador),
+  no respiraciones ni golpes. Si molesta: RNNoise (`nnnoiseless`, Rust puro) o
+  DeepFilterNet entre el micrófono y el envío.
+- **Compartir pantalla en Wayland: sin probar** (esta máquina es X11). Va por el
+  portal de xdg-desktop y quizá pida la feature `glib-main-loop`.
+- **macOS y Windows: sin probar.** En macOS hará falta el permiso del micrófono y
+  la cámara; en Windows, `+crt-static` como en Tauri.
+- **Publicar cuesta ~1 núcleo** con cámara y pantalla: decodificar MJPEG,
+  convertir color con un bucle propio en coma flotante (portado de Tauri) y
+  comprimir dos vídeos. La conversión se puede pasar a libyuv.
+- **1080p60 se queda en 42 fps** por el camino actual de GPUI.
+- **Compilar**: +8 min en frío, libwebrtc se descarga de GitHub al compilar, el
+  CI necesita `libglib2.0-dev`, y el binario crece ~40 MB.
+
+## Qué se reaprovecha
+
+Casi todo el motor de Tauri (`app/src-tauri/src/voice.rs`): procesador de audio,
+mezcla de salida, captura y remuestreo del micrófono, recepción de pistas,
+cámara y pantalla. De Tauri sólo dependía del canal de eventos y del runtime.
+Los cambios de LiveKit 0.8.3 a 0.12 fueron pocos (ver «Paso 0» y los
+comentarios de `call.rs`). Lo de `video_frames.rs` (JPEG por `cacvideo://`) ya no
+hace falta: en nativo se pinta directo. El backend no cambia: pases, timbre,
+presencia y salas ya existen.
+
+## Coste estimado por fase
+
+| fase | qué | días |
+|---|---|---|
+| 1 · Voz | el motor como módulo sin interfaz (del spike y `voice.rs`, con sus pruebas), entrar a la voz de un canal, silenciar y ensordecer, quién está y quién habla, elegir dispositivos, timbre; **probada con dos máquinas** | 6–8 |
+| 2 · Ver vídeo | recuadros, rejilla y foco, la vista previa propia en espejo, dejar de pintar lo que no se ve | 3 |
+| 3 · Cámara | publicarla, elegir cámara, volver a publicar si cambia la resolución (en Tauri los demás veían la imagen congelada), conversión con libyuv | 2–3 |
+| 4 · Pantalla | selector en X11, el portal en Wayland, permisos en macOS y Windows | 3–5 |
+| 5 · Empaquetar | CI con `libglib2.0-dev` y red, comprobar macOS y Windows, tamaño | 2 |
+
+Total: **16–21 días** para tener llamadas como en Tauri.
+
+## Recomendación
+
+Seguir, por fases y empezando por la voz: es la que más se usa, la que más se
+reaprovecha, y la única con una duda de calidad que sólo se cierra con dos
+máquinas. El vídeo ya no es una incógnita. El motor debería vivir en un módulo
+propio sin interfaz, como el core, para que la app nativa sólo pinte.
