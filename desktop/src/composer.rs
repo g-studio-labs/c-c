@@ -517,9 +517,21 @@ impl ChatView {
             .children(replying)
             .children(uploading)
             .children(failed)
+            // En una línea, como WhatsApp: el clip a la izquierda, la caja en
+            // medio y Enviar a la derecha. Al crecer la caja, los botones se
+            // quedan abajo, junto a la última línea.
             .child(
+                div().flex().items_end().gap_2().child(
+                    Button::new("thread-attach")
+                        .ghost()
+                        .icon(Icon::new(Lucide::Paperclip))
+                        .tooltip(tr(cx, "common:editor.attachFile"))
+                        .on_click(cx.listener(|this, _, window, cx| this.choose_files(window, cx))),
+                ).child(
                 div()
                     .id("thread-field")
+                    .flex_1()
+                    .min_w_0()
                     // Enter y Escape se cogen antes de que lleguen a la caja.
                     // Con la lista abierta, las flechas y Tab son suyas.
                     .capture_action(cx.listener(|this, enter: &Enter, window, cx| this.pressed_enter(enter, window, cx)))
@@ -581,19 +593,9 @@ impl ChatView {
                             }),
                     )
                     .test_support(),
-            )
-            .child(
-                div().mt_1().flex().items_center().justify_between().child(
-                    Button::new("thread-attach")
-                        .ghost()
-                        .small()
-                        .icon(Icon::new(Lucide::Paperclip))
-                        .tooltip(tr(cx, "common:editor.attachFile"))
-                        .on_click(cx.listener(|this, _, window, cx| this.choose_files(window, cx))),
                 ).child(
                     Button::new("thread-send")
                         .primary()
-                        .small()
                         .map(|this| if sending { this.child(Spinner::new().xsmall()) } else { this.icon(Icon::new(Lucide::Send)) })
                         .label(tr(cx, "chat:send"))
                         .disabled(!can_send)
