@@ -79,5 +79,10 @@
   "declineCall": "Rechazar",
   "callingYouToChannel": "Te llama a #{{channel}}",
   "isCalling": "{{name}} te llama",
-  "voiceCallIn": "Llamada de voz en #{{channel}}"
+  "voiceCallIn": "Llamada de voz en #{{channel}}",
+  "isSharing": "{{name}} está compartiendo",
+  "fullscreen": "Pantalla completa",
+  "exitFullscreen": "Salir de pantalla completa",
+  "backToGrid": "Volver a la rejilla",
+  "toStage": "Ver en grande"
 }

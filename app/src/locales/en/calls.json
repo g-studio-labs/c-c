@@ -79,5 +79,10 @@
   "declineCall": "Decline",
   "callingYouToChannel": "Calling you to #{{channel}}",
   "isCalling": "{{name}} is calling",
-  "voiceCallIn": "Voice call in #{{channel}}"
+  "voiceCallIn": "Voice call in #{{channel}}",
+  "isSharing": "{{name}} is sharing",
+  "fullscreen": "Full screen",
+  "exitFullscreen": "Exit full screen",
+  "backToGrid": "Back to the grid",
+  "toStage": "View large"
 }

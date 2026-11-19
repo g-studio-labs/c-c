@@ -135,6 +135,9 @@ pub struct Workspace {
     /// La sala estaba a la vista en el último pintado: abrirla pliega el
     /// panel y cerrarla lo devuelve (`useEncogerEnLlamada.ts`).
     stage_was_shown: bool,
+    /// Los vídeos de la sala: uno por cámara o pantalla encendida mientras la
+    /// sala está a la vista, ninguno si no.
+    pub(crate) video: Entity<crate::voice_video::VideoWall>,
     /// El panel se plegó por la sala, y nadie lo ha tocado desde entonces:
     /// al cerrarla vuelve. Si se abre a mano durante la llamada, esto deja
     /// de mandar.
@@ -192,6 +195,7 @@ impl Workspace {
             inbox: Default::default(),
             occupancy: None,
             stage_was_shown: false,
+            video: cx.new(crate::voice_video::VideoWall::new),
             folded_for_call: false,
             voice_settings: Default::default(),
             ring: Default::default(),
@@ -1462,6 +1466,7 @@ impl Render for Workspace {
         }
         let voice = Backend::snapshot(cx).read(cx).voice.clone();
         self.sync_ring(&voice, cx);
+        self.video.update(cx, |wall, cx| wall.sync(&voice, stage_shown, cx));
         let stage: Option<AnyElement> = if stage_shown {
             let settings_button = crate::voice_settings::available(cx).then(|| {
                 // Sin el rojo de «activo»: abierto no es silenciado.
@@ -1476,6 +1481,7 @@ impl Render for Workspace {
                 invite_button: (voice.space_id.is_some() || voice.meet_id.is_some()).then(|| self.invite_button(cx)),
                 invite_panel: self.render_invite(cx),
                 ring_row: self.render_ring_row(&voice, cx),
+                video: Some(self.video.clone()),
             };
             Some(crate::voice::stage(extras, cx))
         } else {

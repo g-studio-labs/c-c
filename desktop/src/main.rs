@@ -47,6 +47,7 @@ mod voice;
 mod voice_engine;
 mod voice_ring;
 mod voice_settings;
+mod voice_video;
 mod workspace;
 #[cfg(test)]
 mod testing;
@@ -132,6 +133,7 @@ fn main() {
             let core = backend::Backend::core(cx);
             let live = Arc::new(voice_engine::LiveVoice::new(core.clone()));
             cx.set_global(voice_engine::Devices(live.engine()));
+            cx.set_global(voice_video::VideoFeeds(live.clone()));
             core.set_voice_engine(live);
             voice_settings::restore_choices(cx);
         }

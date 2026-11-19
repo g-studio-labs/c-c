@@ -7,13 +7,32 @@
 //! la sordera el micrófono sigue cerrado aunque el motor, solo, lo dejaría
 //! como estaba (`Call::set_deaf`).
 //!
+//! Los fotogramas de vídeo tampoco pasan por el core: `LiveVoice` es también
+//! el `voice_video::Feeds` de la app, y la sala los toma de la llamada viva.
+//!
 //! Sólo en Linux por ahora (ver `Cargo.toml`). En macOS y Windows no se pone
 //! ninguno y el core dice que esta app todavía no tiene llamadas.
 
 use std::sync::{Arc, Mutex};
 
-use cac_core::{Core, VoiceEngine, VoiceEvent, VoiceFuture};
+use cac_core::{Core, VideoSource, VoiceEngine, VoiceEvent, VoiceFuture};
 use cac_voice::{Call, EngineEvent, EventSink};
+
+use crate::voice_video::{Feeds, Frame, Wake};
+
+fn to_core_source(source: cac_voice::VideoSource) -> VideoSource {
+    match source {
+        cac_voice::VideoSource::Camera => VideoSource::Camera,
+        cac_voice::VideoSource::Screen => VideoSource::Screen,
+    }
+}
+
+fn to_engine_source(source: VideoSource) -> cac_voice::VideoSource {
+    match source {
+        VideoSource::Camera => cac_voice::VideoSource::Camera,
+        VideoSource::Screen => cac_voice::VideoSource::Screen,
+    }
+}
 
 /// Lo que cuenta el motor, en el idioma del core.
 fn to_core(event: EngineEvent) -> VoiceEvent {
@@ -27,6 +46,7 @@ fn to_core(event: EngineEvent) -> VoiceEvent {
         EngineEvent::Latency { ms } => VoiceEvent::Latency { ms },
         EngineEvent::Recording { active, id, by, since } => VoiceEvent::Recording { active, id, by, since },
         EngineEvent::Disconnected { reason } => VoiceEvent::Disconnected { reason },
+        EngineEvent::Video { identity, source, enabled } => VoiceEvent::Video { identity, source: to_core_source(source), enabled },
     }
 }
 
@@ -40,11 +60,13 @@ pub struct LiveVoice {
     engine: cac_voice::Engine,
     call: Arc<Mutex<Option<Call>>>,
     core: Core,
+    /// A quién despertar cuando llega un fotograma; se le da a cada llamada.
+    wake: Arc<Mutex<Option<Wake>>>,
 }
 
 impl LiveVoice {
     pub fn new(core: Core) -> Self {
-        LiveVoice { engine: cac_voice::Engine::new(), call: Arc::default(), core }
+        LiveVoice { engine: cac_voice::Engine::new(), call: Arc::default(), core, wake: Arc::default() }
     }
 
     /// El motor, para lo que no pasa por el core: los dispositivos.
@@ -61,7 +83,7 @@ impl LiveVoice {
 
 impl VoiceEngine for LiveVoice {
     fn join(&self, url: String, token: String, noise_suppression: bool) -> VoiceFuture<Result<String, String>> {
-        let (engine, slot, core) = (self.engine.clone(), self.call.clone(), self.core.clone());
+        let (engine, slot, core, wake) = (self.engine.clone(), self.call.clone(), self.core.clone(), self.wake.clone());
         Box::pin(async move {
             engine.set_noise_suppression(noise_suppression);
             // Se llama desde las tareas del motor: el core sólo apunta y
@@ -69,6 +91,9 @@ impl VoiceEngine for LiveVoice {
             let sink: EventSink = Arc::new(move |event| core.voice().engine_event(to_core(event)));
             let call = engine.join(&url, &token, sink).await.map_err(|error| error.label().to_string())?;
             let identity = call.identity().to_string();
+            if let Some(wake) = wake.lock().expect("voice wake lock").clone() {
+                call.video().on_frame(wake);
+            }
             *slot.lock().expect("voice call lock") = Some(call);
             Ok(identity)
         })
@@ -94,6 +119,27 @@ impl VoiceEngine for LiveVoice {
     fn set_noise_suppression(&self, on: bool) {
         self.engine.set_noise_suppression(on);
     }
+
+    fn watch_video(&self, on: bool) {
+        self.with_call(|call| call.video().set_watching(on));
+    }
+}
+
+impl Feeds for LiveVoice {
+    fn take(&self, identity: &str, source: VideoSource) -> Option<Frame> {
+        let call = self.call.lock().expect("voice call lock").clone()?;
+        let frame = call.video().take(identity, to_engine_source(source))?;
+        Some(Frame { width: frame.width, height: frame.height, bgra: frame.bgra })
+    }
+
+    fn set_target(&self, identity: &str, source: VideoSource, width: u32, height: u32) {
+        self.with_call(|call| call.video().set_target(identity, to_engine_source(source), width, height));
+    }
+
+    fn on_frame(&self, wake: Wake) {
+        *self.wake.lock().expect("voice wake lock") = Some(wake.clone());
+        self.with_call(|call| call.video().on_frame(wake));
+    }
 }
 
 #[cfg(test)]
@@ -117,6 +163,14 @@ mod tests {
                 VoiceEvent::Recording { active: true, id: "r".into(), by: "u2".into(), since: "t".into() },
             ),
             (EngineEvent::Disconnected { reason: "RoomDeleted".into() }, VoiceEvent::Disconnected { reason: "RoomDeleted".into() }),
+            (
+                EngineEvent::Video { identity: "u2".into(), source: cac_voice::VideoSource::Screen, enabled: true },
+                VoiceEvent::Video { identity: "u2".into(), source: VideoSource::Screen, enabled: true },
+            ),
+            (
+                EngineEvent::Video { identity: "u2".into(), source: cac_voice::VideoSource::Camera, enabled: false },
+                VoiceEvent::Video { identity: "u2".into(), source: VideoSource::Camera, enabled: false },
+            ),
         ];
         for (from, to) in cases {
             assert_eq!(to_core(from), to);

@@ -7,9 +7,11 @@
 //! `VoiceTile.tsx`, `VoiceControls.tsx`, `VoiceMini.tsx`) y se le pasa cada
 //! gesto.
 //!
-//! El audio no pasa por aquí: lo lleva el motor (`voice_engine.rs`).
+//! El audio no pasa por aquí: lo lleva el motor (`voice_engine.rs`). El
+//! vídeo, tampoco: cada vídeo es un `voice_video::VideoTile` que toma sus
+//! fotogramas del motor; aquí sólo se decide dónde va.
 
-use cac_core::{person_initials, voice_error_phrase, voice_room_name, voice_status, voice_tiles, VoicePeer, VoicePhase, VoiceState, VoiceTile};
+use cac_core::{person_initials, voice_error_phrase, voice_layout, voice_room_name, voice_status, StageItem, VideoSource, VoiceLayout, VoicePeer, VoicePhase, VoiceState, VoiceTile};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
@@ -20,6 +22,7 @@ use gpui_kit::*;
 use crate::backend::Backend;
 use crate::lang::{locale, tr};
 use crate::theme::Leading as _;
+use crate::voice_video::{VideoTile, VideoWall};
 
 /// La barra de mandos: el `h-21` de `VoiceControls.tsx`.
 const CONTROLS_HEIGHT: f32 = 84.;
@@ -359,10 +362,19 @@ fn header_button(id: &'static str, icon: Lucide, label: String, cx: &App) -> Sta
         .child(label)
 }
 
+/// El vídeo de alguien, si está encendido y hay quien lo pinte.
+fn video_of(wall: Option<&Entity<VideoWall>>, identity: &str, source: VideoSource, cx: &App) -> Option<Entity<VideoTile>> {
+    wall.and_then(|wall| wall.read(cx).tile(identity, source))
+}
+
 /// Un recuadro de la sala. El borde verde es el **único** indicador de que
 /// alguien habla: con cuatro recuadros lo que se busca es cuál se ha
 /// encendido, y el contorno es lo más rápido de leer.
-fn tile(tile: &VoiceTile, cx: &App) -> AnyElement {
+///
+/// Con la cámara encendida, el vídeo tapa la cara; hasta el primer fotograma
+/// se ve la cara (no hay «cargando»: en Tauri tampoco). Pulsarlo lo lleva al
+/// escenario. `compact` es el de la tira del escenario (`h-30`).
+fn tile(tile: &VoiceTile, video: Option<Entity<VideoTile>>, compact: bool, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let (success, border, card, danger, background) = (theme.success, theme.border, theme.group_box, theme.danger, theme.background);
     let muted_label = cac_core::text_with(locale(cx), "common:voice.isMuted", &[("name", &tile.name)]);
@@ -382,7 +394,16 @@ fn tile(tile: &VoiceTile, cx: &App) -> AnyElement {
         .bg(card)
         .aria_label(tile.name.clone())
         .aria_selected(tile.speaking)
-        .child(face(tile.initials.clone(), 84., 24., cx))
+        .when(compact, |this| this.flex_none().h(px(120.)))
+        .child(if compact { face(tile.initials.clone(), 44., 14., cx) } else { face(tile.initials.clone(), 84., 24., cx) })
+        .when_some(video.filter(|_| tile.camera), |this, video| {
+            let identity = tile.identity.clone();
+            let label = tr(cx, "calls:toStage");
+            this.child(div().absolute().inset_0().child(video))
+                .cursor_pointer()
+                .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                .on_click(move |_, _, cx| Backend::core(cx).voice().toggle_focus(&identity, VideoSource::Camera))
+        })
         .child(
             div()
                 .absolute()
@@ -453,6 +474,14 @@ fn round(id: &'static str, icon: Lucide, label: String, active: bool, cx: &App) 
         .child(Icon::new(icon).size_5())
 }
 
+/// Un mando que esta app aún no hace: gris, y al pulsarlo lo dice en su
+/// globo.
+fn not_yet(id: &'static str, icon: Lucide, label: String, cx: &App) -> AnyElement {
+    let not_here = tr(cx, "common:misc.notInThisApp");
+    let said = format!("{label} — {not_here}");
+    round(id, icon, said, false, cx).opacity(0.45).test_support().into_any_element()
+}
+
 /// La barra de mandos: lo tuyo (micrófono, oír, ajustes) y colgar, aparte.
 fn controls(state: &VoiceState, settings: Option<AnyElement>, cx: &App) -> AnyElement {
     let theme = cx.theme();
@@ -485,6 +514,10 @@ fn controls(state: &VoiceState, settings: Option<AnyElement>, cx: &App) -> AnyEl
             .on_click(|_, _, cx| Backend::core(cx).voice().toggle_deaf())
             .test_support(),
         )
+        // Publicar cámara y pantalla llega en las fases siguientes: se pintan
+        // en su sitio y dicen que todavía no (decisión de jose, 19-nov).
+        .child(not_yet("voice-camera", Lucide::Video, tr(cx, "common:voice.cameraOn"), cx))
+        .child(not_yet("voice-share", Lucide::MonitorUp, tr(cx, "common:voice.share"), cx))
         .children(settings)
         .child(div().mx_1p5().h_7().w(px(1.)).bg(border))
         .child(
@@ -520,6 +553,8 @@ pub struct StageExtras {
     pub invite_button: Option<AnyElement>,
     pub invite_panel: Option<AnyElement>,
     pub ring_row: Option<AnyElement>,
+    /// Los vídeos de la sala (`voice_video.rs`).
+    pub video: Option<Entity<VideoWall>>,
 }
 
 /// La sala: sustituye a la conversación mientras está abierta.
@@ -530,7 +565,7 @@ pub fn stage(extras: StageExtras, cx: &App) -> AnyElement {
     let lang = locale(cx);
     let room = voice_room_name(&state, lang);
     let status = voice_status(&state, lang);
-    let tiles = voice_tiles(&state, lang);
+    let wall = extras.video.as_ref();
     let body: AnyElement = if state.phase == VoicePhase::Joining {
         let joining = cac_core::text_with(lang, "calls:joiningRoom", &[("room", &room)]);
         div()
@@ -547,22 +582,63 @@ pub fn stage(extras: StageExtras, cx: &App) -> AnyElement {
             .test_support()
             .into_any_element()
     } else {
-        // Solo, ocupas la sala; con más gente, de dos en dos.
-        let columns = if tiles.len() > 1 { 2 } else { 1 };
-        div()
-            .id("voice-grid")
-            .size_full()
-            .flex()
-            .flex_col()
-            .gap(px(14.))
-            // Como la rejilla de Tauri: el último de una fila impar se queda
-            // en su columna, no se estira a toda la fila.
-            .children(tiles.chunks(columns).map(|row| {
-                let gap = columns - row.len();
-                div().flex_1().min_h_0().flex().gap(px(14.)).children(row.iter().map(|one| tile(one, cx))).children((0..gap).map(|_| div().flex_1()))
-            }))
-            .test_support()
-            .into_any_element()
+        match voice_layout(&state, lang) {
+            VoiceLayout::Grid { tiles } => {
+                // Solo, ocupas la sala; con más gente, de dos en dos.
+                let columns = if tiles.len() > 1 { 2 } else { 1 };
+                div()
+                    .id("voice-grid")
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(14.))
+                    // Como la rejilla de Tauri: el último de una fila impar se
+                    // queda en su columna, no se estira a toda la fila.
+                    .children(tiles.chunks(columns).map(|row| {
+                        let gap = columns - row.len();
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .gap(px(14.))
+                            .children(row.iter().map(|one| tile(one, video_of(wall, &one.identity, VideoSource::Camera, cx), false, cx)))
+                            .children((0..gap).map(|_| div().flex_1()))
+                    }))
+                    .test_support()
+                    .into_any_element()
+            }
+            VoiceLayout::Stage { on_stage, strip, faces_out } => {
+                let big = stage_main(&on_stage, &strip, faces_out, state.focus.is_some(), wall, cx);
+                div()
+                    .id("voice-stage-layout")
+                    .size_full()
+                    .flex()
+                    .gap(px(14.))
+                    .child(big)
+                    .when(faces_out, |this| {
+                        this.child(
+                            div()
+                                .id("voice-strip")
+                                .w(px(200.))
+                                .flex_none()
+                                .flex()
+                                .flex_col()
+                                .gap(px(10.))
+                                .overflow_y_scroll()
+                                // Quien está en grande con su cámara sale aquí con
+                                // su cara: una vista no se pinta en dos sitios.
+                                .children(strip.iter().map(|one| {
+                                    let in_big = on_stage.source == VideoSource::Camera && on_stage.identity == one.identity;
+                                    let video = if in_big { None } else { video_of(wall, &one.identity, VideoSource::Camera, cx) };
+                                    tile(one, video, true, cx)
+                                }))
+                                .test_support(),
+                        )
+                    })
+                    .test_support()
+                    .into_any_element()
+            }
+        }
     };
     let error = state.error.as_ref().map(|error| {
         let phrase = voice_error_phrase(error, lang);
@@ -640,6 +716,112 @@ pub fn stage(extras: StageExtras, cx: &App) -> AnyElement {
         .child(controls(&state, extras.settings_button, cx))
         .children(extras.invite_panel)
         .children(extras.settings_panel)
+        .test_support()
+        .into_any_element()
+}
+
+/// Lo grande del escenario: la pantalla compartida o lo que se pulsó.
+///
+/// Encima: arriba a la izquierda, pantalla completa; arriba a la derecha, las
+/// caras (la píldora de iniciales de Tauri: quien habla en verde, los demás
+/// apagados; pulsarla las saca a la tira); abajo, de quién es.
+fn stage_main(on_stage: &StageItem, strip: &[VoiceTile], faces_out: bool, by_hand: bool, wall: Option<&Entity<VideoWall>>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let (primary, background, success) = (theme.primary, theme.background, theme.success);
+    let lang = locale(cx);
+    let caption = match (on_stage.source, on_stage.me) {
+        (VideoSource::Screen, true) => tr(cx, "common:last.youAreSharing"),
+        (VideoSource::Screen, false) => cac_core::text_with(lang, "calls:isSharing", &[("name", &on_stage.name)]),
+        (VideoSource::Camera, _) => on_stage.name.clone(),
+    };
+    let picture: AnyElement = match video_of(wall, &on_stage.identity, on_stage.source, cx) {
+        Some(video) => video.into_any_element(),
+        None => face(person_initials(&on_stage.name), 84., 24., cx).into_any_element(),
+    };
+    let faces = (!faces_out).then(|| {
+        div()
+            .id("voice-faces")
+            .absolute()
+            .top_3()
+            .right_3()
+            .flex()
+            .gap_1()
+            .rounded_full()
+            .bg(background.opacity(0.7))
+            .p_1()
+            .cursor_pointer()
+            .on_click(|_, _, cx| Backend::core(cx).voice().show_faces())
+            .aria_label(tr(cx, "common:last.showParticipants"))
+            .tooltip({
+                let label = tr(cx, "common:last.showParticipants");
+                move |window, cx| Tooltip::new(label.clone()).build(window, cx)
+            })
+            .children(strip.iter().map(|one| {
+                div()
+                    .rounded_full()
+                    .map(|this| if one.speaking { this.border_2().border_color(success) } else { this.opacity(0.4) })
+                    .child(face(one.initials.clone(), 28., 11., cx))
+            }))
+            .test_support()
+    });
+    let (identity, source) = (on_stage.identity.clone(), on_stage.source);
+    div()
+        .id("voice-stage-main")
+        .relative()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .overflow_hidden()
+        .rounded(px(12.))
+        .border_2()
+        .border_color(primary)
+        .bg(gpui_kit::black())
+        .aria_label(caption.clone())
+        .child(div().absolute().inset_0().flex().items_center().justify_center().child(picture))
+        // Lo que se llevó a mano vuelve a la rejilla con otro clic; una
+        // pantalla compartida está ahí sola y no se puede devolver.
+        .when(by_hand, |this| {
+            let label = tr(cx, "calls:backToGrid");
+            this.cursor_pointer()
+                .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                .on_click(move |_, _, cx| Backend::core(cx).voice().toggle_focus(&identity, source))
+        })
+        .child(
+            header_button("voice-fullscreen", Lucide::Maximize2, String::new(), cx)
+                .absolute()
+                .top_3()
+                .left_3()
+                .bg(background.opacity(0.7))
+                .map(|this| {
+                    let label = tr(cx, "calls:fullscreen");
+                    this.aria_label(label.clone()).tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                })
+                .on_click(|_, window, cx| {
+                    cx.stop_propagation();
+                    window.toggle_fullscreen();
+                })
+                .test_support(),
+        )
+        .children(faces)
+        .child(
+            div()
+                .id("voice-stage-caption")
+                .absolute()
+                .bottom_3()
+                .left_3()
+                .max_w(relative(0.7))
+                .rounded_full()
+                .bg(background.opacity(0.7))
+                .px(px(10.))
+                .py_1()
+                .text_size(px(13.))
+                .aria_label(caption.clone())
+                .child(div().truncate().child(caption))
+                .test_support(),
+        )
         .test_support()
         .into_any_element()
 }
@@ -813,7 +995,8 @@ mod tests {
     use crate::backend::Backend;
     use crate::testing::{ok, sign_in, wait_until, FakeServer};
     use crate::workspace::Workspace;
-    use cac_core::{VoiceEngine, VoiceFuture};
+    use crate::voice_video::{Feeds, Frame, VideoFeeds, Wake};
+    use cac_core::{VideoSource, VoiceEngine, VoiceEvent, VoiceFuture};
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{px, size, AnyWindowHandle, AppContext, Bounds, Point, TestAppContext, WindowBounds, WindowOptions};
     use serde_json::{json, Value};
@@ -825,6 +1008,8 @@ mod tests {
     pub(crate) struct FakeEngine {
         pub calls: Mutex<Vec<String>>,
         pub fail: Mutex<Option<String>>,
+        /// Lo que se le dijo de mirar el vídeo, aparte de `calls`.
+        pub video: Mutex<Vec<bool>>,
     }
 
     impl VoiceEngine for FakeEngine {
@@ -844,6 +1029,45 @@ mod tests {
             self.calls.lock().unwrap().push(format!("deaf {on}"));
         }
         fn set_noise_suppression(&self, _on: bool) {}
+        fn watch_video(&self, on: bool) {
+            self.video.lock().unwrap().push(on);
+        }
+    }
+
+    /// Fotogramas de mentira: los que se le dejan, de uno en uno, y apunta
+    /// los tamaños que le dicen.
+    #[derive(Default)]
+    struct FakeFeeds {
+        frames: Mutex<std::collections::HashMap<(String, VideoSource), Frame>>,
+        taken: Mutex<usize>,
+        targets: Mutex<Vec<(String, u32, u32)>>,
+        wake: Mutex<Option<Wake>>,
+    }
+
+    impl FakeFeeds {
+        fn push(&self, identity: &str, source: VideoSource, fill: u8) {
+            let frame = Frame { width: 4, height: 2, bgra: vec![fill; 4 * 2 * 4] };
+            self.frames.lock().unwrap().insert((identity.into(), source), frame);
+            if let Some(wake) = self.wake.lock().unwrap().clone() {
+                wake();
+            }
+        }
+    }
+
+    impl Feeds for FakeFeeds {
+        fn take(&self, identity: &str, source: VideoSource) -> Option<Frame> {
+            let frame = self.frames.lock().unwrap().remove(&(identity.to_string(), source));
+            if frame.is_some() {
+                *self.taken.lock().unwrap() += 1;
+            }
+            frame
+        }
+        fn set_target(&self, identity: &str, _source: VideoSource, width: u32, height: u32) {
+            self.targets.lock().unwrap().push((identity.into(), width, height));
+        }
+        fn on_frame(&self, wake: Wake) {
+            *self.wake.lock().unwrap() = Some(wake);
+        }
     }
 
     fn get(route: &str) -> wiremock::MockBuilder {
@@ -877,7 +1101,16 @@ mod tests {
     }
 
     fn open(server: &FakeServer, cx: &mut TestAppContext) -> (AnyWindowHandle, Arc<FakeEngine>) {
-        server.install_with(cx, |config| config.voice_presence_every = Duration::from_millis(100));
+        let (window, engine, _) = open_workspace(server, cx);
+        (window, engine)
+    }
+
+    fn open_workspace(server: &FakeServer, cx: &mut TestAppContext) -> (AnyWindowHandle, Arc<FakeEngine>, gpui_kit::Entity<Workspace>) {
+        open_polling_every(server, Duration::from_millis(100), cx)
+    }
+
+    fn open_polling_every(server: &FakeServer, every: Duration, cx: &mut TestAppContext) -> (AnyWindowHandle, Arc<FakeEngine>, gpui_kit::Entity<Workspace>) {
+        server.install_with(cx, move |config| config.voice_presence_every = every);
         let engine = Arc::new(FakeEngine::default());
         cx.update(|cx| Backend::core(cx).set_voice_engine(engine.clone()));
         sign_in(cx);
@@ -886,9 +1119,9 @@ mod tests {
                 window_bounds: Some(WindowBounds::Windowed(Bounds { origin: Point::default(), size: size(px(1100.), px(760.)) })),
                 ..WindowOptions::default()
             };
-            gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx))).expect("open test window").0
+            gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx))).expect("open test window")
         });
-        (window, engine)
+        (window.0, engine, window.1)
     }
 
     fn on_screen(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> bool {
@@ -1132,6 +1365,129 @@ mod tests {
         click(window, "voice-join", cx);
         wait_until(cx, "el fallo", |cx| label(window, "voice-join", cx) == "No se encontró ningún micrófono.");
         assert!(on_screen(window, "conversation", cx), "la sala se cierra");
+        stop(cx);
+    }
+
+    /// Entra a «Producto» con Luis y Eva dentro y vídeo de mentira.
+    fn in_a_call_with_video(cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle, Arc<FakeEngine>, Arc<FakeFeeds>, gpui_kit::Entity<Workspace>) {
+        let server = server();
+        let feeds = Arc::new(FakeFeeds::default());
+        // Sin sondeo que repinte cada poco: un fotograma tiene que pintarse
+        // porque llegó, no porque otra cosa repintó la ventana.
+        let (window, engine, workspace) = open_polling_every(&server, Duration::from_secs(3600), cx);
+        let installed = feeds.clone();
+        cx.update(|cx| cx.set_global(VideoFeeds(installed)));
+        to_product(window, cx);
+        click(window, "voice-join", cx);
+        wait_until(cx, "dentro de la sala", |cx| on_screen(window, "voice-tile-u1", cx));
+        for (identity, name) in [("u2", "Luis Mora"), ("u3", "Eva")] {
+            tell(cx, VoiceEvent::Joined { identity: identity.into(), name: name.into() });
+        }
+        (server, window, engine, feeds, workspace)
+    }
+
+    fn tell(cx: &mut TestAppContext, event: VoiceEvent) {
+        cx.update(|cx| Backend::core(cx).voice().engine_event(event));
+    }
+
+    fn video(cx: &mut TestAppContext, identity: &str, source: VideoSource, enabled: bool) {
+        tell(cx, VoiceEvent::Video { identity: identity.into(), source, enabled });
+    }
+
+    /// Lo que sabe el recuadro de vídeo de alguien: (si tiene imagen, cuántas
+    /// pintó, cuántas tiró del atlas).
+    fn picture(workspace: &gpui_kit::Entity<Workspace>, identity: &str, source: VideoSource, cx: &mut TestAppContext) -> Option<(bool, usize, usize)> {
+        cx.update(|cx| {
+            let wall = workspace.read(cx).video.clone();
+            let tile = wall.read(cx).tile(identity, source)?;
+            let tile = tile.read(cx);
+            Some((tile.has_picture(), tile.painted, tile.dropped))
+        })
+    }
+
+    /// Una cámara que se enciende tapa la cara con su vídeo, cada fotograma
+    /// nuevo tira el anterior del atlas, el motor se entera de a qué tamaño
+    /// se ve, y apagarla devuelve la cara.
+    ///
+    /// Roturas que atrapa: no pintar el vídeo de una cámara encendida; no
+    /// tirar la imagen anterior (la memoria crece a gigas en segundos); no
+    /// decirle el tamaño al motor (convierte el vídeo entero); dejar el
+    /// vídeo, o su último fotograma, cuando la cámara se apaga; no repintar
+    /// al llegar un fotograma.
+    #[gpui_kit::test]
+    fn a_camera_covers_the_face_and_turning_it_off_brings_it_back(cx: &mut TestAppContext) {
+        let (_server, window, _, feeds, workspace) = in_a_call_with_video(cx);
+        assert!(!on_screen(window, "voice-video-u2-camera", cx), "sin cámara, la cara");
+
+        video(cx, "u2", VideoSource::Camera, true);
+        wait_until(cx, "el vídeo de Luis en su recuadro", |cx| on_screen(window, "voice-video-u2-camera", cx));
+        feeds.push("u2", VideoSource::Camera, 1);
+        wait_until(cx, "su primer fotograma, pintado", |cx| picture(&workspace, "u2", VideoSource::Camera, cx).is_some_and(|(shown, _, _)| shown));
+        // Que llegue un fotograma avisa a su recuadro: sin eso se queda en el
+        // primero hasta que otra cosa repinte la ventana. Se cuenta el aviso y
+        // no el pintado, porque la ventana se repinta sola de vez en cuando.
+        let told = Arc::new(Mutex::new(0usize));
+        let counter = told.clone();
+        let _watching = cx.update(|cx| {
+            let tile = workspace.read(cx).video.read(cx).tile("u2", VideoSource::Camera).unwrap();
+            cx.observe(&tile, move |_, _| *counter.lock().unwrap() += 1)
+        });
+        feeds.push("u2", VideoSource::Camera, 2);
+        wait_until(cx, "el aviso al recuadro", |_| *told.lock().unwrap() > 0);
+        wait_until(cx, "el segundo, pintado", |cx| picture(&workspace, "u2", VideoSource::Camera, cx).is_some_and(|(_, painted, _)| painted == 2));
+        assert_eq!(picture(&workspace, "u2", VideoSource::Camera, cx).unwrap().2, 1, "el primero salió del atlas");
+        assert!(
+            feeds.targets.lock().unwrap().iter().any(|(who, width, height)| who == "u2" && *width > 0 && *height > 0),
+            "el motor sabe a qué tamaño se ve"
+        );
+
+        video(cx, "u2", VideoSource::Camera, false);
+        wait_until(cx, "la cara de vuelta", |cx| !on_screen(window, "voice-video-u2-camera", cx));
+        assert!(picture(&workspace, "u2", VideoSource::Camera, cx).is_none(), "su recuadro de vídeo se soltó");
+        stop(cx);
+    }
+
+    /// Una pantalla compartida va al escenario con quién la comparte; las
+    /// caras pasan a la tira; pulsar una cámara la lleva al escenario y
+    /// pulsar el escenario la devuelve; minimizar deja de mirar el vídeo.
+    ///
+    /// Roturas que atrapa: una pantalla que se queda en la rejilla; el
+    /// rótulo sin nombre; la píldora que no abre la tira; el clic que no
+    /// lleva una cámara al escenario, o el que no la devuelve; minimizar sin
+    /// decirle al motor que nadie mira.
+    #[gpui_kit::test]
+    fn a_shared_screen_takes_the_stage_and_a_click_takes_a_camera_there(cx: &mut TestAppContext) {
+        let (_server, window, engine, _, workspace) = in_a_call_with_video(cx);
+        video(cx, "u2", VideoSource::Screen, true);
+        video(cx, "u3", VideoSource::Camera, true);
+        wait_until(cx, "la pantalla de Luis, en grande", |cx| on_screen(window, "voice-stage-main", cx));
+        assert_eq!(label(window, "voice-stage-caption", cx), "Luis Mora está compartiendo");
+        assert!(on_screen(window, "voice-video-u2-screen", cx));
+        assert!(!on_screen(window, "voice-strip", cx), "las caras, en su píldora");
+
+        click(window, "voice-faces", cx);
+        wait_until(cx, "la tira", |cx| on_screen(window, "voice-strip", cx));
+        click(window, "voice-tile-u3", cx);
+        wait_until(cx, "Eva en grande", |cx| label(window, "voice-stage-caption", cx) == "Eva");
+        assert!(on_screen(window, "voice-video-u3-camera", cx));
+
+        click(window, "voice-stage-main", cx);
+        wait_until(cx, "de vuelta a la pantalla", |cx| label(window, "voice-stage-caption", cx) == "Luis Mora está compartiendo");
+
+        click(window, "voice-minimize", cx);
+        wait_until(cx, "minimizada", |cx| on_screen(window, "voice-mini", cx));
+        assert_eq!(*engine.video.lock().unwrap(), [true, false]);
+        assert!(picture(&workspace, "u2", VideoSource::Screen, cx).is_none(), "sin sala a la vista, ningún vídeo pintándose");
+        stop(cx);
+    }
+
+    /// Cámara y pantalla propias están en su sitio y dicen que todavía no.
+    /// Rotura que atrapa: un botón que parece que hace algo y no hace nada.
+    #[gpui_kit::test]
+    fn publishing_says_it_is_not_here_yet(cx: &mut TestAppContext) {
+        let (_server, window, _, _, _) = in_a_call_with_video(cx);
+        assert_eq!(label(window, "voice-camera", cx), "Encender tu cámara — Todavía no está en esta app");
+        assert_eq!(label(window, "voice-share", cx), "Compartir tu pantalla — Todavía no está en esta app");
         stop(cx);
     }
 }
