@@ -1464,8 +1464,8 @@ impl Render for Workspace {
         self.sync_ring(&voice, cx);
         let stage: Option<AnyElement> = if stage_shown {
             let settings_button = crate::voice_settings::available(cx).then(|| {
-                let open = self.voice_settings.open;
-                crate::voice::round_button("voice-settings-toggle", Lucide::SlidersHorizontal, tr(cx, "common:voice.settings"), open, cx)
+                // Sin el rojo de «activo»: abierto no es silenciado.
+                crate::voice::round_button("voice-settings-toggle", Lucide::SlidersHorizontal, tr(cx, "common:voice.settings"), false, cx)
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_voice_settings(cx)))
                     .test_support()
                     .into_any_element()
