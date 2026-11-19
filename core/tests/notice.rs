@@ -80,7 +80,6 @@ async fn mount_org(server: &MockServer) {
     get("/api/v1/task-spaces/").and(query_param("orgId", "o1")).respond_with(ok(json!([space("a", "o1", "Producto"), space("b", "o1", "Diseño")]))).mount(server).await;
     get("/api/v1/task-spaces/").and(query_param("orgId", "o2")).respond_with(ok(json!([space("z", "o2", "Soporte")]))).mount(server).await;
     get("/api/v1/chat/unread").respond_with(ok(json!([]))).mount(server).await;
-    get("/api/v1/chat/following").respond_with(ok(json!(["a", "b", "z"]))).mount(server).await;
 }
 
 /// Lo que el servidor contesta **ahora**: la prueba lo cambia cuando quiere.
@@ -143,7 +142,28 @@ impl Respond for Events {
 struct World {
     latest: Live,
     dms: Live,
+    following: Live,
     events: Events,
+}
+
+/// Seguir o silenciar, como el servidor: cambia lo que contesta
+/// `/chat/following`.
+struct Follow {
+    following: Live,
+    on: bool,
+}
+
+impl Respond for Follow {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let space = request.url.path().split('/').nth(4).unwrap_or_default().to_string();
+        let mut now: Vec<String> = serde_json::from_value(self.following.0.lock().unwrap().clone()).unwrap();
+        now.retain(|id| id != &space);
+        if self.on {
+            now.push(space);
+        }
+        self.following.set(json!(now));
+        ok(json!(null))
+    }
 }
 
 async fn world(server: &MockServer, latest: Value, dms: Value) -> World {
@@ -152,7 +172,11 @@ async fn world(server: &MockServer, latest: Value, dms: Value) -> World {
 
 async fn world_with(server: &MockServer, latest: Live, dms: Value) -> World {
     mount_org(server).await;
-    let world = World { latest, dms: Live::new(dms), events: Events::default() };
+    let world = World { latest, dms: Live::new(dms), following: Live::new(json!(["a", "b", "z"])), events: Events::default() };
+    get("/api/v1/chat/following").respond_with(world.following.clone()).mount(server).await;
+    let follow = || wiremock::matchers::path_regex(r"^/api/v1/task-spaces/[^/]+/chat/follow$");
+    Mock::given(method("POST")).and(follow()).respond_with(Follow { following: world.following.clone(), on: true }).mount(server).await;
+    Mock::given(method("DELETE")).and(follow()).respond_with(Follow { following: world.following.clone(), on: false }).mount(server).await;
     get("/api/v1/chat/latest").respond_with(world.latest.clone()).mount(server).await;
     get("/api/v1/dm/").respond_with(world.dms.clone()).mount(server).await;
     get("/api/v1/events").respond_with(world.events.clone()).mount(server).await;
@@ -416,5 +440,67 @@ async fn opening_a_notice_goes_to_its_organization_and_its_conversation() {
     let comms = rig.core.comms().state();
     assert!(comms.on_screen);
     assert_eq!(comms.selected, Some(Conversation::Direct { conversation_id: "c1".into() }));
+    rig.core.stream().stop();
+}
+
+/// Un canal silenciado no avisa de lo corriente, y una mención sí; volver a
+/// seguirlo lo devuelve.
+///
+/// Roturas que atrapa: silenciar sin efecto en los avisos (como en Tauri);
+/// que el silencio calle también las menciones; que seguir no deshaga el
+/// silencio; no pedir el cambio al servidor.
+#[tokio::test]
+async fn a_muted_channel_is_silent_but_a_mention_gets_through() {
+    let rig = rig().await;
+    let world = world(&rig.server, json!([line("b", T0)]), json!([])).await;
+    enter(&rig).await;
+
+    rig.core.comms().set_following("b", false).await.unwrap();
+    assert_eq!(*world.following.0.lock().unwrap(), json!(["a", "z"]), "se le pide al servidor");
+    deliver(&world, chat_message("b", "m1", "u2", json!({})), vec![(&world.latest, json!([line("b", T1)]))]).await;
+    assert!(rig.recorder.announced().is_empty(), "silenciado, lo corriente no avisa");
+
+    deliver(&world, chat_message("b", "m2", "u2", json!({ "mentions": ["u1"] })), vec![(&world.latest, json!([line("b", T2)]))]).await;
+    assert_eq!(rig.recorder.announced().len(), 1, "la mención, sí");
+    assert_eq!(rig.recorder.announced()[0].kind, NoticeKind::Mention);
+
+    rig.core.comms().set_following("b", true).await.unwrap();
+    deliver(&world, chat_message("b", "m3", "u2", json!({})), vec![(&world.latest, json!([line("b", "2026-11-18T10:07:00Z")]))]).await;
+    assert_eq!(rig.recorder.announced().len(), 2, "seguido otra vez, avisa");
+    rig.core.stream().stop();
+}
+
+/// El botón cambia en el acto y, si el servidor dice que no, vuelve a como
+/// estaba y se dice por qué, aunque tampoco se pueda volver a pedir la lista
+/// (la red se cayó). Un directo no se sigue ni se silencia.
+///
+/// Roturas que atrapa: esperar al servidor para cambiar (se pulsa dos
+/// veces); quedarse silenciado tras un fallo; tragarse el error; decir de
+/// un directo que se sigue.
+#[tokio::test]
+async fn following_changes_at_once_and_goes_back_if_the_server_says_no() {
+    let rig = rig().await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/task-spaces/a/chat/follow"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({ "success": false, "error": "boom" })).set_delay(Duration::from_millis(300)))
+        .with_priority(1)
+        .mount(&rig.server)
+        .await;
+    let _world = world(&rig.server, json!([line("a", T0)]), json!([direct(T0, "u2")])).await;
+    enter(&rig).await;
+    get("/api/v1/chat/following").respond_with(ResponseTemplate::new(503)).with_priority(1).mount(&rig.server).await;
+    rig.core.comms().enter();
+    assert!(rig.core.comms().select(Conversation::Channel { space_id: "a".into() }));
+    assert_eq!(rig.core.comms().state().selected_followed, Some(true));
+
+    let core = rig.core.clone();
+    let asked = tokio::spawn(async move { core.comms().set_following("a", false).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(rig.core.comms().state().selected_followed, Some(false), "cambia en el acto");
+    assert!(asked.await.unwrap().is_err(), "el fallo se dice");
+    assert_eq!(rig.core.comms().state().selected_followed, Some(true), "y vuelve a como estaba");
+
+    assert!(rig.core.comms().select(Conversation::Direct { conversation_id: "c1".into() }));
+    assert_eq!(rig.core.comms().state().selected_followed, None, "un directo no se sigue");
     rig.core.stream().stop();
 }

@@ -272,6 +272,12 @@ impl Counters {
         }
     }
 
+    /// Vuelve a contar lo sin leer de los canales ya: tras seguir o
+    /// silenciar uno, que el servidor cuenta distinto.
+    pub(crate) async fn reload_channels(&self) {
+        self.load_one(Source::Channels).await;
+    }
+
     /// Vuelve a pedir las conversaciones privadas ya, sin respiro: tras
     /// abrir una, que tiene que estar en la lista para poder elegirla.
     pub(crate) async fn reload_directs(&self) {

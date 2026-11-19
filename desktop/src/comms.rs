@@ -408,6 +408,54 @@ fn channel_tab(id: &'static str, icon: Lucide, label: String, active: bool, cx: 
         .child(label)
 }
 
+/// Seguir o silenciar el canal que se tiene delante (`ChannelView.tsx`).
+/// Vive en la cabecera y no en preferencias porque es una decisión por
+/// canal: los que importan se saben estando dentro. Silenciado, aquí sólo
+/// avisan las menciones y las respuestas. Cambia en el acto; si el servidor
+/// dice que no, vuelve solo y la conversación dice por qué.
+fn follow_button(space_id: String, on: bool, thread: Entity<crate::chat::ChatView>, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let (primary, muted, border) = (theme.primary, theme.muted_foreground, theme.border);
+    let (icon, label, hint) = if on {
+        (Lucide::Bell, tr(cx, "chat:following"), tr(cx, "chat:followingTitle"))
+    } else {
+        (Lucide::BellOff, tr(cx, "chat:follow"), tr(cx, "chat:notFollowingTitle"))
+    };
+    div()
+        .id("conversation-follow")
+        .ml_auto()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap_1()
+        .rounded_md()
+        .border_1()
+        .px_2()
+        .py_1()
+        .leading_xs()
+        .cursor_pointer()
+        .map(|this| if on { this.border_color(primary.opacity(0.4)).text_color(primary) } else { this.border_color(border).text_color(muted) })
+        .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+        .aria_label(label.clone())
+        .aria_selected(on)
+        .on_click(move |_, _, cx| {
+            let space = space_id.clone();
+            let answer = Backend::ask(cx, move |core| async move { core.comms().set_following(&space, !on).await });
+            let thread = thread.clone();
+            cx.spawn(async move |cx| {
+                let Ok(Err(error)) = answer.await else { return };
+                cx.update(|cx| {
+                    let said = error_text(cx, &error, "common:misc.errSave");
+                    thread.update(cx, |view, cx| view.say(said, cx));
+                });
+            })
+            .detach();
+        })
+        .child(Icon::new(icon).size_3().flex_none())
+        .child(label)
+        .test_support()
+}
+
 /// La conversación que se tiene delante: su cabecera —el nombre del canal
 /// con quién anda por aquí, o el de la persona— y, debajo, sus mensajes
 /// (`chat.rs`).
@@ -446,6 +494,14 @@ pub fn conversation(thread: &Entity<crate::chat::ChatView>, cx: &App) -> AnyElem
             .into_any_element();
     };
     let direct = title.direct;
+    let follow = {
+        let comms = &Backend::snapshot(cx).read(cx).comms;
+        match (&comms.selected, comms.selected_followed) {
+            // Un directo no trae «se sigue»: sólo los canales se silencian.
+            (Some(Conversation::Channel { space_id }), Some(on)) => Some(follow_button(space_id.clone(), on, thread.clone(), cx)),
+            _ => None,
+        }
+    };
     // Quién de la organización anda por aquí (`QuienAnda`): tres nombres y
     // cuántos más, con todos al pasar el ratón. Sólo en un canal.
     let around = (!direct).then(|| Backend::core(cx).comms().around(now)).filter(|names| !names.is_empty());
@@ -491,6 +547,7 @@ pub fn conversation(thread: &Entity<crate::chat::ChatView>, cx: &App) -> AnyElem
                 .test_support(),
         )
         .children(around)
+        .children(follow)
         // `ml-auto text-xs text-muted-foreground` (`DMThread.tsx`).
         .when(direct, |this| this.child(div().id("conversation-private").ml_auto().flex_none().leading_xs().text_color(muted).child(tr(cx, "chat:private")).test_support()))
         .test_support();
@@ -1064,6 +1121,56 @@ mod tests {
         wait_until(cx, "el canal del aviso está delante", |cx| label(window, "conversation-title", cx) == "#Soporte");
         assert_eq!(selected(cx), Some(Conversation::Channel { space_id: "z".into() }));
         assert_eq!(cx.update(|cx| Backend::snapshot(cx).read(cx).orgs.current_org_id.clone()).as_deref(), Some("o2"));
+        stop(cx);
+    }
+
+    /// El botón de seguir de la cabecera de un canal: dice si se sigue,
+    /// cambia en el acto al pulsarlo y se lo pide al servidor; si el
+    /// servidor dice que no, vuelve solo y la conversación dice por qué. En
+    /// un directo no está.
+    ///
+    /// Roturas que atrapa: un botón que no cambia; pedir lo contrario (POST
+    /// para silenciar); quedarse silenciado tras un fallo, o callarse el
+    /// fallo; el botón en un directo.
+    #[gpui_kit::test]
+    fn the_follow_button_mutes_a_channel_and_says_when_it_cannot(cx: &mut TestAppContext) {
+        let server = server();
+        // Como el servidor de verdad: silenciar quita el canal de lo que se
+        // sigue, y es lo que contesta la lista que se vuelve a pedir.
+        let following = std::sync::Arc::new(std::sync::Mutex::new(vec!["a", "b", "g"]));
+        let listed = following.clone();
+        server.mount(get("/api/v1/chat/following").respond_with(move |_: &wiremock::Request| ok(json!(*listed.lock().unwrap()))).with_priority(1));
+        let follow = |space: &str| path(format!("/api/v1/task-spaces/{space}/chat/follow"));
+        let muted = following.clone();
+        server.mount(Mock::given(method("DELETE")).and(follow("a")).respond_with(move |_: &wiremock::Request| {
+            muted.lock().unwrap().retain(|id| *id != "a");
+            ok(json!(null))
+        }));
+        server.mount(
+            Mock::given(method("DELETE"))
+                .and(follow("b"))
+                .respond_with(ResponseTemplate::new(500).set_body_json(json!({ "success": false, "error": "boom" })).set_delay(Duration::from_millis(300))),
+        );
+        server.install(cx);
+        let window = open(cx);
+        enter(window, cx);
+
+        click(window, "comms-channel-a", cx);
+        wait_until(cx, "el canal dice que se sigue", |cx| label(window, "conversation-follow", cx) == "Siguiendo");
+        click(window, "conversation-follow", cx);
+        wait_until(cx, "pasa a «Seguir»", |cx| label(window, "conversation-follow", cx) == "Seguir");
+        wait_until(cx, "se le pide al servidor", |_| server.requests().iter().any(|request| request.method.as_str() == "DELETE" && request.url.path() == "/api/v1/task-spaces/a/chat/follow"));
+
+        click(window, "comms-channel-b", cx);
+        wait_until(cx, "el otro canal dice que se sigue", |cx| label(window, "conversation-title", cx) == "#Diseño" && label(window, "conversation-follow", cx) == "Siguiendo");
+        click(window, "conversation-follow", cx);
+        wait_until(cx, "cambia en el acto", |cx| label(window, "conversation-follow", cx) == "Seguir");
+        wait_until(cx, "el servidor dice que no y vuelve", |cx| label(window, "conversation-follow", cx) == "Siguiendo");
+        wait_until(cx, "y se dice", |cx| on_screen(window, "thread-notice", cx));
+
+        click(window, "comms-direct-c1", cx);
+        wait_until(cx, "el directo está delante", |cx| label(window, "conversation-title", cx) == "luis");
+        assert!(!on_screen(window, "conversation-follow", cx), "un directo no se sigue");
         stop(cx);
     }
 

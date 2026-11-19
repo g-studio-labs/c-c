@@ -114,6 +114,9 @@ pub struct CommsState {
     /// organización si sigue existiendo, si no la sala general, y si no el
     /// primer canal.
     pub selected: Option<Conversation>,
+    /// Si se sigue el canal que se tiene delante: `None` si lo de delante
+    /// es un directo, o mientras no se sabe qué se sigue.
+    pub selected_followed: Option<bool>,
     pub channels_folded: bool,
     pub directs_folded: bool,
 }
@@ -224,12 +227,17 @@ impl Comms {
         let directs: Vec<DmSummary> = dms.into_iter().flatten().filter(|direct| direct.org_id == org).collect();
         let selected = resolve_conversation(&channels, &directs, data.places.get(org));
         let folded = data.folded.get(org).copied().unwrap_or_default();
+        let selected_followed = match &selected {
+            Some(Conversation::Channel { space_id }) => data.following.as_ref().map(|following| following.contains(space_id)),
+            _ => None,
+        };
         CommsState {
             org_id,
             on_screen: data.on_screen,
             channels,
             directs,
             selected,
+            selected_followed,
             channels_folded: folded.channels,
             directs_folded: folded.directs,
         }
@@ -300,6 +308,7 @@ impl Comms {
         self.load_latest().await;
         if let Ok(Ok(following)) = following.await {
             self.data().following = Some(following.into_iter().collect());
+            self.publish();
         }
     }
 
@@ -312,6 +321,40 @@ impl Comms {
         self.data().latest = Some(latest.clone());
         self.publish();
         self.core.notices().channels_loaded(&latest, asked_at);
+    }
+
+    /// Sigue o silencia un canal (`setFollowing` en `chat.store.ts`).
+    ///
+    /// Silenciar es pedir que lo corriente deje de avisar: las menciones y
+    /// las respuestas llegan igual (`notice.rs`), y el servidor deja de
+    /// contarlo como sin leer, así que se vuelve a contar. El botón cambia en
+    /// el acto; si el servidor dice que no, vuelve a como estaba y se dice
+    /// por qué. Después se vuelve a pedir la lista, que es la que manda.
+    pub async fn set_following(&self, space_id: &str, on: bool) -> Result<(), ApiError> {
+        let before = {
+            let mut data = self.data();
+            let before = data.following.clone();
+            let following = data.following.get_or_insert_with(HashSet::new);
+            if on {
+                following.insert(space_id.to_string());
+            } else {
+                following.remove(space_id);
+            }
+            before
+        };
+        self.publish();
+        let path = format!("/api/v1/task-spaces/{space_id}/chat/follow");
+        let answer = if on { self.core.call_ok("POST", &path, Some(serde_json::json!({}))).await } else { self.core.call_ok("DELETE", &path, None).await };
+        if answer.is_err() {
+            self.data().following = before;
+            self.publish();
+        }
+        if let Ok(following) = self.core.get_list::<String>("/api/v1/chat/following").await {
+            self.data().following = Some(following.into_iter().collect());
+            self.publish();
+        }
+        self.core.counters().reload_channels().await;
+        answer
     }
 
     /// Los canales que se siguen, si se sabe.
