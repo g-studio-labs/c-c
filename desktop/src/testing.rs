@@ -71,6 +71,9 @@ impl FakeServer {
             gpui_kit::init(cx);
             crate::theme::apply(gpui_kit::component::ThemeMode::Dark, cx);
             cx.set_global(SystemLanguage(Some("es_MX.UTF-8".into())));
+            // Como `main.rs`: sin quién es la app, el sistema no enseña sus
+            // avisos (y la plataforma de pruebas tampoco).
+            cx.set_app_identity(crate::identity::APP_ID, crate::identity::APP_NAME);
             Backend::install(config, Arc::new(MemoryStorage::default()), cx).unwrap();
         });
     }

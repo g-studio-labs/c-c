@@ -398,6 +398,32 @@ impl Notices {
         }
     }
 
+    /// Lleva a la conversación de un aviso que se pulsó: a su organización
+    /// si es otra (como `goInOrg` en `app/src/lib/ir-en-org.ts`), a
+    /// comunicación, y a ella. Devuelve si llegó.
+    ///
+    /// Cambiar de organización puede no hacerse —documentación a medio
+    /// escribir, que pregunta antes (`doc_edit`)—, y entonces no se mueve
+    /// nada. Una conversación que ya no está (se borró el canal) deja
+    /// comunicación abierta con lo que hubiera.
+    pub async fn open(&self, target: NoticeTarget) -> bool {
+        let org_id = match (&target.org_id, &target.conversation) {
+            (Some(org_id), _) => Some(org_id.clone()),
+            (None, Conversation::Channel { space_id }) => self.core.comms().channel_org(space_id).await,
+            // Un directo sólo se avisa si está en la lista, que trae su
+            // organización (`directs_loaded`): sin ella no hay a dónde ir.
+            (None, Conversation::Direct { .. }) => None,
+        };
+        let Some(org_id) = org_id else { return false };
+        if self.core.orgs().state().current_org_id.as_deref() != Some(org_id.as_str()) && !self.core.switch_org(&org_id).await {
+            return false;
+        }
+        let comms = self.core.comms();
+        let chosen = comms.select(target.conversation);
+        comms.enter();
+        chosen
+    }
+
     /// Al salir: lo visto y lo que esperaba es de esa persona.
     pub(crate) fn clear(&self) {
         *self.data() = NoticeData::default();

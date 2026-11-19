@@ -702,7 +702,7 @@ mod tests {
     use crate::workspace::Workspace;
     use cac_core::Conversation;
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{px, size, AnyWindowHandle, AppContext, Bounds, Point, TestAppContext, WindowBounds, WindowOptions};
+    use gpui_kit::{px, size, AnyWindowHandle, AppContext, Bounds, Point, SystemNotificationResponse, TestAppContext, WindowBounds, WindowOptions};
     use serde_json::{json, Value};
     use std::time::Duration;
     use wiremock::matchers::{method, path, query_param};
@@ -1010,6 +1010,60 @@ mod tests {
 
         wait_until(cx, "la fila enseña el mensaje que llegó", |cx| label(window, "comms-channel-b-preview", cx) == "Luis Mora: ya está subido");
         assert_eq!(label(window, "comms-channel-a-preview", cx), "Luis Mora: ¿sale hoy?");
+        stop(cx);
+    }
+
+    /// Un mensaje de un canal que se sigue sale como aviso del sistema, y
+    /// pulsarlo lleva a su organización y a ese canal; un aviso que no es
+    /// de esta app no mueve nada.
+    ///
+    /// El mensaje es de otra organización que la que se mira: es el caso
+    /// que obliga a cambiar antes de elegir. Roturas que atrapa: el aviso
+    /// del core que no llega a enseñarse; título o cuerpo sin el canal o sin
+    /// el autor; pulsar sin efecto (la etiqueta que no se apunta); que un
+    /// aviso ajeno lleve a algún sitio; no cambiar de organización; no
+    /// buscar el canal en las demás organizaciones; no entrar en
+    /// comunicación.
+    #[gpui_kit::test]
+    fn a_notice_shows_and_clicking_it_opens_its_conversation(cx: &mut TestAppContext) {
+        let server = server();
+        server.mount(get("/api/v1/chat/following").respond_with(ok(json!(["a", "b", "g", "z"]))).with_priority(1));
+        let frame = "event: chat:message\ndata: {\"spaceId\":\"z\",\"messageId\":\"m9\",\"actorId\":\"u9\",\"kind\":\"user\",\"spaceName\":\"Soporte\",\"authorName\":\"Zoe\",\"preview\":\"¿alguien?\",\"mentions\":null,\"repliedTo\":\"\",\"edited\":false}\n\n";
+        server.mount(
+            get("/api/v1/events")
+                .respond_with(ResponseTemplate::new(200).set_body_raw(frame.as_bytes().to_vec(), "text/event-stream").set_delay(Duration::from_millis(600)))
+                .up_to_n_times(1),
+        );
+        // Desde que se dice, la última línea de `z` es más nueva: es lo que
+        // le dice al core que el mensaje es nuevo y no una corrección.
+        let said_at = std::time::Instant::now() + Duration::from_millis(600);
+        server.mount(
+            get("/api/v1/chat/latest")
+                .respond_with(move |_: &wiremock::Request| {
+                    let at = if std::time::Instant::now() >= said_at { "2026-01-05T16:00:00Z" } else { "2026-01-05T15:00:00Z" };
+                    ok(json!([{ "spaceId": "z", "authorUserId": "u9", "authorName": "Zoe", "kind": "user", "body": "…", "createdAt": at }]))
+                })
+                .with_priority(1),
+        );
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+
+        wait_until(cx, "sale el aviso", |cx| !cx.shown_system_notifications().is_empty());
+        let shown = cx.shown_system_notifications();
+        assert_eq!(shown.len(), 1);
+        assert_eq!((shown[0].tag.as_ref(), shown[0].title.as_ref(), shown[0].body.as_ref()), ("chat:z", "#Soporte", "Zoe: ¿alguien?"));
+
+        cx.simulate_system_notification_response(SystemNotificationResponse { tag: "chat:otra-cosa".into(), action_id: None });
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(200));
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| Backend::snapshot(cx).read(cx).orgs.current_org_id.clone()).as_deref(), Some("o1"), "un aviso ajeno no mueve nada");
+
+        cx.simulate_system_notification_response(SystemNotificationResponse { tag: "chat:z".into(), action_id: None });
+        wait_until(cx, "el canal del aviso está delante", |cx| label(window, "conversation-title", cx) == "#Soporte");
+        assert_eq!(selected(cx), Some(Conversation::Channel { space_id: "z".into() }));
+        assert_eq!(cx.update(|cx| Backend::snapshot(cx).read(cx).orgs.current_org_id.clone()).as_deref(), Some("o2"));
         stop(cx);
     }
 

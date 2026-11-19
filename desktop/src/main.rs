@@ -32,6 +32,7 @@ mod message_actions;
 mod mywork;
 mod picture_viewer;
 mod newtask;
+mod notifier;
 mod platform;
 mod prompt;
 mod shell;

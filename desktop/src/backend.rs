@@ -17,7 +17,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use cac_core::{
-    ApiError, CommsState, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, OrgsState, Session, Storage,
+    Announcement, ApiError, CommsState, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, OrgsState, Session, Storage,
     TaskState, ThreadState, TreeState,
 };
 use gpui_kit::{App, AppContext, Entity, Global};
@@ -35,6 +35,8 @@ enum CoreEvent {
     Comms(CommsState),
     Thread(ThreadState),
     Connection(ConnectionState),
+    /// No es estado: un aviso del sistema que enseñar (`notifier`).
+    Announce(Announcement),
 }
 
 /// Lo que el core oye, reenviado tal cual. No hace nada más a propósito:
@@ -79,8 +81,9 @@ impl Listener for Forwarder {
     fn connection_changed(&self, state: ConnectionState) {
         self.send(CoreEvent::Connection(state));
     }
-    // `server_event` (lo que no es estado del core: un aviso, un sonido) se
-    // reenviará cuando haya una pantalla que lo use.
+    fn announce(&self, announcement: Announcement) {
+        self.send(CoreEvent::Announce(announcement));
+    }
 }
 
 /// El estado del core tal como lo ve la pantalla, entero y ya en el hilo
@@ -121,6 +124,8 @@ impl Snapshot {
                 self.thread_revision += 1;
             }
             CoreEvent::Connection(state) => self.connection = state,
+            // No llega aquí: lo enseña `notifier` sin pasar por el estado.
+            CoreEvent::Announce(_) => {}
         }
     }
 }
@@ -155,14 +160,16 @@ impl Backend {
             ..Snapshot::default()
         });
 
+        crate::notifier::install(cx);
         let target = snapshot.clone();
         cx.spawn(async move |cx| {
             while let Some(event) = receiver.recv().await {
-                cx.update(|cx| {
-                    target.update(cx, |snapshot, cx| {
+                cx.update(|cx| match event {
+                    CoreEvent::Announce(announcement) => crate::notifier::show(announcement, cx),
+                    event => target.update(cx, |snapshot, cx| {
                         snapshot.apply(event);
                         cx.notify();
-                    });
+                    }),
                 });
             }
         })

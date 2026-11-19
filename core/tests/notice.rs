@@ -71,15 +71,16 @@ fn get(route: &str) -> wiremock::MockBuilder {
     Mock::given(method("GET")).and(path(route.to_string()))
 }
 
-/// Una organización `o1` con dos canales, `a` «Producto» y `b` «Diseño»,
-/// los dos seguidos.
+/// Dos organizaciones: `o1`, la que se mira al entrar, con dos canales, `a`
+/// «Producto» y `b` «Diseño»; y `o2` con `z` «Soporte». Los tres seguidos.
 async fn mount_org(server: &MockServer) {
-    let org = json!({ "id": "o1", "name": "Org", "slug": "o1", "role": "member", "memberCount": 3, "createdAt": "2026-06-09T12:00:00Z" });
-    get("/api/v1/organizations/").respond_with(ok(json!([org]))).mount(server).await;
-    let space = |id: &str, name: &str| json!({ "id": id, "orgId": "o1", "name": name, "color": "#888", "kind": null, "folders": [], "lists": [], "people": [] });
-    get("/api/v1/task-spaces/").and(query_param("orgId", "o1")).respond_with(ok(json!([space("a", "Producto"), space("b", "Diseño")]))).mount(server).await;
+    let org = |id: &str| json!({ "id": id, "name": format!("Org {id}"), "slug": id, "role": "member", "memberCount": 3, "createdAt": "2026-06-09T12:00:00Z" });
+    get("/api/v1/organizations/").respond_with(ok(json!([org("o1"), org("o2")]))).mount(server).await;
+    let space = |id: &str, org: &str, name: &str| json!({ "id": id, "orgId": org, "name": name, "color": "#888", "kind": null, "folders": [], "lists": [], "people": [] });
+    get("/api/v1/task-spaces/").and(query_param("orgId", "o1")).respond_with(ok(json!([space("a", "o1", "Producto"), space("b", "o1", "Diseño")]))).mount(server).await;
+    get("/api/v1/task-spaces/").and(query_param("orgId", "o2")).respond_with(ok(json!([space("z", "o2", "Soporte")]))).mount(server).await;
     get("/api/v1/chat/unread").respond_with(ok(json!([]))).mount(server).await;
-    get("/api/v1/chat/following").respond_with(ok(json!(["a", "b"]))).mount(server).await;
+    get("/api/v1/chat/following").respond_with(ok(json!(["a", "b", "z"]))).mount(server).await;
 }
 
 /// Lo que el servidor contesta **ahora**: la prueba lo cambia cuando quiere.
@@ -165,7 +166,8 @@ fn line(space: &str, at: &str) -> Value {
 
 fn chat_message(space: &str, id: &str, actor: &str, extra: Value) -> String {
     let mut data = json!({
-        "spaceId": space, "messageId": id, "actorId": actor, "kind": "user", "spaceName": if space == "a" { "Producto" } else { "Diseño" },
+        "spaceId": space, "messageId": id, "actorId": actor, "kind": "user",
+        "spaceName": match space { "a" => "Producto", "b" => "Diseño", _ => "Soporte" },
         "authorName": "Luis Mora", "preview": "¿sale hoy?", "mentions": null, "repliedTo": "", "edited": false,
     });
     for (key, value) in extra.as_object().unwrap() {
@@ -376,5 +378,43 @@ async fn a_load_that_left_before_the_message_does_not_decide_it() {
 
     world.events.push(chat_message("a", "m5", "u2", json!({})), vec![(world.latest.clone(), json!([line("a", T1)]))]);
     until("se avisa aunque una carga vieja vuelva sin él", || rig.recorder.announced().len() == 1).await;
+    rig.core.stream().stop();
+}
+
+/// Pulsar el aviso de un canal de otra organización lleva a esa
+/// organización, a comunicación y a ese canal; el de un directo, a ese
+/// directo.
+///
+/// El canal de otra organización no se sabe de quién es al llegar (sólo
+/// está el árbol de la que se mira): se averigua al pulsar. Roturas que
+/// atrapa: no cambiar de organización (el canal no se puede elegir); elegir
+/// antes de cambiar (se elige en la anterior y se pierde); no entrar en
+/// comunicación; el directo sin su organización.
+#[tokio::test]
+async fn opening_a_notice_goes_to_its_organization_and_its_conversation() {
+    let rig = rig().await;
+    let world = world(&rig.server, json!([line("z", T0)]), json!([direct(T0, "u2")])).await;
+    enter(&rig).await;
+
+    deliver(&world, chat_message("z", "m5", "u2", json!({})), vec![(&world.latest, json!([line("z", T1)]))]).await;
+    let announced = rig.recorder.announced();
+    assert_eq!(announced.len(), 1, "se avisa lo de la otra organización");
+    assert_eq!(announced[0].title(Locale::Es), "#Soporte");
+
+    assert!(rig.core.notices().open(announced[0].target.clone()).await);
+    assert_eq!(rig.core.orgs().state().current_org_id.as_deref(), Some("o2"));
+    let comms = rig.core.comms().state();
+    assert!(comms.on_screen, "en comunicación");
+    assert_eq!(comms.selected, Some(Conversation::Channel { space_id: "z".into() }));
+
+    // Y de vuelta, por un directo de la primera.
+    rig.core.comms().leave();
+    deliver(&world, dm_message("d5"), vec![(&world.dms, json!([direct(T1, "u2")]))]).await;
+    let direct = rig.recorder.announced()[1].clone();
+    assert!(rig.core.notices().open(direct.target).await);
+    assert_eq!(rig.core.orgs().state().current_org_id.as_deref(), Some("o1"));
+    let comms = rig.core.comms().state();
+    assert!(comms.on_screen);
+    assert_eq!(comms.selected, Some(Conversation::Direct { conversation_id: "c1".into() }));
     rig.core.stream().stop();
 }

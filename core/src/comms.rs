@@ -319,6 +319,29 @@ impl Comms {
         self.data().following.clone()
     }
 
+    /// De qué organización es un canal, aunque no sea la que se mira: si su
+    /// árbol no ha llegado, se pregunta por los espacios de las demás
+    /// organizaciones de uno hasta dar con él. Lo usa abrir un aviso, que
+    /// puede ser de cualquiera. `None` si no es de ninguna (un superadmin oye
+    /// los canales de toda la plataforma).
+    pub(crate) async fn channel_org(&self, space_id: &str) -> Option<String> {
+        if let (Some(org_id), _) = self.channel_place(space_id) {
+            return Some(org_id);
+        }
+        let known: Vec<String> = self.data().spaces.keys().cloned().collect();
+        let orgs = self.core.orgs().state().orgs;
+        for org in orgs.iter().filter(|org| !known.contains(&org.id)) {
+            let path = format!("/api/v1/task-spaces/?orgId={}", org.id);
+            let Ok(spaces) = self.core.get::<Vec<SpaceTree>>(&path).await else { continue };
+            let found = spaces.iter().any(|space| space.id == space_id);
+            self.spaces_loaded(&org.id, &spaces);
+            if found {
+                return Some(org.id.clone());
+            }
+        }
+        None
+    }
+
     /// De qué organización es un canal y cómo se llama, si ha llegado su
     /// árbol.
     pub(crate) fn channel_place(&self, space_id: &str) -> (Option<String>, Option<String>) {
