@@ -118,16 +118,23 @@ va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
   (nuevos, editados, retirados, reacciones), turnos y días, líneas de cac,
   citas que llevan a su mensaje, imágenes con la sesión, palomitas en
   directos y «Mensajes nuevos» leyendo arriba. Se marca leído al abrir y al
-  llegar algo estando abajo; leyendo arriba, al bajar. Escribir, reaccionar y
-  las menciones como fichas esperan a decidir el compositor.
+  llegar algo estando abajo; leyendo arriba, al bajar.
+- **Comunicación, escribir (406–410):** la caja es el campo del kit con
+  fichas dentro del texto: `@` pone a la persona como ficha que vale su
+  enlace, y un fichero pegado, soltado o elegido con el clip queda como ficha
+  que vale su cita. Enter manda y baja al final, un borrador por
+  conversación, responder con su barra, corregir en el sitio, retirar
+  preguntando, reacciones con su selector y pastillas pulsables, y un visor
+  de imágenes sobre la ventana que recorre las del chat con las flechas.
+  Fuera: `#` para citar tarjetas, fichas al corregir, ❤️/😂 en color (trampa
+  ca5c0caa).
 - **En curso:** dar comportamiento a lo pintado sin él en el detalle (editar
   «dónde quedó», añadir subtarea, mover de lista, borrar, retirar) y en la
   carcasa (⌘B y panel recordado, idioma del sistema en macOS y Windows, crear,
   renombrar y borrar nodos del árbol).
 - **Falta decidir (jose):** nombre definitivo, firma de los instaladores y
   dónde se publican; cuándo se fusiona a `main` y se corta la release.
-- **No entra en la primera entrega:** escribir en el chat,
-  llamadas, servidores, notas, buscador global y el panel de avisos; siguen
+- **No entra en la primera entrega:** llamadas, servidores, notas, buscador global y el panel de avisos; siguen
   en la de Tauri.
 - **Cómo se mira:** `cd desktop && cargo run --release`. Su sesión va aparte
   de la de Tauri (`~/.local/share/cac-desktop`): se entra una vez en cada una.
