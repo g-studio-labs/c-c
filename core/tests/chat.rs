@@ -1335,3 +1335,155 @@ async fn a_file_goes_by_its_conversation_route_and_its_token_cites_it() {
     assert!(cac_core::file_token(&elsewhere).is_none());
     rig.core.stream().stop();
 }
+
+
+// ── Corregir, retirar y reaccionar ──────────────────────────────────────
+
+/// Corregir lo propio manda sólo el texto nuevo, por la ruta del mensaje, y
+/// lo corregido se ve; lo mismo, en blanco o igual que estaba no se pide.
+///
+/// Roturas que atrapa: corregir un directo por la ruta de un canal; mandar
+/// una corrección que no cambia nada; borrar un mensaje dejándolo en
+/// blanco; no releer (se seguiría viendo lo de antes).
+#[tokio::test(flavor = "multi_thread")]
+async fn editing_sends_only_a_change_and_shows_it() {
+    let rig = rig().await;
+    let talk = history(vec![line("m1", "u1", "hola", 1)]);
+    mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
+    let edits = talk.clone();
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/task-spaces/a/chat/m1"))
+        .respond_with(move |request: &Request| {
+            let sent: Value = serde_json::from_slice(&request.body).unwrap();
+            let mut talk = edits.lock().unwrap();
+            talk[0]["body"] = sent["body"].clone();
+            talk[0]["updatedAt"] = json!("2026-10-15T10:05:00Z");
+            ok(json!(null))
+        })
+        .mount(&rig.server)
+        .await;
+    Mock::given(method("PATCH")).and(path("/api/v1/dm/c1/messages/d1")).respond_with(ok(json!(null))).mount(&rig.server).await;
+    rig.core.open_workspace().await;
+    open(&rig, channel("a")).await;
+
+    rig.core.chat().edit(channel("a"), "m1".into(), " hola, corregido ".into()).await.unwrap();
+    let patched = requests(&rig.server, "PATCH", "/api/v1/task-spaces/a/chat/m1").await;
+    assert_eq!(sent_bodies(&patched), [json!({ "body": "hola, corregido" })]);
+    assert_eq!(rig.core.chat().state().messages[0].body, "hola, corregido");
+
+    rig.core.chat().edit(channel("a"), "m1".into(), "hola, corregido".into()).await.unwrap();
+    assert!(rig.core.chat().edit(channel("a"), "m1".into(), "  ".into()).await.is_err());
+    assert_eq!(hits(&rig.server, "PATCH", "/api/v1/task-spaces/a/chat/m1").await, 1, "se mandó una corrección que no cambia nada");
+
+    rig.core.chat().edit(direct("c1"), "d1".into(), "otro".into()).await.unwrap();
+    assert_eq!(hits(&rig.server, "PATCH", "/api/v1/dm/c1/messages/d1").await, 1);
+    rig.core.stream().stop();
+}
+
+/// Retirar va por la ruta del mensaje y el mensaje deja de verse; antes se
+/// pregunta, con lo que implica en un canal y en un directo.
+///
+/// Roturas que atrapa: retirar por la ruta equivocada; seguir pintando lo
+/// retirado; la pregunta de un canal en un directo («para todo el mundo»
+/// cuando son dos).
+#[tokio::test(flavor = "multi_thread")]
+async fn withdrawing_asks_what_it_implies_and_the_message_goes() {
+    let rig = rig().await;
+    let talk = history(vec![line("m1", "u1", "hola", 1), line("m2", "u1", "esto se va", 2)]);
+    mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
+    let gone = talk.clone();
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/task-spaces/a/chat/m2"))
+        .respond_with(move |_: &Request| {
+            gone.lock().unwrap().retain(|message| message["id"] != "m2");
+            ok(json!(null))
+        })
+        .mount(&rig.server)
+        .await;
+    rig.core.open_workspace().await;
+    open(&rig, channel("a")).await;
+
+    let channel_question = rig.core.chat().withdraw_question(&channel("a"), cac_core::Locale::Es);
+    let direct_question = rig.core.chat().withdraw_question(&direct("c1"), cac_core::Locale::Es);
+    assert_eq!(channel_question.title, "¿Retirar este mensaje?");
+    assert_eq!(channel_question.body, "Deja de salir en el canal para todo el mundo.");
+    assert_eq!(direct_question.body, "Deja de salir para los dos.");
+    assert_eq!(channel_question.confirm, "Retirar");
+
+    rig.core.chat().withdraw(channel("a"), "m2".into()).await.unwrap();
+    assert_eq!(hits(&rig.server, "DELETE", "/api/v1/task-spaces/a/chat/m2").await, 1);
+    assert_eq!(ids(&rig.core.chat().state()), ["m1"], "lo retirado se sigue viendo");
+    rig.core.stream().stop();
+}
+
+/// Una reacción se ve en el acto, antes de que conteste el servidor; si el
+/// servidor dice que no, vuelve a como estaba. Sólo las del juego.
+///
+/// Roturas que atrapa: esperar al servidor para pintar lo que se pulsó; una
+/// reacción rechazada que se queda pintada; mandar el `on` al revés;
+/// mandar un emoji que el servidor rechaza.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_is_seen_at_once_and_undone_if_refused() {
+    let rig = rig().await;
+    let mut first = line("m1", "u2", "hola", 1);
+    first["reactions"] = json!([{ "emoji": "👍", "count": 1, "mine": false, "names": ["Luis Mora"] }]);
+    let talk = history(vec![first]);
+    mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
+    let reacted = talk.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/v1/task-spaces/a/chat/m1/reactions"))
+        .and(|request: &Request| String::from_utf8_lossy(&request.body).contains("👍"))
+        .respond_with(move |_: &Request| {
+            reacted.lock().unwrap()[0]["reactions"] = json!([{ "emoji": "👍", "count": 2, "mine": true, "names": ["Luis Mora", "Ana Ruiz"] }]);
+            ok(json!(null)).set_delay(Duration::from_millis(400))
+        })
+        .mount(&rig.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/task-spaces/a/chat/m1/reactions"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({ "success": false, "error": "boom", "message": "Failed" })))
+        .mount(&rig.server)
+        .await;
+    rig.core.open_workspace().await;
+    open(&rig, channel("a")).await;
+
+    let reacting = tokio::spawn({
+        let core = rig.core.clone();
+        async move { core.chat().react(channel("a"), "m1".into(), "👍".into(), true).await }
+    });
+    until("la reacción se ve en el acto", || rig.core.chat().state().messages[0].reactions.first().is_some_and(|reaction| reaction.count == 2 && reaction.mine)).await;
+    assert_eq!(hits(&rig.server, "GET", CHAT_A).await, 1, "se esperó a releer para pintarla");
+    reacting.await.unwrap().unwrap();
+    let sent = sent_bodies(&requests(&rig.server, "POST", "/api/v1/task-spaces/a/chat/m1/reactions").await);
+    assert_eq!(sent, [json!({ "emoji": "👍", "on": true })]);
+
+    // Una que el servidor rechaza vuelve a como estaba.
+    let refused = rig.core.chat().react(channel("a"), "m1".into(), "🔥".into(), true).await;
+    assert!(refused.is_err());
+    assert_eq!(rig.core.chat().state().messages[0].reactions.len(), 1, "la reacción rechazada se quedó pintada");
+
+    let outside = rig.core.chat().react(channel("a"), "m1".into(), "🦀".into(), true).await;
+    assert!(matches!(outside, Err(cac_core::ApiError::Server { ref code, .. }) if code == "bad-emoji"), "{outside:?}");
+    assert_eq!(hits(&rig.server, "POST", "/api/v1/task-spaces/a/chat/m1/reactions").await, 2);
+    rig.core.stream().stop();
+}
+
+/// La cuenta de una reacción hecha aquí: poner suma y marca, quitar resta
+/// y desmarca, y la que se queda a cero se va.
+///
+/// Roturas que atrapa: sumar dos veces la misma; quitar la de otro; dejar
+/// una pastilla con cero.
+#[test]
+fn a_reaction_is_counted_here_like_the_server_would() {
+    use cac_core::{apply_reaction, ReactionSummary};
+    let one = |emoji: &str, count: i64, mine: bool, names: &[&str]| ReactionSummary { emoji: emoji.into(), count, mine, names: names.iter().map(|name| name.to_string()).collect() };
+    let list = vec![one("👍", 1, false, &["Luis"])];
+    assert_eq!(apply_reaction(&list, "👍", true, "Ana"), [one("👍", 2, true, &["Luis", "Ana"])]);
+    let mine = apply_reaction(&list, "👍", true, "Ana");
+    assert_eq!(apply_reaction(&mine, "👍", true, "Ana"), mine, "se sumó dos veces");
+    assert_eq!(apply_reaction(&mine, "👍", false, "Ana"), list);
+    assert_eq!(apply_reaction(&list, "👍", false, "Ana"), list, "se quitó la de otro");
+    assert_eq!(apply_reaction(&list, "🎉", true, "Ana"), [one("👍", 1, false, &["Luis"]), one("🎉", 1, true, &["Ana"])]);
+    let only_mine = vec![one("🎉", 1, true, &["Ana"])];
+    assert!(apply_reaction(&only_mine, "🎉", false, "Ana").is_empty(), "quedó una pastilla con cero");
+}

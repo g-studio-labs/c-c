@@ -791,6 +791,86 @@ impl Chat {
         self.core.upload(&upload_path(&conversation), &content_type, body).await
     }
 
+    /// Corrige un mensaje propio. Lo que no se puede mandar no se pide, y si
+    /// el texto es el mismo, tampoco: no hay nada que corregir. Al salir
+    /// bien se relee la conversación.
+    pub async fn edit(&self, conversation: Conversation, message_id: String, body: String) -> Result<(), ApiError> {
+        let body = message_to_send(&body)?;
+        let same = self.data().open.as_ref().filter(|open| open.conversation == conversation).and_then(|open| open.messages.iter().find(|message| message.id == message_id).map(|message| message.body == body));
+        if same == Some(true) {
+            return Ok(());
+        }
+        self.core.call_ok("PATCH", &message_path(&conversation, &message_id), Some(serde_json::json!({ "body": body }))).await?;
+        self.reread(&conversation).await;
+        Ok(())
+    }
+
+    /// Retira un mensaje propio: deja de salir para todos. Se pregunta antes
+    /// (`withdraw_question`).
+    pub async fn withdraw(&self, conversation: Conversation, message_id: String) -> Result<(), ApiError> {
+        self.core.call_ok("DELETE", &message_path(&conversation, &message_id), None).await?;
+        self.reread(&conversation).await;
+        Ok(())
+    }
+
+    /// Pone (`on`) o quita la reacción de quien mira. Se ve al momento, con
+    /// la cuenta hecha aquí (`apply_reaction`); si el servidor dice que no,
+    /// vuelve a como estaba. Al salir bien se relee: la lista exacta de
+    /// quiénes la trae el servidor.
+    pub async fn react(&self, conversation: Conversation, message_id: String, emoji: String, on: bool) -> Result<(), ApiError> {
+        if !crate::comms_wire::REACTION_EMOJIS.contains(&emoji.as_str()) {
+            return Err(local("bad-emoji", "That reaction is not one of the set"));
+        }
+        let me = self.core.session().map(|session| session.name.clone().filter(|name| !name.trim().is_empty()).unwrap_or(session.username)).unwrap_or_default();
+        let before = {
+            let mut data = self.data();
+            let message = data.open.as_mut().filter(|open| open.conversation == conversation).and_then(|open| open.messages.iter_mut().find(|message| message.id == message_id));
+            message.map(|message| {
+                let before = message.reactions.clone();
+                message.reactions = apply_reaction(&before, &emoji, on, &me);
+                before
+            })
+        };
+        self.publish();
+        let path = format!("{}/reactions", message_path(&conversation, &message_id));
+        let result = self.core.call_ok("POST", &path, Some(serde_json::json!({ "emoji": emoji, "on": on }))).await;
+        match &result {
+            Ok(()) => self.reread(&conversation).await,
+            Err(_) => {
+                if let Some(before) = before {
+                    let mut data = self.data();
+                    if let Some(message) = data.open.as_mut().filter(|open| open.conversation == conversation).and_then(|open| open.messages.iter_mut().find(|message| message.id == message_id)) {
+                        message.reactions = before;
+                    }
+                }
+                self.publish();
+            }
+        }
+        result
+    }
+
+    /// Lo que se pregunta antes de retirar un mensaje de esa conversación.
+    pub fn withdraw_question(&self, conversation: &Conversation, locale: Locale) -> crate::task::Question {
+        let body = match conversation {
+            Conversation::Channel { .. } => "chat:withdrawBody",
+            Conversation::Direct { .. } => "common:misc.withdrawDmBody",
+        };
+        crate::task::Question {
+            title: text(locale, "chat:withdrawTitle"),
+            body: text(locale, body),
+            warning: None,
+            confirm: text(locale, "chat:withdraw"),
+            cancel: text(locale, "chat:cancel"),
+        }
+    }
+
+    /// Relee esa conversación si es la que está delante.
+    async fn reread(&self, conversation: &Conversation) {
+        if self.data().open.as_ref().is_some_and(|open| &open.conversation == conversation) {
+            self.refresh().await;
+        }
+    }
+
     /// La lista de a quién nombrar con ese texto y el cursor ahí, si se está
     /// escribiendo un `@algo` donde se puede nombrar. Con la gente de la
     /// organización que ya trajo comunicación (`Comms::load_people`).
@@ -967,6 +1047,55 @@ pub fn file_token(file: &ChatFile) -> Option<ComposerToken> {
     Some(ComposerToken { id: file.id.clone(), text, label })
 }
 
+/// La ruta de un mensaje de esa conversación: por ella se corrige y se
+/// retira, y debajo cuelgan sus reacciones.
+fn message_path(conversation: &Conversation, message_id: &str) -> String {
+    match conversation {
+        Conversation::Channel { space_id } => format!("/api/v1/task-spaces/{space_id}/chat/{message_id}"),
+        Conversation::Direct { conversation_id } => format!("/api/v1/dm/{conversation_id}/messages/{message_id}"),
+    }
+}
+
+/// Las reacciones de un mensaje tras poner (`on`) o quitar la de quien
+/// mira, sin esperar al servidor (`applyReaction` en `lib/reactions.ts`). Un
+/// emoji que se queda a cero desaparece; uno nuevo va al final, que es donde
+/// lo pondrá el servidor (por orden del primero). Al quitar se quita **un**
+/// nombre igual al de quien mira: puede coincidir con el de otra persona, y
+/// la lista exacta llega al releer.
+pub fn apply_reaction(list: &[ReactionSummary], emoji: &str, on: bool, me: &str) -> Vec<ReactionSummary> {
+    let mut out = list.to_vec();
+    let found = out.iter().position(|reaction| reaction.emoji == emoji);
+    if on {
+        match found {
+            Some(at) if out[at].mine => {}
+            Some(at) => {
+                out[at].count += 1;
+                out[at].mine = true;
+                out[at].names.push(me.to_string());
+            }
+            None => out.push(ReactionSummary { emoji: emoji.to_string(), count: 1, mine: true, names: vec![me.to_string()] }),
+        }
+        return out;
+    }
+    let Some(at) = found.filter(|at| out[*at].mine) else { return out };
+    if out[at].count <= 1 {
+        out.remove(at);
+        return out;
+    }
+    let reaction = &mut out[at];
+    reaction.count -= 1;
+    reaction.mine = false;
+    match reaction.names.iter().rposition(|name| name == me) {
+        Some(name) => {
+            reaction.names.remove(name);
+        }
+        None => {
+            reaction.names.pop();
+        }
+    }
+    out
+}
+
 /// La ruta por la que se sube un fichero a esa conversación.
 fn upload_path(conversation: &Conversation) -> String {
     match conversation {
@@ -1063,6 +1192,8 @@ pub struct ThreadLine {
     pub quote: Option<ThreadQuote>,
     /// En un directo, las palomitas de lo propio: leído o sólo enviado.
     pub ticks: Option<bool>,
+    /// Quien mira puede corregirlo y retirarlo: es suyo y no es de cac.
+    pub can_edit: bool,
     pub reactions: Vec<ReactionSummary>,
 }
 
@@ -1109,6 +1240,7 @@ pub fn thread_lines<Viewer: TimeZone>(state: &ThreadState, me: Option<&str>, loc
                 gone: quote.gone,
             }),
             ticks: (direct && mine).then(|| was_read(Some(&message.created_at), state.other_read_at.as_deref())),
+            can_edit: mine,
             reactions: message.reactions.clone(),
         });
         previous = Some((message, day));
