@@ -126,8 +126,18 @@ va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
   conversación, responder con su barra, corregir en el sitio, retirar
   preguntando, reacciones con su selector y pastillas pulsables, y un visor
   de imágenes sobre la ventana que recorre las del chat con las flechas.
-  Fuera: `#` para citar tarjetas, fichas al corregir, ❤️/😂 en color (trampa
-  ca5c0caa).
+  Fuera: `#` para citar tarjetas y fichas al corregir. Las reacciones van
+  con su imagen de Noto, en color (411); un ❤️ dentro del texto sigue gris
+  (trampa ca5c0caa). La caja va en una línea: clip, texto y Enviar.
+- **Comunicación, avisos (412–416):** un mensaje nuevo sale como aviso del
+  sistema —mención o respuesta siempre, lo demás si el canal se sigue y no
+  se tiene delante, sin repetir por correcciones ni retiros— y pulsarlo
+  lleva a su organización y conversación. Suena (gota o dos notas, `cpal`,
+  sin salida de audio sale igual). Cada canal se sigue o se silencia desde
+  su cabecera, y silenciado calla de verdad salvo menciones y respuestas. La
+  campana abre la bandeja plegada por conversación, con pestañas, marcar
+  leído y el interruptor del sonido. La puerta local: `scripts/test-changed.sh`
+  (417).
 - **En curso:** dar comportamiento a lo pintado sin él en el detalle (editar
   «dónde quedó», añadir subtarea, mover de lista, borrar, retirar) y en la
   carcasa (⌘B y panel recordado, idioma del sistema en macOS y Windows, crear,
