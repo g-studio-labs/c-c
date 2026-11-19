@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm/logger"
 
 	"github.com/guz-studio/cac/backend/internal/core/domain"
+	"github.com/guz-studio/cac/backend/internal/core/events"
 	"github.com/guz-studio/cac/backend/internal/core/repository"
 )
 
@@ -271,5 +272,60 @@ func chatFollowDB(t *testing.T) (*gorm.DB, func()) {
 		}
 		admin.Exec("DROP DATABASE IF EXISTS " + name)
 		adminSQL.Close()
+	}
+}
+
+// Corregir o retirar un mensaje no es decir algo nuevo: el canal se mueve en
+// pantalla —sale el evento, marcado como edición— pero no deja fila en la
+// campana de nadie. Hasta el 19-nov-2026 una corrección avisaba otra vez a
+// todo el canal, y la app lo anunciaba como mensaje nuevo
+// (command-and-control-418).
+//
+// Roturas que atrapa: anotar avisos al corregir o al retirar; mandar el
+// evento sin `edited` (la app lo cuenta como nuevo); dejar de mandarlo (quien
+// tiene el canal delante no ve el cambio); dejar de avisar de lo nuevo.
+func TestCorregirORetirarNoAvisaOtraVez(t *testing.T) {
+	db, cleanup := chatFollowDB(t)
+	defer cleanup()
+	espia := &notificadorEspia{}
+	hub := events.NewHub()
+	oye, cerrar := hub.Subscribe("22222222-2222-4222-8222-222222222222", []string{"org-1"})
+	defer cerrar()
+	svc := NewChatService(repository.NewChatRepository(db), hub).WithNotifier(espia)
+	ana := "11111111-1111-4111-8111-111111111111"
+
+	m, err := svc.Post("esp-1", "org-1", ana, "hola equipo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	avisos := len(espia.avisos)
+	if avisos == 0 {
+		t.Fatal("lo nuevo tiene que avisar, si no la prueba no mide nada")
+	}
+	if err := svc.Edit(m.ID, ana, false, "hola, equipo [bea](cac:user/22222222-2222-4222-8222-222222222222)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Withdraw(m.ID, ana, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(espia.avisos) != avisos {
+		t.Errorf("corregir y retirar no avisan; llegaron %v", espia.avisos[avisos:])
+	}
+
+	var marcas []any
+	for len(marcas) < 3 {
+		select {
+		case e := <-oye:
+			if e.Type != "chat:message" {
+				continue
+			}
+			data, _ := e.Data.(map[string]any)
+			marcas = append(marcas, data["edited"])
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("faltan eventos del canal; llegaron %v", marcas)
+		}
+	}
+	if marcas[0] != false || marcas[1] != true || marcas[2] != true {
+		t.Errorf("lo nuevo sin marca, corregir y retirar marcados; fue %v", marcas)
 	}
 }

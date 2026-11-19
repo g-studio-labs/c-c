@@ -44,7 +44,11 @@ func (s *DMService) WithNotifier(n Notifier) *DMService {
 //
 // The author is not told about their own message; the actor rides along anyway
 // so the receiving console can apply the same echo rule it uses everywhere.
-func (s *DMService) publish(toUserID, orgID, conversationID, messageID, actorID string) {
+//
+// `edited` es una corrección o un retiro: el evento sale igual —la
+// conversación cambia en pantalla— y marcado, pero sin fila en la campana:
+// no es que te hayan escrito otra vez (command-and-control-418).
+func (s *DMService) publish(toUserID, orgID, conversationID, messageID, actorID string, edited bool) {
 	if s.hub == nil || toUserID == "" || toUserID == actorID {
 		return
 	}
@@ -60,12 +64,12 @@ func (s *DMService) publish(toUserID, orgID, conversationID, messageID, actorID 
 	s.hub.Publish(events.Event{
 		Type:   "dm:message",
 		UserID: toUserID,
-		Data: map[string]string{
+		Data: map[string]any{
 			"conversationId": conversationID, "messageId": messageID, "actorId": actorID,
-			"authorName": de,
+			"authorName": de, "edited": edited,
 		},
 	})
-	if s.notifier != nil {
+	if s.notifier != nil && !edited {
 		// El nombre de quien escribe en el título; el mensaje **no**.
 		//
 		// Sin el nombre, tres conversaciones abiertas daban tres filas
@@ -219,7 +223,7 @@ func (s *DMService) ReplyVia(via, conversationID, userID, body, replyToID string
 	if err := s.repo.Create(m); err != nil {
 		return nil, err
 	}
-	s.publish(c.Other(userID), c.OrgID, c.ID, m.ID, userID)
+	s.publish(c.Other(userID), c.OrgID, c.ID, m.ID, userID, false)
 	return m, nil
 }
 
@@ -243,7 +247,7 @@ func (s *DMService) Edit(conversationID, messageID, userID string, superadmin bo
 	if err := s.repo.UpdateBody(messageID, body); err != nil {
 		return err
 	}
-	s.publish(c.Other(userID), c.OrgID, c.ID, m.ID, userID)
+	s.publish(c.Other(userID), c.OrgID, c.ID, m.ID, userID, true)
 	return nil
 }
 
@@ -265,7 +269,7 @@ func (s *DMService) Withdraw(conversationID, messageID, userID string, superadmi
 	if err := s.repo.Withdraw(messageID); err != nil {
 		return err
 	}
-	s.publish(c.Other(userID), c.OrgID, c.ID, m.ID, userID)
+	s.publish(c.Other(userID), c.OrgID, c.ID, m.ID, userID, true)
 	return nil
 }
 
