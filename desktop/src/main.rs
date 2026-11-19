@@ -28,6 +28,7 @@ mod files;
 mod identity;
 mod lang;
 mod mentions;
+mod message_actions;
 mod mywork;
 mod picture_viewer;
 mod newtask;

@@ -190,6 +190,11 @@ impl Composer {
 }
 
 impl ChatView {
+    /// De qué conversación es la caja: la que se tiene delante.
+    pub(crate) fn composer_conversation(&self) -> Option<Conversation> {
+        self.composer.of.clone()
+    }
+
     /// La lista de a quién nombrar, si se está escribiendo un `@algo` donde
     /// se puede.
     fn mention_menu(&self, cx: &App) -> Option<MentionMenu> {

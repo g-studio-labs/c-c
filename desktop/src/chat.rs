@@ -39,6 +39,7 @@ use gpui_kit::*;
 
 use crate::backend::Backend;
 use crate::composer::Composer;
+use crate::message_actions::Editing;
 use crate::picture_viewer::PictureViewer;
 use crate::files;
 use crate::lang::{error_text, locale, tr};
@@ -99,6 +100,10 @@ pub struct ChatView {
     pub(crate) thumbs: Thumbs,
     /// El visor de imágenes, si hay una abierta.
     pub(crate) viewer: Option<PictureViewer>,
+    /// El mensaje al que se le está eligiendo una reacción.
+    pub(crate) picking: Option<String>,
+    /// El mensaje que se está corrigiendo.
+    pub(crate) editing: Option<Editing>,
     /// Algo que decir un momento, y cuál de los avisos es (para que el que
     /// lo quita no quite otro posterior).
     notice: Option<(u64, String)>,
@@ -141,6 +146,8 @@ impl ChatView {
             front: None,
             thumbs: Thumbs::default(),
             viewer: None,
+            picking: None,
+            editing: None,
             notice: None,
             notices: 0,
             flash: None,
@@ -184,6 +191,8 @@ impl ChatView {
             self.bodies.clear();
             self.pictured_in.clear();
             self.viewer = None;
+            self.picking = None;
+            self.editing = None;
             self.thumbs.clear();
             self.notice = None;
             self.flash = None;
@@ -265,7 +274,7 @@ impl ChatView {
     }
 
     /// Dice algo un momento.
-    fn say(&mut self, text: String, cx: &mut Context<Self>) {
+    pub(crate) fn say(&mut self, text: String, cx: &mut Context<Self>) {
         self.notices += 1;
         let serial = self.notices;
         self.notice = Some((serial, text));
@@ -579,7 +588,10 @@ impl ChatView {
         }
         let theme = cx.theme();
         let (foreground, muted_ink, muted, border, primary) = (theme.foreground, theme.muted_foreground, theme.muted, theme.border, theme.primary);
+        // Pulsar una pastilla pone o quita la reacción de quien mira.
+        let can_write = Backend::snapshot(cx).read(cx).thread.can_write && !line.system;
         let pills = line.reactions.iter().enumerate().map(|(index, reaction)| {
+            let (id, emoji, on) = (line.id.clone(), reaction.emoji.clone(), !reaction.mine);
             let label = cac_core::text_with(locale(cx), "chat:reactionCount", &[("emoji", &reaction.emoji), ("count", &reaction.count.to_string())]);
             let names = reaction.names.join(", ");
             div()
@@ -601,6 +613,7 @@ impl ChatView {
                     }
                 })
                 .when(!names.is_empty(), |this| this.tooltip(move |window, cx| Tooltip::new(names.clone()).build(window, cx)))
+                .when(can_write, |this| this.cursor_pointer().on_click(cx.listener(move |this, _, window, cx| this.react(id.clone(), emoji.clone(), on, window, cx))))
                 .aria_label(label)
                 .aria_selected(reaction.mine)
                 .child(reaction.emoji.clone())
@@ -734,29 +747,19 @@ impl ChatView {
         });
         let flashed = self.flash.as_deref() == Some(id.as_str());
         let hover = muted.opacity(0.4);
-        // Responder, en la esquina del mensaje al pasar por él (el hueco de
-        // `pr-12` es para esto). Una línea de cac no se responde, y quien no
-        // puede escribir no responde.
+        // Las acciones, en la esquina del mensaje al pasar por él (el hueco
+        // de `pr-12` es para esto).
         let can_write = Backend::snapshot(cx).read(cx).thread.can_write;
         let group = SharedString::from(format!("thread-row-{id}"));
-        let actions = (!line.system && can_write).then(|| {
-            let replied = line.clone();
-            div().absolute().top_0p5().right_1().opacity(0.).group_hover(group.clone(), |style| style.opacity(1.)).child(
-                Button::new(SharedString::from(format!("thread-reply-{id}")))
-                    .ghost()
-                    .xsmall()
-                    .icon(Icon::new(Lucide::CornerUpLeft))
-                    .tooltip(tr(cx, "chat:reply"))
-                    .on_click(cx.listener(move |this, _, window, cx| this.reply_to(&replied, window, cx))),
-            )
-        });
+        let actions = self.render_actions(&line, group.clone(), can_write, cx);
+        let editor = self.render_editor(&line, cx);
+        let editing = editor.is_some();
         // `relative rounded-md py-1 pl-2 pr-12` (`pr-7` en una línea de
         // cac); lo propio, `max-w-[75%] rounded-tr-sm border
         // border-primary/25 bg-primary/10`, y lo demás a todo el ancho.
         let bubble = div()
             .id(SharedString::from(format!("thread-bubble-{id}")))
             .relative()
-            .group(group.clone())
             .min_w_0()
             .rounded(px(8.))
             .py_1()
@@ -773,17 +776,25 @@ impl ChatView {
             .aria_label(body.parts.text.clone())
             .aria_selected(line.mine)
             .children(self.render_quote(&line, cx))
-            .children(text)
-            .when(!pictures.is_empty(), |this| this.child(div().mt_1().flex().flex_wrap().gap_2().children(pictures)))
-            .when(!files.is_empty(), |this| this.child(div().mt_1().flex().flex_col().gap_1().children(files)))
+            // Corrigiéndolo, la caja va en el sitio de lo que dice.
+            .children(editor)
+            .when(!editing, |this| {
+                this.children(text)
+                    .when(!pictures.is_empty(), |this| this.child(div().mt_1().flex().flex_wrap().gap_2().children(pictures)))
+                    .when(!files.is_empty(), |this| this.child(div().mt_1().flex().flex_col().gap_1().children(files)))
+            })
             .children(ticks)
             .children(actions)
             .test_support();
 
         // `space-y-3`: cada fila deja doce píxeles con la de arriba, y la
         // primera, con el borde (el `p-3` de la caja).
+        // Las acciones salen al pasar por la fila entera, no sólo por la
+        // burbuja: la barra flota sobre su borde de arriba, y subir el ratón
+        // hasta ella no la tiene que apagar.
         div()
             .id(SharedString::from(format!("thread-line-{id}")))
+            .group(group)
             .w_full()
             .px_3()
             .pt_3()
@@ -791,7 +802,16 @@ impl ChatView {
             .flex_col()
             .aria_label(line.author.clone())
             .children(day)
-            .child(div().flex().flex_col().when(line.mine, |this| this.items_end()).children(header).child(bubble).children(self.render_reactions(&line, cx)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .when(line.mine, |this| this.items_end())
+                    .children(header)
+                    .child(bubble)
+                    .children(self.render_reactions(&line, cx))
+                    .children(self.render_picker(&line, cx)),
+            )
             .test_support()
             .into_any_element()
     }
@@ -1326,11 +1346,10 @@ mod tests {
         assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "los mensajes no están en su orden: {order:?}");
 
         // La caja vacía no manda nada, y lo que todavía no se hace aquí
-        // (reaccionar, las pestañas) tampoco escribe.
+        // (las pestañas) tampoco escribe.
         assert_eq!(label(window, "thread-composer", cx), "Escríbele al equipo — con @ nombras a alguien");
         let before = server.requests().len();
         click(window, "thread-send", cx);
-        click(window, "thread-reaction-m1-0", cx);
         click(window, "conversation-tab-media", cx);
         cx.run_until_parked();
         assert!(server.requests().iter().skip(before).all(|request| request.method.as_str() == "GET"), "algo de lo que no está escribió en el servidor");
@@ -2098,6 +2117,134 @@ mod tests {
         press(window, "escape", cx);
         assert!(!on_screen(window, "picture-viewer", cx), "Escape no cerró el visor");
         assert!(server.requests().iter().filter(|request| request.url.path().ends_with("/raw")).all(|request| request.headers.get("Authorization").is_some()), "una imagen se pidió sin la sesión");
+        stop(cx);
+    }
+
+    // ── Corregir, retirar y reaccionar ──────────────────────────────────
+
+    /// Lo propio se corrige en su sitio: Enter guarda, y se ve corregido y
+    /// marcado; Escape deja como estaba. Lo de otro no ofrece corregir ni
+    /// retirar.
+    ///
+    /// Roturas que atrapa: corregir lo de otro; una caja de corregir que no
+    /// guarda; Escape que guarda; no ver lo corregido sin salir.
+    #[gpui_kit::test]
+    fn what_is_mine_is_corrected_in_place(cx: &mut TestAppContext) {
+        let server = server();
+        let talk = history(vec![line("m1", "u2", "Luis Mora", "de Luis", 5, 1), line("m2", "u1", "Ana Ruiz", "hola", 5, 2)]);
+        mount_history(&server, CHAT_A, &talk, Duration::ZERO);
+        let edits = talk.clone();
+        server.mount(
+            Mock::given(method("PATCH"))
+                .and(path("/api/v1/task-spaces/a/chat/m2"))
+                .respond_with(move |request: &Request| {
+                    let sent: Value = serde_json::from_slice(&request.body).unwrap();
+                    let mut talk = edits.lock().unwrap();
+                    talk[1]["body"] = sent["body"].clone();
+                    talk[1]["updatedAt"] = json!(when(5, 30));
+                    ok(json!(null))
+                })
+                .with_priority(1),
+        );
+        let (window, _) = open(&server, cx);
+        enter(window, channel("a"), cx);
+        wait_until(cx, "se pinta", |cx| on_screen(window, "thread-line-m2", cx));
+        assert!(!on_screen(window, "thread-edit-m1", cx) && !on_screen(window, "thread-withdraw-m1", cx), "se ofrece corregir lo de otro");
+
+        click(window, "thread-edit-m2", cx);
+        assert!(on_screen(window, "thread-editing-m2", cx));
+        cx.update_window(window, |_, window, cx| window.input(" y esto no", cx)).unwrap();
+        press(window, "escape", cx);
+        assert!(!on_screen(window, "thread-editing-m2", cx), "Escape no cerró la caja de corregir");
+        // Lo que se manda sale por otro hilo: se le da tiempo a llegar.
+        std::thread::sleep(Duration::from_millis(400));
+        cx.run_until_parked();
+        assert!(server.requests().iter().all(|request| request.method.as_str() != "PATCH"), "Escape guardó");
+        assert_eq!(label(window, "thread-bubble-m2", cx), "hola");
+
+        click(window, "thread-edit-m2", cx);
+        cx.update_window(window, |_, window, cx| window.input(", corregido", cx)).unwrap();
+        press(window, "enter", cx);
+        wait_until(cx, "se ve corregido", |cx| label(window, "thread-bubble-m2", cx) == "hola, corregido");
+        assert!(on_screen(window, "thread-edited-m2", cx));
+        assert!(!on_screen(window, "thread-editing-m2", cx));
+        stop(cx);
+    }
+
+    /// Retirar pregunta siempre, y sólo si se dice que sí se retira.
+    ///
+    /// Roturas que atrapa: retirar sin preguntar; retirar aunque se diga
+    /// que no; seguir pintando lo retirado.
+    #[gpui_kit::test]
+    fn withdrawing_asks_first(cx: &mut TestAppContext) {
+        let server = server();
+        let talk = history(vec![line("m1", "u1", "Ana Ruiz", "hola", 5, 1), line("m2", "u1", "Ana Ruiz", "esto se va", 5, 2)]);
+        mount_history(&server, CHAT_A, &talk, Duration::ZERO);
+        let gone = talk.clone();
+        server.mount(
+            Mock::given(method("DELETE"))
+                .and(path("/api/v1/task-spaces/a/chat/m2"))
+                .respond_with(move |_: &Request| {
+                    gone.lock().unwrap().retain(|message| message["id"] != "m2");
+                    ok(json!(null))
+                })
+                .with_priority(1),
+        );
+        let (window, _) = open(&server, cx);
+        enter(window, channel("a"), cx);
+        wait_until(cx, "se pinta", |cx| on_screen(window, "thread-line-m2", cx));
+
+        click(window, "thread-withdraw-m2", cx);
+        // Lo que se manda sale por otro hilo: se le da tiempo a llegar.
+        std::thread::sleep(Duration::from_millis(400));
+        cx.run_until_parked();
+        assert!(server.requests().iter().all(|request| request.method.as_str() != "DELETE"), "se retiró sin esperar a que contestaran");
+        assert!(cx.has_pending_prompt(), "no preguntó antes de retirar");
+        cx.simulate_prompt_answer("Cancelar");
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(400));
+        cx.run_until_parked();
+        assert!(server.requests().iter().all(|request| request.method.as_str() != "DELETE"), "se retiró diciendo que no");
+
+        click(window, "thread-withdraw-m2", cx);
+        cx.simulate_prompt_answer("Retirar");
+        wait_until(cx, "el mensaje se va", |cx| !on_screen(window, "thread-line-m2", cx));
+        stop(cx);
+    }
+
+    /// Reaccionar desde el selector y pulsar una pastilla ponen o quitan la
+    /// reacción de quien mira, y se ve en el acto.
+    ///
+    /// Roturas que atrapa: un selector que no manda nada; una pastilla que
+    /// no se puede pulsar; el `on` al revés (pulsar la propia la pondría
+    /// otra vez); esperar al servidor para verla.
+    #[gpui_kit::test]
+    fn reacting_from_the_picker_or_a_pill(cx: &mut TestAppContext) {
+        let server = server();
+        let mut first = line("m1", "u2", "Luis Mora", "hola", 5, 1);
+        first["reactions"] = json!([{ "emoji": "👍", "count": 1, "mine": true, "names": ["Ana Ruiz"] }]);
+        mount_history(&server, CHAT_A, &history(vec![first]), Duration::ZERO);
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/task-spaces/a/chat/m1/reactions")).respond_with(ok(json!(null)).set_delay(Duration::from_millis(400))).with_priority(1));
+        let (window, _) = open(&server, cx);
+        enter(window, channel("a"), cx);
+        wait_until(cx, "se pinta", |cx| on_screen(window, "thread-line-m1", cx));
+        let reactions = |server: &FakeServer| sent(server, "/api/v1/task-spaces/a/chat/m1/reactions");
+
+        click(window, "thread-react-m1", cx);
+        assert!(on_screen(window, "thread-picker-m1", cx));
+        // La tercera del juego: 😂.
+        click(window, "thread-pick-m1-2", cx);
+        // Antes de que el servidor conteste (tarda 400 ms) ya se ve.
+        let started = std::time::Instant::now();
+        wait_until(cx, "se ve en el acto", |cx| label(window, "thread-reaction-m1-1", cx) == "😂 1");
+        assert!(started.elapsed() < Duration::from_millis(400), "se esperó al servidor para verla");
+        assert!(!on_screen(window, "thread-picker-m1", cx));
+        wait_until(cx, "se manda", |_| !reactions(&server).is_empty());
+
+        // La propia, pulsada, se quita.
+        click(window, "thread-reaction-m1-0", cx);
+        wait_until(cx, "se manda quitarla", |_| reactions(&server).len() == 2);
+        assert_eq!(reactions(&server), [json!({ "emoji": "😂", "on": true }), json!({ "emoji": "👍", "on": false })]);
         stop(cx);
     }
 }
