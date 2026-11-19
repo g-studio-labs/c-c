@@ -581,7 +581,8 @@ impl ChatView {
 
     /// Las reacciones de un mensaje (`Reactions.tsx`): una pastilla por
     /// emoji con cuántos y, al pasar el ratón, quiénes. La propia va
-    /// marcada. Todavía no se pulsan.
+    /// marcada. El emoji va como imagen (`assets::emoji`): con la fuente,
+    /// el ❤️ y el 😂 salen grises.
     fn render_reactions(&self, line: &ThreadLine, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         if line.reactions.is_empty() {
             return None;
@@ -616,7 +617,7 @@ impl ChatView {
                 .when(can_write, |this| this.cursor_pointer().on_click(cx.listener(move |this, _, window, cx| this.react(id.clone(), emoji.clone(), on, window, cx))))
                 .aria_label(label)
                 .aria_selected(reaction.mine)
-                .child(reaction.emoji.clone())
+                .child(crate::assets::emoji(&reaction.emoji, px(16.)))
                 .child(reaction.count.to_string())
                 .test_support()
         });

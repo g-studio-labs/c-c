@@ -10,7 +10,7 @@ use std::borrow::Cow;
 
 #[cfg(test)]
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::{AssetSource, Result, SharedString};
+use gpui_kit::{img, AnyElement, AssetSource, IntoElement, Pixels, Result, SharedString, Styled};
 
 // Los de Lucide que la app nombra y los componentes no traen. Al usar uno
 // nuevo, se añade aquí y a `USED`. Guardián: `tests::every_icon_can_be_loaded`.
@@ -97,6 +97,9 @@ pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if let Some((_, png)) = EMOJI.iter().find(|(name, _)| path.strip_prefix("emoji/").and_then(|file| file.strip_suffix(".png")) == Some(*name)) {
+            return Ok(Some(Cow::Borrowed(*png)));
+        }
         if let Some(found) = Extra.load(path)? {
             return Ok(Some(found));
         }
@@ -106,13 +109,54 @@ impl AssetSource for Assets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut all = Extra.list(path)?;
         all.extend(gpui_kit::assets::Assets.list(path)?);
+        if "emoji/".starts_with(path) {
+            all.extend(EMOJI.iter().map(|(name, _)| SharedString::from(format!("emoji/{name}.png"))));
+        }
         Ok(all)
+    }
+}
+
+// Los emojis de las reacciones, como imágenes. Con la fuente no salen:
+// GPUI no le hace caso a la preferencia de emoji de fontconfig, y el ❤️ y el
+// 😂 que existen en blanco y negro en DejaVu se pintan grises (incidente
+// ca5c0caa). Slack, Discord y Telegram hacen lo mismo: su propio juego en
+// imágenes, igual en todas las máquinas.
+//
+// Son los de Noto Color Emoji (OFL, la licencia va al lado), sacados de la
+// fuente a 48 px de alto —sobra para pintarlos a 16–20 px en una pantalla
+// doble— y con paleta: unos 11 KB los ocho. Uno por cada `REACTION_EMOJIS`.
+// Guardián: `tests::every_reaction_has_its_picture`.
+const EMOJI: [(&str, &[u8]); 8] = [
+    ("1f44d", include_bytes!("../assets/emoji/1f44d.png")),
+    ("2764", include_bytes!("../assets/emoji/2764.png")),
+    ("1f602", include_bytes!("../assets/emoji/1f602.png")),
+    ("1f389", include_bytes!("../assets/emoji/1f389.png")),
+    ("1f440", include_bytes!("../assets/emoji/1f440.png")),
+    ("2705", include_bytes!("../assets/emoji/2705.png")),
+    ("1f64f", include_bytes!("../assets/emoji/1f64f.png")),
+    ("1f525", include_bytes!("../assets/emoji/1f525.png")),
+];
+
+/// Dónde está la imagen de un emoji, si la app la trae: los puntos de
+/// código en hexadecimal, sin el selector de variación (U+FE0F), que sólo
+/// pide «en color» y es lo que le falta al ❤️ de DejaVu.
+pub fn emoji_picture(emoji: &str) -> Option<SharedString> {
+    let name = emoji.chars().filter(|c| *c != '\u{fe0f}').map(|c| format!("{:x}", c as u32)).collect::<Vec<_>>().join("-");
+    EMOJI.iter().any(|(known, _)| *known == name).then(|| SharedString::from(format!("emoji/{name}.png")))
+}
+
+/// Un emoji para pintar en un renglón: su imagen si la app la trae, si no
+/// el carácter tal cual.
+pub fn emoji(emoji: &str, size: Pixels) -> AnyElement {
+    match emoji_picture(emoji) {
+        Some(path) => img(path).size(size).flex_none().into_any_element(),
+        None => SharedString::from(emoji.to_string()).into_any_element(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Assets, USED};
+    use super::{emoji_picture, Assets, EMOJI, USED};
     use gpui_kit::assets::IconNamed;
     use gpui_kit::component::IconName;
     use gpui_kit::AssetSource;
@@ -173,6 +217,23 @@ mod tests {
             }
         }
         assert!(seen > 8, "no encontró los iconos del código");
+    }
+
+    /// Cada reacción del juego tiene su imagen, y es un PNG de verdad.
+    ///
+    /// Una que falte no falla: se pinta el carácter, y vuelve a salir gris.
+    /// Roturas que atrapa: una reacción nueva en el juego sin su imagen;
+    /// dejar el U+FE0F en el nombre (el ❤️ se quedaría sin la suya); una
+    /// ruta que la fuente de la app no sirve.
+    #[test]
+    fn every_reaction_has_its_picture() {
+        for reaction in cac_core::REACTION_EMOJIS {
+            let path = emoji_picture(reaction).unwrap_or_else(|| panic!("{reaction} no tiene imagen"));
+            let png = Assets.load(&path).unwrap().unwrap_or_else(|| panic!("{path} no se sirve"));
+            assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "{path} no es un PNG");
+        }
+        assert_eq!(EMOJI.len(), cac_core::REACTION_EMOJIS.len(), "sobra alguna imagen");
+        assert_eq!(emoji_picture("🦀"), None, "uno que no está en el juego se pinta como texto");
     }
 
 }

@@ -208,6 +208,8 @@ impl ChatView {
             div()
                 .id(SharedString::from(format!("thread-picker-{}", line.id)))
                 .mt_1()
+                // Del ancho de sus ocho, del lado del mensaje.
+                .map(|this| if line.mine { this.self_end() } else { this.self_start() })
                 .flex()
                 .gap_0p5()
                 .p_1()
@@ -222,7 +224,7 @@ impl ChatView {
                     Button::new(SharedString::from(format!("thread-pick-{}-{index}", line.id)))
                         .ghost()
                         .small()
-                        .label(emoji.clone())
+                        .child(crate::assets::emoji(&emoji, px(20.)))
                         .selected(mine)
                         .on_click(cx.listener(move |this, _, window, cx| this.react(id.clone(), emoji.clone(), !mine, window, cx)))
                 }))
