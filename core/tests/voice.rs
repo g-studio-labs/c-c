@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cac_core::{Config, Core, ServerEvent, Session, Storage, VoiceEngine, VoiceEvent, VoiceFuture, VoicePhase, VoiceState};
+use cac_core::{Config, Core, ServerEvent, Session, Storage, VideoSource, VoiceEngine, VoiceEvent, VoiceFocus, VoiceFuture, VoicePhase, VoiceState};
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -38,6 +38,8 @@ struct FakeEngine {
     calls: Mutex<Vec<String>>,
     delay: Mutex<Duration>,
     fail: Mutex<Option<String>>,
+    /// Lo que se le dijo de mirar el vídeo, aparte de `calls`.
+    video: Mutex<Vec<bool>>,
 }
 
 impl FakeEngine {
@@ -74,6 +76,9 @@ impl VoiceEngine for FakeEngine {
     }
     fn set_noise_suppression(&self, on: bool) {
         self.log(format!("noise {on}"));
+    }
+    fn watch_video(&self, on: bool) {
+        self.video.lock().unwrap().push(on);
     }
 }
 
@@ -529,4 +534,78 @@ async fn chosen_devices_are_remembered() {
     again.voice().choose_device(false, None);
     assert_eq!(again.voice().device_choices().output.as_deref(), Some("alsa:speaker"));
     assert_eq!(again.voice().device_choices().input, None);
+}
+
+/// Entrar con la sala abierta mira el vídeo, minimizar deja de recibirlo y
+/// volver lo pide otra vez; fuera de una sala no se le pide nada al motor.
+///
+/// Roturas que atrapa: no pedirlo al entrar (la sala en negro); minimizar
+/// sin avisar al motor (se sigue recibiendo y convirtiendo vídeo que nadie
+/// ve); volver sin pedirlo; avisar con la llamada ya colgada.
+#[tokio::test]
+async fn minimizing_stops_the_video() {
+    let rig = rig().await;
+    let voice = rig.core.voice();
+    voice.join_channel("a", None, None).await;
+    voice.close_stage();
+    voice.open_stage();
+    voice.leave().await;
+    voice.close_stage();
+    assert_eq!(*rig.engine.video.lock().unwrap(), [true, false, true]);
+}
+
+/// Lo que cuenta el motor del vídeo llega al estado: cámaras, pantallas por
+/// orden, y quien se va se lleva lo suyo y el foco si era suyo.
+///
+/// Roturas que atrapa: no escuchar el evento de vídeo; dejar la pantalla o
+/// la cámara de quien se fue; un foco que apunta a alguien que ya no está;
+/// colgar y que la siguiente sala empiece con las pantallas de la anterior.
+#[tokio::test]
+async fn video_follows_what_the_engine_tells() {
+    let rig = rig().await;
+    let voice = rig.core.voice();
+    voice.join_channel("a", None, None).await;
+    for (identity, name) in [("u2", "Luis"), ("u3", "Eva")] {
+        voice.engine_event(VoiceEvent::Joined { identity: identity.into(), name: name.into() });
+    }
+    voice.engine_event(VoiceEvent::Video { identity: "u2".into(), source: VideoSource::Camera, enabled: true });
+    voice.engine_event(VoiceEvent::Video { identity: "u2".into(), source: VideoSource::Screen, enabled: true });
+    voice.engine_event(VoiceEvent::Video { identity: "u3".into(), source: VideoSource::Screen, enabled: true });
+    voice.toggle_focus("u2", VideoSource::Camera);
+    let now = state(&rig);
+    assert_eq!((now.cameras.clone(), now.screens.clone()), (vec!["u2".to_string()], vec!["u2".to_string(), "u3".to_string()]));
+    assert_eq!(now.focus, Some(VoiceFocus { identity: "u2".into(), source: VideoSource::Camera }));
+
+    voice.engine_event(VoiceEvent::Left { identity: "u2".into() });
+    let now = state(&rig);
+    assert!(now.cameras.is_empty(), "su cámara se fue con él");
+    assert_eq!(now.screens, ["u3"], "su pantalla también, y pasa la siguiente");
+    assert_eq!(now.focus, None, "el foco era suyo");
+
+    voice.leave().await;
+    assert!(state(&rig).screens.is_empty(), "nada de esta sala para la siguiente");
+}
+
+/// Pulsar un recuadro lo lleva al escenario y pulsarlo otra vez lo devuelve;
+/// un recuadro sin vídeo no se lleva.
+///
+/// Roturas que atrapa: el segundo clic que no devuelve; llevar al escenario
+/// una cámara apagada; la tira de caras que no se abre o que sobrevive al
+/// escenario.
+#[tokio::test]
+async fn clicking_a_tile_takes_it_to_the_stage_and_back() {
+    let rig = rig().await;
+    let voice = rig.core.voice();
+    voice.join_channel("a", None, None).await;
+    voice.engine_event(VoiceEvent::Joined { identity: "u2".into(), name: "Luis".into() });
+    voice.toggle_focus("u2", VideoSource::Camera);
+    assert_eq!(state(&rig).focus, None, "sin cámara no hay nada que llevar");
+    voice.engine_event(VoiceEvent::Video { identity: "u2".into(), source: VideoSource::Camera, enabled: true });
+    voice.toggle_focus("u2", VideoSource::Camera);
+    assert!(state(&rig).focus.is_some());
+    voice.show_faces();
+    assert!(state(&rig).faces_out);
+    voice.toggle_focus("u2", VideoSource::Camera);
+    let now = state(&rig);
+    assert_eq!((now.focus, now.faces_out), (None, false));
 }

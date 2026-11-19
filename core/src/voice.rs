@@ -20,6 +20,11 @@
 //!   propio se desincroniza con el primer evento perdido y entonces miente sin
 //!   que nada falle.
 //!
+//! - **El vídeo se cuenta, no se pinta.** Aquí sólo se sabe quién tiene la
+//!   cámara encendida, quién comparte pantalla y qué va al escenario; los
+//!   fotogramas van del motor a la vista sin pasar por el core (si pasaran,
+//!   cada uno repintaría la app entera). Ver `voice_layout`.
+//!
 //! El timbre está en `voice_ring.rs`; los tonos, en `ring_tone.rs`.
 
 use std::collections::HashMap;
@@ -67,6 +72,25 @@ pub trait VoiceEngine: Send + Sync {
     /// Ensordece: no se reproduce nada de lo que llega.
     fn set_deaf(&self, on: bool);
     fn set_noise_suppression(&self, on: bool);
+    /// Si alguien mira la sala. Sin nadie mirando (minimizada) el motor deja
+    /// de recibir y de convertir vídeo. Un motor sin vídeo no hace nada.
+    fn watch_video(&self, _on: bool) {}
+}
+
+/// De qué es un vídeo: la cámara de alguien o la pantalla que comparte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum VideoSource {
+    Camera,
+    Screen,
+}
+
+/// Lo que alguien llevó al escenario pulsando su recuadro.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct VoiceFocus {
+    pub identity: String,
+    pub source: VideoSource,
 }
 
 /// Lo que cuenta el motor de lo que pasa en la sala. Los mismos que el motor
@@ -91,6 +115,9 @@ pub enum VoiceEvent {
     Recording { active: bool, id: String, by: String, since: String },
     /// Se cortó, con el motivo de LiveKit (`ParticipantRemoved`…).
     Disconnected { reason: String },
+    /// La cámara o la pantalla de alguien se encendió o se apagó. Una pista
+    /// silenciada llega como apagada.
+    Video { identity: String, source: VideoSource, enabled: bool },
 }
 
 /// En qué punto está la llamada.
@@ -235,6 +262,18 @@ pub struct VoiceState {
     pub occupancy: HashMap<String, Vec<VoicePeer>>,
     /// Si se quiere la supresión de ruido. Se recuerda en esta máquina.
     pub noise_suppression: bool,
+    /// Quién tiene la cámara encendida, de los demás.
+    pub cameras: Vec<String>,
+    /// Quién comparte pantalla, por orden de llegada. La primera es la del
+    /// escenario: una segunda no le quita el sitio, y si la primera para,
+    /// pasa la siguiente.
+    pub screens: Vec<String>,
+    /// Lo que se llevó al escenario a mano. Manda sobre la pantalla
+    /// compartida; si su dueño lo apaga o se va, se suelta solo.
+    pub focus: Option<VoiceFocus>,
+    /// Las caras del escenario como tira al lado, en vez de la píldora de
+    /// iniciales. Se olvida al acabar el escenario.
+    pub faces_out: bool,
 }
 
 impl Default for VoiceState {
@@ -264,6 +303,10 @@ impl Default for VoiceState {
             moved: None,
             occupancy: HashMap::new(),
             noise_suppression: true,
+            cameras: Vec::new(),
+            screens: Vec::new(),
+            focus: None,
+            faces_out: false,
         }
     }
 }
@@ -392,6 +435,81 @@ pub struct VoiceTile {
     pub speaking: bool,
     pub muted: bool,
     pub me: bool,
+    /// Con la cámara encendida: el vídeo tapa el avatar.
+    pub camera: bool,
+}
+
+/// Qué ocupa el escenario.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct StageItem {
+    pub identity: String,
+    pub name: String,
+    pub source: VideoSource,
+    pub me: bool,
+}
+
+/// Cómo se reparte la sala. La vista pinta lo que dice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum VoiceLayout {
+    /// Todos iguales, en rejilla.
+    Grid { tiles: Vec<VoiceTile> },
+    /// Uno en grande y los demás (todos, también el del escenario) como
+    /// píldora de caras o, con `faces_out`, como tira al lado.
+    Stage { on_stage: StageItem, strip: Vec<VoiceTile>, faces_out: bool },
+}
+
+/// Qué va al escenario: lo llevado a mano, si no la primera pantalla
+/// compartida, si no nada.
+fn on_stage(state: &VoiceState) -> Option<VoiceFocus> {
+    state.focus.clone().or_else(|| state.screens.first().map(|identity| VoiceFocus { identity: identity.clone(), source: VideoSource::Screen }))
+}
+
+/// Si ese vídeo está encendido ahora.
+fn video_on(state: &VoiceState, identity: &str, source: VideoSource) -> bool {
+    let list = match source {
+        VideoSource::Camera => &state.cameras,
+        VideoSource::Screen => &state.screens,
+    };
+    list.iter().any(|id| id == identity)
+}
+
+/// Lo que se deduce del vídeo: el foco de algo que ya no está se suelta, y
+/// sin escenario no hay tira.
+fn settle_video(state: &mut VoiceState) {
+    if let Some(focus) = &state.focus {
+        if !video_on(state, &focus.identity, focus.source) {
+            state.focus = None;
+        }
+    }
+    if on_stage(state).is_none() {
+        state.faces_out = false;
+    }
+}
+
+/// Un vídeo que se enciende o se apaga.
+fn apply_video(state: &mut VoiceState, identity: String, source: VideoSource, enabled: bool) {
+    let list = match source {
+        VideoSource::Camera => &mut state.cameras,
+        VideoSource::Screen => &mut state.screens,
+    };
+    let there = list.iter().any(|id| *id == identity);
+    if enabled && !there {
+        list.push(identity);
+    } else if !enabled {
+        list.retain(|id| *id != identity);
+    }
+    settle_video(state);
+}
+
+/// La sala, repartida: rejilla, o escenario con su tira.
+pub fn voice_layout(state: &VoiceState, locale: Locale) -> VoiceLayout {
+    let tiles = voice_tiles(state, locale);
+    let Some(focus) = on_stage(state) else { return VoiceLayout::Grid { tiles } };
+    let me = state.me.as_deref() == Some(focus.identity.as_str());
+    let name = tiles.iter().find(|tile| tile.identity == focus.identity).map(|tile| tile.name.clone()).unwrap_or_else(|| focus.identity.clone());
+    VoiceLayout::Stage { on_stage: StageItem { identity: focus.identity, name, source: focus.source, me }, strip: tiles, faces_out: state.faces_out }
 }
 
 /// Los recuadros de la sala: tú primero aunque el motor sólo cuente a los
@@ -401,7 +519,9 @@ pub fn voice_tiles(state: &VoiceState, locale: Locale) -> Vec<VoiceTile> {
     let mut tiles = Vec::new();
     if let Some(me) = &state.me {
         let name = text(locale, "calls:you");
-        tiles.push(VoiceTile { identity: me.clone(), initials: person_initials(&name), name, speaking: state.self_speaking, muted: !state.mic, me: true });
+        // Tu cámara no se publica todavía (fase siguiente): tu recuadro es tu
+        // avatar.
+        tiles.push(VoiceTile { identity: me.clone(), initials: person_initials(&name), name, speaking: state.self_speaking, muted: !state.mic, me: true, camera: false });
     }
     for peer in state.people.iter().filter(|peer| Some(&peer.identity) != state.me.as_ref()) {
         let name = if peer.name.is_empty() { peer.identity.clone() } else { peer.name.clone() };
@@ -412,6 +532,7 @@ pub fn voice_tiles(state: &VoiceState, locale: Locale) -> Vec<VoiceTile> {
             speaking: state.speaking.contains(&peer.identity),
             muted: state.muted.get(&peer.identity).copied().unwrap_or(false),
             me: false,
+            camera: state.cameras.contains(&peer.identity),
         });
     }
     tiles
@@ -644,6 +765,7 @@ impl Voice {
                     state.me = Some(identity);
                     state.mic = true;
                 });
+                engine.watch_video(self.state().stage_open);
                 self.occupancy_soon();
             }
             Err(code) => {
@@ -676,11 +798,38 @@ impl Voice {
             return;
         }
         self.change(|state| state.stage_open = true);
+        if let Some(engine) = self.engine() {
+            engine.watch_video(true);
+        }
     }
 
-    /// Minimiza. No cuelga: el audio sigue.
+    /// Minimiza. No cuelga: el audio sigue, pero el vídeo no se recibe (no
+    /// se ve).
     pub fn close_stage(&self) {
+        let inside = self.state().phase != VoicePhase::Out;
         self.change(|state| state.stage_open = false);
+        if let (true, Some(engine)) = (inside, self.engine()) {
+            engine.watch_video(false);
+        }
+    }
+
+    /// Pulsar un recuadro: lo lleva al escenario, y pulsarlo otra vez lo
+    /// devuelve. Un vídeo apagado no se queda: `settle_video` suelta el
+    /// foco, porque el escenario enseñaría una cara en grande.
+    pub fn toggle_focus(&self, identity: &str, source: VideoSource) {
+        self.change(|state| {
+            let same = state.focus.as_ref().is_some_and(|focus| focus.identity == identity && focus.source == source);
+            state.focus = (!same).then(|| VoiceFocus { identity: identity.into(), source });
+            settle_video(state);
+        });
+    }
+
+    /// Las caras del escenario pasan de píldora a tira.
+    pub fn show_faces(&self) {
+        self.change(|state| {
+            state.faces_out = true;
+            settle_video(state);
+        });
     }
 
     /// Abre o cierra el micrófono. Optimista: silenciarse tiene que sentirse
@@ -786,7 +935,12 @@ impl Voice {
                 // quien se fue mudo y vuelve abierto saldría silenciado.
                 state.speaking.retain(|id| *id != identity);
                 state.muted.remove(&identity);
+                // Y su vídeo: su cámara, su pantalla y el foco si era suyo.
+                state.cameras.retain(|id| *id != identity);
+                state.screens.retain(|id| *id != identity);
+                settle_video(state);
             }),
+            VoiceEvent::Video { identity, source, enabled } => self.change(|state| apply_video(state, identity, source, enabled)),
             VoiceEvent::Speaking { identities } => self.change(|state| state.speaking = identities),
             VoiceEvent::SelfSpeaking { speaking } => self.change(|state| state.self_speaking = speaking),
             VoiceEvent::Muted { identity, muted } => self.change(|state| {
@@ -955,6 +1109,65 @@ mod tests {
         assert_eq!(voice_status(&state, Locale::Es), "nadie más todavía · 40 ms");
         state.phase = VoicePhase::Joining;
         assert_eq!(voice_status(&state, Locale::Es), "conectando…");
+    }
+
+    fn peers(state: &mut VoiceState) {
+        state.phase = VoicePhase::In;
+        state.me = Some("u1".into());
+        state.people = vec![VoicePeer { identity: "u2".into(), name: "Luis".into() }, VoicePeer { identity: "u3".into(), name: "Eva".into() }];
+    }
+
+    /// Sin pantalla ni foco, rejilla; con una pantalla, al escenario con su
+    /// nombre y todos en la tira; el foco a mano manda sobre la pantalla.
+    /// Roturas que atrapa: escenario sin nada que enseñar; el foco que no
+    /// gana a la pantalla; dejar fuera de la tira al que está en grande; la
+    /// cámara de alguien sin marcar en su recuadro.
+    #[test]
+    fn the_stage_is_the_focus_or_else_the_first_screen() {
+        let mut state = VoiceState::default();
+        peers(&mut state);
+        apply_video(&mut state, "u3".into(), VideoSource::Camera, true);
+        let VoiceLayout::Grid { tiles } = voice_layout(&state, Locale::Es) else { panic!("sin pantalla ni foco es rejilla") };
+        assert_eq!(tiles.iter().map(|tile| tile.camera).collect::<Vec<_>>(), [false, false, true]);
+
+        apply_video(&mut state, "u2".into(), VideoSource::Screen, true);
+        let VoiceLayout::Stage { on_stage, strip, faces_out } = voice_layout(&state, Locale::Es) else { panic!("una pantalla va al escenario") };
+        assert_eq!((on_stage.identity.as_str(), on_stage.name.as_str(), on_stage.source, faces_out), ("u2", "Luis", VideoSource::Screen, false));
+        assert_eq!(strip.len(), 3);
+
+        state.focus = Some(VoiceFocus { identity: "u3".into(), source: VideoSource::Camera });
+        let VoiceLayout::Stage { on_stage, .. } = voice_layout(&state, Locale::Es) else { panic!() };
+        assert_eq!((on_stage.identity.as_str(), on_stage.source), ("u3", VideoSource::Camera));
+    }
+
+    /// La primera pantalla se queda el escenario; si para, pasa la siguiente.
+    /// Roturas que atrapa: que la segunda se lo quite; perder la segunda
+    /// cuando la primera para; repetir a alguien que avisa dos veces.
+    #[test]
+    fn a_second_screen_waits_its_turn() {
+        let mut state = VoiceState::default();
+        peers(&mut state);
+        apply_video(&mut state, "u2".into(), VideoSource::Screen, true);
+        apply_video(&mut state, "u3".into(), VideoSource::Screen, true);
+        apply_video(&mut state, "u3".into(), VideoSource::Screen, true);
+        assert_eq!(on_stage(&state).unwrap().identity, "u2");
+        apply_video(&mut state, "u2".into(), VideoSource::Screen, false);
+        assert_eq!(state.screens, ["u3"]);
+        assert_eq!(on_stage(&state).unwrap().identity, "u3");
+    }
+
+    /// El foco se suelta cuando su vídeo se apaga, y la tira se olvida sin
+    /// escenario. Roturas que atrapa: un escenario negro por un foco a una
+    /// cámara apagada; la tira puesta en la siguiente pantalla.
+    #[test]
+    fn the_focus_lets_go_when_its_video_goes() {
+        let mut state = VoiceState::default();
+        peers(&mut state);
+        apply_video(&mut state, "u3".into(), VideoSource::Camera, true);
+        state.focus = Some(VoiceFocus { identity: "u3".into(), source: VideoSource::Camera });
+        state.faces_out = true;
+        apply_video(&mut state, "u3".into(), VideoSource::Camera, false);
+        assert_eq!((state.focus.clone(), state.faces_out), (None, false));
     }
 
     /// El nombre de la sala. Rotura que atrapa: llamar a una reunión por el
