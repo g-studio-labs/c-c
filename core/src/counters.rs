@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -345,8 +345,11 @@ impl Counters {
                 self.update(|data| data.chat = Some(rows));
             }
             Source::Dms => {
+                let asked_at = Instant::now();
                 let Ok(rows) = self.core.get_list::<DmSummary>("/api/v1/dm/").await else { return };
-                self.update(|data| data.dms = Some(rows));
+                self.update(|data| data.dms = Some(rows.clone()));
+                // Con ellas, los avisos saben qué mensaje privado era nuevo.
+                self.core.notices().directs_loaded(&rows, asked_at);
             }
             Source::Servers => {
                 let Ok(rows) = self.core.get_list::<ServerStatus>("/api/v1/servers/").await else { return };

@@ -65,6 +65,8 @@
     "soundHint": "A short tone when a notification arrives: a drop for messages and two notes for everything else. Silent while you are in a call or deafened. This device only."
   },
   "wrote": "{{who}} wrote",
+  "wroteToYou": "{{who}} wrote to you",
+  "newDirect": "New direct message",
   "push": {
     "title": "Notifications on this device",
     "enable": "Turn on",

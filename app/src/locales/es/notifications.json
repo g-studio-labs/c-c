@@ -65,6 +65,8 @@
     "soundHint": "Un tono corto cuando llega un aviso: una gota para los mensajes y dos notas para lo demás. No suena si estás en una llamada o te has puesto sordo. Sólo en este equipo."
   },
   "wrote": "{{who}} escribió",
+  "wroteToYou": "{{who}} te escribió",
+  "newDirect": "Mensaje directo nuevo",
   "push": {
     "title": "Avisos en este dispositivo",
     "enable": "Encender",

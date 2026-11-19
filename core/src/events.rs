@@ -8,6 +8,7 @@ use crate::comms::CommsState;
 use crate::counters::CountersState;
 use crate::docs::DocsState;
 use crate::mywork::MyWorkState;
+use crate::notice::Announcement;
 use crate::orgs::OrgsState;
 use crate::tree::TreeState;
 use crate::session::Session;
@@ -57,6 +58,11 @@ pub trait Listener: Send + Sync {
     /// trabajo» y la tarea abierta; llegan aquí igualmente, con todos los
     /// demás, para lo que es de cada plataforma (un aviso, un sonido).
     fn server_event(&self, _event: ServerEvent) {}
+
+    /// Hay que avisar de un mensaje: el aviso del sistema y su sonido, que
+    /// son de cada plataforma. Ya se decidió todo (`notice.rs`): si es nuevo,
+    /// si se sigue, si no se tiene delante; aquí sólo se enseña.
+    fn announce(&self, _announcement: Announcement) {}
 }
 
 /// Para quien no necesita enterarse (el MCP, una prueba).

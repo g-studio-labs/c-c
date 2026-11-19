@@ -23,9 +23,9 @@
 //!   filas no pueden decir cosas distintas.
 //! - La última línea de cada canal se pide aquí (`/chat/latest`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
@@ -173,6 +173,10 @@ pub(crate) struct CommsData {
     /// organización, por lo mismo que los espacios: la respuesta tardía de
     /// la que se dejó no le quita a la nueva la suya.
     people: HashMap<String, Vec<Person>>,
+    /// Los canales que se siguen, de todas las organizaciones de uno
+    /// (`/chat/following`): los suyos menos los silenciados. `None` mientras
+    /// no se sabe; lo usan los avisos.
+    following: Option<HashSet<String>>,
     /// Lo último que se avisó, para no avisar de lo mismo.
     published: CommsState,
 }
@@ -268,6 +272,7 @@ impl Comms {
             data.on_screen = false;
             data.spaces.clear();
             data.latest = None;
+            data.following = None;
             data.people.clear();
         }
         self.publish();
@@ -285,12 +290,43 @@ impl Comms {
         self.publish();
     }
 
-    /// Trae la última línea de cada canal. Si falla se queda lo que hubiera:
-    /// la lista sale sin adelantos, que es como era antes de tenerlos.
+    /// Trae la última línea de cada canal y qué canales se siguen: al entrar
+    /// y al volver de una caída. Lo que falle se queda como estuviera.
     pub async fn load(&self) {
+        let following = {
+            let core = self.core.clone();
+            tokio::spawn(async move { core.get_list::<String>("/api/v1/chat/following").await })
+        };
+        self.load_latest().await;
+        if let Ok(Ok(following)) = following.await {
+            self.data().following = Some(following.into_iter().collect());
+        }
+    }
+
+    /// Trae la última línea de cada canal. Si falla se queda lo que hubiera:
+    /// la lista sale sin adelantos, que es como era antes de tenerlos. Con
+    /// ellas, los avisos saben qué mensaje era nuevo (`Notices`).
+    async fn load_latest(&self) {
+        let asked_at = Instant::now();
         let Ok(latest) = self.core.get_list::<ChatLatest>("/api/v1/chat/latest").await else { return };
-        self.data().latest = Some(latest);
+        self.data().latest = Some(latest.clone());
         self.publish();
+        self.core.notices().channels_loaded(&latest, asked_at);
+    }
+
+    /// Los canales que se siguen, si se sabe.
+    pub(crate) fn following(&self) -> Option<HashSet<String>> {
+        self.data().following.clone()
+    }
+
+    /// De qué organización es un canal y cómo se llama, si ha llegado su
+    /// árbol.
+    pub(crate) fn channel_place(&self, space_id: &str) -> (Option<String>, Option<String>) {
+        let data = self.data();
+        data.spaces
+            .iter()
+            .find_map(|(org_id, spaces)| spaces.iter().find(|space| space.id == space_id).map(|space| (Some(org_id.clone()), Some(space.name.clone()))))
+            .unwrap_or_default()
     }
 
     /// Vuelve a pedir las últimas líneas tras un respiro, y sólo la última
@@ -303,7 +339,7 @@ impl Comms {
             if comms.core.inner.comms_reloads.load(Ordering::SeqCst) != turn {
                 return;
             }
-            comms.load().await;
+            comms.load_latest().await;
         });
     }
 

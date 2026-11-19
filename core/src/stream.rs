@@ -325,6 +325,9 @@ impl Stream {
         self.core.comms().server_event(&event);
         // Después de la lista: es ella quien apunta hasta dónde leyó el otro.
         self.core.chat().server_event(&event);
+        // Después de la lista: decide con la conversación que se tiene delante
+        // y con lo que se sigue.
+        self.core.notices().server_event(&event);
         self.core.inner.listener.server_event(event);
     }
 }

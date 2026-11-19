@@ -25,6 +25,7 @@ pub mod docs;
 pub mod events;
 pub mod mywork;
 pub mod nav;
+pub mod notice;
 pub mod orgs;
 pub mod prefs;
 pub mod prose;
@@ -76,6 +77,7 @@ pub use mywork::{
     week_start, week_title, week_view, weekday_name, CalendarChip, CalendarCursor, CalendarDay, CalendarView, CalendarWeek, MonthView,
     ToneCount, WeekSummary, WeekView, CALENDAR_TONES,
 };
+pub use notice::{channel_notice, direct_notice, Announcement, NoticeKind, NoticeTarget, Notices, Viewer};
 pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClick};
 pub use hue::{hue_index, HUES};
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
@@ -184,6 +186,7 @@ pub(crate) struct Inner {
     /// canales: ver `Comms::reload_soon`.
     pub(crate) comms_reloads: std::sync::atomic::AtomicU64,
     pub(crate) chat: Mutex<chat::ChatData>,
+    pub(crate) notices: Mutex<notice::NoticeData>,
     /// Cuál de las aperturas de una conversación es la vigente: ver
     /// `Chat::open`.
     pub(crate) chat_turn: std::sync::atomic::AtomicU64,
@@ -228,6 +231,7 @@ impl Core {
                 comms: Mutex::new(comms::CommsData::default()),
                 comms_reloads: std::sync::atomic::AtomicU64::new(0),
                 chat: Mutex::new(chat::ChatData::default()),
+                notices: Mutex::new(notice::NoticeData::default()),
                 chat_turn: std::sync::atomic::AtomicU64::new(0),
                 chat_reloads: std::sync::atomic::AtomicU64::new(0),
                 chat_reads: std::sync::atomic::AtomicU64::new(0),
