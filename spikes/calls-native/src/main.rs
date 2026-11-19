@@ -23,6 +23,19 @@ use livekit::webrtc::prelude::*;
 use livekit::webrtc::video_frame::native::VideoFrameBufferExt as _;
 use livekit::webrtc::video_source::native::NativeVideoSource;
 
+/// Lo que dice GPUI (`CALLS_LOG=1`): el refresco que eligió, el adaptador.
+struct StderrLog;
+
+impl log::Log for StderrLog {
+    fn enabled(&self, _: &log::Metadata) -> bool {
+        true
+    }
+    fn log(&self, record: &log::Record) {
+        eprintln!("[{}] {}: {}", record.level(), record.target(), record.args());
+    }
+    fn flush(&self) {}
+}
+
 /// Lo que el arranque comprobó, para pintarlo.
 struct Probe {
     said: Vec<String>,
@@ -46,6 +59,9 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("call") {
         call::run();
         return;
+    }
+    if std::env::var_os("CALLS_LOG").is_some() {
+        let _ = log::set_logger(&StderrLog).map(|()| log::set_max_level(log::LevelFilter::Info));
     }
     if std::env::args().nth(1).as_deref() == Some("paint") {
         let setup = paint::Setup::from_env();

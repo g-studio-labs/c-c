@@ -46,6 +46,7 @@ pub struct Setup {
     pub seconds: u64,
     pub leak: bool,
     pub spin: bool,
+    pub fit: bool,
 }
 
 impl Setup {
@@ -58,6 +59,7 @@ impl Setup {
             seconds: env_or("CALLS_SECONDS", 30),
             leak: std::env::var_os("CALLS_LEAK").is_some(),
             spin: std::env::var_os("CALLS_SPIN").is_some(),
+            fit: std::env::var_os("CALLS_FIT").is_some(),
         }
     }
 }
@@ -70,6 +72,11 @@ impl Setup {
 #[derive(Default)]
 pub struct Slot {
     ready: Mutex<Option<Arc<RenderImage>>>,
+    /// El tamaño del recuadro en pantalla, en píxeles de verdad (ancho en los
+    /// 32 bits altos, alto en los bajos; 0 si todavía no se ha pintado). Lo
+    /// escribe la vista; lo lee quien convierte, para no subir más píxeles de
+    /// los que se ven (`CALLS_FIT`).
+    pub target: AtomicU64,
     pub made: AtomicU64,
     pub lost: AtomicU64,
     pub gen_us: AtomicU64,
@@ -138,6 +145,19 @@ pub fn to_render_image(buffer: &dyn VideoBuffer) -> Arc<RenderImage> {
     Arc::new(RenderImage::new(vec![image::Frame::new(pixels)]))
 }
 
+/// A qué tamaño subir un fotograma de `width`×`height` que se ve dentro de un
+/// recuadro de `box_w`×`box_h` píxeles, conservando la proporción (como
+/// `ObjectFit::Contain`). `None` si cabe entero: nunca se agranda. Medidas
+/// pares, que I420 las pide.
+pub fn fit_size(width: u32, height: u32, box_w: u32, box_h: u32) -> Option<(u32, u32)> {
+    if box_w == 0 || box_h == 0 || (width <= box_w && height <= box_h) {
+        return None;
+    }
+    let scale = (box_w as f64 / width as f64).min(box_h as f64 / height as f64);
+    let even = |v: f64| ((v as u32) & !1).max(2);
+    Some((even(width as f64 * scale), even(height as f64 * scale)))
+}
+
 /// El hilo de una pista: genera, convierte y deja el último en su casilla, al
 /// ritmo pedido.
 fn run_track(index: usize, setup: Setup, slot: Arc<Slot>, wake: UnboundedSender<usize>) {
@@ -145,14 +165,29 @@ fn run_track(index: usize, setup: Setup, slot: Arc<Slot>, wake: UnboundedSender<
     // Treinta fotogramas hechos al empezar y repetidos: inventar la imagen no
     // es parte de una llamada (llega ya decodificada), y aquí sólo se quiere
     // medir lo que sí: convertir, subir y pintar.
-    let reel: Vec<I420Buffer> = (0..30).map(|n| test_frame(setup.width, setup.height, n + index as u64 * 40)).collect();
+    let mut reel: Vec<I420Buffer> = (0..30).map(|n| test_frame(setup.width, setup.height, n + index as u64 * 40)).collect();
     let mut next = Instant::now();
     let mut n = 0u64;
+    let mut last_fit = None;
     loop {
         let started = Instant::now();
-        let buffer = &reel[(n % 30) as usize];
+        let buffer = &mut reel[(n % 30) as usize];
         let generated = Instant::now();
-        let image = to_render_image(buffer);
+        // Con `CALLS_FIT`, se reduce al tamaño en que se ve antes de convertir
+        // y subir: menos bytes al atlas por fotograma. El escalado es libyuv.
+        let target = slot.target.load(Ordering::Relaxed);
+        let fit = if setup.fit { fit_size(setup.width, setup.height, (target >> 32) as u32, target as u32) } else { None };
+        if fit != last_fit {
+            match fit {
+                Some((w, h)) => println!("pista {index}: se sube a {w}x{h} (llega a {}x{})", setup.width, setup.height),
+                None => println!("pista {index}: se sube entera, {}x{}", setup.width, setup.height),
+            }
+            last_fit = fit;
+        }
+        let image = match fit {
+            Some((w, h)) => to_render_image(&buffer.scale(w as i32, h as i32)),
+            None => to_render_image(&*buffer),
+        };
         let converted = Instant::now();
         slot.gen_us.fetch_add((generated - started).as_micros() as u64, Ordering::Relaxed);
         slot.conv_us.fetch_add((converted - generated).as_micros() as u64, Ordering::Relaxed);
@@ -177,6 +212,7 @@ pub struct Wall {
     shown: Vec<Option<Arc<RenderImage>>>,
     painted: Vec<u64>,
     leaked: Vec<Arc<RenderImage>>,
+    last_render: Option<Instant>,
 }
 
 impl Wall {
@@ -200,7 +236,7 @@ impl Wall {
         .detach();
         let painted = vec![0; setup.tracks];
         report(setup, slots.clone(), cx);
-        Wall { setup, shown: vec![None; setup.tracks], slots, painted, leaked: Vec::new() }
+        Wall { setup, shown: vec![None; setup.tracks], slots, painted, leaked: Vec::new(), last_render: None }
     }
 }
 
@@ -220,12 +256,29 @@ impl Render for Wall {
             PAINTED.fetch_add(1, Ordering::Relaxed);
         }
         RENDERS.fetch_add(1, Ordering::Relaxed);
+        // Cuánto pasó desde el pintado anterior, en cubos: dice si la ventana
+        // va al ritmo del monitor o salta pintados.
+        let now = Instant::now();
+        if let Some(last) = self.last_render.replace(now) {
+            let ms = (now - last).as_secs_f64() * 1000.0;
+            let bucket = match ms { m if m < 7.0 => 0, m if m < 12.0 => 1, m if m < 20.0 => 2, m if m < 35.0 => 3, _ => 4 };
+            INTERVALS[bucket].fetch_add(1, Ordering::Relaxed);
+        }
         if self.setup.spin {
             // Pintar sin parar, haya fotograma nuevo o no: mide cuántas
             // veces por segundo puede presentar esta pantalla.
             window.request_animation_frame();
         }
         let columns = (self.setup.tracks.max(1) as f32).sqrt().ceil() as usize;
+        // El recuadro de cada pista, en píxeles de pantalla: lo que la vista
+        // ocupa entre las columnas, por la escala de la pantalla.
+        let viewport = window.viewport_size();
+        let scale = window.scale_factor();
+        let tile_w = (f32::from(viewport.width) * scale / columns as f32) as u64;
+        let tile_h = (f32::from(viewport.height) * scale / columns as f32) as u64;
+        for slot in &self.slots {
+            slot.target.store(tile_w << 32 | tile_h, Ordering::Relaxed);
+        }
         div()
             .size_full()
             .bg(rgb(0x000000))
@@ -245,6 +298,8 @@ impl Render for Wall {
 static PAINTED: AtomicU64 = AtomicU64::new(0);
 /// Veces que se pintó la ventana, con o sin vídeo nuevo.
 static RENDERS: AtomicU64 = AtomicU64::new(0);
+/// Intervalos entre pintados: <7 ms, 7–12, 12–20, 20–35, ≥35.
+static INTERVALS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 
 /// CPU usada por el proceso hasta ahora, en segundos (utime + stime).
 pub fn cpu_seconds() -> f64 {
@@ -326,6 +381,12 @@ fn report(setup: Setup, slots: Vec<Arc<Slot>>, cx: &mut Context<Wall>) {
             rss_last,
             (rss_last - rss_first) / (steady.len().max(1) as f64 / 60.0),
             mean(7),
+        );
+        let buckets: Vec<u64> = INTERVALS.iter().map(|b| b.load(Ordering::Relaxed)).collect();
+        let total = buckets.iter().sum::<u64>().max(1) as f64;
+        println!(
+            "INTERVALOS entre pintados: <7ms {:.0}%  7–12 {:.0}%  12–20 {:.0}%  20–35 {:.0}%  ≥35 {:.0}%",
+            buckets[0] as f64 * 100.0 / total, buckets[1] as f64 * 100.0 / total, buckets[2] as f64 * 100.0 / total, buckets[3] as f64 * 100.0 / total, buckets[4] as f64 * 100.0 / total
         );
         let _ = cx.update(|cx| cx.quit());
     })

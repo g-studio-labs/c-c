@@ -820,6 +820,7 @@ dependencies = [
  "gpui-kit",
  "image",
  "livekit",
+ "log",
  "nokhwa",
  "reqwest",
  "serde",

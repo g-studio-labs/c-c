@@ -26,6 +26,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 # `image::Frame`, y el canal que despierta a la vista.
 image = { version = "0.25", default-features = false }
 futures = "0.3"
+log = "0.4"
 # Paso 2, la llamada (`call.rs`): las mismas versiones que el motor de Tauri
 # para el micrófono, los altavoces y la cámara.
 cpal = "0.18.2"

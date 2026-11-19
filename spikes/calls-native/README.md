@@ -18,7 +18,8 @@ de macOS: cada fotograma se convierte con libyuv a BGRA en la tarea de su pista,
 se sube al atlas de la gráfica con `img(ImageSource::Render(..))` y el anterior
 se tira con `window.drop_image`. En la pantalla real, **9 vídeos 720p a 30 fps
 se pintan enteros con 0,74 núcleos**, y la memoria queda plana durante 10
-minutos. El techo conocido: un vídeo **1080p a 60 fps se queda en 42 fps**.
+minutos. **1080p a 60 fps llega a 60 a pantalla completa**; en ventana varía
+entre 46 y 60 según la tanda, por cómo se presenta la ventana, no por el vídeo.
 
 Lo que queda sin cerrar está en «Riesgos»: la calidad de la voz con dos
 máquinas, compartir pantalla en Wayland, macOS y Windows.
@@ -104,10 +105,36 @@ X11, monitores a 180 y 144 Hz, NVIDIA RTX 3060.
 | 9 × 720p30 | 29,8 | 0,2 | 0,74 |
 | 1 × 1080p60 | **41,8** | 18 | 0,29 |
 
-El techo de 1080p60 es subir ~8 MB por fotograma al atlas creando una textura
-cada vez. Cámaras a 720p y pantallas a 1080p hasta ~30 fps entran de sobra. El
-camino sin copias (dma-buf, que 0.12 ya expone con `get_dmabuf_fd`) lo subiría,
-pero pide parchear GPUI.
+### ¿60 fps? (pedido por jose, medido el 19-nov)
+
+El 42 de 1080p60 **no era un techo de subir datos**. Se probó reducir cada
+fotograma al tamaño de su recuadro antes de subirlo (`CALLS_FIT=1`, con el
+escalado de libyuv) y en tres tandas, en los dos monitores (HDMI-0 vertical a
+180 Hz, eDP a 144 Hz) y con las dos gráficas:
+
+| 1080p60 | Intel | NVIDIA | primera tanda |
+|---|---|---|---|
+| 1 vídeo a **pantalla completa** | 60 | **60** | 60 |
+| 1 vídeo en ventana | 60 | 49–53 | 46–49 |
+| 4 vídeos en ventana | 55–60 | 30–55 | 30 |
+
+- **A pantalla completa da 60 siempre**, también subiendo el 1080p entero, con
+  los intervalos entre pintados todos en 12–20 ms.
+- **En ventana varía** entre tandas y no depende del tamaño subido: con 4 vídeos
+  reducidos a 260×146 seguía en 30. Los intervalos se reparten entre 16 y 33 ms.
+  Apunta a cómo se presenta una ventana normal en ese escritorio (con
+  compositor) frente a una a pantalla completa, y a que GPUI pone su reloj a
+  5 ms —el primer monitor, 180 Hz— también en el de 144 Hz. Sin aislar: pide
+  tocar el escritorio de jose.
+- **Reducir al recuadro sí conviene**: 4 × 1080p60 baja de 0,88 a 0,25 núcleos
+  y la memoria deja de crecer.
+- **Trampa encontrada**: en esta máquina `ZED_DEVICE_ID=9a68` (la Intel, puesto
+  para Zed) hace que GPUI pinte en la Intel mientras la pantalla la lleva la
+  NVIDIA. La app nativa ya lo ignora (`desktop/src/main.rs`, `CAC_DEVICE_ID`);
+  la prueba no, y una tanda salió con la Intel.
+
+El camino sin copias (dma-buf, que 0.12 ya expone con `get_dmabuf_fd`) queda
+para cuando haga falta: pide parchear GPUI.
 
 ## Pasos 2–4 · La llamada (`call.rs`)
 
@@ -174,7 +201,8 @@ Ninguna de las dos cosas pasa entre dos máquinas; eso queda por comprobar.
 - **Publicar cuesta ~1 núcleo** con cámara y pantalla: decodificar MJPEG,
   convertir color con un bucle propio en coma flotante (portado de Tauri) y
   comprimir dos vídeos. La conversión se puede pasar a libyuv.
-- **1080p60 se queda en 42 fps** por el camino actual de GPUI.
+- **60 fps en ventana no son estables** (46–60 según la tanda); a pantalla
+  completa sí. A investigar en la fase de vídeo (reloj de GPUI y compositor).
 - **Compilar**: +8 min en frío, libwebrtc se descarga de GitHub al compilar, el
   CI necesita `libglib2.0-dev`, y el binario crece ~40 MB.
 
@@ -193,12 +221,12 @@ presencia y salas ya existen.
 | fase | qué | días |
 |---|---|---|
 | 1 · Voz | el motor como módulo sin interfaz (del spike y `voice.rs`, con sus pruebas), entrar a la voz de un canal, silenciar y ensordecer, quién está y quién habla, elegir dispositivos, timbre; **probada con dos máquinas** | 6–8 |
-| 2 · Ver vídeo | recuadros, rejilla y foco, la vista previa propia en espejo, dejar de pintar lo que no se ve | 3 |
+| 2 · Ver vídeo | recuadros, rejilla y foco, la vista previa propia en espejo, reducir cada fotograma a su recuadro, dejar de pintar lo que no se ve, y los 60 fps en ventana | 3–5 |
 | 3 · Cámara | publicarla, elegir cámara, volver a publicar si cambia la resolución (en Tauri los demás veían la imagen congelada), conversión con libyuv | 2–3 |
 | 4 · Pantalla | selector en X11, el portal en Wayland, permisos en macOS y Windows | 3–5 |
 | 5 · Empaquetar | CI con `libglib2.0-dev` y red, comprobar macOS y Windows, tamaño | 2 |
 
-Total: **16–21 días** para tener llamadas como en Tauri.
+Total: **16–23 días** para tener llamadas como en Tauri.
 
 ## Recomendación
 
