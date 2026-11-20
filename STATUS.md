@@ -138,6 +138,14 @@ va a `core/` con su prueba. Primera entrega: «Mi trabajo» completo.
   campana abre la bandeja plegada por conversación, con pestañas, marcar
   leído y el interruptor del sonido. La puerta local: `scripts/test-changed.sh`
   (417).
+- **Llamadas, ver vídeo (437–440, 20-nov):** la sala enseña las cámaras de
+  los demás sobre su cara y la pantalla compartida en el escenario, con la
+  tira de caras, foco por clic y pantalla completa; minimizada no recibe
+  vídeo. Los fotogramas van del motor (`voice/src/video.rs`, ya reducidos y
+  en BGRA) a la vista (`desktop/src/voice_video.rs`) sin pasar por el core.
+  Una cámara silenciada desde el navegador vuelve a la cara (en Tauri se
+  quedaba congelada). Publicar cámara y pantalla, todavía no. Falta probarlo
+  con jose y una segunda cuenta (442) y medir los 60 fps en ventana (441).
 - **En curso:** dar comportamiento a lo pintado sin él en el detalle (editar
   «dónde quedó», añadir subtarea, mover de lista, borrar, retirar) y en la
   carcasa (⌘B y panel recordado, idioma del sistema en macOS y Windows, crear,
