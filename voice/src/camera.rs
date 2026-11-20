@@ -5,16 +5,15 @@
 //! Se elige **por nombre**: el índice de V4L2 se mueve al enchufar otra.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use livekit::webrtc::native::yuv_helper;
 use livekit::webrtc::prelude::I420Buffer;
+use livekit::webrtc::video_source::native::NativeVideoSource;
 use tokio::runtime::Handle;
 
 use crate::devices::Device;
 use crate::error::VoiceError;
-use crate::publish::{Change, Outlet, Publishing};
-use livekit::webrtc::video_source::native::NativeVideoSource;
+use crate::publish::{self, Capture, Outlet, Publishing, Started};
 
 /// Fallos seguidos de la cámara antes de rendirse.
 const STREAK_MAX: u32 = 30;
@@ -46,56 +45,9 @@ pub(crate) fn list(chosen: Option<&str>) -> Vec<Device> {
     as_devices(&native::names(), chosen)
 }
 
-/// Una captura en marcha. Soltarla la apaga: retira lo publicado **ya**, sin
-/// esperar al hilo, que puede estar bloqueado dentro del controlador.
-pub(crate) struct CameraCapture {
-    stop: Arc<AtomicBool>,
-    alive: Arc<AtomicBool>,
-    publisher: tokio::sync::mpsc::UnboundedSender<Change<NativeVideoSource>>,
-}
-
-impl CameraCapture {
-    /// Si su hilo sigue vivo (apagado, pero todavía soltando la cámara).
-    pub(crate) fn alive_flag(&self) -> Arc<AtomicBool> {
-        self.alive.clone()
-    }
-}
-
-impl Drop for CameraCapture {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        let _ = self.publisher.send(Change::Stopped(None));
-    }
-}
-
-/// Lo baja a `false` el hilo al salir, por donde salga.
-struct AliveGuard(Arc<AtomicBool>);
-
-impl Drop for AliveGuard {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
-}
-
-/// Abre la cámara elegida en su hilo y empieza a entregar. Lo que salga
-/// llega por `publishing.started` (y luego por los eventos del motor).
-pub(crate) fn start(handle: Handle, chosen: Option<String>, publishing: Publishing) -> Result<(CameraCapture, tokio::sync::oneshot::Receiver<Result<(), VoiceError>>), VoiceError> {
-    let Publishing { outlet, stop: publisher, started } = publishing;
-    let stop = Arc::new(AtomicBool::new(false));
-    let alive = Arc::new(AtomicBool::new(true));
-    let (thread_stop, thread_alive) = (stop.clone(), alive.clone());
-    std::thread::Builder::new()
-        .name("cámara".into())
-        .spawn(move || {
-            let _alive = AliveGuard(thread_alive);
-            // `NativeVideoSource::new` lanza tareas de tokio: desde un hilo
-            // suelto sin el runtime entrado, la captura moría en la primera
-            // trama (voice.rs de Tauri, `enter_runtime`).
-            let _runtime = handle.enter();
-            capture(chosen, outlet, &thread_stop);
-        })
-        .map_err(|e| VoiceError::CameraFailed(e.to_string()))?;
-    Ok((CameraCapture { stop, alive, publisher }, started))
+/// Abre la cámara elegida en su hilo y empieza a entregar.
+pub(crate) fn start(handle: Handle, chosen: Option<String>, publishing: Publishing) -> Result<(Capture, Started), VoiceError> {
+    publish::spawn_capture("cámara", handle, publishing, move |outlet, stop| capture(chosen, outlet, stop))
 }
 
 fn capture(chosen: Option<String>, mut outlet: Outlet<NativeVideoSource>, stop: &AtomicBool) {

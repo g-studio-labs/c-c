@@ -29,6 +29,17 @@ pub enum VoiceError {
     /// Abrió pero no entrega imagen, o dejó de entregarla.
     CameraNoFrames,
     CameraFailed(String),
+    /// Este sistema no trae capturador de pantalla.
+    NoScreenCapture,
+    /// El sistema (o el portal) dijo que no.
+    ScreenDenied,
+    /// El diálogo del sistema sigue sin contestar al minuto.
+    ShareUnanswered,
+    /// La captura no contestó ni para decir que no.
+    ScreenTimeout,
+    ScreenFailed(String),
+    /// Ya se está pidiendo una pantalla y no ha contestado nadie.
+    SharePending,
 }
 
 /// El nombre que pide la tarea; es el mismo tipo.
@@ -51,12 +62,18 @@ impl VoiceError {
             VoiceError::CameraBusy => "voice-camera-busy",
             VoiceError::CameraNoFrames => "voice-camera-no-frames",
             VoiceError::CameraFailed(_) => "voice-camera-thread-died",
+            VoiceError::NoScreenCapture => "voice-no-screen-capture",
+            VoiceError::ScreenDenied => "voice-screen-denied",
+            VoiceError::ShareUnanswered => "voice-share-unanswered",
+            VoiceError::ScreenTimeout => "voice-screen-timeout",
+            VoiceError::ScreenFailed(_) => "voice-screen-thread-died",
+            VoiceError::SharePending => "voice-share-pending",
         }
     }
 
     pub fn detail(&self) -> Option<&str> {
         match self {
-            VoiceError::Connect(d) | VoiceError::Publish(d) | VoiceError::MicOpen(d) | VoiceError::OutputOpen(d) | VoiceError::CameraFailed(d) => Some(d),
+            VoiceError::Connect(d) | VoiceError::Publish(d) | VoiceError::MicOpen(d) | VoiceError::OutputOpen(d) | VoiceError::CameraFailed(d) | VoiceError::ScreenFailed(d) => Some(d),
             _ => None,
         }
     }

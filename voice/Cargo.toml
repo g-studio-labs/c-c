@@ -5,7 +5,7 @@
 # pasa por un `Fn(EngineEvent)`. Quien lo pinte (GPUI) vive en otro sitio.
 # Portado del spike `spikes/calls-native/` (ya en LiveKit 0.12) y del motor de
 # Tauri (`app/src-tauri/src/voice.rs`, en 0.8.3). Recibe vídeo y publica tu
-# cámara.
+# cámara y tu pantalla.
 [package]
 name = "cac-voice"
 version = "0.1.0"

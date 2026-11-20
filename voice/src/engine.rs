@@ -24,7 +24,7 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::camera::{self, CameraCapture};
+use crate::camera;
 use crate::capture::{self, CaptureCtx, InputFormat, MicState, ThreadGuard};
 use crate::devices::{self, DeviceKind, Devices};
 use crate::dsp::{to_mono, CHANNELS, SAMPLE_RATE};
@@ -32,8 +32,9 @@ use crate::error::{redact, JoinError, VoiceError};
 use crate::events::{arrival_events, EngineEvent, EventSink, Peer};
 use crate::mixer::TrackQueue;
 use crate::output::Playback;
-use crate::publish;
+use crate::publish::{self, Capture};
 use crate::recording::recording_event;
+use crate::screen::{self, ScreenSource, ScreenSources, ShareSlot};
 use crate::video::{self, Feed, TrackChange, VideoFeeds, VideoSource};
 
 /// Cada cuánto se mide la latencia: un número para mirar de reojo.
@@ -46,6 +47,9 @@ const CAMERA_START: Duration = Duration::from_secs(15);
 /// un controlador colgado deja su hilo vivo, y dos hilos sobre la misma
 /// cámara no abren ninguna.
 const CAMERA_RELEASE: Duration = Duration::from_secs(2);
+/// Lo que se espera al hilo de la pantalla: el diálogo del sistema, y un
+/// margen por si el hilo no contesta ni para decir que nadie lo contestó.
+const SCREEN_START: Duration = Duration::from_secs(screen::PORTAL_WAIT.as_secs() + 5);
 
 /// Lo que es del motor y no de una llamada.
 pub(crate) struct Shared {
@@ -223,6 +227,7 @@ impl Engine {
             video: video.clone(),
             sink: sink.clone(),
             camera: Mutex::new(None),
+            screen: Mutex::new(ShareSlot::default()),
         });
         *self.shared.current.lock().unwrap() = Arc::downgrade(&inner);
 
@@ -285,7 +290,8 @@ struct CallInner {
     /// El vídeo de los demás (`video.rs`) y tu vista previa.
     video: VideoFeeds,
     sink: EventSink,
-    camera: Mutex<Option<CameraCapture>>,
+    camera: Mutex<Option<Capture>>,
+    screen: Mutex<ShareSlot<Capture>>,
 }
 
 impl Call {
@@ -353,7 +359,7 @@ impl Call {
     /// reabre (cambiar de cámara). Apagar no espera al hilo.
     pub async fn set_camera(&self, on: bool) -> Result<(), VoiceError> {
         let previous = self.inner.camera.lock().unwrap().take();
-        let releasing = previous.as_ref().map(CameraCapture::alive_flag);
+        let releasing = previous.as_ref().map(Capture::alive_flag);
         drop(previous);
         if !on || self.inner.left.load(Ordering::SeqCst) {
             return Ok(());
@@ -380,6 +386,54 @@ impl Call {
             }
         }
         result
+    }
+
+    /// Las pantallas y ventanas que se pueden compartir. Vacía cuando elige
+    /// el sistema (Wayland): entonces `share(None)`.
+    pub fn screen_sources(&self) -> ScreenSources {
+        screen::sources()
+    }
+
+    /// Comparte esa pantalla o ventana (`None`: la que elija el sistema).
+    ///
+    /// Vuelve cuando ya se publica (y lo cuenta con `EngineEvent::Video`) o
+    /// con el fallo; si paras mientras se pide, vuelve `Ok` sin publicar.
+    /// Pedir otra mientras la primera espera da `SharePending`; con una ya
+    /// compartiéndose, la cambia. Si la captura muere después, se retira y se
+    /// cuenta con `EngineEvent::VideoFailed`.
+    pub async fn share(&self, source: Option<ScreenSource>) -> Result<(), VoiceError> {
+        let requested = match &source {
+            None => None,
+            Some(source) => Some(screen::parse_source_id(&source.id).ok_or_else(|| VoiceError::ScreenFailed(format!("fuente desconocida: {}", source.id)))?),
+        };
+        let inner = &self.inner;
+        if inner.left.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let ticket = inner.screen.lock().unwrap().begin()?;
+        let publishing = publish::spawn(&inner.handle, Arc::downgrade(&inner.room), inner.identity.clone(), VideoSource::Screen, inner.video.clone(), inner.sink.clone());
+        let (capture, started) = match screen::start(inner.handle.clone(), requested, publishing) {
+            Ok(started) => started,
+            Err(e) => {
+                inner.screen.lock().unwrap().settle(ticket, false);
+                return Err(e);
+            }
+        };
+        if inner.screen.lock().unwrap().attach(ticket, capture).is_err() {
+            return Ok(());
+        }
+        let result = match tokio::time::timeout(SCREEN_START, started).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(VoiceError::ScreenFailed("quien publicaba se fue sin contestar".into())),
+            Err(_) => Err(VoiceError::ScreenTimeout),
+        };
+        inner.screen.lock().unwrap().settle(ticket, result.is_ok());
+        result
+    }
+
+    /// Deja de compartir. No espera al hilo.
+    pub fn stop_share(&self) {
+        self.inner.screen.lock().unwrap().stop();
     }
 
     fn is_camera_on(&self) -> bool {
@@ -434,6 +488,7 @@ impl CallInner {
         }
         self.capture.lock().unwrap().take();
         self.camera.lock().unwrap().take();
+        self.screen.lock().unwrap().stop();
         self.playback.close();
         // La última cara de esta sala no se enseña en la siguiente.
         self.video.clear();

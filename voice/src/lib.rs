@@ -4,8 +4,8 @@
 //! alto, ruido), mezcla a los demás en una sola salida —que es también la
 //! referencia del cancelador de eco— y cuenta lo que pasa por un
 //! `Fn(EngineEvent)`. Recibe el vídeo de los demás (cámara y pantalla) y lo
-//! deja listo para pintar, y publica tu cámara con su vista previa. Sin
-//! interfaz.
+//! deja listo para pintar, y publica tu cámara y tu pantalla (o una
+//! ventana) con su vista previa. Sin interfaz.
 //!
 //! ```ignore
 //! let engine = Engine::new();
@@ -34,6 +34,7 @@ mod mixer;
 mod output;
 mod publish;
 mod recording;
+mod screen;
 mod video;
 
 pub use capture::InputFormat;
@@ -42,12 +43,13 @@ pub use engine::{Call, Engine, MicLevel};
 pub use error::{JoinError, VoiceError};
 pub use events::{EngineEvent, EventSink};
 pub use recording::{recording_from_metadata, RecordingSignal};
+pub use screen::{ScreenSource, ScreenSources};
 pub use video::{FrameWake, VideoFeeds, VideoFrame, VideoSource};
 
 #[cfg(test)]
 mod tests {
     /// Las fuentes del crate, para leerlas.
-    const SOURCES: [(&str, &str); 13] = [
+    const SOURCES: [(&str, &str); 14] = [
         ("lib.rs", include_str!("lib.rs")),
         ("camera.rs", include_str!("camera.rs")),
         ("publish.rs", include_str!("publish.rs")),
@@ -60,6 +62,7 @@ mod tests {
         ("mixer.rs", include_str!("mixer.rs")),
         ("output.rs", include_str!("output.rs")),
         ("recording.rs", include_str!("recording.rs")),
+        ("screen.rs", include_str!("screen.rs")),
         ("video.rs", include_str!("video.rs")),
     ];
 

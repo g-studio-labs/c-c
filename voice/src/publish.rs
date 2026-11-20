@@ -1,32 +1,35 @@
-//! Publicar un vídeo propio: tu cámara (y, en la subtarea B, tu pantalla)
-//! (command-and-control-445).
+//! Publicar un vídeo propio: tu cámara y tu pantalla (command-and-control-445).
 //!
 //! Dos piezas, una a cada lado del hilo que captura:
 //!
 //! - **`Outlet`**, en el hilo de captura: cada fotograma va a la fuente que se
-//!   publica y, si alguien mira la sala, a tu vista previa. Si cambian las
-//!   medidas, pide una fuente nueva.
-//! - **`run`**, una tarea en el runtime: publica cada fuente nueva y retira la
-//!   anterior. Es el arreglo de un fallo del motor de Tauri: si la cámara
-//!   cambiaba de resolución a media llamada, el hilo alimentaba una fuente
-//!   nueva y la pista publicada seguía atada a la vieja, que ya nadie
-//!   alimentaba: los demás veían la imagen congelada. Una fuente nueva
-//!   necesita una pista nueva.
+//!   publica y, si alguien mira la sala, a tu vista previa.
+//! - **`run`**, una tarea en el runtime: publica la fuente y la retira al
+//!   acabar.
 //!
-//! **Nada se publica hasta el primer fotograma**: la fuente nace con él (y con
-//! sus medidas), así que nadie ve una pista en negro mientras la cámara
-//! arranca.
+//! **Nada se publica hasta el primer fotograma**: la fuente nace con él, así
+//! que nadie ve una pista en negro mientras la cámara arranca o alguien
+//! contesta al diálogo del sistema.
+//!
+//! **Una fuente por publicación, aunque cambie el tamaño.** Medido contra un
+//! LiveKit local (20-nov, command-and-control-446): una `NativeVideoSource`
+//! creada a 1280×720 acepta fotogramas de 1000×700, 1600×900 y 700×1000, y
+//! quien recibe ve el tamaño nuevo en 100–150 ms. La prueba de viabilidad
+//! republicaba en cada cambio, y cada republicación es una pista nueva para
+//! todos y para la grabación; una ventana cambia de tamaño a menudo. (El
+//! fallo de Tauri que la prueba creía arreglar era otro: creaba una fuente
+//! nueva y seguía publicando la vieja.)
 //!
 //! Lo que pasa con la sala va detrás de `TrackRoom`, para probar las reglas
-//! sin red; la sala de verdad es `LiveRoom`. Portado de `spawn_publisher` y
-//! `start_camera` de `spikes/calls-native/src/call.rs`.
+//! sin red; la sala de verdad es `LiveRoom`.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
 use livekit::options::TrackPublishOptions;
 use livekit::track::{LocalTrack, LocalVideoTrack, TrackSource};
-use livekit::webrtc::prelude::{I420Buffer, VideoBuffer, VideoFrame as RtcFrame, VideoRotation};
+use livekit::webrtc::prelude::{I420Buffer, VideoBuffer, VideoFrame as RtcFrame, VideoResolution, VideoRotation};
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::video_source::RtcVideoSource;
 use livekit::Room;
@@ -39,72 +42,59 @@ use crate::video::{self, Feed, VideoFeeds, VideoFrame, VideoSource};
 
 /// Lo que la captura le dice a quien publica.
 pub(crate) enum Change<S> {
-    /// Una fuente nueva con sus medidas: la primera, o la de después de un
-    /// cambio de tamaño.
-    Source(S, (u32, u32)),
+    /// Llegó el primer fotograma: ésta es la fuente, con sus medidas.
+    Publish(S, (u32, u32)),
     /// Se acabó. `None`: lo apagaste tú; `Some`: se rindió sola.
-    Stopped(Option<VoiceError>),
+    Stop(Option<VoiceError>),
 }
 
-/// La sala, para quien publica. Detrás de un rasgo para probar las reglas de
-/// `run` sin red.
+/// La sala, para quien publica.
 pub(crate) trait TrackRoom<S>: Send + 'static {
-    /// Lo que hace falta para retirar lo publicado.
     type Published: Send;
     fn publish(&self, source: S) -> impl Future<Output = Result<Self::Published, String>> + Send;
     fn unpublish(&self, published: Self::Published) -> impl Future<Output = ()> + Send;
 }
 
-/// Lo que `run` cuenta de cada publicación, para el resto del motor.
+/// Lo que `run` cuenta después de haberse visto.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Lifecycle {
-    /// La primera fuente ya se publicó: se ve.
     On,
-    /// Se dejó de publicar, con el fallo si lo hubo.
     Off(Option<VoiceError>),
 }
 
-/// Publica cada fuente que llega y retira la anterior, **siempre en ese
-/// orden**: retirar primero deja un instante sin vídeo; publicar primero
-/// dejaría dos pistas tuyas a la vez, y los demás verían dos cámaras.
+/// Publica la fuente cuando llega y la retira cuando se acaba.
 ///
-/// `started` se contesta una vez: `Ok` con la primera publicación (o si lo
-/// apagaste antes: no falló nada), o el fallo si no llegó a publicarse. Lo
-/// que pase después se cuenta por `tell`. `died` es el fallo si la captura
-/// desaparece sin avisar (su hilo murió).
+/// `started` se contesta una vez: `Ok` al publicarse (o si lo apagaste antes:
+/// no falló nada), o el fallo si no llegó a publicarse; en ese caso no se
+/// cuenta ni «encendida» ni «apagada», porque nunca se vio. Lo de después va
+/// por `tell`. `died` es el fallo si la captura desaparece sin avisar.
 pub(crate) async fn run<S, R: TrackRoom<S>>(room: R, mut changes: mpsc::UnboundedReceiver<Change<S>>, started: oneshot::Sender<Result<(), VoiceError>>, died: VoiceError, tell: impl Fn(Lifecycle)) {
-    let mut started = Some(started);
-    let mut published: Option<R::Published> = None;
-    let ending = loop {
-        let Some(change) = changes.recv().await else { break Some(died) };
-        if let Some(previous) = published.take() {
-            room.unpublish(previous).await;
-        }
-        match change {
-            Change::Source(source, (width, height)) => match room.publish(source).await {
-                Ok(fresh) => {
-                    log::info!("vídeo propio: publicado a {width}x{height}");
-                    published = Some(fresh);
-                    if let Some(started) = started.take() {
-                        let _ = started.send(Ok(()));
-                        tell(Lifecycle::On);
-                    }
-                }
-                Err(e) => break Some(VoiceError::Publish(e)),
-            },
-            Change::Stopped(error) => break error,
-        }
+    let failure = match changes.recv().await {
+        Some(Change::Publish(source, (width, height))) => match room.publish(source).await {
+            Ok(published) => {
+                log::info!("vídeo propio: publicado a {width}x{height}");
+                let _ = started.send(Ok(()));
+                tell(Lifecycle::On);
+                let ending = next_stop(&mut changes, died).await;
+                room.unpublish(published).await;
+                tell(Lifecycle::Off(ending));
+                return;
+            }
+            Err(e) => Some(VoiceError::Publish(e)),
+        },
+        Some(Change::Stop(error)) => error,
+        None => Some(died),
     };
-    if let Some(previous) = published.take() {
-        room.unpublish(previous).await;
-    }
-    match started.take() {
-        // No llegó a verse: el fallo es la respuesta a quien lo pidió, y no
-        // hay nada que apagar.
-        Some(started) => {
-            let _ = started.send(ending.map_or(Ok(()), Err));
-        }
-        None => tell(Lifecycle::Off(ending)),
+    let _ = started.send(failure.map_or(Ok(()), Err));
+}
+
+/// Espera a que se acabe. `Outlet` sólo publica una vez, así que aquí no
+/// puede llegar otra fuente.
+async fn next_stop<S>(changes: &mut mpsc::UnboundedReceiver<Change<S>>, died: VoiceError) -> Option<VoiceError> {
+    match changes.recv().await {
+        Some(Change::Stop(error)) => error,
+        Some(Change::Publish(..)) => unreachable!("una publicación recibe una sola fuente"),
+        None => Some(died),
     }
 }
 
@@ -132,11 +122,10 @@ pub(crate) struct Preview {
     pub kind: VideoSource,
 }
 
-/// Lo que ve quien publica de sí mismo: la cámara **en espejo**, como en un
-/// espejo de verdad (levantar la mano derecha la levanta a la derecha); la
-/// pantalla, nunca, que el texto se leería al revés. Se voltea en los
-/// píxeles porque GPUI no sabe voltear una imagen. Sólo la vista previa: lo
-/// que se publica va derecho.
+/// Tu cámara se ve **en espejo**, como en un espejo de verdad; tu pantalla
+/// nunca, que el texto se leería al revés. Se voltea en los píxeles porque
+/// GPUI no sabe voltear una imagen. Sólo la vista previa: lo publicado va
+/// derecho.
 pub(crate) fn preview_pixels(kind: VideoSource, frame: VideoFrame) -> VideoFrame {
     match kind {
         VideoSource::Camera => mirror(frame),
@@ -144,7 +133,6 @@ pub(crate) fn preview_pixels(kind: VideoSource, frame: VideoFrame) -> VideoFrame
     }
 }
 
-/// Voltea en horizontal: cada fila, al revés, píxel a píxel (4 bytes).
 fn mirror(mut frame: VideoFrame) -> VideoFrame {
     let row = frame.width as usize * 4;
     if row == 0 {
@@ -162,37 +150,42 @@ fn mirror(mut frame: VideoFrame) -> VideoFrame {
     frame
 }
 
+/// Crea la fuente con las medidas del primer fotograma.
+type MakeSource<S> = Box<dyn FnOnce((u32, u32)) -> S + Send>;
+
 /// Adónde va cada fotograma capturado. Vive en el hilo de captura.
 pub(crate) struct Outlet<S> {
     changes: mpsc::UnboundedSender<Change<S>>,
-    make: Box<dyn Fn((u32, u32)) -> S + Send>,
-    current: Option<(S, (u32, u32))>,
+    make: Option<MakeSource<S>>,
+    source: Option<S>,
     preview: Preview,
 }
 
 impl<S: FrameSink> Outlet<S> {
-    /// `make` crea una fuente de esas medidas.
-    pub(crate) fn new(changes: mpsc::UnboundedSender<Change<S>>, make: impl Fn((u32, u32)) -> S + Send + 'static, preview: Preview) -> Self {
-        Outlet { changes, make: Box::new(make), current: None, preview }
+    pub(crate) fn new(changes: mpsc::UnboundedSender<Change<S>>, make: impl FnOnce((u32, u32)) -> S + Send + 'static, preview: Preview) -> Self {
+        Outlet { changes, make: Some(Box::new(make)), source: None, preview }
     }
 
-    /// Un fotograma: a la fuente (nueva si cambió de tamaño) y a la vista
-    /// previa, si alguien mira. Con la sala minimizada **se sigue
-    /// publicando**: sólo deja de convertirse lo que nadie ve (`offer` no
-    /// llama). `false` si ya nadie publica: el hilo debe acabar.
+    /// Un fotograma: a la fuente (creada con el primero) y a la vista previa
+    /// si alguien mira. Con la sala minimizada **se sigue publicando**: sólo
+    /// deja de convertirse lo que nadie ve (`offer` no llama). `false` si ya
+    /// nadie publica: el hilo debe acabar.
     pub(crate) fn deliver(&mut self, buffer: &I420Buffer) -> bool {
+        if self.changes.is_closed() {
+            return false;
+        }
         let dims = (buffer.width(), buffer.height());
         if dims.0 == 0 || dims.1 == 0 {
             return true;
         }
-        if self.current.as_ref().map(|(_, current)| *current) != Some(dims) {
-            let source = (self.make)(dims);
-            if self.changes.send(Change::Source(source.clone(), dims)).is_err() {
+        if let Some(make) = self.make.take() {
+            let source = make(dims);
+            if self.changes.send(Change::Publish(source.clone(), dims)).is_err() {
                 return false;
             }
-            self.current = Some((source, dims));
+            self.source = Some(source);
         }
-        if let Some((source, _)) = &self.current {
+        if let Some(source) = &self.source {
             source.capture(buffer);
         }
         let kind = self.preview.kind;
@@ -202,7 +195,7 @@ impl<S: FrameSink> Outlet<S> {
 
     /// La captura se rinde: que se retire lo publicado y se diga por qué.
     pub(crate) fn fail(self, error: VoiceError) {
-        let _ = self.changes.send(Change::Stopped(Some(error)));
+        let _ = self.changes.send(Change::Stop(Some(error)));
     }
 }
 
@@ -234,13 +227,73 @@ impl TrackRoom<NativeVideoSource> for LiveRoom {
 
 /// Lo que se le da al hilo que captura, y lo que se queda quien lo arranca.
 pub(crate) struct Publishing {
-    /// Para el hilo: por aquí manda los fotogramas.
-    pub outlet: Outlet<NativeVideoSource>,
-    /// Para quien lo apaga: avisar de que se acabó sin esperar al hilo (que
-    /// puede estar bloqueado en el controlador).
-    pub stop: mpsc::UnboundedSender<Change<NativeVideoSource>>,
-    /// Se contesta con la primera publicación o con el fallo.
-    pub started: oneshot::Receiver<Result<(), VoiceError>>,
+    kind: VideoSource,
+    outlet: Outlet<NativeVideoSource>,
+    stop: mpsc::UnboundedSender<Change<NativeVideoSource>>,
+    started: oneshot::Receiver<Result<(), VoiceError>>,
+}
+
+/// El fallo de un hilo de captura que muere, con el texto de su fuente.
+fn thread_died(kind: VideoSource, detail: &str) -> VoiceError {
+    match kind {
+        VideoSource::Camera => VoiceError::CameraFailed(detail.into()),
+        VideoSource::Screen => VoiceError::ScreenFailed(detail.into()),
+    }
+}
+
+/// Un hilo que captura y publica. Soltarlo lo apaga y retira lo publicado
+/// **ya**, sin esperar al hilo, que puede estar bloqueado en el controlador
+/// de la cámara o esperando al diálogo del sistema.
+pub(crate) struct Capture {
+    stop: Arc<AtomicBool>,
+    alive: Arc<AtomicBool>,
+    publisher: mpsc::UnboundedSender<Change<NativeVideoSource>>,
+}
+
+impl Capture {
+    /// Baja a `false` cuando su hilo acaba de verdad (soltó el dispositivo).
+    pub(crate) fn alive_flag(&self) -> Arc<AtomicBool> {
+        self.alive.clone()
+    }
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = self.publisher.send(Change::Stop(None));
+    }
+}
+
+struct AliveGuard(Arc<AtomicBool>);
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// La respuesta a «enciende»: la primera publicación o el fallo.
+pub(crate) type Started = oneshot::Receiver<Result<(), VoiceError>>;
+
+/// Lanza `body` en su propio hilo, que captura y entrega a su `Outlet` hasta
+/// que la bandera diga que pare.
+pub(crate) fn spawn_capture(name: &str, handle: Handle, publishing: Publishing, body: impl FnOnce(Outlet<NativeVideoSource>, &AtomicBool) + Send + 'static) -> Result<(Capture, Started), VoiceError> {
+    let Publishing { kind, outlet, stop: publisher, started } = publishing;
+    let stop = Arc::new(AtomicBool::new(false));
+    let alive = Arc::new(AtomicBool::new(true));
+    let (thread_stop, thread_alive) = (stop.clone(), alive.clone());
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let _alive = AliveGuard(thread_alive);
+            // `NativeVideoSource::new` lanza tareas de tokio: desde un hilo
+            // suelto sin el runtime entrado, la captura moría en el primer
+            // fotograma (voice.rs de Tauri, `enter_runtime`).
+            let _runtime = handle.enter();
+            body(outlet, &thread_stop);
+        })
+        .map_err(|e| thread_died(kind, &e.to_string()))?;
+    Ok((Capture { stop, alive, publisher }, started))
 }
 
 /// Arranca quien publica tu `kind` en la sala y prepara tu vista previa. Los
@@ -267,10 +320,9 @@ pub(crate) fn spawn(handle: &Handle, room: Weak<Room>, identity: String, kind: V
             sink(EngineEvent::Video { identity: identity.clone(), source: kind, enabled: false });
         }
     };
-    let died = VoiceError::CameraFailed("la captura terminó sin avisar".into());
-    handle.spawn(run(LiveRoom { room, kind: track_source, name }, receiver, answer, died, tell));
-    let make = move |(width, height): (u32, u32)| NativeVideoSource::new(livekit::webrtc::prelude::VideoResolution { width, height }, screencast);
-    Publishing { outlet: Outlet::new(changes.clone(), make, preview), stop: changes, started }
+    handle.spawn(run(LiveRoom { room, kind: track_source, name }, receiver, answer, thread_died(kind, "la captura terminó sin avisar"), tell));
+    let make = move |(width, height): (u32, u32)| NativeVideoSource::new(VideoResolution { width, height }, screencast);
+    Publishing { kind, outlet: Outlet::new(changes.clone(), make, preview), stop: changes, started }
 }
 
 #[cfg(test)]
@@ -316,17 +368,16 @@ mod tests {
         (log, started.await.unwrap(), told)
     }
 
-    /// Una fuente de otro tamaño retira la pista anterior **antes** de
-    /// publicar la nueva, y apagar retira la última.
+    /// Se publica con el primer fotograma, se cuenta encendida y, al
+    /// apagar, se retira y se cuenta apagada.
     ///
-    /// Roturas que atrapa: publicar la nueva sin retirar la vieja (dos
-    /// cámaras tuyas a la vez); retirarla después de publicar; dejar la
-    /// última publicada al apagar; contar «encendida» en cada cambio.
+    /// Roturas que atrapa: no retirar la pista al apagar (los demás verían
+    /// tu última imagen congelada); contestar antes de publicar; no contar
+    /// que se encendió o que se apagó.
     #[tokio::test]
-    async fn a_new_size_unpublishes_the_old_track_first() {
-        let changes = vec![Change::Source("720p", (1280, 720)), Change::Source("480p", (640, 480)), Change::Stopped(None)];
-        let (log, started, told) = play(FakeRoom::default(), changes).await;
-        assert_eq!(log, ["publish 720p", "unpublish 720p", "publish 480p", "unpublish 480p"]);
+    async fn publishing_and_stopping() {
+        let (log, started, told) = play(FakeRoom::default(), vec![Change::Publish("720p", (1280, 720)), Change::Stop(None)]).await;
+        assert_eq!(log, ["publish 720p", "unpublish 720p"]);
         assert_eq!(started, Ok(()));
         assert_eq!(told, [Lifecycle::On, Lifecycle::Off(None)]);
     }
@@ -341,18 +392,18 @@ mod tests {
     /// decir que falló algo que apagaste tú.
     #[tokio::test]
     async fn failures_before_and_after_being_seen() {
-        let (_, started, told) = play(FakeRoom::default(), vec![Change::Stopped(Some(VoiceError::CameraBusy))]).await;
+        let (_, started, told) = play(FakeRoom::default(), vec![Change::Stop(Some(VoiceError::CameraBusy))]).await;
         assert_eq!((started, told), (Err(VoiceError::CameraBusy), vec![]));
 
         let refusing = FakeRoom { refuse: true, ..FakeRoom::default() };
-        let (_, started, _) = play(refusing, vec![Change::Source("720p", (1280, 720))]).await;
+        let (_, started, _) = play(refusing, vec![Change::Publish("720p", (1280, 720))]).await;
         assert_eq!(started.map_err(|e| e.label()), Err("voice-publish"));
 
-        let (log, started, told) = play(FakeRoom::default(), vec![Change::Source("720p", (1280, 720)), Change::Stopped(Some(VoiceError::CameraNoFrames))]).await;
+        let (log, started, told) = play(FakeRoom::default(), vec![Change::Publish("720p", (1280, 720)), Change::Stop(Some(VoiceError::CameraNoFrames))]).await;
         assert_eq!((started, told), (Ok(()), vec![Lifecycle::On, Lifecycle::Off(Some(VoiceError::CameraNoFrames))]));
         assert_eq!(log.last().unwrap(), "unpublish 720p");
 
-        let (_, started, told) = play(FakeRoom::default(), vec![Change::Stopped(None)]).await;
+        let (_, started, told) = play(FakeRoom::default(), vec![Change::Stop(None)]).await;
         assert_eq!((started, told), (Ok(()), vec![]));
     }
 
@@ -364,7 +415,7 @@ mod tests {
     /// que se apagó.
     #[tokio::test]
     async fn a_capture_that_vanishes_is_unpublished() {
-        let (log, _, told) = play(FakeRoom::default(), vec![Change::Source("720p", (1280, 720))]).await;
+        let (log, _, told) = play(FakeRoom::default(), vec![Change::Publish("720p", (1280, 720))]).await;
         assert_eq!(log, ["publish 720p", "unpublish 720p"]);
         assert_eq!(told, [Lifecycle::On, Lifecycle::Off(Some(VoiceError::CameraNoFrames))]);
     }
@@ -392,14 +443,12 @@ mod tests {
     /// Una fuente de mentira que cuenta lo que recibe.
     #[derive(Clone)]
     struct CountingSink {
-        dims: (u32, u32),
         captured: Captured,
     }
 
     impl FrameSink for CountingSink {
         fn capture(&self, buffer: &I420Buffer) {
-            assert_eq!((buffer.width(), buffer.height()), self.dims, "un fotograma a una fuente de otras medidas");
-            self.captured.lock().unwrap().push(self.dims);
+            self.captured.lock().unwrap().push((buffer.width(), buffer.height()));
         }
     }
 
@@ -410,17 +459,18 @@ mod tests {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let shared = captured.clone();
         let preview = Preview { feeds: feeds.clone(), feed: feeds.open("u-yo", VideoSource::Camera), kind: VideoSource::Camera };
-        (Outlet::new(tx, move |dims| CountingSink { dims, captured: shared.clone() }, preview), rx, captured)
+        (Outlet::new(tx, move |_| CountingSink { captured: shared }, preview), rx, captured)
     }
 
     /// Con la sala minimizada no se convierte tu vista previa, pero la
-    /// captura sigue entregando a lo que se publica; y una fuente nueva sólo
-    /// cuando cambian las medidas.
+    /// captura sigue entregando a lo que se publica; y un tamaño nuevo va a
+    /// la misma fuente, sin publicar otra.
     ///
     /// Roturas que atrapa: dejar de publicar al minimizar (los demás te
     /// pierden); seguir convirtiendo la vista previa sin nadie mirando;
-    /// pedir una fuente (una pista nueva) en cada fotograma; mandar el
-    /// fotograma nuevo a la fuente vieja.
+    /// publicar una pista nueva en cada fotograma o en cada cambio de tamaño
+    /// (una ventana que se redimensiona sería una pista nueva para todos y
+    /// para la grabación); perder el fotograma de otro tamaño.
     #[test]
     fn minimized_stops_the_preview_but_not_the_publishing() {
         let feeds = VideoFeeds::default();
@@ -436,13 +486,14 @@ mod tests {
         assert_eq!(captured.lock().unwrap().len(), 3, "pero se sigue publicando");
 
         assert!(outlet.deliver(&I420Buffer::new(2, 2)));
+        assert_eq!(captured.lock().unwrap().last(), Some(&(2, 2)), "el tamaño nuevo, a la misma fuente");
         let sources: Vec<(u32, u32)> = std::iter::from_fn(|| changes.try_recv().ok())
             .map(|change| match change {
-                Change::Source(_, dims) => dims,
-                Change::Stopped(_) => panic!("nadie lo paró"),
+                Change::Publish(_, dims) => dims,
+                Change::Stop(_) => panic!("nadie lo paró"),
             })
             .collect();
-        assert_eq!(sources, [(4, 2), (2, 2)], "una fuente por tamaño, no por fotograma");
+        assert_eq!(sources, [(4, 2)], "una sola publicación, con las medidas del primero");
 
         drop(changes);
         assert!(!outlet.deliver(&I420Buffer::new(8, 8)), "sin nadie que publique, el hilo acaba");
