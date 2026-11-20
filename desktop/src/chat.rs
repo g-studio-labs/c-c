@@ -997,7 +997,7 @@ mod tests {
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{point, px, size, AnyWindowHandle, AppContext, Bounds, Entity, Pixels, Point, ScrollDelta, TestAppContext, WindowBounds, WindowOptions};
     use serde_json::{json, Value};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, Request, ResponseTemplate};
@@ -1048,9 +1048,37 @@ mod tests {
     /// Sirve esa conversación como el servidor de verdad: los cincuenta
     /// últimos, o los cincuenta anteriores a `before`.
     fn mount_history(server: &FakeServer, route: &str, history: &History, delay: Duration) {
+        mount_history_held(server, route, history, delay, None);
+    }
+
+    /// Retiene una respuesta hasta que la prueba la suelta. Con un plazo de
+    /// llegada, en un CI lento la respuesta se adelantaba a lo que la prueba
+    /// quería mirar antes, o la prueba no llegaba a mirarlo a tiempo. El servidor tiene un solo hilo: mientras retiene,
+    /// no contesta nada más.
+    #[derive(Clone, Default)]
+    struct Gate(Arc<(Mutex<bool>, Condvar)>);
+
+    impl Gate {
+        fn open(&self) {
+            *self.0.0.lock().unwrap() = true;
+            self.0.1.notify_all();
+        }
+
+        fn wait(&self) {
+            let (open, opened) = &*self.0;
+            // Una prueba que se rompe antes de soltarla no se queda colgada.
+            let _ = opened.wait_timeout_while(open.lock().unwrap(), Duration::from_secs(10), |open| !*open).unwrap();
+        }
+    }
+
+    /// Como `mount_history`, con la página anterior retenida por `older`.
+    fn mount_history_held(server: &FakeServer, route: &str, history: &History, delay: Duration, older: Option<Gate>) {
         let history = history.clone();
         server.mount(get(route).respond_with(move |request: &Request| {
             let before = request.url.query_pairs().find(|(name, _)| name == "before").map(|(_, value)| value.to_string());
+            if let (Some(gate), Some(_)) = (&older, &before) {
+                gate.wait();
+            }
             let all = history.lock().unwrap().clone();
             let visible: Vec<Value> = all.into_iter().filter(|message| before.as_deref().is_none_or(|before| message["createdAt"].as_str().unwrap() < before)).collect();
             ok(json!(visible[visible.len().saturating_sub(50)..].to_vec())).set_delay(delay)
@@ -1520,7 +1548,8 @@ mod tests {
     fn the_older_page_lands_above_without_moving_what_is_read(cx: &mut TestAppContext) {
         let server = server();
         let talk = history(numbered(0..70));
-        mount_history(&server, CHAT_A, &talk, Duration::from_millis(150));
+        let older = Gate::default();
+        mount_history_held(&server, CHAT_A, &talk, Duration::ZERO, Some(older.clone()));
         let (window, _) = open(&server, cx);
         enter(window, channel("a"), cx);
         wait_until(cx, "se abre por el final", |cx| on_screen(window, "thread-line-m069", cx));
@@ -1542,8 +1571,9 @@ mod tests {
         scroll_up(window, 4000., cx);
         assert!(on_screen(window, "thread-line-m020", cx), "no se llegó arriba");
         let (row, at) = reading(window, cx);
-        wait_until(cx, "se ve que llega la página anterior", |cx| on_screen(window, "thread-older-loading", cx) || loaded(cx) == 70);
+        wait_until(cx, "se ve que llega la página anterior", |cx| on_screen(window, "thread-older-loading", cx));
         assert_eq!(top(window, &format!("thread-line-{row}"), cx), at, "pedir la página movió lo que se lee");
+        older.open();
         wait_until(cx, "llega la página anterior", |cx| loaded(cx) == 70);
         assert_eq!(top(window, &format!("thread-line-{row}"), cx), at, "la página anterior empujó lo que se lee");
         assert!(!on_screen(window, "thread-line-m069", cx), "se volvió al final");
@@ -2231,7 +2261,17 @@ mod tests {
         let mut first = line("m1", "u2", "Luis Mora", "hola", 5, 1);
         first["reactions"] = json!([{ "emoji": "👍", "count": 1, "mine": true, "names": ["Ana Ruiz"] }]);
         mount_history(&server, CHAT_A, &history(vec![first]), Duration::ZERO);
-        server.mount(Mock::given(method("POST")).and(path("/api/v1/task-spaces/a/chat/m1/reactions")).respond_with(ok(json!(null)).set_delay(Duration::from_millis(400))).with_priority(1));
+        let answer = Gate::default();
+        let held = answer.clone();
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path("/api/v1/task-spaces/a/chat/m1/reactions"))
+                .respond_with(move |_: &Request| {
+                    held.wait();
+                    ok(json!(null))
+                })
+                .with_priority(1),
+        );
         let (window, _) = open(&server, cx);
         enter(window, channel("a"), cx);
         wait_until(cx, "se pinta", |cx| on_screen(window, "thread-line-m1", cx));
@@ -2241,11 +2281,10 @@ mod tests {
         assert!(on_screen(window, "thread-picker-m1", cx));
         // La tercera del juego: 😂.
         click(window, "thread-pick-m1-2", cx);
-        // Antes de que el servidor conteste (tarda 400 ms) ya se ve.
-        let started = std::time::Instant::now();
-        wait_until(cx, "se ve en el acto", |cx| label(window, "thread-reaction-m1-1", cx) == "😂 1");
-        assert!(started.elapsed() < Duration::from_millis(400), "se esperó al servidor para verla");
+        // Con el servidor sin contestar ya se ve.
+        wait_until(cx, "se ve sin esperar al servidor", |cx| label(window, "thread-reaction-m1-1", cx) == "😂 1");
         assert!(!on_screen(window, "thread-picker-m1", cx));
+        answer.open();
         wait_until(cx, "se manda", |_| !reactions(&server).is_empty());
 
         // La propia, pulsada, se quita.
