@@ -40,6 +40,56 @@ pub(crate) fn as_devices(names: &[String], chosen: Option<&str>) -> Vec<Device> 
     names.iter().filter(|name| seen.insert(name.as_str())).map(|name| Device { id: name.clone(), name: name.clone(), current: Some(name) == current.as_ref() }).collect()
 }
 
+/// La cámara puesta y de qué orden es. Cada encender o apagar es un turno
+/// nuevo, y sólo el último puede dejar una cámara puesta: encender espera a
+/// que se suelte la anterior, y en esa espera pueden llegar otras órdenes.
+pub(crate) struct CameraSlot<H> {
+    turn: u64,
+    current: Option<H>,
+}
+
+impl<H> Default for CameraSlot<H> {
+    fn default() -> Self {
+        CameraSlot { turn: 0, current: None }
+    }
+}
+
+impl<H> CameraSlot<H> {
+    /// Una orden nueva: deja viejas las anteriores y devuelve la cámara que
+    /// estaba puesta, para soltarla.
+    pub(crate) fn begin(&mut self) -> (u64, Option<H>) {
+        self.turn += 1;
+        (self.turn, self.current.take())
+    }
+
+    pub(crate) fn is_current(&self, turn: u64) -> bool {
+        self.turn == turn
+    }
+
+    /// Pone la cámara de ese turno. Si ya llegó otra orden, se la devuelve
+    /// para que quien llama la suelte.
+    pub(crate) fn attach(&mut self, turn: u64, handle: H) -> Result<(), H> {
+        if !self.is_current(turn) {
+            return Err(handle);
+        }
+        self.current = Some(handle);
+        Ok(())
+    }
+
+    /// La de ese turno falló: se quita, si sigue siendo la puesta.
+    pub(crate) fn fail(&mut self, turn: u64) -> Option<H> {
+        if self.is_current(turn) { self.current.take() } else { None }
+    }
+
+    pub(crate) fn is_on(&self) -> bool {
+        self.current.is_some()
+    }
+
+    pub(crate) fn stop(&mut self) -> Option<H> {
+        self.begin().1
+    }
+}
+
 /// Las cámaras que hay. Barato: no abre ninguna.
 pub(crate) fn list(chosen: Option<&str>) -> Vec<Device> {
     as_devices(&native::names(), chosen)
@@ -202,6 +252,41 @@ mod tests {
     /// que no es); quedarse sin cámara si la elegida no está; probar sólo el
     /// primer nodo con ese nombre (en Linux, el de metadatos, que no
     /// captura); enseñar la misma webcam dos veces.
+    /// Apagar, encender y apagar en el rato en que se suelta la cámara
+    /// anterior deja la cámara apagada: el encender que esperaba ya es viejo.
+    ///
+    /// Roturas que atrapa: un turno que no se mira (la cámara se queda
+    /// encendida tras el último apagar); un encender viejo que pisa al
+    /// nuevo; un fallo viejo que quita la cámara que está bien puesta.
+    #[test]
+    fn only_the_last_order_leaves_a_camera_on() {
+        let mut slot: CameraSlot<&str> = CameraSlot::default();
+        let (first, _) = slot.begin();
+        slot.attach(first, "vieja").unwrap();
+
+        let (_off, released) = slot.begin();
+        assert_eq!(released, Some("vieja"));
+        let (on, _) = slot.begin();
+        let (_off_again, _) = slot.begin();
+        assert!(!slot.is_current(on), "el encender que esperaba ya no es el último");
+        assert_eq!(slot.attach(on, "tarde"), Err("tarde"));
+        assert!(!slot.is_on());
+
+        let (late, _) = slot.begin();
+        let (latest, _) = slot.begin();
+        slot.attach(latest, "nueva").unwrap();
+        assert_eq!(slot.attach(late, "otra"), Err("otra"), "un encender viejo no pisa al nuevo");
+        assert_eq!(slot.fail(late), None, "un fallo viejo no quita la buena");
+        assert!(slot.is_on());
+        assert_eq!(slot.fail(latest), Some("nueva"));
+        assert!(!slot.is_on());
+
+        let (again, _) = slot.begin();
+        slot.attach(again, "otra vez").unwrap();
+        assert_eq!(slot.stop(), Some("otra vez"));
+        assert_eq!(slot.attach(again, "tarde"), Err("tarde"), "colgar también deja viejo el turno");
+    }
+
     #[test]
     fn the_camera_is_found_by_name_whatever_the_order() {
         let before = names(&["Integrated", "Integrated", "Logitech C920", "Logitech C920"]);

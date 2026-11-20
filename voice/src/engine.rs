@@ -24,7 +24,7 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::camera;
+use crate::camera::{self, CameraSlot};
 use crate::capture::{self, CaptureCtx, InputFormat, MicState, ThreadGuard};
 use crate::devices::{self, DeviceKind, Devices};
 use crate::dsp::{to_mono, CHANNELS, SAMPLE_RATE};
@@ -226,7 +226,7 @@ impl Engine {
             tasks: Mutex::new(Vec::new()),
             video: video.clone(),
             sink: sink.clone(),
-            camera: Mutex::new(None),
+            camera: Mutex::new(CameraSlot::default()),
             screen: Mutex::new(ShareSlot::default()),
         });
         *self.shared.current.lock().unwrap() = Arc::downgrade(&inner);
@@ -290,7 +290,7 @@ struct CallInner {
     /// El vídeo de los demás (`video.rs`) y tu vista previa.
     video: VideoFeeds,
     sink: EventSink,
-    camera: Mutex<Option<Capture>>,
+    camera: Mutex<CameraSlot<Capture>>,
     screen: Mutex<ShareSlot<Capture>>,
 }
 
@@ -358,7 +358,7 @@ impl Call {
     /// vuelve `Ok` sin publicar nada. Encender con la cámara ya encendida la
     /// reabre (cambiar de cámara). Apagar no espera al hilo.
     pub async fn set_camera(&self, on: bool) -> Result<(), VoiceError> {
-        let previous = self.inner.camera.lock().unwrap().take();
+        let (turn, previous) = self.inner.camera.lock().unwrap().begin();
         let releasing = previous.as_ref().map(Capture::alive_flag);
         drop(previous);
         if !on || self.inner.left.load(Ordering::SeqCst) {
@@ -368,22 +368,21 @@ impl Call {
             wait_released(&alive).await?;
         }
         let inner = &self.inner;
+        if !inner.camera.lock().unwrap().is_current(turn) {
+            return Ok(());
+        }
         let publishing = publish::spawn(&inner.handle, Arc::downgrade(&inner.room), inner.identity.clone(), VideoSource::Camera, inner.video.clone(), inner.sink.clone());
         let (capture, started) = camera::start(inner.handle.clone(), inner.engine.chosen(DeviceKind::Camera), publishing)?;
-        let alive = capture.alive_flag();
-        *inner.camera.lock().unwrap() = Some(capture);
+        if inner.camera.lock().unwrap().attach(turn, capture).is_err() {
+            return Ok(());
+        }
         let result = match tokio::time::timeout(CAMERA_START, started).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(VoiceError::CameraFailed("quien publicaba se fue sin contestar".into())),
             Err(_) => Err(VoiceError::CameraNoFrames),
         };
         if result.is_err() {
-            // La que falló, si sigue siendo la puesta: otra llamada pudo
-            // encender ya otra.
-            let mut slot = inner.camera.lock().unwrap();
-            if slot.as_ref().is_some_and(|c| Arc::ptr_eq(&c.alive_flag(), &alive)) {
-                slot.take();
-            }
+            inner.camera.lock().unwrap().fail(turn);
         }
         result
     }
@@ -437,7 +436,7 @@ impl Call {
     }
 
     fn is_camera_on(&self) -> bool {
-        self.inner.camera.lock().unwrap().is_some()
+        self.inner.camera.lock().unwrap().is_on()
     }
 
     /// Colgar. Idempotente: colgar dos veces no es un error (pasa de verdad,
@@ -487,7 +486,7 @@ impl CallInner {
             task.abort();
         }
         self.capture.lock().unwrap().take();
-        self.camera.lock().unwrap().take();
+        self.camera.lock().unwrap().stop();
         self.screen.lock().unwrap().stop();
         self.playback.close();
         // La última cara de esta sala no se enseña en la siguiente.
