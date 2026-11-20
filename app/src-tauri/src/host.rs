@@ -158,15 +158,17 @@ mod tests {
 
     /// Nadie lanza un programa del sistema por fuera de `host`, ni aquí ni en
     /// el crate del MCP (que corre dentro de la misma AppImage con
-    /// `cac --mcp`). Rotura que detecta: un `Command::new("programa")` nuevo,
-    /// que heredaría el entorno de la imagen y moriría igual que `xdg-open`.
-    /// La misma prueba, con el mismo nombre, vive en `mcp/src/host.rs`: aquella
-    /// es la que corre en el CI.
+    /// `cac --mcp`), ni en `ops/` (SSH y llavero, que la app enlaza). Rotura
+    /// que detecta: un `Command::new("programa")` nuevo, que heredaría el
+    /// entorno de la imagen y moriría igual que `xdg-open`.
+    /// La misma prueba, con el mismo nombre, vive en `mcp/src/host.rs`, y la de
+    /// `ops/` en su `lib.rs`: aquéllas son las que corren en el CI.
     #[test]
     fn every_system_program_is_launched_through_here() {
         let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut bad = cac_mcp::host::unclean_launches(&here.join("src"));
         bad.extend(cac_mcp::host::unclean_launches(&here.join("../../mcp/src")));
+        bad.extend(cac_mcp::host::unclean_launches(&here.join("../../ops/src")));
         assert!(bad.is_empty(), "lanzan un programa sin limpiar el entorno: {bad:#?}");
     }
 

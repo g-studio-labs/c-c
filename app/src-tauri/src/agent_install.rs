@@ -213,7 +213,7 @@ pub fn install_swarm_manage_agent(install: AgentInstall) -> Result<SshOutput, St
     // El token de GitHub de este servidor, si se guardó (la pantalla de
     // secretos del stack lo usa ya): con él el agente puede bajar las imágenes
     // privadas de ghcr. Sin él, sólo públicas.
-    let registry = crate::keychain_get(&install.server_id)
+    let registry = crate::keychain::github_token(&install.server_id)
         .ok()
         .map(|token| registry_auth_json(&token));
     let script = install_script(&install, registry.as_deref())?;
@@ -241,7 +241,7 @@ pub fn install_swarm_manage_agent(install: AgentInstall) -> Result<SshOutput, St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ssh_base_args;
+    use cac_ops::ssh::ssh_base_args;
 
     fn install() -> AgentInstall {
         AgentInstall {

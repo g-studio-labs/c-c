@@ -1,0 +1,35 @@
+[package]
+name = "cac-ops"
+version = "0.1.0"
+license = "AGPL-3.0-or-later"
+description = "Lo que Plataforma hace en la máquina local (SSH, llavero), sin interfaz, para las dos apps de cac"
+edition = "2021"
+publish = false
+
+[lib]
+name = "cac_ops"
+
+# Aquí no entra nada que pinte: ni Tauri, ni GTK, ni WebKit, ni GPUI. Lo usan
+# la app de Tauri y la nativa, y ninguna de las dos tiene que arrastrarle la
+# interfaz de la otra. Guardián: `tests/no_ui.rs`.
+#
+# Sin workspace a propósito, como `core/`, `mcp/` y `desktop/`: cada crate con
+# su `target/` y su `Cargo.lock`.
+[dependencies]
+# Lanzar `ssh`/`ssh-add` sin el entorno de la AppImage (`cac_mcp::host`) y
+# encontrar el agente SSH (`cac_mcp::ssh_agent`). Viven en el MCP porque su
+# binario los necesita sin ninguna app; duplicarlos aquí sería tener dos
+# fuentes de algo que ya mordió tres veces. Por ruta, como la app.
+cac-mcp = { path = "../mcp" }
+# Sin features, keyring 3 no trae ningún llavero y cae en uno de mentira en
+# memoria: `set_password` dice que sí y no guarda nada, y el siguiente
+# `Entry` ya no lo encuentra. Así estuvieron la llave SSH de cada servidor, su
+# token de GitHub y su referencia de 1Password hasta el 18-oct-2026 («como que
+# no se guarda»). En Linux, el Secret Service (gnome-keyring, KWallet) por
+# zbus, que es Rust puro: nada de libdbus que instalar en el CI; con async-io
+# y no tokio, porque keyring bloquea por dentro y desde un hilo de tokio eso
+# revienta. Guardián: `keychain::tests::the_keychain_is_a_real_one`.
+keyring = { version = "3", features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
+# Las apps devuelven estos tipos tal cual a su interfaz (Tauri los serializa
+# para la página).
+serde = { version = "1", features = ["derive"] }

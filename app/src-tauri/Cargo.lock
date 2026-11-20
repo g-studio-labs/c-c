@@ -126,6 +126,7 @@ dependencies = [
  "block2",
  "cac-core",
  "cac-mcp",
+ "cac-ops",
  "cpal",
  "crypto_box",
  "cuid2",
@@ -136,7 +137,6 @@ dependencies = [
  "image",
  "jpeg-encoder",
  "jsonwebtoken 9.3.1",
- "keyring",
  "livekit",
  "log",
  "md-5",
@@ -737,6 +737,15 @@ dependencies = [
  "tokio",
  "uuid",
  "webp",
+]
+
+[[package]]
+name = "cac-ops"
+version = "0.1.0"
+dependencies = [
+ "cac-mcp",
+ "keyring",
+ "serde",
 ]
 
 [[package]]

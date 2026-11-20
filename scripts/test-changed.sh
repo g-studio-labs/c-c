@@ -10,7 +10,8 @@
 # Lo que depende de qué (las rutas de los workflows dicen lo mismo para el
 # CI; si cambia una, cambia la otra):
 #   core/                → core, desktop y el lado Rust de la app (tauri)
-#   mcp/                 → mcp, desktop y tauri
+#   mcp/                 → mcp, ops (que lo usa por ruta), desktop y tauri
+#   ops/                 → ops y tauri, que lo envuelve
 #   desktop/             → desktop
 #   voice/               → voice (el motor de llamadas) y desktop, que lo enlaza
 #   app/src/locales/     → app, y además core y desktop: el core incrusta
@@ -82,7 +83,8 @@ for file in "${files[@]}"; do
       ;;
     desktop/*) desktop_modules+=("*") ;;
     core/*) suites[core]=1; suites[desktop]=1; suites[tauri]=1; only_desktop=0 ;;
-    mcp/*) suites[mcp]=1; suites[desktop]=1; suites[tauri]=1; only_desktop=0 ;;
+    mcp/*) suites[mcp]=1; suites[ops]=1; suites[desktop]=1; suites[tauri]=1; only_desktop=0 ;;
+    ops/*) suites[ops]=1; suites[tauri]=1; only_desktop=0 ;;
     voice/*) suites[voice]=1; suites[desktop]=1; only_desktop=0 ;;
     app/src/locales/*) suites[app]=1; suites[core]=1; suites[desktop]=1; only_desktop=0 ;;
     app/src-tauri/*) suites[tauri]=1; suites[mcp]=1; only_desktop=0 ;;
@@ -110,7 +112,7 @@ if [[ $quick == 1 && $only_desktop == 1 && ${#desktop_modules[@]} -gt 0 ]]; then
 fi
 
 # Del más rápido al más lento: lo que falla antes, se ve antes.
-order=(hooks domain core voice mcp app tauri backend desktop)
+order=(hooks domain core voice mcp ops app tauri backend desktop)
 commands=()
 for suite in "${order[@]}"; do
   [[ -z "${suites[$suite]:-}" ]] && continue
@@ -120,6 +122,7 @@ for suite in "${order[@]}"; do
     core) commands+=("cd core && cargo test --locked && cargo check --locked --features uniffi") ;;
     voice) commands+=("cd voice && cargo test --locked") ;;
     mcp) commands+=("cd mcp && cargo test --locked") ;;
+    ops) commands+=("cd ops && cargo test --locked") ;;
     app) commands+=("cd app && npx tsc --noEmit && bun run test") ;;
     tauri) commands+=("cd app/src-tauri && cargo check --locked") ;;
     backend) commands+=("cd backend && go build ./... && go vet ./... && go test ./...") ;;

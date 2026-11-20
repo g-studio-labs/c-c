@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
  * cada caso dice qué dependencia guarda.
  *
  * Mutantes: el core sin el escritorio (que lo usa) o sin el lado Rust de la
- * app; un catálogo que no recompila el core, que lo incrusta; acotar el
+ * app; ops sin la app de Tauri, que lo envuelve, o el mcp sin ops, que lo usa; un catálogo que no recompila el core, que lo incrusta; acotar el
  * escritorio sin `--quick`, o acotarlo cuando se tocó también el core;
  * correr algo por tocar un `.md`.
  */
@@ -60,12 +60,18 @@ describe("test-changed.sh", () => {
     expect(quick("desktop/src/chat.rs", "desktop/assets/emoji/2764.png")).toEqual(["cd desktop && cargo test --locked"]);
   });
 
-  it("el mcp arrastra al escritorio y a la app, que lo enlazan", () => {
+  it("el mcp arrastra a ops, al escritorio y a la app, que lo enlazan", () => {
     expect(plan("mcp/src/main.rs")).toEqual([
       "cd mcp && cargo test --locked",
+      "cd ops && cargo test --locked",
       "cd app/src-tauri && cargo check --locked",
       "cd desktop && cargo test --locked",
     ]);
+  });
+
+  it("ops arrastra a la app de Tauri, que lo envuelve", () => {
+    expect(plan("ops/src/ssh.rs")).toEqual(["cd ops && cargo test --locked", "cd app/src-tauri && cargo check --locked"]);
+    expect(quick("ops/src/ssh.rs", "desktop/src/chat.rs")).toContain("cd desktop && cargo test --locked");
   });
 
   it("el motor de voz arrastra al escritorio, que lo enlaza", () => {

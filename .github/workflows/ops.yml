@@ -1,0 +1,49 @@
+name: ops
+
+# Las pruebas de `ops/` (`cac-ops`): lo que Plataforma hace en la máquina
+# local —SSH, el llavero— sin interfaz, para la app de Tauri y la nativa.
+#
+# Hasta command-and-control-450 vivía dentro de la app de Tauri
+# (`app/src-tauri/src/lib.rs`) y sus pruebas no corrían en ningún CI:
+# compilarlas pedía WebKit y libwebrtc. Fuera de la app no enlaza ninguna
+# interfaz —lo guarda `tests/no_ui.rs`—, así que corre en un runner limpio.
+#
+# Sólo prueba. No publica nada: el crate entra en las apps por ruta.
+#
+# En cualquier rama, como `mcp.yml`. Y no sólo con `ops/`: depende por ruta
+# de `mcp/` (`cac_mcp::host` para lanzar `ssh` sin el entorno de la AppImage,
+# `cac_mcp::ssh_agent` para encontrar el agente), y un cambio ahí puede
+# romperlo.
+on:
+  push:
+    paths:
+      - "ops/**"
+      - "mcp/**"
+      - ".github/workflows/ops.yml"
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        working-directory: ops
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Sin bibliotecas del sistema que instalar, a propósito: si un día hace
+      # falta añadir aquí un `apt-get install libgtk…`, es que a `ops` le ha
+      # entrado una interfaz. El llavero de Linux va por zbus (Rust puro): no
+      # pide libdbus.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./ops -> target"
+
+      - name: Test
+        run: cargo test --locked

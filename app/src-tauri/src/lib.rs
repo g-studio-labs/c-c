@@ -39,7 +39,7 @@ pub fn run_provision_cli(args: Vec<String>) -> i32 {
 // de Tauri. Aquí entra con los nombres que ya tenía.
 use cac_mcp::files::{free_name, safe_file_name};
 use cac_mcp::op::read as op_read;
-use cac_mcp::ssh_agent::{agent_candidates, probe_agent, resolve_agent_socket, AgentProbe};
+use cac_mcp::ssh_agent::resolve_agent_socket;
 use cac_mcp::{dropped, image};
 
 /// Absolute path of the running executable, so the "Connect Claude Code" modal
@@ -56,20 +56,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-const KEYCHAIN_SERVICE: &str = "cac-vps";
 const GITHUB_API: &str = "https://api.github.com";
-
-fn token_account(server_id: &str) -> String {
-    format!("github-token:{server_id}")
-}
-
-fn ref_account(server_id: &str) -> String {
-    format!("op-reference:{server_id}")
-}
-
-fn ssh_key_account(server_id: &str) -> String {
-    format!("ssh-key-ref:{server_id}")
-}
 
 // In-memory cache: survives the process lifetime, avoids repeated keychain reads
 // from async contexts where some Linux keyring backends fail.
@@ -91,48 +78,6 @@ impl TokenCache {
             m.remove(server_id);
         }
     }
-}
-
-fn keychain_get(server_id: &str) -> Result<String, String> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, &token_account(server_id))
-        .map_err(|e| e.to_string())?
-        .get_password()
-        .map_err(|e| e.to_string())
-}
-
-fn keychain_set(server_id: &str, token: &str) -> Result<(), String> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, &token_account(server_id))
-        .map_err(|e| e.to_string())?
-        .set_password(token)
-        .map_err(|e| e.to_string())
-}
-
-fn keychain_delete(server_id: &str) -> Result<(), String> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, &token_account(server_id))
-        .map_err(|e| e.to_string())?
-        .delete_credential()
-        .map_err(|e| e.to_string())
-}
-
-fn keychain_get_ref(server_id: &str) -> Result<String, String> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, &ref_account(server_id))
-        .map_err(|e| e.to_string())?
-        .get_password()
-        .map_err(|e| e.to_string())
-}
-
-fn keychain_set_ref(server_id: &str, reference: &str) -> Result<(), String> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, &ref_account(server_id))
-        .map_err(|e| e.to_string())?
-        .set_password(reference)
-        .map_err(|e| e.to_string())
-}
-
-fn keychain_delete_ref(server_id: &str) -> Result<(), String> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, &ref_account(server_id))
-        .map_err(|e| e.to_string())?
-        .delete_credential()
-        .map_err(|e| e.to_string())
 }
 
 /// Para la app: si esta copia quedó vieja tras una actualización. Una
@@ -351,375 +296,38 @@ async fn op_item_create(
         .collect())
 }
 
-// ─── SSH agent keys ───────────────────────────────────────────────────────────
-
-// ─── SSH agent discovery ─────────────────────────────────────────────────────
+// ─── SSH y llavero ────────────────────────────────────────────────────────────
 //
-// A desktop-launched app does NOT inherit the shell environment, so
-// `SSH_AUTH_SOCK` is usually missing and every `ssh`/`ssh-add` call fails with
-// "Could not open a connection to your authentication agent" — even though the
-// same commands work fine in a terminal. So we locate the socket ourselves and
-// hand it to the child process explicitly.
+// Lo que se hace en la máquina local vive en `ops/` (`cac_ops`), sin Tauri,
+// para que lo use también la app nativa. Aquí quedan los comandos, como una
+// capa fina, y los nombres que el resto del crate ya usaba.
 
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct SshAgent {
-    /// Socket path (or Windows named pipe) to export as SSH_AUTH_SOCK.
-    pub socket: String,
-    /// Human label: which agent this is and where we found it.
-    pub label: String,
-    /// How many identities it holds right now.
-    pub key_count: usize,
-    /// "ok" (holds keys) · "empty" (answers, no keys — usually locked) ·
-    /// "refused" (socket file is there but nothing is listening).
-    pub status: String,
-}
+pub(crate) use cac_ops::ssh::{
+    ephemeral_suffix, ssh_run_input, stage_public_key, EphemeralIdentity, SshOutput,
+};
+use cac_ops::keychain;
+pub(crate) use cac_ops::keychain::ssh_key as stored_ssh_key;
 
-/// Agents the machine actually has, so the UI can let the user choose (a laptop
-/// with both 1Password and GNOME Keyring running has two, holding different
-/// keys). Only reachable ones are returned.
+/// Agents the machine actually has (ver `cac_ops::ssh::list_ssh_agents`).
 #[tauri::command]
-fn list_ssh_agents() -> Vec<SshAgent> {
-    agent_candidates()
-        .into_iter()
-        .filter_map(|(socket, label)| match probe_agent(&socket) {
-            AgentProbe::Keys(n) => Some(SshAgent {
-                socket,
-                label,
-                key_count: n,
-                status: if n > 0 { "ok".into() } else { "empty".into() },
-            }),
-            // Surfaced on purpose: "1Password is installed but not answering" is
-            // something the user can fix, unlike a path that was never there.
-            AgentProbe::Refused => Some(SshAgent {
-                socket,
-                label,
-                key_count: 0,
-                status: "refused".into(),
-            }),
-            AgentProbe::Missing => None,
-        })
-        .collect()
+fn list_ssh_agents() -> Vec<cac_ops::ssh::SshAgent> {
+    cac_ops::ssh::list_ssh_agents()
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SshKeyItem {
-    /// Full public key line, e.g. "ssh-ed25519 AAAA… title".
-    pub public_key: String,
-    /// The agent's comment — for 1Password this is the item title.
-    pub title: String,
-    pub fingerprint: String,
-    pub key_type: String,
-}
-
-fn run_ssh_add(flag: &str, socket: Option<&str>) -> Result<String, String> {
-
-    let mut cmd = crate::host::command("ssh-add");
-    cmd.arg(flag);
-    // Explicit socket: the inherited environment can't be trusted in a
-    // desktop-launched app (see agent discovery above).
-    if let Some(sock) = socket {
-        cmd.env("SSH_AUTH_SOCK", sock);
-    }
-    let output = cmd.output().map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => "`ssh-add` not found on PATH.".to_string(),
-        _ => format!("Failed to execute ssh-add: {e}"),
-    })?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        // ssh-add exits non-zero when the agent holds nothing or is unreachable.
-        if stdout.contains("no identities") || stderr.contains("no identities") {
-            return Ok(String::new());
-        }
-        return Err(if stderr.is_empty() {
-            no_agent_message()
-        } else if stderr.contains("Could not open a connection") {
-            // The generic ssh-add wording is a dead end for the user: say which
-            // sockets were tried and what to do about it.
-            format!("{stderr}\n\n{}", no_agent_message())
-        } else {
-            stderr
-        });
-    }
-    Ok(stdout)
-}
-
-/// What to tell the user when no agent answers. Lists the sockets we tried,
-/// because "could not open a connection" alone gives them nothing to act on.
-fn no_agent_message() -> String {
-    let mut refused = Vec::new();
-    let mut tried = Vec::new();
-    for (sock, label) in agent_candidates() {
-        match probe_agent(&sock) {
-            AgentProbe::Refused => refused.push(format!("{label} ({sock})")),
-            _ => tried.push(format!("  • {sock}  ({label})")),
-        }
-    }
-    if !refused.is_empty() {
-        return format!(
-            "Found an agent socket but nothing is listening on it:\n  • {}\n\n\
-             That usually means the app that owns it isn't running — for 1Password, \
-             open it, unlock it, and check Settings → Developer → \"Use the SSH agent\".",
-            refused.join("\n  • ")
-        );
-    }
-    format!(
-        "No SSH agent answered. Tried:\n{}\n\nIf you use 1Password, turn on \
-         Settings → Developer → \"Use the SSH agent\", then reopen this dialog.",
-        tried.join("\n")
-    )
-}
-
-/// Lists the keys the SSH agent currently holds — for a 1Password agent, that's
-/// the keys from the enabled vaults, with the item title as the comment.
-///
-/// This deliberately does NOT shell out to `op`: the 1Password CLI's desktop-app
-/// integration validates the process that invokes it and refuses when launched
-/// from a GUI app ("connecting to desktop app: connection reset"), while the
-/// agent socket works fine from the same context — it's what ssh already uses.
+/// Las llaves que tiene el agente (ver `cac_ops::ssh::list_agent_ssh_keys`).
 #[tauri::command]
-fn list_agent_ssh_keys(socket: Option<String>) -> Result<Vec<SshKeyItem>, String> {
-    let sock = socket
-        .filter(|s| !s.is_empty())
-        .or_else(resolve_agent_socket)
-        .ok_or_else(no_agent_message)?;
-    let listing = run_ssh_add("-L", Some(&sock))?; // public key material + comment
-    let prints = run_ssh_add("-l", Some(&sock)).unwrap_or_default(); // same order
-
-    // "256 SHA256:… comment (ED25519)" → fingerprint by position.
-    let fingerprints: Vec<String> = prints
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.split_whitespace().nth(1).unwrap_or_default().to_string())
-        .collect();
-
-    Ok(listing
-        .lines()
-        .filter(|l| l.starts_with("ssh-") || l.starts_with("ecdsa-"))
-        .enumerate()
-        .map(|(i, line)| {
-            let mut parts = line.splitn(3, ' ');
-            let key_type = parts.next().unwrap_or_default().to_string();
-            let _material = parts.next().unwrap_or_default();
-            let title = parts.next().unwrap_or("(no title)").trim().to_string();
-            SshKeyItem {
-                public_key: line.to_string(),
-                title: if title.is_empty() {
-                    "(no title)".into()
-                } else {
-                    title
-                },
-                fingerprint: fingerprints.get(i).cloned().unwrap_or_default(),
-                key_type,
-            }
-        })
-        .collect())
-}
-
-/// A public key materialized on disk only for the lifetime of one ssh call.
-/// ssh needs an `IdentityFile` path; the file holds the PUBLIC half only (the
-/// private key never leaves the agent, which does the signing) and is removed as
-/// soon as the command returns.
-pub(crate) struct EphemeralIdentity {
-    pub(crate) path: std::path::PathBuf,
-}
-
-impl Drop for EphemeralIdentity {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-pub(crate) fn stage_public_key(public_key: &str) -> Result<EphemeralIdentity, String> {
-    let key = public_key.trim();
-    if !key.starts_with("ssh-") && !key.starts_with("ecdsa-") {
-        return Err("Stored SSH identity is not a public key".into());
-    }
-
-    let mut path = std::env::temp_dir();
-    path.push(format!("cac-ssh-{}.pub", ephemeral_suffix()));
-    std::fs::write(&path, format!("{key}\n"))
-        .map_err(|e| format!("Could not stage the public key: {e}"))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-
-    Ok(EphemeralIdentity { path })
-}
-
-pub(crate) fn ephemeral_suffix() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{nanos:x}-{}", std::process::id())
+fn list_agent_ssh_keys(socket: Option<String>) -> Result<Vec<cac_ops::ssh::SshKeyItem>, String> {
+    cac_ops::ssh::list_agent_ssh_keys(socket)
 }
 
 #[tauri::command]
 fn set_server_ssh_key(server_id: String, public_key: String) -> Result<(), String> {
-    if public_key.trim().is_empty() {
-        return keyring::Entry::new(KEYCHAIN_SERVICE, &ssh_key_account(&server_id))
-            .map_err(|e| e.to_string())?
-            .delete_credential()
-            .or(Ok(()));
-    }
-    keyring::Entry::new(KEYCHAIN_SERVICE, &ssh_key_account(&server_id))
-        .map_err(|e| e.to_string())?
-        .set_password(public_key.trim())
-        .map_err(|e| e.to_string())
+    keychain::set_ssh_key(&server_id, &public_key)
 }
 
 #[tauri::command]
 fn get_server_ssh_key(server_id: String) -> Result<Option<String>, String> {
-    stored_ssh_key(&server_id)
-}
-
-/// La misma lectura, llamable desde Rust. El comando de arriba no sirve: la
-/// macro de tauri le cuelga un re-export con su nombre, y hacerlo visible al
-/// resto del crate choca con él.
-pub(crate) fn stored_ssh_key(server_id: &str) -> Result<Option<String>, String> {
-    match keyring::Entry::new(KEYCHAIN_SERVICE, &ssh_key_account(server_id))
-        .map_err(|e| e.to_string())?
-        .get_password()
-    {
-        Ok(v) => Ok(Some(v)),
-        // Sólo «no hay» es no tener llave. Un llavero bloqueado o caído se
-        // dice: tragárselo era conectar ofreciendo todas las llaves y acabar
-        // en «Too many authentication failures», que apunta a otro sitio.
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(format!("keychain: {e}")),
-    }
-}
-
-// ─── SSH agent operations ─────────────────────────────────────────────────────
-
-#[derive(Serialize)]
-pub struct SshOutput {
-    pub stdout: String,
-    pub stderr: String,
-}
-
-// Authentication is provided by the OS SSH agent (`SSH_AUTH_SOCK`, e.g. 1Password).
-// StrictHostKeyChecking=accept-new pins unknown hosts on first connect.
-//
-/// Los argumentos de `ssh`, compartidos por `ssh_run` y su variante con stdin.
-///
-/// El comando remoto es lo último y es **lo único** que viaja como argumento
-/// al otro lado: por eso lo que es secreto no va aquí sino por stdin
-/// (`ssh_run_input`), donde no lo ve `ps` de ninguna de las dos máquinas.
-pub(crate) fn ssh_base_args(
-    host: &str,
-    port: u16,
-    user: &str,
-    remote_cmd: &str,
-    identity: Option<&str>,
-) -> Vec<String> {
-    let target = format!("{user}@{host}");
-    let port_str = port.to_string();
-
-    let mut args: Vec<String> = vec![
-        "-p".into(),
-        port_str,
-        "-o".into(),
-        "BatchMode=yes".into(),
-        "-o".into(),
-        "StrictHostKeyChecking=accept-new".into(),
-        "-o".into(),
-        "ConnectTimeout=15".into(),
-    ];
-
-    // Pin a single key. An agent holding many keys (1Password vaults often do)
-    // makes ssh offer them one by one until the server's MaxAuthTries (6 by
-    // default) trips "Too many authentication failures" — before it ever reaches
-    // the right one. With the 1Password agent the identity is the **public** key
-    // file: ssh then asks the agent for just that one.
-    if let Some(id) = identity.filter(|s| !s.trim().is_empty()) {
-        args.push("-i".into());
-        args.push(id.trim().to_string());
-        args.push("-o".into());
-        args.push("IdentitiesOnly=yes".into());
-    }
-
-    args.push(target);
-    args.push(remote_cmd.to_string());
-    args
-}
-
-/// `ssh_run` con algo que escribir en el stdin del comando remoto.
-///
-/// Es el canal para los secretos: un argumento sale en `ps` de cualquier
-/// usuario de la máquina remota y queda en el historial; stdin no toca ni el
-/// disco ni la tabla de procesos. El mismo contrato que `rotate-secrets` en los
-/// servidores de RRHH.
-pub(crate) fn ssh_run_input(
-    host: &str,
-    port: u16,
-    user: &str,
-    remote_cmd: &str,
-    identity: Option<&str>,
-    input: Option<&str>,
-) -> Result<SshOutput, String> {
-    use std::io::Write;
-    use std::process::Stdio;
-
-    let args = ssh_base_args(host, port, user, remote_cmd, identity);
-    let mut cmd = crate::host::command("ssh");
-    cmd.args(&args);
-    // Same reason as ssh-add: without this the desktop-launched app has no agent
-    // and every connection fails with "Permission denied (publickey)".
-    if let Some(sock) = resolve_agent_socket() {
-        cmd.env("SSH_AUTH_SOCK", sock);
-    }
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    cmd.stdin(if input.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    });
-    let mut child = cmd.spawn().map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => "`ssh` binary not found on PATH.".to_string(),
-        _ => format!("Failed to execute ssh: {e}"),
-    })?;
-    if let Some(text) = input {
-        // Se escribe y se cierra: el otro lado lee hasta EOF.
-        let mut stdin = child.stdin.take().ok_or("ssh sin stdin")?;
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|e| format!("no se pudo escribir en ssh: {e}"))?;
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to execute ssh: {e}"))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if !output.status.success() {
-        let trimmed = stderr.trim();
-        let hint = if trimmed.contains("Too many authentication failures") {
-            " (your SSH agent offered more keys than the server allows before the right one. Pick this server's key with the key button in the servers table so cac offers only that one)"
-        } else if trimmed.contains("Permission denied") {
-            " (is your 1Password SSH agent unlocked and the key authorized on this server?)"
-        } else if trimmed.contains("Connection refused") || trimmed.contains("Connection timed out")
-        {
-            " (host unreachable or SSH port closed)"
-        } else {
-            ""
-        };
-        return Err(format!(
-            "ssh exited with status {}{}\n{}",
-            output.status, hint, trimmed
-        ));
-    }
-
-    Ok(SshOutput { stdout, stderr })
+    keychain::ssh_key(&server_id)
 }
 
 // ─── Keychain commands ────────────────────────────────────────────────────────
@@ -730,7 +338,7 @@ fn set_github_token(
     token: String,
     cache: tauri::State<TokenCache>,
 ) -> Result<(), String> {
-    keychain_set(&server_id, &token)?;
+    keychain::set_github_token(&server_id, &token)?;
     cache.set(&server_id, &token);
     Ok(())
 }
@@ -738,8 +346,8 @@ fn set_github_token(
 #[tauri::command]
 fn delete_github_token(server_id: String, cache: tauri::State<TokenCache>) -> Result<(), String> {
     cache.remove(&server_id);
-    let _ = keychain_delete_ref(&server_id);
-    keychain_delete(&server_id)
+    let _ = keychain::delete_op_reference(&server_id);
+    keychain::delete_github_token(&server_id)
 }
 
 #[tauri::command]
@@ -749,8 +357,8 @@ fn load_github_token_from_1password(
     cache: tauri::State<TokenCache>,
 ) -> Result<(), String> {
     let token = op_read(&op_reference)?;
-    keychain_set(&server_id, &token)?;
-    let _ = keychain_set_ref(&server_id, &op_reference);
+    keychain::set_github_token(&server_id, &token)?;
+    let _ = keychain::set_op_reference(&server_id, &op_reference);
     cache.set(&server_id, &token);
     Ok(())
 }
@@ -760,23 +368,23 @@ fn refresh_github_token_from_1password(
     server_id: String,
     cache: tauri::State<TokenCache>,
 ) -> Result<(), String> {
-    let reference = keychain_get_ref(&server_id).map_err(|_| {
+    let reference = keychain::op_reference(&server_id).map_err(|_| {
         "No 1Password reference saved for this server. Use 'Load from 1Password' first.".to_string()
     })?;
     let token = op_read(&reference)?;
-    keychain_set(&server_id, &token)?;
+    keychain::set_github_token(&server_id, &token)?;
     cache.set(&server_id, &token);
     Ok(())
 }
 
 #[tauri::command]
 fn get_op_reference(server_id: String) -> Option<String> {
-    keychain_get_ref(&server_id).ok()
+    keychain::op_reference(&server_id).ok()
 }
 
 #[tauri::command]
 fn clear_op_reference(server_id: String) -> Result<(), String> {
-    keychain_delete_ref(&server_id)
+    keychain::delete_op_reference(&server_id)
 }
 
 #[tauri::command]
@@ -785,7 +393,7 @@ fn github_token_configured(server_id: String, cache: tauri::State<TokenCache>) -
         return true;
     }
     // Try loading from keychain and warming the cache
-    if let Ok(token) = keychain_get(&server_id) {
+    if let Ok(token) = keychain::github_token(&server_id) {
         cache.set(&server_id, &token);
         return true;
     }
@@ -797,7 +405,7 @@ fn get_token(server_id: &str, cache: &TokenCache) -> Result<String, String> {
     if let Some(t) = cache.get(server_id) {
         return Ok(t);
     }
-    let t = keychain_get(server_id)?;
+    let t = keychain::github_token(server_id)?;
     cache.set(server_id, &t);
     Ok(t)
 }
@@ -1268,28 +876,6 @@ async fn save_attachment(
         return Err(format!("Could not save the file: {e}"));
     }
     Ok(target.to_string_lossy().to_string())
-}
-
-#[cfg(test)]
-mod keychain_tests {
-    use super::*;
-
-    /// Lo que se guarda en el llavero va a un llavero de verdad.
-    ///
-    /// Sin features, keyring 3 usa su almacén de pruebas en memoria y todo
-    /// «se guarda» sin guardarse (ver el comentario en `Cargo.toml`). No toca
-    /// el llavero de la máquina: sólo mira qué clase de credencial construye.
-    #[test]
-    fn the_keychain_is_a_real_one() {
-        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &ssh_key_account("probe")).unwrap();
-        assert!(
-            entry
-                .get_credential()
-                .downcast_ref::<keyring::mock::MockCredential>()
-                .is_none(),
-            "keyring está usando su almacén de mentira: faltan las features de plataforma"
-        );
-    }
 }
 
 /// Opens the live event stream. Idempotent: connecting again replaces the

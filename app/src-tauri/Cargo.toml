@@ -23,6 +23,10 @@ cac-core = { path = "../../core" }
 # AppImage. Vive en su crate porque también se compila solo, como `cac-mcp`,
 # sin Tauri; aquí entra por ruta, así que hay una sola fuente.
 cac-mcp = { path = "../../mcp" }
+# Lo que Plataforma hace en la máquina local (SSH, el llavero), sin interfaz,
+# para que lo use también la app nativa. Aquí sólo quedan los comandos que lo
+# envuelven. `keyring`, con sus features de plataforma, va con él.
+cac-ops = { path = "../../ops" }
 # Sólo para escuchar a libwebrtc. El SDK ya instala un sumidero de sus registros
 # a nivel VERBOSE y los reenvía a `log::debug!(target: "libwebrtc")`; sin una
 # implementación de `log` en el proceso, esa macro no hace nada y todo lo que
@@ -31,15 +35,6 @@ log = "0.4"
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-http = "2"
-# Sin features, keyring 3 no trae ningún llavero y cae en uno de mentira en
-# memoria: `set_password` dice que sí y no guarda nada, y el siguiente
-# `Entry` ya no lo encuentra. Así estuvieron la llave SSH de cada servidor, su
-# token de GitHub y su referencia de 1Password hasta el 18-oct-2026 («como que
-# no se guarda»). En Linux, el Secret Service (gnome-keyring, KWallet) por
-# zbus, que es Rust puro: nada de libdbus que instalar en el CI; con async-io
-# y no tokio, porque keyring bloquea por dentro y desde un hilo de tokio eso
-# revienta. Guardián: `keychain_tests::the_keychain_is_a_real_one`.
-keyring = { version = "3", features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
 crypto_box = "0.9"
 blake2 = "0.10"
