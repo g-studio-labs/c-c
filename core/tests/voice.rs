@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cac_core::{Config, Core, ServerEvent, Session, Storage, VideoSource, VoiceEngine, VoiceEvent, VoiceFocus, VoiceFuture, VoicePhase, VoiceState};
+use cac_core::{voice_tiles, Config, Core, Locale, Publishing, ScreenSource, ScreenSources, ServerEvent, Session, Storage, VideoSource, VoiceEngine, VoiceEvent, VoiceFocus, VoiceFuture, VoiceLayout, VoicePhase, VoiceState};
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -40,6 +40,8 @@ struct FakeEngine {
     fail: Mutex<Option<String>>,
     /// Lo que se le dijo de mirar el vídeo, aparte de `calls`.
     video: Mutex<Vec<bool>>,
+    /// Lo que contesta a `screen_sources`.
+    sources: Mutex<ScreenSources>,
 }
 
 impl FakeEngine {
@@ -80,6 +82,22 @@ impl VoiceEngine for FakeEngine {
     fn watch_video(&self, on: bool) {
         self.video.lock().unwrap().push(on);
     }
+    fn set_camera(&self, on: bool) {
+        self.log(format!("camera {on}"));
+    }
+    fn screen_sources(&self) -> ScreenSources {
+        self.sources.lock().unwrap().clone()
+    }
+    fn share_screen(&self, source: Option<ScreenSource>) {
+        self.log(format!("share {}", source.map(|s| s.id).unwrap_or_else(|| "system".into())));
+    }
+    fn stop_share(&self) {
+        self.log("stop share");
+    }
+}
+
+fn source(id: &str) -> ScreenSource {
+    ScreenSource { id: id.into(), title: format!("Fuente {id}") }
 }
 
 struct Rig {
@@ -608,4 +626,192 @@ async fn clicking_a_tile_takes_it_to_the_stage_and_back() {
     voice.toggle_focus("u2", VideoSource::Camera);
     let now = state(&rig);
     assert_eq!((now.focus, now.faces_out), (None, false));
+}
+
+/// Lo que se le pidió al motor después de entrar.
+fn after_join(rig: &Rig) -> Vec<String> {
+    rig.engine.calls().into_iter().filter(|call| !call.starts_with("join")).collect()
+}
+
+fn own(identity: &str, source: VideoSource, enabled: bool) -> VoiceEvent {
+    VoiceEvent::Video { identity: identity.into(), source, enabled }
+}
+
+/// Encender la cámara espera al motor: el botón arranca, y sólo su evento lo
+/// enciende y te pone en tu recuadro. Apagar es inmediato.
+///
+/// Roturas que atrapa: el botón encendido antes de que la cámara publique
+/// (optimista, como el micro); tu recuadro con vídeo antes de que haya;
+/// pulsar apagar sin decírselo al motor; tu recuadro con vídeo después de
+/// apagar.
+#[tokio::test]
+async fn the_camera_is_on_only_when_the_engine_says_so() {
+    let rig = rig().await;
+    let voice = rig.core.voice();
+    voice.join_channel("a", None, None).await;
+    voice.toggle_camera();
+    let now = state(&rig);
+    assert_eq!(now.camera, Publishing::Starting);
+    assert!(!voice_tiles(&now, Locale::Es)[0].camera, "sin vídeo todavía");
+    assert_eq!(after_join(&rig), ["camera true"]);
+
+    voice.engine_event(own("u1", VideoSource::Camera, true));
+    let now = state(&rig);
+    assert_eq!(now.camera, Publishing::On);
+    assert!(voice_tiles(&now, Locale::Es)[0].camera, "tu cámara sale en tu recuadro");
+
+    voice.toggle_camera();
+    let now = state(&rig);
+    assert_eq!(now.camera, Publishing::Off);
+    assert!(!voice_tiles(&now, Locale::Es)[0].camera);
+    assert_eq!(after_join(&rig), ["camera true", "camera false"]);
+}
+
+/// Un fallo al encender deja el botón como estaba y dice por qué; un fallo
+/// con la cámara ya publicando no la apaga por su cuenta. Y el «apagado»
+/// tardío de un intento anterior no apaga el que está arrancando.
+///
+/// Roturas que atrapa: quedarse girando para siempre tras un fallo; perder
+/// la frase; apagar el botón por un aviso que no dice que paró; que apagar y
+/// encender seguidos deje el botón apagado con la cámara arrancando.
+#[tokio::test]
+async fn a_failure_puts_the_button_back_and_says_why() {
+    let rig = rig().await;
+    let voice = rig.core.voice();
+    voice.join_channel("a", None, None).await;
+    voice.toggle_camera();
+    voice.engine_event(VoiceEvent::VideoFailed { source: VideoSource::Camera, code: "voice-camera-busy".into() });
+    let now = state(&rig);
+    assert_eq!(now.camera, Publishing::Off);
+    assert_eq!(now.error.map(|e| e.code).as_deref(), Some("voice-camera-busy"));
+
+    voice.toggle_share();
+    voice.engine_event(own("u1", VideoSource::Screen, true));
+    voice.engine_event(VoiceEvent::VideoFailed { source: VideoSource::Screen, code: "voice-screen-thread-died".into() });
+    assert_eq!(state(&rig).sharing, Publishing::On, "si paró, lo dirá su propio evento");
+
+    voice.toggle_camera();
+    voice.engine_event(own("u1", VideoSource::Camera, true));
+    voice.toggle_camera();
+    voice.toggle_camera();
+    voice.engine_event(own("u1", VideoSource::Camera, false));
+    assert_eq!(state(&rig).camera, Publishing::Starting, "ese apagado era del intento anterior");
+    voice.engine_event(own("u1", VideoSource::Camera, true));
+    assert_eq!(state(&rig).camera, Publishing::On);
+}
+
+/// Sin dónde elegir se comparte directo (lo único que hay, o lo que elija el
+/// sistema); con varias fuentes se abre el selector y elegir manda ésa.
+/// Pulsar compartiendo para.
+///
+/// Roturas que atrapa: abrir el selector con una sola fuente; compartir
+/// cualquiera con varias; elegir y mandar otra; un clic tardío que comparte
+/// tras cancelar; no parar al pulsar otra vez.
+#[tokio::test]
+async fn one_source_shares_at_once_and_several_ask() {
+    let rig = rig().await;
+    let voice = rig.core.voice();
+    voice.join_channel("a", None, None).await;
+
+    voice.toggle_share();
+    assert_eq!(state(&rig).sharing, Publishing::Starting);
+    voice.toggle_share();
+    *rig.engine.sources.lock().unwrap() = ScreenSources { screens: vec![source("s1")], windows: vec![] };
+    voice.toggle_share();
+    assert_eq!(after_join(&rig), ["share system", "stop share", "share s1"]);
+    voice.toggle_share();
+
+    let several = ScreenSources { screens: vec![source("s1")], windows: vec![source("w7")] };
+    *rig.engine.sources.lock().unwrap() = several.clone();
+    voice.toggle_share();
+    let now = state(&rig);
+    assert_eq!((now.picking, now.sharing), (Some(several), Publishing::Off), "el selector, y nada pedido todavía");
+    voice.cancel_pick();
+    voice.pick_screen(source("w7"));
+    assert_eq!(after_join(&rig).len(), 4, "cancelado no comparte");
+
+    voice.toggle_share();
+    voice.pick_screen(source("w7"));
+    let now = state(&rig);
+    assert_eq!((now.picking, now.sharing), (None, Publishing::Starting));
+    assert_eq!(after_join(&rig).last().unwrap(), "share w7");
+}
+
+/// Tu pantalla va al escenario como cualquiera, por orden de llegada: no le
+/// quitas el sitio a quien ya compartía, ni otra que llega después te lo
+/// quita a ti. Y el escenario sabe que es tuya.
+///
+/// Roturas que atrapa: tu pantalla fuera del escenario; colarte delante de
+/// quien compartía; que otra te quite el sitio; el escenario sin saber que
+/// es tuya (no saldría «Estás compartiendo»).
+#[tokio::test]
+async fn your_screen_takes_its_turn_on_the_stage() {
+    let rig = rig().await;
+    let voice = rig.core.voice();
+    voice.join_channel("a", None, None).await;
+    voice.engine_event(VoiceEvent::Joined { identity: "u2".into(), name: "Luis".into() });
+    voice.engine_event(VoiceEvent::Joined { identity: "u3".into(), name: "Eva".into() });
+    voice.toggle_share();
+    voice.engine_event(own("u1", VideoSource::Screen, true));
+    voice.engine_event(own("u2", VideoSource::Screen, true));
+    let VoiceLayout::Stage { on_stage, .. } = cac_core::voice_layout(&state(&rig), Locale::Es) else { panic!("tu pantalla va al escenario") };
+    assert_eq!((on_stage.identity.as_str(), on_stage.me), ("u1", true));
+
+    voice.toggle_share();
+    let VoiceLayout::Stage { on_stage, .. } = cac_core::voice_layout(&state(&rig), Locale::Es) else { panic!() };
+    assert_eq!((on_stage.identity.as_str(), on_stage.me), ("u2", false), "al parar, pasa la siguiente");
+
+    voice.toggle_share();
+    voice.engine_event(own("u1", VideoSource::Screen, true));
+    let VoiceLayout::Stage { on_stage, .. } = cac_core::voice_layout(&state(&rig), Locale::Es) else { panic!() };
+    assert_eq!(on_stage.identity, "u2", "quien ya compartía se queda el escenario");
+}
+
+/// Colgar, o que la sala te suelte, apaga cámara, pantalla y selector; y
+/// fuera de una sala los botones no piden nada.
+///
+/// Roturas que atrapa: la cámara encendida en el botón de la llamada
+/// siguiente; el selector abierto sin sala; pedirle al motor que publique
+/// sin estar dentro.
+#[tokio::test]
+async fn leaving_turns_everything_off() {
+    let rig = rig().await;
+    let voice = rig.core.voice();
+    voice.join_channel("a", None, None).await;
+    voice.toggle_camera();
+    voice.engine_event(own("u1", VideoSource::Camera, true));
+    *rig.engine.sources.lock().unwrap() = ScreenSources { screens: vec![source("s1"), source("s2")], windows: vec![] };
+    voice.toggle_share();
+    voice.leave().await;
+    let now = state(&rig);
+    assert_eq!((now.camera, now.sharing, now.picking.is_some(), now.cameras.len()), (Publishing::Off, Publishing::Off, false, 0));
+
+    let before = rig.engine.calls().len();
+    voice.toggle_camera();
+    voice.toggle_share();
+    assert_eq!(rig.engine.calls().len(), before, "fuera no se publica nada");
+    assert_eq!(state(&rig).camera, Publishing::Off);
+
+    voice.join_channel("a", None, None).await;
+    voice.toggle_camera();
+    voice.engine_event(own("u1", VideoSource::Camera, true));
+    voice.engine_event(VoiceEvent::Disconnected { reason: "SignalClose".into() });
+    assert_eq!(state(&rig).camera, Publishing::Off);
+}
+
+/// La cámara elegida se recuerda por su nombre y no pisa ni el micrófono ni
+/// el altavoz; lo guardado antes de que existiera la cámara se sigue
+/// leyendo.
+///
+/// Roturas que atrapa: olvidarla al reiniciar; que elegirla borre el
+/// micrófono; perder las elecciones de siempre al añadir el campo nuevo.
+#[tokio::test]
+async fn the_chosen_camera_is_remembered() {
+    let rig = rig().await;
+    rig.storage.set("voice-devices", r#"{"input":"alsa:mic","output":null}"#).unwrap();
+    assert_eq!(rig.core.voice().device_choices().input.as_deref(), Some("alsa:mic"), "lo guardado antes de la cámara");
+    rig.core.voice().choose_camera(Some("Integrated Camera".into()));
+    let again = Core::new(Config::new(rig.server.uri()), rig.storage.clone(), Arc::new(Quiet)).unwrap();
+    let choices = again.voice().device_choices();
+    assert_eq!((choices.camera.as_deref(), choices.input.as_deref()), (Some("Integrated Camera"), Some("alsa:mic")));
 }

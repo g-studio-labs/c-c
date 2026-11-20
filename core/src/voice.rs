@@ -44,13 +44,16 @@ const NOISE_KEY: &str = "voice-noise-suppression";
 /// Y el micrófono y el altavoz elegidos a mano.
 const DEVICES_KEY: &str = "voice-devices";
 
-/// El micrófono y el altavoz elegidos a mano en esta máquina, por el id que
-/// les da el motor. `None` es «el del sistema».
+/// El micrófono, el altavoz y la cámara elegidos a mano en esta máquina.
+/// `None` es «el del sistema» (o, en la cámara, la primera que haya).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DeviceChoices {
+    /// El micrófono y el altavoz, por el id que les da el motor.
     pub input: Option<String>,
     pub output: Option<String>,
+    /// La cámara, **por su nombre**: su índice se mueve al enchufar otra.
+    pub camera: Option<String>,
 }
 
 /// Lo que devuelve el motor cuando tarda.
@@ -75,6 +78,75 @@ pub trait VoiceEngine: Send + Sync {
     /// Si alguien mira la sala. Sin nadie mirando (minimizada) el motor deja
     /// de recibir y de convertir vídeo. Un motor sin vídeo no hace nada.
     fn watch_video(&self, _on: bool) {}
+
+    // Publicar vídeo. Lo que pasa después **no se devuelve**: llega como
+    // `VoiceEvent::Video` con tu identidad (empezó, paró, o paró sola) o como
+    // `VoiceEvent::VideoFailed` (no pudo). Un motor sin vídeo (el móvil, de
+    // momento) no hace nada, y nadie le enseña los botones.
+
+    /// Enciende o apaga tu cámara, la elegida (`DeviceChoices::camera`).
+    fn set_camera(&self, _on: bool) {}
+    /// Las pantallas y ventanas que se pueden compartir ahora. Vacía cuando
+    /// elige el sistema (el portal de Wayland).
+    fn screen_sources(&self) -> ScreenSources {
+        ScreenSources::default()
+    }
+    /// Comparte esa fuente, o la que elija el sistema con `None`.
+    fn share_screen(&self, _source: Option<ScreenSource>) {}
+    fn stop_share(&self) {}
+}
+
+/// Una pantalla o una ventana que se puede compartir. `id` es del motor y
+/// sólo vale mientras dura la llamada; `title` puede venir vacío.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ScreenSource {
+    pub id: String,
+    pub title: String,
+}
+
+/// Lo que se puede compartir, en dos grupos: así se enseña en el selector.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ScreenSources {
+    pub screens: Vec<ScreenSource>,
+    pub windows: Vec<ScreenSource>,
+}
+
+impl ScreenSources {
+    /// Lo que se comparte sin preguntar: `Some(None)` si no hay lista (elige
+    /// el sistema), `Some(Some(única))` si sólo hay una, y `None` si hay donde
+    /// elegir y hay que abrir el selector.
+    fn without_asking(&self) -> Option<Option<ScreenSource>> {
+        let mut all = self.screens.iter().chain(&self.windows);
+        match (all.next(), all.next()) {
+            (None, _) => Some(None),
+            (Some(only), None) => Some(Some(only.clone())),
+            _ => None,
+        }
+    }
+}
+
+/// Cómo va algo que publicas tú (tu cámara, tu pantalla).
+///
+/// **Encender no es optimista** (como en Tauri): abrir una cámara o pedir una
+/// pantalla tarda y falla de verdad (ocupada, sin permiso, el diálogo sin
+/// contestar), y un botón encendido que no publica nada es mentir. Así que
+/// pulsar pasa a `Starting`, y sólo el motor lo pasa a `On`. Apagar sí es
+/// inmediato: el motor no puede fallar en soltar algo que ya tiene.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum Publishing {
+    #[default]
+    Off,
+    Starting,
+    On,
+}
+
+impl Publishing {
+    pub fn is_off(self) -> bool {
+        self == Publishing::Off
+    }
 }
 
 /// De qué es un vídeo: la cámara de alguien o la pantalla que comparte.
@@ -116,8 +188,12 @@ pub enum VoiceEvent {
     /// Se cortó, con el motivo de LiveKit (`ParticipantRemoved`…).
     Disconnected { reason: String },
     /// La cámara o la pantalla de alguien se encendió o se apagó. Una pista
-    /// silenciada llega como apagada.
+    /// silenciada llega como apagada. Con tu identidad, es el motor
+    /// confirmando lo que publicas (o que dejó de publicarlo solo).
     Video { identity: String, source: VideoSource, enabled: bool },
+    /// No se pudo publicar tu cámara o tu pantalla. `code` es la etiqueta
+    /// (`voice-camera-busy`, `voice-screen-denied`…).
+    VideoFailed { source: VideoSource, code: String },
 }
 
 /// En qué punto está la llamada.
@@ -262,7 +338,14 @@ pub struct VoiceState {
     pub occupancy: HashMap<String, Vec<VoicePeer>>,
     /// Si se quiere la supresión de ruido. Se recuerda en esta máquina.
     pub noise_suppression: bool,
-    /// Quién tiene la cámara encendida, de los demás.
+    /// Tu cámara y tu pantalla, como las ve tu botón. Que se vean en la sala
+    /// lo dicen `cameras` y `screens`, igual que las de los demás.
+    pub camera: Publishing,
+    pub sharing: Publishing,
+    /// Hay varias pantallas o ventanas y se está eligiendo cuál compartir.
+    pub picking: Option<ScreenSources>,
+    /// Quién tiene la cámara encendida, tú incluido cuando el motor lo
+    /// confirma.
     pub cameras: Vec<String>,
     /// Quién comparte pantalla, por orden de llegada. La primera es la del
     /// escenario: una segunda no le quita el sitio, y si la primera para,
@@ -303,6 +386,9 @@ impl Default for VoiceState {
             moved: None,
             occupancy: HashMap::new(),
             noise_suppression: true,
+            camera: Publishing::Off,
+            sharing: Publishing::Off,
+            picking: None,
             cameras: Vec::new(),
             screens: Vec::new(),
             focus: None,
@@ -503,6 +589,45 @@ fn apply_video(state: &mut VoiceState, identity: String, source: VideoSource, en
     settle_video(state);
 }
 
+/// Dónde guarda tu botón cómo va esa fuente.
+fn own_slot(state: &mut VoiceState, source: VideoSource) -> &mut Publishing {
+    match source {
+        VideoSource::Camera => &mut state.camera,
+        VideoSource::Screen => &mut state.sharing,
+    }
+}
+
+/// Lo que el motor confirma de lo que publicas tú. Un «apagado» que llega
+/// mientras arranca es del intento anterior (apagar y encender seguidos): el
+/// nuevo todavía no ha contestado, y el botón sigue esperándolo.
+fn apply_own_video(state: &mut VoiceState, source: VideoSource, enabled: bool) {
+    let slot = own_slot(state, source);
+    *slot = match (enabled, *slot) {
+        (true, _) => Publishing::On,
+        (false, Publishing::Starting) => Publishing::Starting,
+        (false, _) => Publishing::Off,
+    };
+}
+
+/// No se pudo publicar: el botón vuelve a como estaba antes de pulsarlo, y
+/// se dice por qué. Lo que ya se publicaba no se apaga por un fallo: si de
+/// verdad paró, el motor lo cuenta con su propio `Video`.
+fn apply_own_failure(state: &mut VoiceState, source: VideoSource, code: String) {
+    let slot = own_slot(state, source);
+    if *slot == Publishing::Starting {
+        *slot = Publishing::Off;
+    }
+    state.error = Some(VoiceError { message: code.clone(), code, space_id: state.space_id.clone() });
+}
+
+/// Apagas tú: el botón y tu recuadro, ya, sin esperar al motor.
+fn stop_own(state: &mut VoiceState, source: VideoSource) {
+    *own_slot(state, source) = Publishing::Off;
+    if let Some(me) = state.me.clone() {
+        apply_video(state, me, source, false);
+    }
+}
+
 /// La sala, repartida: rejilla, o escenario con su tira.
 pub fn voice_layout(state: &VoiceState, locale: Locale) -> VoiceLayout {
     let tiles = voice_tiles(state, locale);
@@ -519,9 +644,9 @@ pub fn voice_tiles(state: &VoiceState, locale: Locale) -> Vec<VoiceTile> {
     let mut tiles = Vec::new();
     if let Some(me) = &state.me {
         let name = text(locale, "calls:you");
-        // Tu cámara no se publica todavía (fase siguiente): tu recuadro es tu
-        // avatar.
-        tiles.push(VoiceTile { identity: me.clone(), initials: person_initials(&name), name, speaking: state.self_speaking, muted: !state.mic, me: true, camera: false });
+        // Tu cámara, como la de cualquiera: cuando el motor dice que se ve.
+        let camera = state.cameras.contains(me);
+        tiles.push(VoiceTile { identity: me.clone(), initials: person_initials(&name), name, speaking: state.self_speaking, muted: !state.mic, me: true, camera });
     }
     for peer in state.people.iter().filter(|peer| Some(&peer.identity) != state.me.as_ref()) {
         let name = if peer.name.is_empty() { peer.identity.clone() } else { peer.name.clone() };
@@ -849,6 +974,73 @@ impl Voice {
         }
     }
 
+    /// Enciende o apaga tu cámara. Encender espera al motor (`Publishing`);
+    /// pulsar mientras arranca lo cancela. Fuera de una sala no hay nada que
+    /// publicar.
+    pub fn toggle_camera(&self) {
+        let state = self.state();
+        let Some(engine) = self.engine().filter(|_| state.phase == VoicePhase::In) else { return };
+        let on = state.camera.is_off();
+        self.change(|state| {
+            state.error = None;
+            if on {
+                state.camera = Publishing::Starting;
+            } else {
+                stop_own(state, VideoSource::Camera);
+            }
+        });
+        engine.set_camera(on);
+    }
+
+    /// Compartir pantalla: si ya compartes (o lo estás pidiendo), para; si no
+    /// hay dónde elegir, comparte lo único que hay (o deja elegir al
+    /// sistema); si hay varias pantallas o ventanas, abre el selector.
+    pub fn toggle_share(&self) {
+        let state = self.state();
+        let Some(engine) = self.engine().filter(|_| state.phase == VoicePhase::In) else { return };
+        if !state.sharing.is_off() {
+            self.change(|state| {
+                state.error = None;
+                state.picking = None;
+                stop_own(state, VideoSource::Screen);
+            });
+            engine.stop_share();
+            return;
+        }
+        let sources = engine.screen_sources();
+        match sources.without_asking() {
+            Some(source) => self.start_share(engine.as_ref(), source),
+            None => self.change(|state| {
+                state.error = None;
+                state.picking = Some(sources);
+            }),
+        }
+    }
+
+    /// La fuente elegida en el selector. Sin selector abierto no hace nada:
+    /// un clic que llega tarde no comparte lo que ya se canceló.
+    pub fn pick_screen(&self, source: ScreenSource) {
+        if self.state().picking.is_none() {
+            return;
+        }
+        if let Some(engine) = self.engine() {
+            self.start_share(engine.as_ref(), Some(source));
+        }
+    }
+
+    pub fn cancel_pick(&self) {
+        self.change(|state| state.picking = None);
+    }
+
+    fn start_share(&self, engine: &dyn VoiceEngine, source: Option<ScreenSource>) {
+        self.change(|state| {
+            state.error = None;
+            state.picking = None;
+            state.sharing = Publishing::Starting;
+        });
+        engine.share_screen(source);
+    }
+
     /// Ensordece, o lo quita. Ensordecer silencia también el micrófono, y
     /// quitarlo **no** lo devuelve: quien se pone sordo casi siempre se está
     /// apartando, y volver hablando sin querer es el accidente que este botón
@@ -893,12 +1085,18 @@ impl Voice {
 
     /// Apunta un micrófono (`output: false`) o un altavoz elegido a mano.
     pub fn choose_device(&self, output: bool, id: Option<String>) {
+        self.edit_choices(|choices| if output { choices.output = id } else { choices.input = id });
+    }
+
+    /// Apunta la cámara elegida, por su nombre.
+    pub fn choose_camera(&self, name: Option<String>) {
+        self.edit_choices(|choices| choices.camera = name);
+    }
+
+    /// Cambia una elección sin pisar las otras.
+    fn edit_choices(&self, edit: impl FnOnce(&mut DeviceChoices)) {
         let mut choices = self.device_choices();
-        if output {
-            choices.output = id;
-        } else {
-            choices.input = id;
-        }
+        edit(&mut choices);
         if let Ok(raw) = serde_json::to_string(&choices) {
             let _ = self.core.inner.storage.set(DEVICES_KEY, &raw);
         }
@@ -940,7 +1138,13 @@ impl Voice {
                 state.screens.retain(|id| *id != identity);
                 settle_video(state);
             }),
-            VoiceEvent::Video { identity, source, enabled } => self.change(|state| apply_video(state, identity, source, enabled)),
+            VoiceEvent::Video { identity, source, enabled } => self.change(|state| {
+                if state.me.as_deref() == Some(identity.as_str()) {
+                    apply_own_video(state, source, enabled);
+                }
+                apply_video(state, identity, source, enabled)
+            }),
+            VoiceEvent::VideoFailed { source, code } => self.change(|state| apply_own_failure(state, source, code)),
             VoiceEvent::Speaking { identities } => self.change(|state| state.speaking = identities),
             VoiceEvent::SelfSpeaking { speaking } => self.change(|state| state.self_speaking = speaking),
             VoiceEvent::Muted { identity, muted } => self.change(|state| {
