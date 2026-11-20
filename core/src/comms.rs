@@ -286,8 +286,10 @@ impl Comms {
         self.publish();
     }
 
-    /// Entrar a comunicación: el panel pasa a ser su lista.
+    /// Entrar a comunicación: el panel pasa a ser su lista. Sólo un módulo
+    /// está en pantalla a la vez: deja Plataforma si se estaba en ella.
     pub fn enter(&self) {
+        self.core.platform().leave();
         self.data().on_screen = true;
         self.publish();
     }

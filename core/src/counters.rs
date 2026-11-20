@@ -422,6 +422,20 @@ impl Counters {
         });
     }
 
+    /// Plataforma leyó los servidores (o sondeó a sus agentes): el número
+    /// del riel sale de la misma lista que los puntos del panel, y no de otra
+    /// pregunta que pudo contestar otra cosa.
+    pub(crate) fn servers_seen(&self, servers: &[crate::platform::Server]) {
+        let rows = servers
+            .iter()
+            .map(|server| ServerStatus {
+                org_id: server.org_id.clone(),
+                status: server.status.as_str().to_string(),
+            })
+            .collect();
+        self.update(|data| data.servers = Some(rows));
+    }
+
     /// Al salir: los números de una persona no son los de la siguiente.
     pub(crate) fn clear(&self) {
         self.update(|data| *data = CountersData::default());

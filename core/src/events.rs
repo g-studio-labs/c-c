@@ -11,6 +11,7 @@ use crate::inbox::InboxState;
 use crate::mywork::MyWorkState;
 use crate::notice::Announcement;
 use crate::orgs::OrgsState;
+use crate::platform::PlatformState;
 use crate::tree::TreeState;
 use crate::session::Session;
 use crate::stream::{ConnectionState, ServerEvent};
@@ -60,6 +61,10 @@ pub trait Listener: Send + Sync {
     /// La voz cambió: la sala en la que estás, quién habla, el timbre, o
     /// quién anda por los canales.
     fn voice_changed(&self, _state: VoiceState) {}
+
+    /// Plataforma cambió: llegaron los servidores, se entró en uno, o se
+    /// cambió de organización.
+    fn platform_changed(&self, _state: PlatformState) {}
 
     /// La conexión con el servidor cambió: para el aviso de «sin conexión».
     fn connection_changed(&self, _state: ConnectionState) {}

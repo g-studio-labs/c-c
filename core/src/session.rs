@@ -102,7 +102,7 @@ fn error_code(body: &str) -> String {
 }
 
 /// Saca el `data` de una respuesta, o el error del servidor con sus dos campos.
-fn unwrap_data<T: for<'de> Deserialize<'de>>(reply: &Reply) -> Result<T, ApiError> {
+pub(crate) fn unwrap_data<T: for<'de> Deserialize<'de>>(reply: &Reply) -> Result<T, ApiError> {
     let envelope = serde_json::from_str::<Envelope<T>>(&reply.body).ok();
     if reply.status < 400 {
         if let Some(Envelope { success: true, data: Some(data), .. }) = envelope {
@@ -158,6 +158,7 @@ impl Core {
         self.stream().stop();
         self.counters().clear();
         self.comms().clear();
+        self.platform().clear();
         self.notices().clear();
         self.inbox().clear();
         self.chat().clear();

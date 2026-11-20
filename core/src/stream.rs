@@ -302,6 +302,14 @@ impl Stream {
         // se dijo mientras no estaba.
         let core = self.core.clone();
         tokio::spawn(async move { core.chat().refresh().await });
+        // Y los servidores, si se están mirando: su estado no llega por
+        // evento.
+        let core = self.core.clone();
+        tokio::spawn(async move {
+            if core.platform().state().on_screen {
+                core.platform().refresh().await;
+            }
+        });
         // Y la bandeja, si se ha mirado.
         let core = self.core.clone();
         tokio::spawn(async move { core.inbox().refresh().await });

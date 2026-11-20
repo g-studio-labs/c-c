@@ -28,6 +28,7 @@ pub mod nav;
 pub mod notice;
 pub mod notice_sound;
 pub mod orgs;
+pub mod platform;
 pub mod prefs;
 pub mod prose;
 pub mod session;
@@ -88,6 +89,10 @@ pub use notice_sound::{render, tone_for, Chime, Tone, TONE_GAP};
 pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClick};
 pub use hue::{hue_index, HUES};
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
+pub use platform::{
+    agent_base, platform_sections, servers_of, Agent, AgentStream, Platform, PlatformSection, PlatformState, Server, ServerHealth, ServerKind,
+    AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT,
+};
 pub use prose::prose_for_painting;
 pub use prefs::{first_spoken, folds_panel, is_dark, shortcut_text, KeysHeld, ThemePreference, WorkLayout};
 pub use session::Session;
@@ -235,6 +240,10 @@ pub(crate) struct Inner {
     pub(crate) occupancy_turn: std::sync::atomic::AtomicU64,
     /// Qué timbre que sale es el vigente: su reloj sólo lo rinde si lo es.
     pub(crate) ring_turn: std::sync::atomic::AtomicU64,
+    pub(crate) platform: Mutex<platform::PlatformData>,
+    /// Los pases para hablar con los agentes, por servidor: ver
+    /// `platform::agent`.
+    pub(crate) agent_passes: Mutex<platform::agent::AgentPasses>,
 }
 
 impl Core {
@@ -277,6 +286,8 @@ impl Core {
                 voice_turn: std::sync::atomic::AtomicU64::new(0),
                 occupancy_turn: std::sync::atomic::AtomicU64::new(0),
                 ring_turn: std::sync::atomic::AtomicU64::new(0),
+                platform: Mutex::new(platform::PlatformData::default()),
+                agent_passes: Mutex::new(platform::agent::AgentPasses::default()),
             }),
         };
         let held = core.load_held();
