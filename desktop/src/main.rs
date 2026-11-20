@@ -35,6 +35,7 @@ mod picture_viewer;
 mod newtask;
 mod notifier;
 mod platform;
+mod system;
 mod prompt;
 mod shell;
 mod sound;
@@ -105,14 +106,14 @@ fn main() {
 
     let var = |name: &str| std::env::var(name).ok();
     let spike = std::env::var_os("CAC_SPIKE").is_some();
-    let Some(data_dir) = platform::data_dir(platform::Os::current(), var) else {
+    let Some(data_dir) = system::data_dir(system::Os::current(), var) else {
         eprintln!("cac: esta máquina no dice dónde guardar los datos de su usuario");
         std::process::exit(1);
     };
-    let server_url = platform::server_url(var);
+    let server_url = system::server_url(var);
     let mut config = Config::new(server_url.clone());
     config.client = Some("desktop".to_string());
-    let system_language = platform::system_language(platform::Os::current(), var, platform::preferred_languages);
+    let system_language = system::system_language(system::Os::current(), var, system::preferred_languages);
 
     gpui_kit::application().with_assets(assets::Assets).run(move |cx| {
         gpui_kit::init(cx);

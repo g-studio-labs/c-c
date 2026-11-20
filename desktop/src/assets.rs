@@ -14,11 +14,11 @@ use gpui_kit::{img, AnyElement, AssetSource, IntoElement, Pixels, Result, Shared
 
 // Los de Lucide que la app nombra y los componentes no traen. Al usar uno
 // nuevo, se añade aquí y a `USED`. Guardián: `tests::every_icon_can_be_loaded`.
-gpui_kit::assets::icon_assets!(Extra, [WifiOff, RefreshCw, LogOut, X, Paperclip, Image, Download, Trash, Pencil, Folder, ListChecks, FileText, ChevronsUpDown, Building2, Moon, Languages, PanelLeftClose, PanelLeftOpen, UserRound, KeyRound, Briefcase, MessagesSquare, Server, NotebookPen, Lock, List, SquareKanban, CalendarDays, PanelLeft, ChevronLeft, GripVertical, Plus, Eye, EyeOff, CircleAlert, Flag, Tag, Users, Calendar, FolderInput, Link2, Bot, Gavel, Send, Copy, Share2, ListTree, SquareCheck, Bold, Italic, Code, Heading2, ListOrdered, Quote, Table, GitPullRequest, Activity, FolderPlus, House, Puzzle, ClipboardList, RotateCcwClock, Clock, CircleCheck, BellRing, Pin, Megaphone, Hash, UserPlus, Check, CheckCheck, MessageSquare, CornerUpLeft, ExternalLink, ChevronRight, HeartPlus, Bell, BellOff, AtSign, Zap, CalendarClock, Workflow, Rocket, Archive, Info, Volume2, VolumeX, Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Minimize2, SlidersHorizontal, Phone, AudioLines, RotateCcw, Maximize2, Video, MonitorUp, VideoOff, Monitor, AppWindow]);
+gpui_kit::assets::icon_assets!(Extra, [WifiOff, RefreshCw, LogOut, X, Paperclip, Image, Download, Trash, Pencil, Folder, ListChecks, FileText, ChevronsUpDown, Building2, Moon, Languages, PanelLeftClose, PanelLeftOpen, UserRound, KeyRound, Briefcase, MessagesSquare, Server, NotebookPen, Lock, List, SquareKanban, CalendarDays, PanelLeft, ChevronLeft, GripVertical, Plus, Eye, EyeOff, CircleAlert, Flag, Tag, Users, Calendar, FolderInput, Link2, Bot, Gavel, Send, Copy, Share2, ListTree, SquareCheck, Bold, Italic, Code, Heading2, ListOrdered, Quote, Table, GitPullRequest, Activity, FolderPlus, House, Puzzle, ClipboardList, RotateCcwClock, Clock, CircleCheck, BellRing, Pin, Megaphone, Hash, UserPlus, Check, CheckCheck, MessageSquare, CornerUpLeft, ExternalLink, ChevronRight, HeartPlus, Bell, BellOff, AtSign, Zap, CalendarClock, Workflow, Rocket, Archive, Info, Volume2, VolumeX, Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Minimize2, SlidersHorizontal, Phone, AudioLines, RotateCcw, Maximize2, Video, MonitorUp, VideoOff, Monitor, AppWindow, Wrench]);
 
 /// Los mismos, para la prueba que comprueba que se cargan.
 #[cfg(test)]
-const USED: [Lucide; 99] = [
+const USED: [Lucide; 100] = [
     Lucide::WifiOff,
     Lucide::RefreshCw,
     Lucide::LogOut,
@@ -118,6 +118,7 @@ const USED: [Lucide; 99] = [
     Lucide::VideoOff,
     Lucide::Monitor,
     Lucide::AppWindow,
+    Lucide::Wrench,
 ];
 
 pub struct Assets;
@@ -228,10 +229,22 @@ mod tests {
             let name = format!("{icon:?}");
             assert_eq!(icon.path().to_string(), format!("icons/{}.svg", kebab(&name)), "{name}");
         }
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        // También los de las carpetas de un módulo (`platform/`): un icono
+        // que sólo se nombra ahí dentro se escapaba.
+        let mut pending = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let mut files = Vec::new();
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    files.push(path);
+                }
+            }
+        }
         let mut seen = 0;
-        for file in std::fs::read_dir(src).unwrap() {
-            let path = file.unwrap().path();
+        for path in files {
             let code = std::fs::read_to_string(&path).unwrap();
             for piece in code.split("Lucide::").skip(1) {
                 let name: String = piece.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();

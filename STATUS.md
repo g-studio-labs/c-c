@@ -13,6 +13,24 @@ tablero: **App** `ca0bfd49-0909-43eb-8135-bc8ecd0f282c` y **Backend**
 
 ## 🟢 Al día
 
+**20-nov, Plataforma entra en la app nativa: fase 0, los cimientos**
+(command-and-control-450, de la 444), en la rama `wt-platform` (worktree
+`cac-wt-platform`), sin fusionar. Diseño en cac: «Diseño · Plataforma en la
+app nativa».
+- **Core:** `core/src/platform/` — `Core::platform()` (servidores de la
+  organización que se mira, entrar/salir, abrir uno; sólo un módulo en
+  pantalla a la vez) y `Core::agent()`, el cliente del agente con las reglas
+  de `app/src/lib/agent.ts` (pase por servidor con 60 s de margen, un
+  reintento en 401, 10 s de plazo, sonda a `/nodes` en 4 s; a los agentes sin
+  identidad se les sondea y se escribe `agent-status`). El número del riel
+  sale de la misma lista.
+- **Escritorio:** el riel abre Plataforma; panel con «Servidores» y sus puntos
+  de estado (Actividad, Diagnóstico, Usuarios —superadmin— y DevTools,
+  apagadas); tabla de servidores en lectura. `desktop/src/platform.rs` (lo del
+  sistema operativo) pasa a llamarse `system.rs`.
+- **`ops/` (`cac-ops`):** SSH y llavero, fuera de Tauri y sin interfaz; Tauri
+  los envuelve. CI `ops.yml`; `scripts/test-changed.sh` lo conoce.
+
 **18-nov, `cac-mcp` se reparte, se instala con una línea y avisa de sus
 versiones** (command-and-control-388, paso 2), en la rama `wt-mcp2`, sin
 fusionar. **Nada publicado todavía: ni etiqueta, ni release, ni se ha lanzado

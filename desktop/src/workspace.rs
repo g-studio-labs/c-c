@@ -30,14 +30,14 @@ const RAIL_WIDTH: f32 = 48.;
 const PANEL_WIDTH: f32 = 256.;
 const ROW_HEIGHT: f32 = 28.;
 /// Una fila del panel (`PanelRow.tsx`: `text-sm` con `py-1.5`).
-const PANEL_ROW_HEIGHT: f32 = 32.;
+pub(crate) const PANEL_ROW_HEIGHT: f32 = 32.;
 /// El lado de un botón del riel.
 const RAIL_BUTTON: f32 = 36.;
 /// El ancho del menú de la cuenta: el de la app de siempre (`w-64`).
 const ACCOUNT_MENU_WIDTH: f32 = 256.;
 /// Lo que entra una fila por cada nivel que cuelga: el `ml-4` de
 /// `SpacesNavigator.tsx`.
-const INDENT: f32 = 16.;
+pub(crate) const INDENT: f32 = 16.;
 
 /// `capitalize` de CSS: cada palabra con su primera letra en mayúscula.
 fn capitalized(text: &str) -> String {
@@ -815,7 +815,7 @@ impl Workspace {
     }
 
     /// Una fila del panel que la app de siempre tiene y ésta todavía no.
-    fn pending_panel_row(id: &'static str, icon: Lucide, label_key: &str, cx: &App) -> impl IntoElement {
+    pub(crate) fn pending_panel_row(id: &'static str, icon: Lucide, label_key: &str, cx: &App) -> impl IntoElement {
         let theme = cx.theme();
         let (muted, hover, foreground) = (theme.muted_foreground, theme.sidebar_accent.opacity(0.5), theme.sidebar_foreground);
         let not_yet = tr(cx, "common:misc.notInThisApp");
@@ -967,8 +967,13 @@ impl Workspace {
         // puedas», no algo sin leer.
         let servers = RailCount { id: "rail-platform-count", count: counters.servers, warning: true };
         let invitations = RailCount { id: "rail-organization-count", count: counters.invitations, warning: false };
-        // En cuál de los dos módulos con pantalla se está lo dice el core.
-        let on_comms = Backend::snapshot(cx).read(cx).comms.on_screen;
+        // En cuál de los módulos con pantalla se está lo dice el core.
+        let (on_comms, on_platform) = {
+            let snapshot = Backend::snapshot(cx).read(cx);
+            (snapshot.comms.on_screen, snapshot.platform.on_screen)
+        };
+        let on_work = !on_comms && !on_platform;
+        let platform_label = counted_label(&tr(cx, "nav:module.platform"), servers.count);
         let comms_label = counted_label(&tr(cx, "nav:module.comms"), comms.count);
         div()
             .w(px(RAIL_WIDTH))
@@ -984,11 +989,19 @@ impl Workspace {
             .border_color(border)
             .child(div().id("rail-brand").test_support().mb_2().child(crate::brand::brand_mark(20., sidebar, cx)))
             // Pulsar el módulo en el que se está fija el panel o lo suelta;
-            // pulsar el otro lleva a él, con su panel.
+            // pulsar otro lleva a él, con su panel.
             .child(
-                Self::rail_button("rail-work", Lucide::Briefcase, tr(cx, "nav:module.work"), !on_comms, cx)
+                Self::rail_button("rail-work", Lucide::Briefcase, tr(cx, "nav:module.work"), on_work, cx)
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| if on_comms { Backend::core(cx).comms().leave() } else { this.toggle_panel(cx) }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if on_work {
+                            this.toggle_panel(cx);
+                        } else {
+                            let core = Backend::core(cx);
+                            core.comms().leave();
+                            core.platform().leave();
+                        }
+                    }))
                     .test_support(),
             )
             .child(Self::pending_module("rail-docs", Lucide::BookOpen, "nav:module.docs", None, cx))
@@ -1001,7 +1014,23 @@ impl Workspace {
                     .children(Self::rail_badge(comms, cx))
                     .test_support(),
             )
-            .child(Self::pending_module("rail-platform", Lucide::Server, "nav:module.platform", Some(servers), cx))
+            // Con los servidores que no están en línea, en ámbar. Entrar los
+            // vuelve a pedir: su estado no llega por evento.
+            .child(
+                Self::rail_button("rail-platform", Lucide::Server, platform_label.clone(), on_platform, cx)
+                    .aria_label(platform_label)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if on_platform {
+                            this.toggle_panel(cx);
+                        } else {
+                            Backend::core(cx).platform().enter();
+                            Backend::run(cx, |core| async move { core.platform().refresh().await });
+                        }
+                    }))
+                    .children(Self::rail_badge(servers, cx))
+                    .test_support(),
+            )
             .child(div().flex_1())
             // Con el panel plegado, la llamada en curso queda como un punto.
             .when(!self.panel_pinned, |this| this.children(crate::voice::mini_dot(cx)))
@@ -1249,8 +1278,10 @@ impl Workspace {
         // «Mi trabajo» es la pantalla, esté acotada o no: a qué, lo dice el
         // árbol. Leyendo documentación ya no se está en ella.
         let on_my_work = snapshot.docs.target.is_none();
-        // En comunicación el panel es su lista: misma cabecera, otro cuerpo.
+        // En comunicación el panel es su lista, y en Plataforma sus filas:
+        // misma cabecera, otro cuerpo.
         let on_comms = snapshot.comms.on_screen;
+        let on_platform = snapshot.platform.on_screen;
         let pinned = self.panel_pinned;
         // El catálogo anuncia el atajo como en un Mac («⌘B»): se dice con
         // la tecla de este sistema.
@@ -1331,7 +1362,7 @@ impl Workspace {
                     .leading_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(muted)
-                    .child(div().flex_1().child(tr(cx, if on_comms { "nav:module.comms" } else { "nav:module.work" }).to_uppercase()))
+                    .child(div().flex_1().child(tr(cx, if on_comms { "nav:module.comms" } else if on_platform { "nav:module.platform" } else { "nav:module.work" }).to_uppercase()))
                     .child(
                         Button::new("panel-toggle")
                             .ghost()
@@ -1344,6 +1375,12 @@ impl Workspace {
         if on_comms {
             return panel
                 .child(div().flex_1().min_h_0().flex().flex_col().child(self.comms.clone()))
+                .children(crate::voice::mini(cx))
+                .into_any_element();
+        }
+        if on_platform {
+            return panel
+                .child(div().id("platform-panel").flex_1().min_h_0().overflow_y_scroll().child(crate::platform::panel::panel(cx)))
                 .children(crate::voice::mini(cx))
                 .into_any_element();
         }
@@ -1525,6 +1562,8 @@ impl Render for Workspace {
             stage
         } else if snapshot.comms.on_screen {
             crate::comms::conversation(&self.chat, cx)
+        } else if snapshot.platform.on_screen {
+            crate::platform::servers::page(cx)
         } else if snapshot.docs.target.is_some() {
             self.docs.clone().into_any_element()
         } else {
@@ -3323,9 +3362,78 @@ mod tests {
         assert_eq!(label(window, "rail-organization-count", cx), "3");
         assert_eq!(label(window, "notifications-bell", cx), "Notificaciones (12)");
         assert_eq!(label(window, "rail-comms", cx), "Comunicación (120)");
-        assert_eq!(label(window, "rail-platform", cx), "Plataforma (1) · Todavía no está en esta app");
+        assert_eq!(label(window, "rail-platform", cx), "Plataforma (1)");
         assert_eq!(label(window, "rail-organization", cx), "Organización (3) · Todavía no está en esta app");
         assert!(!on_screen(window, "rail-docs-count", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Un servidor como lo manda el backend. Con identidad: a uno sin ella
+    /// la app le sondearía el agente, y aquí no hay agente que conteste.
+    fn platform_server(id: &str, org_id: &str, name: &str, status: &str) -> serde_json::Value {
+        json!({
+            "id": id, "orgId": org_id, "name": name, "host": "203.0.113.7", "sshPort": 22, "sshUser": "deploy",
+            "type": "docker-swarm", "agentPort": 8080, "status": status, "hasAgentToken": true, "agentVersion": 2,
+        })
+    }
+
+    /// Pulsar Plataforma en el riel enseña su panel, con los servidores de
+    /// la organización que se mira y su punto de estado, y la tabla; volver a
+    /// «Trabajo» deja el árbol como estaba.
+    ///
+    /// Roturas que atrapa: el botón del riel que sigue apagado; los
+    /// servidores de otra organización en el panel; un punto que no dice su
+    /// estado; «Usuarios» a quien no administra la plataforma; quedarse en
+    /// Plataforma al pulsar «Trabajo».
+    #[gpui_kit::test]
+    fn the_rail_opens_platform_with_the_servers_and_their_state(cx: &mut TestAppContext) {
+        let server = server();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/servers/")).respond_with(ok(json!([
+            platform_server("s1", "o1", "pixel-vps", "online"),
+            platform_server("s2", "o1", "gstd", "offline"),
+            platform_server("s3", "o2", "otro", "online"),
+        ]))));
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-l-a", cx));
+
+        click(window, "rail-platform", cx);
+        wait_until(cx, "llegan los servidores", |cx| on_screen(window, "platform-server-s1", cx));
+        assert!(on_screen(window, "platform-server-s2", cx));
+        assert!(!on_screen(window, "platform-server-s3", cx), "un servidor de otra organización en el panel");
+        assert_eq!(label(window, "platform-dot-s1", cx), "En línea");
+        assert_eq!(label(window, "platform-dot-s2", cx), "Sin conexión");
+        assert!(on_screen(window, "platform-row-s1", cx) && on_screen(window, "platform-row-s2", cx), "la tabla no enseña los servidores");
+        assert!(!on_screen(window, "tree-l-a", cx), "el panel sigue siendo el árbol");
+        assert!(on_screen(window, "platform-activity", cx));
+        assert!(!on_screen(window, "platform-users", cx), "«Usuarios» a quien no es superadmin");
+
+        click(window, "platform-server-s2", cx);
+        assert_eq!(cx.update(|cx| Backend::core(cx).platform().state().open_server), Some("s2".into()));
+
+        click(window, "rail-work", cx);
+        wait_until(cx, "«Trabajo» devuelve el árbol", |cx| on_screen(window, "tree-l-a", cx));
+        assert!(!on_screen(window, "platform-server-s1", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// «Usuarios» sale a quien administra la plataforma entera.
+    ///
+    /// Rotura que atrapa: esconderlo también al superadmin, o decidirlo con
+    /// otra cosa que su sesión.
+    #[gpui_kit::test]
+    fn users_shows_for_a_superadmin(cx: &mut TestAppContext) {
+        let server = server();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/servers/")).respond_with(ok(json!([]))));
+        server.install(cx);
+        let window = open(cx);
+        cx.update(|cx| {
+            let boss = serde_json::from_value(json!({ "id": "u1", "username": "ana", "superadmin": true })).unwrap();
+            Backend::core(cx).update_session(boss).unwrap();
+        });
+        click(window, "rail-platform", cx);
+        wait_until(cx, "sale «Usuarios»", |cx| on_screen(window, "platform-users", cx));
+        wait_until(cx, "dice que no hay servidores", |cx| on_screen(window, "platform-no-servers", cx));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 

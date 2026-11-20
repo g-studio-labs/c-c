@@ -17,7 +17,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use cac_core::{
-    Announcement, ApiError, CommsState, InboxState, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, OrgsState, Session, Storage,
+    Announcement, ApiError, CommsState, InboxState, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, OrgsState, PlatformState, Session, Storage,
     TaskState, ThreadState, TreeState, VoiceState,
 };
 use gpui_kit::{App, AppContext, Entity, Global};
@@ -37,6 +37,7 @@ enum CoreEvent {
     Connection(ConnectionState),
     Inbox(InboxState),
     Voice(VoiceState),
+    Platform(PlatformState),
     /// No es estado: un aviso del sistema que enseñar (`notifier`).
     Announce(Announcement),
 }
@@ -76,6 +77,9 @@ impl Listener for Forwarder {
     }
     fn comms_changed(&self, state: CommsState) {
         self.send(CoreEvent::Comms(state));
+    }
+    fn platform_changed(&self, state: PlatformState) {
+        self.send(CoreEvent::Platform(state));
     }
     fn thread_changed(&self, state: ThreadState) {
         self.send(CoreEvent::Thread(state));
@@ -119,6 +123,9 @@ pub struct Snapshot {
     /// La voz: la sala en la que estás, el timbre y quién anda por los
     /// canales.
     pub voice: VoiceState,
+    /// Plataforma: los servidores de la organización que se mira, y si se
+    /// está en ella.
+    pub platform: PlatformState,
 }
 
 impl Snapshot {
@@ -139,6 +146,7 @@ impl Snapshot {
             CoreEvent::Connection(state) => self.connection = state,
             CoreEvent::Inbox(state) => self.inbox = state,
             CoreEvent::Voice(state) => self.voice = state,
+            CoreEvent::Platform(state) => self.platform = state,
             // No llega aquí: lo enseña `notifier` sin pasar por el estado.
             CoreEvent::Announce(_) => {}
         }
