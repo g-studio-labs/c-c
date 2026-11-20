@@ -1051,7 +1051,11 @@ mod tests {
 
     impl FakeFeeds {
         fn push(&self, identity: &str, source: VideoSource, fill: u8) {
-            let frame = Frame { width: 4, height: 2, bgra: vec![fill; 4 * 2 * 4] };
+            self.push_sized(identity, source, (4, 2), fill);
+        }
+
+        fn push_sized(&self, identity: &str, source: VideoSource, (width, height): (u32, u32), fill: u8) {
+            let frame = Frame { width, height, bgra: vec![fill; (width * height * 4) as usize] };
             self.frames.lock().unwrap().insert((identity.into(), source), frame);
             if let Some(wake) = self.wake.lock().unwrap().clone() {
                 wake();
@@ -1134,6 +1138,15 @@ mod tests {
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             window.try_find(id).is_some()
+        })
+        .unwrap()
+    }
+
+    fn bounds(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.find(id).bounds()
         })
         .unwrap()
     }
@@ -1410,12 +1423,25 @@ mod tests {
         })
     }
 
-    /// Una cámara que se enciende tapa la cara con su vídeo, cada fotograma
-    /// nuevo tira el anterior del atlas, el motor se entera de a qué tamaño
-    /// se ve, y apagarla devuelve la cara.
+    /// El fondo desenfocado de un recuadro: (si lo tiene, cuántos tiró del
+    /// atlas).
+    fn backdrop(workspace: &gpui_kit::Entity<Workspace>, identity: &str, source: VideoSource, cx: &mut TestAppContext) -> Option<(bool, usize)> {
+        cx.update(|cx| {
+            let wall = workspace.read(cx).video.clone();
+            let tile = wall.read(cx).tile(identity, source)?;
+            let tile = tile.read(cx);
+            Some((tile.has_backdrop(), tile.blurred_dropped))
+        })
+    }
+
+    /// Una cámara que se enciende tapa la cara con su vídeo, entero y sobre
+    /// su fondo desenfocado; cada fotograma nuevo tira el anterior (y su
+    /// fondo) del atlas, el motor se entera de a qué tamaño se ve, y apagarla
+    /// devuelve la cara.
     ///
-    /// Roturas que atrapa: no pintar el vídeo de una cámara encendida; no
-    /// tirar la imagen anterior (la memoria crece a gigas en segundos); no
+    /// Roturas que atrapa: no pintar el vídeo de una cámara encendida; una
+    /// cámara sin fondo; no tirar la imagen o el fondo anteriores (la memoria
+    /// crece a gigas en segundos); no
     /// decirle el tamaño al motor (convierte el vídeo entero); dejar el
     /// vídeo, o su último fotograma, cuando la cámara se apaga; no repintar
     /// al llegar un fotograma.
@@ -1441,6 +1467,7 @@ mod tests {
         wait_until(cx, "el aviso al recuadro", |_| *told.lock().unwrap() > 0);
         wait_until(cx, "el segundo, pintado", |cx| picture(&workspace, "u2", VideoSource::Camera, cx).is_some_and(|(_, painted, _)| painted == 2));
         assert_eq!(picture(&workspace, "u2", VideoSource::Camera, cx).unwrap().2, 1, "el primero salió del atlas");
+        assert_eq!(backdrop(&workspace, "u2", VideoSource::Camera, cx), Some((true, 1)), "con su fondo, y el anterior también salió");
         assert!(
             feeds.targets.lock().unwrap().iter().any(|(who, width, height)| who == "u2" && *width > 0 && *height > 0),
             "el motor sabe a qué tamaño se ve"
@@ -1452,22 +1479,47 @@ mod tests {
         stop(cx);
     }
 
+    /// La imagen de una cámara ocupa justo su recuadro, también la de un
+    /// móvil en vertical en uno ancho; dentro, `video_fit` la deja entera.
+    ///
+    /// Roturas que atrapa: la imagen con `size_full` sin más (`img` le pone
+    /// la proporción del vídeo y crece de alto hasta tres veces el recuadro,
+    /// que la recorta: así una cámara vertical a pantalla completa era una
+    /// nariz, 19-nov); clavada a los bordes sin tamaño (se queda con el ancho
+    /// de su proporción, pegada a la izquierda).
+    #[gpui_kit::test]
+    fn a_tall_camera_gets_exactly_its_tile(cx: &mut TestAppContext) {
+        let (_server, window, _, feeds, workspace) = in_a_call_with_video(cx);
+        video(cx, "u2", VideoSource::Camera, true);
+        wait_until(cx, "el vídeo de Luis en su recuadro", |cx| on_screen(window, "voice-video-u2-camera", cx));
+        feeds.push_sized("u2", VideoSource::Camera, (2, 8), 1);
+        wait_until(cx, "su fotograma, pintado", |cx| picture(&workspace, "u2", VideoSource::Camera, cx).is_some_and(|(shown, _, _)| shown));
+        let tile = bounds(window, "voice-video-u2-camera", cx);
+        let image = bounds(window, "voice-video-u2-camera-picture", cx);
+        assert!(tile.size.width > tile.size.height, "el recuadro es ancho: {tile:?}");
+        assert_eq!(image, tile, "la imagen ocupa su recuadro, ni más alta ni más estrecha");
+        stop(cx);
+    }
+
     /// Una pantalla compartida va al escenario con quién la comparte; las
     /// caras pasan a la tira; pulsar una cámara la lleva al escenario y
     /// pulsar el escenario la devuelve; minimizar deja de mirar el vídeo.
     ///
-    /// Roturas que atrapa: una pantalla que se queda en la rejilla; el
-    /// rótulo sin nombre; la píldora que no abre la tira; el clic que no
+    /// Roturas que atrapa: una pantalla que se queda en la rejilla; una
+    /// pantalla con fondo de colores; el rótulo sin nombre; la píldora que no abre la tira; el clic que no
     /// lleva una cámara al escenario, o el que no la devuelve; minimizar sin
     /// decirle al motor que nadie mira.
     #[gpui_kit::test]
     fn a_shared_screen_takes_the_stage_and_a_click_takes_a_camera_there(cx: &mut TestAppContext) {
-        let (_server, window, _, _, _) = in_a_call_with_video(cx);
+        let (_server, window, _, feeds, workspace) = in_a_call_with_video(cx);
         video(cx, "u2", VideoSource::Screen, true);
         video(cx, "u3", VideoSource::Camera, true);
         wait_until(cx, "la pantalla de Luis, en grande", |cx| on_screen(window, "voice-stage-main", cx));
         assert_eq!(label(window, "voice-stage-caption", cx), "Luis Mora está compartiendo");
         assert!(on_screen(window, "voice-video-u2-screen", cx));
+        feeds.push("u2", VideoSource::Screen, 1);
+        wait_until(cx, "la pantalla, pintada", |cx| picture(&workspace, "u2", VideoSource::Screen, cx).is_some_and(|(shown, _, _)| shown));
+        assert_eq!(backdrop(&workspace, "u2", VideoSource::Screen, cx), Some((false, 0)), "una pantalla va sobre negro");
         assert!(!on_screen(window, "voice-strip", cx), "las caras, en su píldora");
 
         click(window, "voice-faces", cx);
