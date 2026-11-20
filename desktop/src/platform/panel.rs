@@ -14,7 +14,6 @@ use crate::lang::tr;
 use crate::theme::Leading as _;
 use crate::workspace::{Workspace, INDENT, PANEL_ROW_HEIGHT};
 
-/// El cuerpo del panel, bajo su cabecera.
 pub(crate) fn panel(cx: &App) -> AnyElement {
     let snapshot = Backend::snapshot(cx).read(cx);
     let state = snapshot.platform.clone();
@@ -52,7 +51,6 @@ pub(crate) fn panel(cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// Un servidor, colgando de «Servidores», con su punto de estado.
 fn server_row(server: &Server, active: bool, cx: &App) -> AnyElement {
     let status = tr(cx, server.status.label_key());
     // El estado lo dice el punto, también a quien no lo ve (`aria-label` en
@@ -74,8 +72,6 @@ fn server_row(server: &Server, active: bool, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// Una fila del panel (`PanelRow.tsx`): la activa con fondo y en negrita; las
-/// demás apagadas hasta que pasa el ratón.
 fn row(id: impl Into<ElementId>, icon: impl IntoElement, label: String, active: bool, indent: f32, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
     let (hover, muted, foreground) = (theme.sidebar_accent, theme.muted_foreground, theme.sidebar_foreground);

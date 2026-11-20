@@ -16,7 +16,6 @@ use crate::theme::Leading as _;
 /// que se lee; tipo y estado caben en poco.
 const COLUMNS: [(&str, f32); 4] = [("common:admin.thName", 3.), ("common:admin.thHost", 3.), ("common:admin.thType", 2.), ("common:admin.thStatus", 2.)];
 
-/// La página entera.
 pub(crate) fn page(cx: &App) -> AnyElement {
     let state = Backend::snapshot(cx).read(cx).platform.clone();
     let theme = cx.theme();
@@ -69,7 +68,6 @@ pub(crate) fn page(cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// Lo que va bajo la cabecera: cargando, vacía, o la tabla.
 fn content(state: &PlatformState, cx: &App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     if !state.loaded {
@@ -121,7 +119,6 @@ fn server_row(server: &Server, open: bool, cx: &App) -> AnyElement {
     .into_any_element()
 }
 
-/// Una fila de la tabla, con cada celda en su parte del ancho.
 fn cells(cells: Vec<AnyElement>) -> Div {
     div().flex().items_center().px_3().gap_3().children(
         cells.into_iter().zip(COLUMNS).map(|(cell, (_, share))| div().flex_grow(share).flex_basis(px(0.)).min_w_0().child(cell)),
