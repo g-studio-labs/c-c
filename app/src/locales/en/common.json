@@ -62,6 +62,10 @@
     "pickScreenTitle": "Which screen do you share?",
     "pickScreenLead": "You have more than one. Pick the one the others will see.",
     "screenN": "Screen {{n}}",
+    "pickSourceTitle": "What do you share?",
+    "pickSourceLead": "Pick the screen or the window the others will see.",
+    "screens": "Screens",
+    "windows": "Windows",
     "more": "More options",
     "leaveShort": "Leave",
     "isMuted": "{{name}} is muted"

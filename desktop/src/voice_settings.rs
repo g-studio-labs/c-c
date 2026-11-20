@@ -1,5 +1,5 @@
-//! Los ajustes de audio de la sala: elegir micrófono y altavoz, la
-//! supresión de ruido y el medidor del micrófono.
+//! Los ajustes de audio y vídeo de la sala: elegir micrófono, altavoz y
+//! cámara, la supresión de ruido y el medidor del micrófono.
 //!
 //! Como `DeviceSettings.tsx` y `MicLevel.tsx`, con una cosa más: aquí se
 //! elige también el altavoz, que en Tauri no se podía. Qué se elige se
@@ -29,11 +29,40 @@ pub(crate) struct DeviceRow {
     pub current: bool,
 }
 
-/// Lo que hay, por sistema: micrófonos y altavoces.
+/// Lo que hay, por sistema: micrófonos, altavoces y cámaras.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DeviceLists {
     pub inputs: Vec<DeviceRow>,
     pub outputs: Vec<DeviceRow>,
+    pub cameras: Vec<DeviceRow>,
+}
+
+/// De qué es un dispositivo de la lista.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeviceGroup {
+    Input,
+    Output,
+    Camera,
+}
+
+impl DeviceGroup {
+    /// Cómo se llama en el id de su fila (`voice-device-in-…`).
+    fn slug(self) -> &'static str {
+        match self {
+            DeviceGroup::Input => "in",
+            DeviceGroup::Output => "out",
+            DeviceGroup::Camera => "camera",
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn kind(self) -> cac_voice::DeviceKind {
+        match self {
+            DeviceGroup::Input => cac_voice::DeviceKind::Input,
+            DeviceGroup::Output => cac_voice::DeviceKind::Output,
+            DeviceGroup::Camera => cac_voice::DeviceKind::Camera,
+        }
+    }
 }
 
 /// Lo que el panel sabe mientras está abierto.
@@ -85,6 +114,7 @@ pub(crate) fn restore_choices(cx: &App) {
         let choices = core.voice().device_choices();
         let _ = engine.set_device(cac_voice::DeviceKind::Input, choices.input).await;
         let _ = engine.set_device(cac_voice::DeviceKind::Output, choices.output).await;
+        let _ = engine.set_device(cac_voice::DeviceKind::Camera, choices.camera).await;
     });
 }
 
@@ -110,7 +140,7 @@ impl Workspace {
             cx.spawn(async move |this, cx| {
                 let devices = found.await;
                 let _ = this.update(cx, |this, cx| {
-                    this.voice_settings.lists = Some(DeviceLists { inputs: rows(&devices.inputs), outputs: rows(&devices.outputs) });
+                    this.voice_settings.lists = Some(DeviceLists { inputs: rows(&devices.inputs), outputs: rows(&devices.outputs), cameras: rows(&devices.cameras) });
                     cx.notify();
                 });
             })
@@ -157,14 +187,19 @@ impl Workspace {
 
     /// Elige uno: se recuerda, y el motor lo abre (en caliente si hay
     /// llamada). Si no abre, la llamada sigue con el que tenía y se dice.
-    fn choose_device(&mut self, output: bool, id: String, cx: &mut Context<Self>) {
-        Backend::core(cx).voice().choose_device(output, Some(id.clone()));
+    fn choose_device(&mut self, group: DeviceGroup, id: String, cx: &mut Context<Self>) {
+        let voice = Backend::core(cx).voice();
+        match group {
+            DeviceGroup::Input => voice.choose_device(false, Some(id.clone())),
+            DeviceGroup::Output => voice.choose_device(true, Some(id.clone())),
+            DeviceGroup::Camera => voice.choose_camera(Some(id.clone())),
+        }
         #[cfg(target_os = "linux")]
         {
             let Some(engine) = engine(cx) else { return };
             self.voice_settings.busy = Some(id.clone());
             cx.notify();
-            let kind = if output { cac_voice::DeviceKind::Output } else { cac_voice::DeviceKind::Input };
+            let kind = group.kind();
             let answer = Backend::ask(cx, move |_| async move { engine.set_device(kind, Some(id)).await.map_err(|error| error.label().to_string()) });
             cx.spawn(async move |this, cx| {
                 let result = answer.await.unwrap_or(Ok(()));
@@ -194,11 +229,11 @@ impl Workspace {
         let group_title = |icon: Lucide, title: String| {
             div().flex().items_center().gap_1p5().px_3().pb_1().text_size(px(11.)).text_color(muted).child(Icon::new(icon).size_3()).child(title.to_uppercase())
         };
-        let row = |output: bool, device: &DeviceRow, busy: bool, cx: &mut Context<Self>| {
+        let row = |group: DeviceGroup, device: &DeviceRow, busy: bool, cx: &mut Context<Self>| {
             let id = device.id.clone();
             let current = device.current;
             div()
-                .id(SharedString::from(format!("voice-device-{}-{}", if output { "out" } else { "in" }, device.id)))
+                .id(SharedString::from(format!("voice-device-{}-{}", group.slug(), device.id)))
                 .flex()
                 .items_center()
                 .gap_2()
@@ -208,7 +243,7 @@ impl Workspace {
                 .text_size(px(13.))
                 .text_color(if current { foreground } else { muted })
                 .when(!current && !busy, |this| {
-                    this.cursor_pointer().hover(move |style| style.text_color(foreground)).on_click(cx.listener(move |this, _, _, cx| this.choose_device(output, id.clone(), cx)))
+                    this.cursor_pointer().hover(move |style| style.text_color(foreground)).on_click(cx.listener(move |this, _, _, cx| this.choose_device(group, id.clone(), cx)))
                 })
                 .aria_label(device.name.clone())
                 .aria_selected(current)
@@ -256,8 +291,12 @@ impl Workspace {
                     )
                     .children(settings.input.clone().map(|input| div().mt_1().truncate().text_size(px(11.)).text_color(muted).child(input)))
                     .children(settings.mic_error.clone().map(|error| div().mt(px(2.)).text_size(px(11.)).text_color(danger).child(error)));
-                let inputs: Vec<AnyElement> = lists.inputs.iter().map(|device| row(false, device, settings.busy.as_deref() == Some(device.id.as_str()), cx).into_any_element()).collect();
-                let outputs: Vec<AnyElement> = lists.outputs.iter().map(|device| row(true, device, settings.busy.as_deref() == Some(device.id.as_str()), cx).into_any_element()).collect();
+                let rows_of = |group: DeviceGroup, devices: &[DeviceRow], cx: &mut Context<Self>| -> Vec<AnyElement> {
+                    devices.iter().map(|device| row(group, device, settings.busy.as_deref() == Some(device.id.as_str()), cx).into_any_element()).collect()
+                };
+                let inputs = rows_of(DeviceGroup::Input, &lists.inputs, cx);
+                let outputs = rows_of(DeviceGroup::Output, &lists.outputs, cx);
+                let cameras = rows_of(DeviceGroup::Camera, &lists.cameras, cx);
                 let empty = |key: &str, cx: &App| div().px_3().py_1().leading_xs().text_color(muted).child(tr(cx, key));
                 div()
                     .flex()
@@ -314,6 +353,13 @@ impl Workspace {
                             .child(group_title(Lucide::Volume2, tr(cx, "common:last.speaker")))
                             .when(outputs.is_empty(), |this| this.child(empty("common:last.noSpeaker", cx)))
                             .children(outputs),
+                    )
+                    .child(
+                        div()
+                            .py_1()
+                            .child(group_title(Lucide::Video, tr(cx, "common:last.camera")))
+                            .when(cameras.is_empty(), |this| this.child(empty("common:last.noCamera", cx)))
+                            .children(cameras),
                     )
                     .into_any_element()
             }

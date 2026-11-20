@@ -11,7 +11,7 @@
 //! vídeo, tampoco: cada vídeo es un `voice_video::VideoTile` que toma sus
 //! fotogramas del motor; aquí sólo se decide dónde va.
 
-use cac_core::{person_initials, voice_error_phrase, voice_layout, voice_room_name, voice_status, StageItem, VideoSource, VoiceLayout, VoicePeer, VoicePhase, VoiceState, VoiceTile};
+use cac_core::{person_initials, voice_error_phrase, voice_layout, voice_room_name, voice_status, Publishing, StageItem, VideoSource, VoiceLayout, VoicePeer, VoicePhase, VoiceState, VoiceTile};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
@@ -439,6 +439,15 @@ fn tile(tile: &VoiceTile, video: Option<Entity<VideoTile>>, compact: bool, cx: &
         .into_any_element()
 }
 
+/// De qué color se enciende un mando: rojo lo que apaga algo tuyo
+/// (silencio, sordera), cian lo que saca algo tuyo a la sala (cámara,
+/// pantalla). El `tone` de `Round` en `VoiceControls.tsx`.
+#[derive(Clone, Copy)]
+enum Tone {
+    Danger,
+    Primary,
+}
+
 /// Un mando redondo de la barra (`Round` en `VoiceControls.tsx`): rojo
 /// cuando está «activo» (silenciado, sordo).
 pub(crate) fn round_button(id: &'static str, icon: Lucide, label: String, active: bool, cx: &App) -> Stateful<Div> {
@@ -446,8 +455,16 @@ pub(crate) fn round_button(id: &'static str, icon: Lucide, label: String, active
 }
 
 fn round(id: &'static str, icon: Lucide, label: String, active: bool, cx: &App) -> Stateful<Div> {
+    round_with(id, Icon::new(icon).size_5().into_any_element(), label, active, Tone::Danger, cx)
+}
+
+fn round_with(id: &'static str, content: AnyElement, label: String, active: bool, tone: Tone, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
-    let (danger, border, card, foreground, accent) = (theme.danger, theme.border, theme.group_box, theme.foreground, theme.accent);
+    let (border, card, foreground, accent) = (theme.border, theme.group_box, theme.foreground, theme.accent);
+    let lit = match tone {
+        Tone::Danger => theme.danger,
+        Tone::Primary => theme.primary,
+    };
     div()
         .id(id)
         .size(px(46.))
@@ -459,7 +476,7 @@ fn round(id: &'static str, icon: Lucide, label: String, active: bool, cx: &App) 
         .border_1()
         .map(|this| {
             if active {
-                this.border_color(danger.opacity(0.5)).bg(danger.opacity(0.15)).text_color(danger)
+                this.border_color(lit.opacity(0.5)).bg(lit.opacity(0.15)).text_color(lit)
             } else {
                 this.border_color(border).bg(card).text_color(foreground).hover(move |style| style.bg(accent))
             }
@@ -471,15 +488,21 @@ fn round(id: &'static str, icon: Lucide, label: String, active: bool, cx: &App) 
         })
         .aria_label(label)
         .aria_selected(active)
-        .child(Icon::new(icon).size_5())
+        .child(content)
 }
 
-/// Un mando que esta app aún no hace: gris, y al pulsarlo lo dice en su
-/// globo.
-fn not_yet(id: &'static str, icon: Lucide, label: String, cx: &App) -> AnyElement {
-    let not_here = tr(cx, "common:misc.notInThisApp");
-    let said = format!("{label} — {not_here}");
-    round(id, icon, said, false, cx).opacity(0.45).test_support().into_any_element()
+/// Lo que sacas a la sala (cámara, pantalla): encendido en cian cuando ya
+/// sale, y girando mientras el motor lo arranca, que abrir una cámara o
+/// esperar al diálogo de la pantalla tarda. Pulsarlo mientras gira lo
+/// cancela, así que ya dice «apagar».
+fn publish_button(id: &'static str, publishing: Publishing, icon: Lucide, turn_on: &str, turn_off: &str, cx: &App) -> Stateful<Div> {
+    let content = if publishing == Publishing::Starting {
+        div().id(SharedString::from(format!("{id}-starting"))).child(Spinner::new().with_size(px(20.))).test_support().into_any_element()
+    } else {
+        Icon::new(icon).size_5().into_any_element()
+    };
+    let label = tr(cx, if publishing.is_off() { turn_on } else { turn_off });
+    round_with(id, content, label, publishing == Publishing::On, Tone::Primary, cx)
 }
 
 /// La barra de mandos: lo tuyo (micrófono, oír, ajustes) y colgar, aparte.
@@ -514,10 +537,16 @@ fn controls(state: &VoiceState, settings: Option<AnyElement>, cx: &App) -> AnyEl
             .on_click(|_, _, cx| Backend::core(cx).voice().toggle_deaf())
             .test_support(),
         )
-        // Publicar cámara y pantalla llega en las fases siguientes: se pintan
-        // en su sitio y dicen que todavía no (decisión de jose, 19-nov).
-        .child(not_yet("voice-camera", Lucide::Video, tr(cx, "common:voice.cameraOn"), cx))
-        .child(not_yet("voice-share", Lucide::MonitorUp, tr(cx, "common:voice.share"), cx))
+        .child(
+            publish_button("voice-camera", state.camera, if state.camera.is_off() { Lucide::VideoOff } else { Lucide::Video }, "common:voice.cameraOn", "common:voice.cameraOff", cx)
+                .on_click(|_, _, cx| Backend::core(cx).voice().toggle_camera())
+                .test_support(),
+        )
+        .child(
+            publish_button("voice-share", state.sharing, Lucide::MonitorUp, "common:voice.share", "common:voice.stopSharing", cx)
+                .on_click(|_, _, cx| Backend::core(cx).voice().toggle_share())
+                .test_support(),
+        )
         .children(settings)
         .child(div().mx_1p5().h_7().w(px(1.)).bg(border))
         .child(
@@ -553,6 +582,8 @@ pub struct StageExtras {
     pub invite_button: Option<AnyElement>,
     pub invite_panel: Option<AnyElement>,
     pub ring_row: Option<AnyElement>,
+    /// Qué pantalla o ventana compartir (`voice_screen_picker.rs`).
+    pub screen_picker: Option<AnyElement>,
     /// Los vídeos de la sala (`voice_video.rs`).
     pub video: Option<Entity<VideoWall>>,
 }
@@ -716,6 +747,7 @@ pub fn stage(extras: StageExtras, cx: &App) -> AnyElement {
         .child(controls(&state, extras.settings_button, cx))
         .children(extras.invite_panel)
         .children(extras.settings_panel)
+        .children(extras.screen_picker)
         .test_support()
         .into_any_element()
 }
@@ -727,7 +759,7 @@ pub fn stage(extras: StageExtras, cx: &App) -> AnyElement {
 /// apagados; pulsarla las saca a la tira); abajo, de quién es.
 fn stage_main(on_stage: &StageItem, strip: &[VoiceTile], faces_out: bool, by_hand: bool, wall: Option<&Entity<VideoWall>>, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    let (primary, background, success) = (theme.primary, theme.background, theme.success);
+    let (primary, background, success, danger) = (theme.primary, theme.background, theme.success, theme.danger);
     let lang = locale(cx);
     let caption = match (on_stage.source, on_stage.me) {
         (VideoSource::Screen, true) => tr(cx, "common:last.youAreSharing"),
@@ -811,6 +843,34 @@ fn stage_main(on_stage: &StageItem, strip: &[VoiceTile], faces_out: bool, by_han
                 .test_support(),
         )
         .children(faces)
+        // Lo que compartes tú se para desde donde lo estás mirando, no sólo
+        // desde la barra.
+        .when(on_stage.source == VideoSource::Screen && on_stage.me, |this| {
+            this.child(
+                div()
+                    .id("voice-stop-sharing")
+                    .absolute()
+                    .bottom_3()
+                    .right_3()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(danger.opacity(0.5))
+                    .bg(background.opacity(0.8))
+                    .px_3()
+                    .py_1()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(danger)
+                    .cursor_pointer()
+                    .on_click(|_, _, cx| {
+                        cx.stop_propagation();
+                        Backend::core(cx).voice().toggle_share();
+                    })
+                    .aria_label(tr(cx, "common:last.stopSharing"))
+                    .child(tr(cx, "common:last.stopSharing"))
+                    .test_support(),
+            )
+        })
         .child(
             div()
                 .id("voice-stage-caption")
@@ -1001,7 +1061,7 @@ mod tests {
     use crate::testing::{ok, sign_in, wait_until, FakeServer};
     use crate::workspace::Workspace;
     use crate::voice_video::{Feeds, Frame, VideoFeeds, Wake};
-    use cac_core::{VideoSource, VoiceEngine, VoiceEvent, VoiceFuture};
+    use cac_core::{ScreenSource, ScreenSources, VideoSource, VoiceEngine, VoiceEvent, VoiceFuture};
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{px, size, AnyWindowHandle, AppContext, Bounds, Point, TestAppContext, WindowBounds, WindowOptions};
     use serde_json::{json, Value};
@@ -1015,6 +1075,8 @@ mod tests {
         pub fail: Mutex<Option<String>>,
         /// Lo que se le dijo de mirar el vídeo, aparte de `calls`.
         pub video: Mutex<Vec<bool>>,
+        /// Las pantallas y ventanas que dice tener.
+        pub sources: Mutex<ScreenSources>,
     }
 
     impl VoiceEngine for FakeEngine {
@@ -1036,6 +1098,18 @@ mod tests {
         fn set_noise_suppression(&self, _on: bool) {}
         fn watch_video(&self, on: bool) {
             self.video.lock().unwrap().push(on);
+        }
+        fn set_camera(&self, on: bool) {
+            self.calls.lock().unwrap().push(format!("camera {on}"));
+        }
+        fn screen_sources(&self) -> ScreenSources {
+            self.sources.lock().unwrap().clone()
+        }
+        fn share_screen(&self, source: Option<ScreenSource>) {
+            self.calls.lock().unwrap().push(format!("share {}", source.map_or("system".to_string(), |source| source.id)));
+        }
+        fn stop_share(&self) {
+            self.calls.lock().unwrap().push("stop share".into());
         }
     }
 
@@ -1556,13 +1630,150 @@ mod tests {
         stop(cx);
     }
 
-    /// Cámara y pantalla propias están en su sitio y dicen que todavía no.
-    /// Rotura que atrapa: un botón que parece que hace algo y no hace nada.
+    fn source(id: &str, title: &str) -> ScreenSource {
+        ScreenSource { id: id.into(), title: title.into() }
+    }
+
+    fn last_call(engine: &FakeEngine) -> String {
+        engine.calls.lock().unwrap().last().cloned().unwrap_or_default()
+    }
+
+    /// Pulsar la cámara se la pide al motor y gira hasta que contesta; con
+    /// su sí, tu recuadro enseña tu vídeo y el botón se enciende; volver a
+    /// pulsarla la apaga ya, sin esperar.
+    ///
+    /// Roturas que atrapa: un botón que no llega al motor; darla por
+    /// encendida antes de que conteste (sin giro); tu recuadro sin tu vídeo;
+    /// apagar esperando al motor.
     #[gpui_kit::test]
-    fn publishing_says_it_is_not_here_yet(cx: &mut TestAppContext) {
+    fn the_camera_waits_for_the_engine_and_shows_in_your_tile(cx: &mut TestAppContext) {
+        let (_server, window, engine, _, _) = in_a_call_with_video(cx);
+        assert_eq!(label(window, "voice-camera", cx), "Encender tu cámara");
+
+        click(window, "voice-camera", cx);
+        wait_until(cx, "gira mientras arranca", |cx| on_screen(window, "voice-camera-starting", cx));
+        assert_eq!(last_call(&engine), "camera true");
+        assert_eq!(label(window, "voice-camera", cx), "Apagar tu cámara", "pulsarla mientras gira la cancela");
+        assert!(!on_screen(window, "voice-video-u1-camera", cx), "sin el sí del motor no hay vídeo");
+
+        video(cx, "u1", VideoSource::Camera, true);
+        wait_until(cx, "tu vídeo en tu recuadro", |cx| on_screen(window, "voice-video-u1-camera", cx));
+        assert!(!on_screen(window, "voice-camera-starting", cx), "ya no gira");
+        assert_eq!(label(window, "voice-camera", cx), "Apagar tu cámara");
+
+        click(window, "voice-camera", cx);
+        wait_until(cx, "apagada en el acto", |cx| !on_screen(window, "voice-video-u1-camera", cx));
+        assert_eq!(last_call(&engine), "camera false");
+        assert_eq!(label(window, "voice-camera", cx), "Encender tu cámara");
+        stop(cx);
+    }
+
+    /// Si la cámara no sale, el botón vuelve a apagado y la sala dice por
+    /// qué.
+    /// Rotura que atrapa: un botón que se queda girando, o que vuelve sin
+    /// decir nada.
+    #[gpui_kit::test]
+    fn a_camera_that_fails_puts_the_button_back_and_says_why(cx: &mut TestAppContext) {
         let (_server, window, _, _, _) = in_a_call_with_video(cx);
-        assert_eq!(label(window, "voice-camera", cx), "Encender tu cámara — Todavía no está en esta app");
-        assert_eq!(label(window, "voice-share", cx), "Compartir tu pantalla — Todavía no está en esta app");
+        click(window, "voice-camera", cx);
+        wait_until(cx, "arrancando", |cx| on_screen(window, "voice-camera-starting", cx));
+        tell(cx, VoiceEvent::VideoFailed { source: VideoSource::Camera, code: "voice-camera-busy".into() });
+        wait_until(cx, "la frase", |cx| label(window, "voice-error", cx) == "Otro programa está usando la cámara.");
+        assert!(!on_screen(window, "voice-camera-starting", cx));
+        assert_eq!(label(window, "voice-camera", cx), "Encender tu cámara");
+        stop(cx);
+    }
+
+    /// Con varias pantallas y ventanas, compartir abre el selector, con las
+    /// pantallas por su número y las ventanas por su título; Escape lo
+    /// cierra sin compartir nada, cerrar la sala también, y pulsar una
+    /// ventana manda esa al motor.
+    ///
+    /// Roturas que atrapa: compartir sin preguntar; un selector sin las
+    /// ventanas; una pantalla con el nombre del capturador («screen»);
+    /// Escape que no cierra, o que comparte; el selector que vuelve al abrir
+    /// otra vez la sala; mandar otra fuente que la pulsada; el selector que
+    /// se queda abierto después de elegir.
+    #[gpui_kit::test]
+    fn several_sources_open_the_picker_and_the_one_picked_is_shared(cx: &mut TestAppContext) {
+        let (_server, window, engine, _, _) = in_a_call_with_video(cx);
+        *engine.sources.lock().unwrap() = ScreenSources { screens: vec![source("screen:1", "screen"), source("screen:2", "screen")], windows: vec![source("window:7", "Notas — Editor")] };
+
+        click(window, "voice-share", cx);
+        wait_until(cx, "el selector", |cx| on_screen(window, "voice-picker", cx));
+        assert_eq!(label(window, "voice-picker-title", cx), "¿Qué compartes?");
+        assert_eq!(label(window, "voice-pick-screen:2", cx), "Pantalla 2");
+        assert_eq!(label(window, "voice-pick-window:7", cx), "Notas — Editor");
+        assert!(!last_call(&engine).starts_with("share"), "sin elegir no se comparte");
+
+        cx.simulate_keystrokes(window, "escape");
+        wait_until(cx, "Escape lo cierra", |cx| !on_screen(window, "voice-picker", cx));
+        assert!(!engine.calls.lock().unwrap().iter().any(|call| call.starts_with("share")), "y no comparte nada");
+
+        // Cerrar la sala con el selector abierto no lo deja pendiente.
+        click(window, "voice-share", cx);
+        wait_until(cx, "abierto", |cx| on_screen(window, "voice-picker", cx));
+        cx.update(|cx| Backend::core(cx).voice().close_stage());
+        wait_until(cx, "minimizada", |cx| on_screen(window, "voice-mini", cx));
+        cx.update(|cx| Backend::core(cx).voice().open_stage());
+        wait_until(cx, "de vuelta", |cx| on_screen(window, "voice-share", cx));
+        assert!(!on_screen(window, "voice-picker", cx), "el selector no vuelve solo");
+
+        click(window, "voice-share", cx);
+        wait_until(cx, "otra vez", |cx| on_screen(window, "voice-picker", cx));
+        click(window, "voice-pick-window:7", cx);
+        wait_until(cx, "cerrado al elegir", |cx| !on_screen(window, "voice-picker", cx));
+        assert_eq!(last_call(&engine), "share window:7");
+        assert!(on_screen(window, "voice-share-starting", cx), "y espera al motor");
+        stop(cx);
+    }
+
+    /// Lo que compartes tú va al escenario con «Estás compartiendo» y su
+    /// botón de parar; pararlo se lo dice al motor y la sala vuelve a la
+    /// rejilla. Con una sola pantalla se comparte sin preguntar.
+    ///
+    /// Roturas que atrapa: preguntar con una sola fuente; tu pantalla sin
+    /// botón de parar, o un botón que no para; el escenario que se queda con
+    /// tu pantalla después de pararla.
+    #[gpui_kit::test]
+    fn stopping_your_share_from_the_stage_goes_back_to_the_grid(cx: &mut TestAppContext) {
+        let (_server, window, engine, _, _) = in_a_call_with_video(cx);
+        *engine.sources.lock().unwrap() = ScreenSources { screens: vec![source("screen:1", "screen")], windows: vec![] };
+
+        click(window, "voice-share", cx);
+        wait_until(cx, "pedida sin preguntar", |_| last_call(&engine) == "share screen:1");
+        assert!(!on_screen(window, "voice-picker", cx));
+        video(cx, "u1", VideoSource::Screen, true);
+        wait_until(cx, "tu pantalla, en grande", |cx| label(window, "voice-stage-caption", cx) == "Estás compartiendo");
+        assert_eq!(label(window, "voice-share", cx), "Dejar de compartir la pantalla");
+
+        click(window, "voice-stop-sharing", cx);
+        wait_until(cx, "la rejilla", |cx| on_screen(window, "voice-grid", cx));
+        assert_eq!(last_call(&engine), "stop share");
+        assert_eq!(label(window, "voice-share", cx), "Compartir tu pantalla");
+        stop(cx);
+    }
+
+    /// Elegir una cámara en los ajustes la deja apuntada para la próxima
+    /// vez, sin tocar el micrófono ni el altavoz elegidos.
+    /// Roturas que atrapa: no guardarla; guardarla como micrófono o altavoz.
+    #[gpui_kit::test]
+    fn the_camera_chosen_in_settings_is_remembered(cx: &mut TestAppContext) {
+        use crate::voice_settings::{DeviceLists, DeviceRow};
+        let (_server, window, _, _, workspace) = in_a_call_with_video(cx);
+        cx.update(|cx| Backend::core(cx).voice().choose_device(false, Some("mic-1".into())));
+        let row = |name: &str, current: bool| DeviceRow { id: name.into(), name: name.into(), current };
+        workspace.update(cx, |workspace, cx| {
+            workspace.voice_settings.open = true;
+            workspace.voice_settings.lists = Some(DeviceLists { cameras: vec![row("Integrated", true), row("Logitech C920", false)], ..DeviceLists::default() });
+            cx.notify();
+        });
+        wait_until(cx, "el grupo Cámara", |cx| on_screen(window, "voice-device-camera-Logitech C920", cx));
+
+        click(window, "voice-device-camera-Logitech C920", cx);
+        let choices = cx.update(|cx| Backend::core(cx).voice().device_choices());
+        assert_eq!(choices.camera.as_deref(), Some("Logitech C920"));
+        assert_eq!((choices.input.as_deref(), choices.output.as_deref()), (Some("mic-1"), None), "lo demás, como estaba");
         stop(cx);
     }
 }

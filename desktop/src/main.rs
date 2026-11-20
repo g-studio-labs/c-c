@@ -46,6 +46,7 @@ mod voice;
 #[cfg(target_os = "linux")]
 mod voice_engine;
 mod voice_ring;
+mod voice_screen_picker;
 mod voice_settings;
 mod voice_video;
 mod workspace;

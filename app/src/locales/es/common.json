@@ -62,6 +62,10 @@
     "pickScreenTitle": "¿Qué pantalla compartes?",
     "pickScreenLead": "Tienes más de una. Elige la que verán los demás.",
     "screenN": "Pantalla {{n}}",
+    "pickSourceTitle": "¿Qué compartes?",
+    "pickSourceLead": "Elige la pantalla o la ventana que verán los demás.",
+    "screens": "Pantallas",
+    "windows": "Ventanas",
     "more": "Más opciones",
     "leaveShort": "Salir",
     "isMuted": "{{name}} tiene el micrófono silenciado"

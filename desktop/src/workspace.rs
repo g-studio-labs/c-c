@@ -146,6 +146,9 @@ pub struct Workspace {
     pub(crate) voice_settings: crate::voice_settings::SettingsState,
     /// El timbre: a quién llamar, el aviso de uno nuevo, el reloj.
     pub(crate) ring: crate::voice_ring::RingUi,
+    /// El foco del selector de pantalla, que se le da al abrirse.
+    picker_focus: FocusHandle,
+    was_picking: bool,
 }
 
 impl Workspace {
@@ -199,6 +202,8 @@ impl Workspace {
             folded_for_call: false,
             voice_settings: Default::default(),
             ring: Default::default(),
+            picker_focus: cx.focus_handle(),
+            was_picking: false,
             connect,
             connect_open: false,
             account_menu_open: false,
@@ -1434,8 +1439,24 @@ impl Workspace {
     }
 }
 
+impl Workspace {
+    /// El selector de pantalla, con el foco al abrirse (Escape lo cierra) y
+    /// devuelto a la ventana al cerrarse.
+    fn render_screen_picker(&mut self, voice: &cac_core::VoiceState, stage_shown: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let sources = voice.picking.as_ref().filter(|_| stage_shown);
+        let picking = sources.is_some();
+        if picking && !self.was_picking {
+            self.picker_focus.focus(window, cx);
+        } else if !picking && self.was_picking {
+            self.focus_anchor.focus(window, cx);
+        }
+        self.was_picking = picking;
+        sources.map(|sources| crate::voice_screen_picker::screen_picker(sources, &self.picker_focus, window, cx))
+    }
+}
+
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (on_comms, stage_shown) = {
             let snapshot = Backend::snapshot(cx).read(cx);
             let voice = &snapshot.voice;
@@ -1460,11 +1481,17 @@ impl Render for Workspace {
         }
         self.stage_was_shown = stage_shown;
         // Lo que cuelga de la sala se cierra con ella.
+        let voice = Backend::snapshot(cx).read(cx).voice.clone();
         if !stage_shown {
             self.voice_settings.open = false;
             self.ring.invite_open = false;
+            // Elegir qué compartir sin ver la sala no se queda pendiente
+            // para cuando vuelvas.
+            if voice.picking.is_some() {
+                Backend::core(cx).voice().cancel_pick();
+            }
         }
-        let voice = Backend::snapshot(cx).read(cx).voice.clone();
+        let screen_picker = self.render_screen_picker(&voice, stage_shown, window, cx);
         self.sync_ring(&voice, cx);
         self.video.update(cx, |wall, cx| wall.sync(&voice, stage_shown, cx));
         let stage: Option<AnyElement> = if stage_shown {
@@ -1481,6 +1508,7 @@ impl Render for Workspace {
                 invite_button: (voice.space_id.is_some() || voice.meet_id.is_some()).then(|| self.invite_button(cx)),
                 invite_panel: self.render_invite(cx),
                 ring_row: self.render_ring_row(&voice, cx),
+                screen_picker,
                 video: Some(self.video.clone()),
             };
             Some(crate::voice::stage(extras, cx))

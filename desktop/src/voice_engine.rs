@@ -7,16 +7,25 @@
 //! la sordera el micrófono sigue cerrado aunque el motor, solo, lo dejaría
 //! como estaba (`Call::set_deaf`).
 //!
+//! Publicar cámara y pantalla: el core lo pide sin esperar (`set_camera`,
+//! `share_screen`), y aquí se espera al motor; un fallo vuelve al core como
+//! `VoiceEvent::VideoFailed`, y lo que sí sale lo cuenta el propio motor con
+//! su `Video`.
+//!
 //! Los fotogramas de vídeo tampoco pasan por el core: `LiveVoice` es también
 //! el `voice_video::Feeds` de la app, y la sala los toma de la llamada viva.
 //!
 //! Sólo en Linux por ahora (ver `Cargo.toml`). En macOS y Windows no se pone
 //! ninguno y el core dice que esta app todavía no tiene llamadas.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 
-use cac_core::{Core, VideoSource, VoiceEngine, VoiceEvent, VoiceFuture};
-use cac_voice::{Call, EngineEvent, EventSink};
+use cac_core::{Core, ScreenSource, ScreenSources, VideoSource, VoiceEngine, VoiceEvent, VoiceFuture};
+use cac_voice::{Call, EngineEvent, EventSink, VoiceError};
+use tokio::sync::mpsc;
 
 use crate::voice_video::{Feeds, Frame, Wake};
 
@@ -51,6 +60,36 @@ fn to_core(event: EngineEvent) -> VoiceEvent {
     }
 }
 
+fn to_core_sources(sources: cac_voice::ScreenSources) -> ScreenSources {
+    let convert = |list: Vec<cac_voice::ScreenSource>| list.into_iter().map(|source| ScreenSource { id: source.id, title: source.title }).collect();
+    ScreenSources { screens: convert(sources.screens), windows: convert(sources.windows) }
+}
+
+/// Una orden de publicar, ya con su llamada dentro.
+type Order = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// Empieza cada orden en el orden en que llegó, sin esperar a que acabe la
+/// anterior. Las dos cosas hacen falta: apagar mientras la cámara arranca
+/// tiene que cancelar ese arranque (`Call::set_camera`), no esperar los 15 s
+/// a que termine; y si «enciende» y «apaga» se lanzaran sueltas podrían
+/// empezar al revés y dejarla encendida. Por eso cada una da aquí su primera
+/// vuelta —donde `Call` aparta lo que había— y sólo después se suelta.
+async fn run_in_order(mut orders: mpsc::UnboundedReceiver<Order>) {
+    while let Some(mut order) = orders.recv().await {
+        let first = std::future::poll_fn(|cx| Poll::Ready(order.as_mut().poll(cx))).await;
+        if first.is_pending() {
+            tokio::spawn(order);
+        }
+    }
+}
+
+/// La llamada en curso y por dónde se le mandan las órdenes de publicar.
+#[derive(Clone)]
+struct Live {
+    call: Call,
+    orders: mpsc::UnboundedSender<Order>,
+}
+
 /// El motor, para lo que no pasa por el core: elegir micrófono y altavoz.
 pub struct Devices(pub cac_voice::Engine);
 
@@ -59,7 +98,7 @@ impl gpui_kit::Global for Devices {}
 /// El motor de verdad, con la llamada en curso.
 pub struct LiveVoice {
     engine: cac_voice::Engine,
-    call: Arc<Mutex<Option<Call>>>,
+    live: Arc<Mutex<Option<Live>>>,
     core: Core,
     /// A quién despertar cuando llega un fotograma; se le da a cada llamada.
     wake: Arc<Mutex<Option<Wake>>>,
@@ -67,7 +106,7 @@ pub struct LiveVoice {
 
 impl LiveVoice {
     pub fn new(core: Core) -> Self {
-        LiveVoice { engine: cac_voice::Engine::new(), call: Arc::default(), core, wake: Arc::default() }
+        LiveVoice { engine: cac_voice::Engine::new(), live: Arc::default(), core, wake: Arc::default() }
     }
 
     /// El motor, para lo que no pasa por el core: los dispositivos.
@@ -75,16 +114,32 @@ impl LiveVoice {
         self.engine.clone()
     }
 
+    fn live(&self) -> Option<Live> {
+        self.live.lock().expect("voice call lock").clone()
+    }
+
     fn with_call(&self, act: impl FnOnce(&Call)) {
-        if let Some(call) = self.call.lock().expect("voice call lock").as_ref() {
-            act(call);
+        if let Some(live) = self.live() {
+            act(&live.call);
         }
+    }
+
+    /// Manda una orden de publicar a la llamada; si no sale, se lo dice al
+    /// core, que devuelve el botón a como estaba.
+    fn publish(&self, source: VideoSource, act: impl FnOnce(Call) -> Pin<Box<dyn Future<Output = Result<(), VoiceError>> + Send>>) {
+        let Some(live) = self.live() else { return };
+        let (core, attempt) = (self.core.clone(), act(live.call));
+        let _ = live.orders.send(Box::pin(async move {
+            if let Err(error) = attempt.await {
+                core.voice().engine_event(VoiceEvent::VideoFailed { source, code: error.label().to_string() });
+            }
+        }));
     }
 }
 
 impl VoiceEngine for LiveVoice {
     fn join(&self, url: String, token: String, noise_suppression: bool) -> VoiceFuture<Result<String, String>> {
-        let (engine, slot, core, wake) = (self.engine.clone(), self.call.clone(), self.core.clone(), self.wake.clone());
+        let (engine, slot, core, wake) = (self.engine.clone(), self.live.clone(), self.core.clone(), self.wake.clone());
         Box::pin(async move {
             engine.set_noise_suppression(noise_suppression);
             // Se llama desde las tareas del motor: el core sólo apunta y
@@ -95,16 +150,19 @@ impl VoiceEngine for LiveVoice {
             if let Some(wake) = wake.lock().expect("voice wake lock").clone() {
                 call.video().on_frame(wake);
             }
-            *slot.lock().expect("voice call lock") = Some(call);
+            let (orders, received) = mpsc::unbounded_channel();
+            tokio::spawn(run_in_order(received));
+            *slot.lock().expect("voice call lock") = Some(Live { call, orders });
             Ok(identity)
         })
     }
 
     fn leave(&self) -> VoiceFuture<()> {
-        let call = self.call.lock().expect("voice call lock").take();
+        // Soltar `Live` cierra su cola de órdenes, y con ella su trabajador.
+        let live = self.live.lock().expect("voice call lock").take();
         Box::pin(async move {
-            if let Some(call) = call {
-                call.leave().await;
+            if let Some(live) = live {
+                live.call.leave().await;
             }
         })
     }
@@ -124,12 +182,36 @@ impl VoiceEngine for LiveVoice {
     fn watch_video(&self, on: bool) {
         self.with_call(|call| call.video().set_watching(on));
     }
+
+    fn set_camera(&self, on: bool) {
+        self.publish(VideoSource::Camera, move |call| Box::pin(async move { call.set_camera(on).await }));
+    }
+
+    fn screen_sources(&self) -> ScreenSources {
+        self.live().map(|live| to_core_sources(live.call.screen_sources())).unwrap_or_default()
+    }
+
+    fn share_screen(&self, source: Option<ScreenSource>) {
+        let source = source.map(|source| cac_voice::ScreenSource { id: source.id, title: source.title });
+        self.publish(VideoSource::Screen, move |call| Box::pin(async move { call.share(source).await }));
+    }
+
+    /// Por la cola, como compartir: parar antes de que la petición haya
+    /// empezado no la pararía.
+    fn stop_share(&self) {
+        self.publish(VideoSource::Screen, |call| {
+            Box::pin(async move {
+                call.stop_share();
+                Ok(())
+            })
+        });
+    }
 }
 
 impl Feeds for LiveVoice {
     fn take(&self, identity: &str, source: VideoSource) -> Option<Frame> {
-        let call = self.call.lock().expect("voice call lock").clone()?;
-        let frame = call.video().take(identity, to_engine_source(source))?;
+        let live = self.live()?;
+        let frame = live.call.video().take(identity, to_engine_source(source))?;
         Some(Frame { width: frame.width, height: frame.height, bgra: frame.bgra })
     }
 
@@ -180,5 +262,36 @@ mod tests {
         for (from, to) in cases {
             assert_eq!(to_core(from), to);
         }
+    }
+
+    /// Una orden empieza después de la anterior aunque la anterior tarde en
+    /// su primera vuelta, y sin esperar a que la anterior acabe.
+    ///
+    /// Roturas que atrapa: esperar cada orden entera (apagar la cámara
+    /// esperaría a que termine de encenderse); soltarlas sin su primera
+    /// vuelta (la de detrás puede empezar antes y la cámara queda encendida
+    /// después de apagarla).
+    #[test]
+    fn orders_start_in_turn_without_waiting_for_each_other() {
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let started = Arc::new(Mutex::new(Vec::new()));
+        let (orders, received) = mpsc::unbounded_channel::<Order>();
+        runtime.spawn(run_in_order(received));
+        let (slow, quick) = (started.clone(), started.clone());
+        // Como encender una cámara: su primera vuelta aparta lo que había y
+        // lanza el hilo, y luego espera sin fin a que publique.
+        orders
+            .send(Box::pin(async move {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                slow.lock().unwrap().push("enciende");
+                std::future::pending::<()>().await;
+            }))
+            .unwrap();
+        orders.send(Box::pin(async move { quick.lock().unwrap().push("apaga") })).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while started.lock().unwrap().len() < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(*started.lock().unwrap(), ["enciende", "apaga"]);
     }
 }
