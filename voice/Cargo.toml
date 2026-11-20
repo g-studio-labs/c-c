@@ -4,7 +4,8 @@
 # micrófono procesado, mezcla a los demás en una sola salida y cuenta lo que
 # pasa por un `Fn(EngineEvent)`. Quien lo pinte (GPUI) vive en otro sitio.
 # Portado del spike `spikes/calls-native/` (ya en LiveKit 0.12) y del motor de
-# Tauri (`app/src-tauri/src/voice.rs`, en 0.8.3). Recibe vídeo; no lo publica.
+# Tauri (`app/src-tauri/src/voice.rs`, en 0.8.3). Recibe vídeo y publica tu
+# cámara.
 [package]
 name = "cac-voice"
 version = "0.1.0"
@@ -31,3 +32,9 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 # El metadata de la sala (el aviso de grabación) es JSON que escribe el backend.
 serde_json = "1"
+
+# La cámara, por V4L2: la misma que el spike de llamadas. Sólo Linux, como el
+# resto de la voz nativa (macOS y Windows, fuera de esta fase). En el CI pide
+# las cabeceras de V4L2 y libclang para `bindgen`.
+[target.'cfg(target_os = "linux")'.dependencies]
+nokhwa = { version = "0.10.11", features = ["input-native"] }

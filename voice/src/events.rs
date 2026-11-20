@@ -38,6 +38,11 @@ pub enum EngineEvent {
     /// una pista de vídeo cuenta como apagarla. Los fotogramas no viajan por
     /// aquí: se toman de `Call::video`.
     Video { identity: String, source: VideoSource, enabled: bool },
+    /// Tu cámara o tu pantalla se apagó sola a media llamada, y por qué
+    /// (`error` es la etiqueta). Llega justo antes de su `Video` apagado. Lo
+    /// que falla al encender no llega por aquí: es la respuesta de quien lo
+    /// pidió (`Call::set_camera`).
+    VideoFailed { source: VideoSource, error: String },
     /// La sala te soltó. El micrófono sigue abierto hasta que quien lo
     /// recibe llama a `Call::leave` (como en Tauri: decide la interfaz).
     /// Colgar con `Call::leave` **no** lo emite.

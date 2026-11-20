@@ -4,7 +4,8 @@
 //! alto, ruido), mezcla a los demás en una sola salida —que es también la
 //! referencia del cancelador de eco— y cuenta lo que pasa por un
 //! `Fn(EngineEvent)`. Recibe el vídeo de los demás (cámara y pantalla) y lo
-//! deja listo para pintar; no publica vídeo. Sin interfaz.
+//! deja listo para pintar, y publica tu cámara con su vista previa. Sin
+//! interfaz.
 //!
 //! ```ignore
 //! let engine = Engine::new();
@@ -22,6 +23,7 @@
 //! (ya en LiveKit 0.12); silenciar, ensordecer, dispositivos, medidor, quién
 //! habla, latencia y grabación, de `app/src-tauri/src/voice.rs` (en 0.8.3).
 
+mod camera;
 mod capture;
 mod devices;
 mod dsp;
@@ -30,6 +32,7 @@ mod error;
 mod events;
 mod mixer;
 mod output;
+mod publish;
 mod recording;
 mod video;
 
@@ -44,8 +47,10 @@ pub use video::{FrameWake, VideoFeeds, VideoFrame, VideoSource};
 #[cfg(test)]
 mod tests {
     /// Las fuentes del crate, para leerlas.
-    const SOURCES: [(&str, &str); 11] = [
+    const SOURCES: [(&str, &str); 13] = [
         ("lib.rs", include_str!("lib.rs")),
+        ("camera.rs", include_str!("camera.rs")),
+        ("publish.rs", include_str!("publish.rs")),
         ("capture.rs", include_str!("capture.rs")),
         ("devices.rs", include_str!("devices.rs")),
         ("dsp.rs", include_str!("dsp.rs")),

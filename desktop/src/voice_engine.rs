@@ -47,6 +47,7 @@ fn to_core(event: EngineEvent) -> VoiceEvent {
         EngineEvent::Recording { active, id, by, since } => VoiceEvent::Recording { active, id, by, since },
         EngineEvent::Disconnected { reason } => VoiceEvent::Disconnected { reason },
         EngineEvent::Video { identity, source, enabled } => VoiceEvent::Video { identity, source: to_core_source(source), enabled },
+        EngineEvent::VideoFailed { source, error } => VoiceEvent::VideoFailed { source: to_core_source(source), code: error },
     }
 }
 
@@ -170,6 +171,10 @@ mod tests {
             (
                 EngineEvent::Video { identity: "u2".into(), source: cac_voice::VideoSource::Camera, enabled: false },
                 VoiceEvent::Video { identity: "u2".into(), source: VideoSource::Camera, enabled: false },
+            ),
+            (
+                EngineEvent::VideoFailed { source: cac_voice::VideoSource::Camera, error: "voice-camera-no-frames".into() },
+                VoiceEvent::VideoFailed { source: VideoSource::Camera, code: "voice-camera-no-frames".into() },
             ),
         ];
         for (from, to) in cases {

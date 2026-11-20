@@ -24,6 +24,7 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::camera::{self, CameraCapture};
 use crate::capture::{self, CaptureCtx, InputFormat, MicState, ThreadGuard};
 use crate::devices::{self, DeviceKind, Devices};
 use crate::dsp::{to_mono, CHANNELS, SAMPLE_RATE};
@@ -31,6 +32,7 @@ use crate::error::{redact, JoinError, VoiceError};
 use crate::events::{arrival_events, EngineEvent, EventSink, Peer};
 use crate::mixer::TrackQueue;
 use crate::output::Playback;
+use crate::publish;
 use crate::recording::recording_event;
 use crate::video::{self, Feed, TrackChange, VideoFeeds, VideoSource};
 
@@ -38,6 +40,12 @@ use crate::video::{self, Feed, TrackChange, VideoFeeds, VideoSource};
 const LATENCY_EVERY: Duration = Duration::from_secs(5);
 /// Lo que se espera a que la sala cierre limpia al colgar.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Lo que se espera a que la cámara publique su primer fotograma.
+const CAMERA_START: Duration = Duration::from_secs(15);
+/// Lo que se espera a que la cámara anterior se suelte antes de abrir otra:
+/// un controlador colgado deja su hilo vivo, y dos hilos sobre la misma
+/// cámara no abren ninguna.
+const CAMERA_RELEASE: Duration = Duration::from_secs(2);
 
 /// Lo que es del motor y no de una llamada.
 pub(crate) struct Shared {
@@ -45,6 +53,8 @@ pub(crate) struct Shared {
     /// micrófono una vez no tiene que hacerlo en cada sala.
     chosen_input: Mutex<Option<String>>,
     chosen_output: Mutex<Option<String>>,
+    /// La cámara, por su nombre.
+    chosen_camera: Mutex<Option<String>>,
     /// La de la última llamada, para la siguiente.
     noise_suppression: AtomicBool,
     /// La llamada en curso, débil: el motor no la mantiene viva, y cambiar de
@@ -54,7 +64,13 @@ pub(crate) struct Shared {
 
 impl Default for Shared {
     fn default() -> Self {
-        Shared { chosen_input: Mutex::new(None), chosen_output: Mutex::new(None), noise_suppression: AtomicBool::new(true), current: Mutex::new(Weak::new()) }
+        Shared {
+            chosen_input: Mutex::new(None),
+            chosen_output: Mutex::new(None),
+            chosen_camera: Mutex::new(None),
+            noise_suppression: AtomicBool::new(true),
+            current: Mutex::new(Weak::new()),
+        }
     }
 }
 
@@ -63,6 +79,7 @@ impl Shared {
         match kind {
             DeviceKind::Input => &self.chosen_input,
             DeviceKind::Output => &self.chosen_output,
+            DeviceKind::Camera => &self.chosen_camera,
         }
     }
 
@@ -98,17 +115,21 @@ impl Engine {
         Self::default()
     }
 
-    /// Los micrófonos y altavoces que hay ahora, con el que se usa marcado.
-    /// Pregunta al sistema cada vez (tarda unos milisegundos): mejor fuera del
-    /// hilo de la interfaz.
+    /// Los micrófonos, altavoces y cámaras que hay ahora, con el que se usa
+    /// marcado. Pregunta al sistema cada vez (tarda unos milisegundos): mejor
+    /// fuera del hilo de la interfaz.
     pub fn devices(&self) -> Devices {
-        devices::list(self.shared.chosen(DeviceKind::Input).as_deref(), self.shared.chosen(DeviceKind::Output).as_deref())
+        let mut found = devices::list(self.shared.chosen(DeviceKind::Input).as_deref(), self.shared.chosen(DeviceKind::Output).as_deref());
+        found.cameras = camera::list(self.shared.chosen(DeviceKind::Camera).as_deref());
+        found
     }
 
-    /// Elige micrófono o altavoz (`None`: el del sistema). Queda para las
-    /// siguientes llamadas, y si hay una en curso se aplica en caliente: el
-    /// nuevo se abre antes de soltar el viejo, así que si falla la llamada
-    /// sigue con el que tenía (y se devuelve el error; la preferencia queda).
+    /// Elige micrófono, altavoz o cámara (`None`: el del sistema; la cámara,
+    /// por su nombre). Queda para las siguientes llamadas, y si hay una en
+    /// curso se aplica en caliente: el micrófono nuevo se abre antes de
+    /// soltar el viejo, así que si falla la llamada sigue con el que tenía (y
+    /// se devuelve el error; la preferencia queda). La cámara, si estaba
+    /// encendida, se reabre con la nueva.
     pub async fn set_device(&self, kind: DeviceKind, id: Option<String>) -> Result<(), VoiceError> {
         *self.shared.slot(kind).lock().unwrap() = id.clone();
         let Some(call) = self.current_call() else { return Ok(()) };
@@ -118,6 +139,8 @@ impl Engine {
                 let playback = call.inner.playback.clone();
                 tokio::task::spawn_blocking(move || playback.reopen(id)).await.map_err(|e| VoiceError::OutputOpen(e.to_string()))?
             }
+            DeviceKind::Camera if call.is_camera_on() => call.set_camera(true).await,
+            DeviceKind::Camera => Ok(()),
         }
     }
 
@@ -198,6 +221,8 @@ impl Engine {
             left: AtomicBool::new(false),
             tasks: Mutex::new(Vec::new()),
             video: video.clone(),
+            sink: sink.clone(),
+            camera: Mutex::new(None),
         });
         *self.shared.current.lock().unwrap() = Arc::downgrade(&inner);
 
@@ -207,6 +232,18 @@ impl Engine {
         inner.tasks.lock().unwrap().extend([listening, latency]);
         Ok(Call { inner })
     }
+}
+
+/// Espera a que el hilo de la cámara anterior suelte el dispositivo.
+async fn wait_released(alive: &AtomicBool) -> Result<(), VoiceError> {
+    let deadline = tokio::time::Instant::now() + CAMERA_RELEASE;
+    while alive.load(Ordering::SeqCst) {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(VoiceError::CameraFailed("la cámara anterior no se suelta".into()));
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    Ok(())
 }
 
 /// Abre el micrófono fuera del runtime: abrir un dispositivo bloquea.
@@ -245,8 +282,10 @@ struct CallInner {
     deaf: AtomicBool,
     left: AtomicBool,
     tasks: Mutex<Vec<JoinHandle<()>>>,
-    /// El vídeo de los demás (`video.rs`).
+    /// El vídeo de los demás (`video.rs`) y tu vista previa.
     video: VideoFeeds,
+    sink: EventSink,
+    camera: Mutex<Option<CameraCapture>>,
 }
 
 impl Call {
@@ -306,6 +345,47 @@ impl Call {
         self.inner.video.clone()
     }
 
+    /// Enciende o apaga tu cámara, la elegida con `Engine::set_device`.
+    ///
+    /// Encender vuelve cuando ya se publica (y lo cuenta con
+    /// `EngineEvent::Video`) o con el fallo; si la apagas mientras arranca,
+    /// vuelve `Ok` sin publicar nada. Encender con la cámara ya encendida la
+    /// reabre (cambiar de cámara). Apagar no espera al hilo.
+    pub async fn set_camera(&self, on: bool) -> Result<(), VoiceError> {
+        let previous = self.inner.camera.lock().unwrap().take();
+        let releasing = previous.as_ref().map(CameraCapture::alive_flag);
+        drop(previous);
+        if !on || self.inner.left.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        if let Some(alive) = releasing {
+            wait_released(&alive).await?;
+        }
+        let inner = &self.inner;
+        let publishing = publish::spawn(&inner.handle, Arc::downgrade(&inner.room), inner.identity.clone(), VideoSource::Camera, inner.video.clone(), inner.sink.clone());
+        let (capture, started) = camera::start(inner.handle.clone(), inner.engine.chosen(DeviceKind::Camera), publishing)?;
+        let alive = capture.alive_flag();
+        *inner.camera.lock().unwrap() = Some(capture);
+        let result = match tokio::time::timeout(CAMERA_START, started).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(VoiceError::CameraFailed("quien publicaba se fue sin contestar".into())),
+            Err(_) => Err(VoiceError::CameraNoFrames),
+        };
+        if result.is_err() {
+            // La que falló, si sigue siendo la puesta: otra llamada pudo
+            // encender ya otra.
+            let mut slot = inner.camera.lock().unwrap();
+            if slot.as_ref().is_some_and(|c| Arc::ptr_eq(&c.alive_flag(), &alive)) {
+                slot.take();
+            }
+        }
+        result
+    }
+
+    fn is_camera_on(&self) -> bool {
+        self.inner.camera.lock().unwrap().is_some()
+    }
+
     /// Colgar. Idempotente: colgar dos veces no es un error (pasa de verdad,
     /// la ventana se cierra mientras alguien pulsa el botón). No emite
     /// `Disconnected`.
@@ -353,6 +433,7 @@ impl CallInner {
             task.abort();
         }
         self.capture.lock().unwrap().take();
+        self.camera.lock().unwrap().take();
         self.playback.close();
         // La última cara de esta sala no se enseña en la siguiente.
         self.video.clear();

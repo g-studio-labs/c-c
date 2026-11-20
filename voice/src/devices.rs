@@ -1,4 +1,5 @@
-//! Micrófonos y altavoces: listarlos, y encontrar el elegido.
+//! Micrófonos y altavoces: listarlos, y encontrar el elegido. Las cámaras
+//! se listan en `camera.rs`, que no son de cpal.
 //!
 //! Portado de `voice_list_devices` (`app/src-tauri/src/voice.rs`), que sólo
 //! listaba micrófonos; aquí también salidas, que elegir altavoz es nuevo.
@@ -15,6 +16,8 @@ use serde::{Deserialize, Serialize};
 pub enum DeviceKind {
     Input,
     Output,
+    /// Se elige por nombre (ver `camera.rs`).
+    Camera,
 }
 
 /// Un dispositivo, como lo enseña la pantalla.
@@ -31,19 +34,21 @@ pub struct Device {
 pub struct Devices {
     pub inputs: Vec<Device>,
     pub outputs: Vec<Device>,
+    pub cameras: Vec<Device>,
 }
 
 /// Lo que hay ahora mismo. Se pregunta al abrir el desplegable y no al entrar:
 /// enchufar unos auriculares a media llamada es justo cuando alguien lo abre.
 pub(crate) fn list(chosen_input: Option<&str>, chosen_output: Option<&str>) -> Devices {
     let host = cpal::default_host();
-    Devices { inputs: list_kind(&host, DeviceKind::Input, chosen_input), outputs: list_kind(&host, DeviceKind::Output, chosen_output) }
+    Devices { inputs: list_kind(&host, DeviceKind::Input, chosen_input), outputs: list_kind(&host, DeviceKind::Output, chosen_output), cameras: Vec::new() }
 }
 
 fn list_kind(host: &cpal::Host, kind: DeviceKind, chosen: Option<&str>) -> Vec<Device> {
     let (all, default) = match kind {
         DeviceKind::Input => (host.input_devices().map(|i| i.collect::<Vec<_>>()), host.default_input_device()),
         DeviceKind::Output => (host.output_devices().map(|i| i.collect::<Vec<_>>()), host.default_output_device()),
+        DeviceKind::Camera => return Vec::new(),
     };
     let all = match all {
         Ok(all) => all,
@@ -67,12 +72,14 @@ pub(crate) fn find(host: &cpal::Host, kind: DeviceKind, chosen: Option<&str>) ->
         let mut all: Box<dyn Iterator<Item = cpal::Device>> = match kind {
             DeviceKind::Input => Box::new(host.input_devices().ok()?),
             DeviceKind::Output => Box::new(host.output_devices().ok()?),
+            DeviceKind::Camera => return None,
         };
         all.find(|d| id_of(d).as_deref() == Some(id))
     });
     found.or_else(|| match kind {
         DeviceKind::Input => host.default_input_device(),
         DeviceKind::Output => host.default_output_device(),
+        DeviceKind::Camera => None,
     })
 }
 

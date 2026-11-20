@@ -23,6 +23,12 @@ pub enum VoiceError {
     NoOutput,
     OutputOpen(String),
     OutputTimeout,
+    NoCamera,
+    /// La tiene otro programa (EBUSY).
+    CameraBusy,
+    /// Abrió pero no entrega imagen, o dejó de entregarla.
+    CameraNoFrames,
+    CameraFailed(String),
 }
 
 /// El nombre que pide la tarea; es el mismo tipo.
@@ -41,12 +47,16 @@ impl VoiceError {
             VoiceError::NoOutput => "voice-no-output",
             VoiceError::OutputOpen(_) => "voice-output-open",
             VoiceError::OutputTimeout => "voice-output-timeout",
+            VoiceError::NoCamera => "voice-no-camera",
+            VoiceError::CameraBusy => "voice-camera-busy",
+            VoiceError::CameraNoFrames => "voice-camera-no-frames",
+            VoiceError::CameraFailed(_) => "voice-camera-thread-died",
         }
     }
 
     pub fn detail(&self) -> Option<&str> {
         match self {
-            VoiceError::Connect(d) | VoiceError::Publish(d) | VoiceError::MicOpen(d) | VoiceError::OutputOpen(d) => Some(d),
+            VoiceError::Connect(d) | VoiceError::Publish(d) | VoiceError::MicOpen(d) | VoiceError::OutputOpen(d) | VoiceError::CameraFailed(d) => Some(d),
             _ => None,
         }
     }
