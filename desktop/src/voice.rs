@@ -750,7 +750,12 @@ fn stage_main(on_stage: &StageItem, strip: &[VoiceTile], faces_out: bool, by_han
             .bg(background.opacity(0.7))
             .p_1()
             .cursor_pointer()
-            .on_click(|_, _, cx| Backend::core(cx).voice().show_faces())
+            // Que no le llegue al escenario: con una cámara en grande, ese
+            // clic la devolvería a la rejilla.
+            .on_click(|_, _, cx| {
+                cx.stop_propagation();
+                Backend::core(cx).voice().show_faces();
+            })
             .aria_label(tr(cx, "common:last.showParticipants"))
             .tooltip({
                 let label = tr(cx, "common:last.showParticipants");
@@ -1457,7 +1462,7 @@ mod tests {
     /// decirle al motor que nadie mira.
     #[gpui_kit::test]
     fn a_shared_screen_takes_the_stage_and_a_click_takes_a_camera_there(cx: &mut TestAppContext) {
-        let (_server, window, engine, _, workspace) = in_a_call_with_video(cx);
+        let (_server, window, _, _, _) = in_a_call_with_video(cx);
         video(cx, "u2", VideoSource::Screen, true);
         video(cx, "u3", VideoSource::Camera, true);
         wait_until(cx, "la pantalla de Luis, en grande", |cx| on_screen(window, "voice-stage-main", cx));
@@ -1473,7 +1478,25 @@ mod tests {
 
         click(window, "voice-stage-main", cx);
         wait_until(cx, "de vuelta a la pantalla", |cx| label(window, "voice-stage-caption", cx) == "Luis Mora está compartiendo");
+        stop(cx);
+    }
 
+    /// Con una cámara llevada a mano al escenario, abrir la tira de caras la
+    /// deja donde está.
+    /// Rotura que atrapa: que el clic en la píldora le llegue también al
+    /// escenario y lo devuelva a la rejilla (pasó en Xvfb el 19-nov).
+    #[gpui_kit::test]
+    fn opening_the_faces_keeps_a_camera_on_the_stage(cx: &mut TestAppContext) {
+        let (_server, window, engine, _, workspace) = in_a_call_with_video(cx);
+        video(cx, "u3", VideoSource::Camera, true);
+        wait_until(cx, "la cámara de Eva", |cx| on_screen(window, "voice-video-u3-camera", cx));
+        click(window, "voice-tile-u3", cx);
+        wait_until(cx, "Eva en grande", |cx| label(window, "voice-stage-caption", cx) == "Eva");
+        click(window, "voice-faces", cx);
+        wait_until(cx, "la tira", |cx| on_screen(window, "voice-strip", cx));
+        assert_eq!(label(window, "voice-stage-caption", cx), "Eva", "sigue en grande");
+
+        // Y minimizar deja de mirar el vídeo.
         click(window, "voice-minimize", cx);
         wait_until(cx, "minimizada", |cx| on_screen(window, "voice-mini", cx));
         assert_eq!(*engine.video.lock().unwrap(), [true, false]);
