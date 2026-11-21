@@ -6,6 +6,7 @@
 //! app nativa». Cada fase añade su fichero junto a éstos.
 
 pub mod agent;
+pub mod detail;
 pub mod edit;
 pub mod servers;
 
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Core;
 pub use agent::{agent_base, Agent, AgentStream, AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT};
+pub use detail::{server_tabs, AgentNote, DeployableSummary, IncidentServerRef, IncidentSummary, ProvisioningRun, ServerOverview, ServerTab, AGENT_VERSION_DEPLOYS};
 pub use edit::{server_edit_phrase, server_permissions, ServerEditError, ServerField, ServerForm, ServerPermissions, MAX_SERVER_NAME};
 pub use servers::{platform_sections, servers_of, PlatformSection, Server, ServerHealth, ServerKind};
 
@@ -35,6 +37,10 @@ pub struct PlatformState {
     pub error: Option<String>,
     /// El servidor abierto, si se entró en uno.
     pub open_server: Option<String>,
+    /// La pestaña del servidor abierto.
+    pub tab: ServerTab,
+    /// Su resumen, cuando llegó.
+    pub overview: Option<ServerOverview>,
     pub permissions: ServerPermissions,
 }
 
@@ -46,6 +52,8 @@ pub(crate) struct PlatformData {
     loading: bool,
     error: Option<String>,
     open_server: Option<String>,
+    tab: ServerTab,
+    overview: Option<ServerOverview>,
 }
 
 /// Plataforma en este core.
@@ -71,6 +79,8 @@ impl Platform {
             loading: data.loading,
             error: data.error.clone(),
             open_server: data.open_server.clone(),
+            tab: data.tab,
+            overview: data.overview.clone(),
             permissions: self.permissions(),
         }
     }
@@ -198,25 +208,81 @@ impl Platform {
         }
     }
 
-    /// Entra en un servidor. Uno que no es de la organización que se mira no
-    /// se abre.
+    /// Entra en un servidor, por su resumen. Uno que no es de la
+    /// organización que se mira no se abre: cambiar de organización con un
+    /// servidor abierto dejaba en pantalla el de la otra, y era fácil
+    /// desplegar en el equivocado (`ServerLayout.tsx`).
     pub fn open_server(&self, server_id: &str) -> bool {
         if !self.state().servers.iter().any(|server| server.id == server_id) {
             return false;
         }
-        self.change(|data| data.open_server = Some(server_id.to_string()));
+        self.change(|data| {
+            data.open_server = Some(server_id.to_string());
+            data.tab = ServerTab::Overview;
+            data.overview = None;
+        });
         true
+    }
+
+    /// Abre un servidor y pide su resumen.
+    pub async fn open_server_and_load(&self, server_id: &str) {
+        if self.open_server(server_id) {
+            self.load_overview().await;
+        }
     }
 
     /// Vuelve a la lista de servidores.
     pub fn close_server(&self) {
-        self.change(|data| data.open_server = None);
+        self.change(close);
+    }
+
+    /// Cambia de pestaña. Una que ese servidor no tiene no se elige.
+    pub fn select_tab(&self, tab: ServerTab) -> bool {
+        let Some(server) = self.open() else { return false };
+        if !server_tabs(server.kind).contains(&tab) {
+            return false;
+        }
+        self.change(|data| data.tab = tab);
+        true
+    }
+
+    /// El servidor abierto, si sigue en la lista.
+    pub fn open(&self) -> Option<Server> {
+        let state = self.state();
+        let id = state.open_server?;
+        state.servers.into_iter().find(|server| server.id == id)
+    }
+
+    /// Pide el resumen del servidor abierto: lo que ha mordido en él, lo que
+    /// se despliega desde cac y lo último que se le aplicó. Lo que falle se
+    /// queda vacío. Si mientras llegaba se abrió otro, no se pisa.
+    pub async fn load_overview(&self) {
+        let Some(server_id) = self.data().open_server.clone() else { return };
+        let route = |what: &str| format!("/api/v1/servers/{server_id}/{what}");
+        // A la vez, cada una en su tarea: el core no trae las macros de tokio.
+        let (core, path) = (self.core.clone(), route("incidents"));
+        let incidents = tokio::spawn(async move { core.get::<detail::IncidentPage>(&path).await });
+        let (core, path) = (self.core.clone(), route("deployables"));
+        let deployables = tokio::spawn(async move { core.get_list::<DeployableSummary>(&path).await });
+        let (core, path) = (self.core.clone(), route("provisioning-runs"));
+        let runs = tokio::spawn(async move { core.get_list::<ProvisioningRun>(&path).await });
+        let overview = ServerOverview {
+            server_id: server_id.clone(),
+            incidents: incidents.await.ok().and_then(Result::ok).map(|page| page.incidents).unwrap_or_default(),
+            deployables: deployables.await.ok().and_then(Result::ok).unwrap_or_default(),
+            last_run: runs.await.ok().and_then(Result::ok).and_then(|runs| runs.into_iter().next()),
+        };
+        self.change(|data| {
+            if data.open_server.as_deref() == Some(server_id.as_str()) {
+                data.overview = Some(overview);
+            }
+        });
     }
 
     /// Se cambió de organización: la lista es la misma respuesta, filtrada
     /// por otra; el servidor abierto era de la anterior.
     pub(crate) fn org_changed(&self) {
-        self.change(|data| data.open_server = None);
+        self.change(close);
     }
 
     /// Al salir: los servidores y los pases de una persona no son de la
@@ -280,6 +346,12 @@ impl Platform {
         edit(&mut self.data());
         self.core.inner.listener.platform_changed(self.state());
     }
+}
+
+fn close(data: &mut PlatformData) {
+    data.open_server = None;
+    data.tab = ServerTab::Overview;
+    data.overview = None;
 }
 
 #[cfg(test)]

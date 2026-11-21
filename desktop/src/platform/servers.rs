@@ -137,7 +137,22 @@ impl ServersView {
                 )
             });
         cells(vec![
-            div().font_weight(FontWeight::MEDIUM).truncate().child(server.name.clone()).into_any_element(),
+            {
+                let id = server.id.clone();
+                div()
+                    .id(SharedString::from(format!("platform-open-{}", server.id)))
+                    .font_weight(FontWeight::MEDIUM)
+                    .truncate()
+                    .cursor_pointer()
+                    .hover(|style| style.underline())
+                    .on_click(move |_, _, cx| {
+                        let id = id.clone();
+                        Backend::run(cx, move |core| async move { core.platform().open_server_and_load(&id).await });
+                    })
+                    .child(server.name.clone())
+                    .test_support()
+                    .into_any_element()
+            },
             div().font_family(mono).text_color(muted).truncate().child(server.address()).into_any_element(),
             div().text_color(muted).child(server.kind.as_str()).into_any_element(),
             status.into_any_element(),
@@ -157,6 +172,10 @@ impl ServersView {
 impl Render for ServersView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = Backend::snapshot(cx).read(cx).platform.clone();
+        let open = state.open_server.as_ref().and_then(|id| state.servers.iter().find(|server| &server.id == id));
+        if let Some(server) = open {
+            return div().size_full().child(super::server_page::page(server, &state, cx)).into_any_element();
+        }
         let theme = cx.theme();
         let (background, foreground, border, danger) = (theme.background, theme.foreground, theme.border, theme.danger);
 
@@ -218,6 +237,7 @@ impl Render for ServersView {
             .child(body)
             .children(self.dialog.as_ref().map(|(dialog, _)| dialog.clone()))
             .children(self.ssh_key.as_ref().map(|(dialog, _)| dialog.clone()))
+            .into_any_element()
     }
 }
 

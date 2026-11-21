@@ -438,3 +438,108 @@ async fn deleting_takes_it_out_and_closes_it() {
     assert!(state.servers.is_empty());
     assert_eq!(state.open_server, None);
 }
+
+// ─── Un servidor abierto ─────────────────────────────────────────────────────
+
+use cac_core::ServerTab;
+
+async fn mount_overview(rig: &Rig, id: &str) {
+    let route = |what: &str| format!("/api/v1/servers/{id}/{what}");
+    Mock::given(method("GET"))
+        .and(path(route("incidents")))
+        .respond_with(ok(json!({ "incidents": [
+            { "id": "i1", "title": "cert-manager no renueva", "status": "open", "servers": [{ "id": id, "name": "vps" }], "areas": ["cert-manager"], "recordedAt": "2026-11-01T10:00:00Z" }
+        ] })))
+        .mount(&rig.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(route("deployables")))
+        .respond_with(ok(json!([{ "id": "d1", "name": "api", "environment": "prod", "currentImage": "ghcr.io/o/api:abc1234", "onCINotify": "deploy" }])))
+        .mount(&rig.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(route("provisioning-runs")))
+        .respond_with(ok(json!([
+            { "id": "r2", "playbook": "docker.yml", "status": "succeeded", "startedAt": "2026-11-02T10:00:00Z", "summary": "ok=3" },
+            { "id": "r1", "playbook": "base.yml", "status": "failed", "startedAt": "2026-11-01T10:00:00Z" }
+        ])))
+        .mount(&rig.server)
+        .await;
+}
+
+/// Rotura que atrapa: no pedir una de las tres partes, quedarse con la
+/// ejecución más vieja, o abrir en otra pestaña que el resumen.
+#[tokio::test]
+async fn opening_a_server_brings_its_overview() {
+    let rig = rig().await;
+    as_role(&rig, "member", vec![row(&rig, "a", "o1", "online", true)]).await;
+    mount_overview(&rig, "a").await;
+    rig.core.platform().select_tab(ServerTab::Services);
+
+    rig.core.platform().open_server_and_load("a").await;
+    let state = rig.core.platform().state();
+    assert_eq!(state.tab, ServerTab::Overview);
+    let overview = state.overview.expect("sin resumen");
+    assert_eq!(overview.incidents.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(), ["cert-manager no renueva"]);
+    assert!(overview.incidents[0].is_open());
+    assert_eq!(overview.deployables[0].image_tag().as_deref(), Some("abc1234"));
+    assert_eq!(overview.last_run.map(|run| run.playbook), Some("docker.yml".into()));
+}
+
+/// Rotura que atrapa: que un endpoint caído tumbe el resumen entero.
+#[tokio::test]
+async fn a_failing_part_of_the_overview_stays_empty() {
+    let rig = rig().await;
+    as_role(&rig, "member", vec![row(&rig, "a", "o1", "online", true)]).await;
+    Mock::given(method("GET")).and(path("/api/v1/servers/a/incidents")).respond_with(ResponseTemplate::new(500)).mount(&rig.server).await;
+    mount_overview(&rig, "a").await;
+
+    rig.core.platform().open_server_and_load("a").await;
+    let overview = rig.core.platform().state().overview.expect("sin resumen");
+    assert!(overview.incidents.is_empty());
+    assert_eq!(overview.deployables.len(), 1);
+}
+
+/// Rotura que atrapa: pintar en un servidor el resumen que llegó tarde de
+/// otro.
+#[tokio::test]
+async fn a_late_overview_does_not_land_on_another_server() {
+    let rig = rig().await;
+    as_role(&rig, "member", vec![row(&rig, "a", "o1", "online", true), row(&rig, "b", "o1", "online", true)]).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/servers/a/incidents"))
+        .respond_with(ok(json!({ "incidents": [] })).set_delay(std::time::Duration::from_millis(300)))
+        .mount(&rig.server)
+        .await;
+    rig.core.platform().open_server("a");
+    let platform = rig.core.platform();
+    let late = tokio::spawn(async move { platform.load_overview().await });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    rig.core.platform().open_server("b");
+    late.await.unwrap();
+    let state = rig.core.platform().state();
+    assert_eq!(state.open_server.as_deref(), Some("b"));
+    assert_eq!(state.overview, None);
+}
+
+/// Rotura que atrapa: dejar elegir una pestaña de swarm en un kubernetes,
+/// o volver a un servidor en la pestaña que tenía otro.
+#[tokio::test]
+async fn tabs_follow_the_kind_of_server() {
+    let rig = rig().await;
+    let mut kubernetes = row(&rig, "k", "o1", "online", false);
+    kubernetes["type"] = json!("kubernetes");
+    as_role(&rig, "member", vec![row(&rig, "a", "o1", "online", true), kubernetes]).await;
+    let platform = rig.core.platform();
+
+    platform.open_server("k");
+    assert!(!platform.select_tab(ServerTab::Services));
+    assert!(platform.select_tab(ServerTab::Provision));
+    assert_eq!(platform.state().tab, ServerTab::Provision);
+
+    platform.open_server("a");
+    assert_eq!(platform.state().tab, ServerTab::Overview, "abrir otro hereda la pestaña del anterior");
+    assert!(platform.select_tab(ServerTab::Services));
+    platform.close_server();
+    assert_eq!(platform.state().tab, ServerTab::Overview, "cerrar deja la pestaña del que se cerró");
+}

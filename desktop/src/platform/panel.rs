@@ -66,7 +66,8 @@ fn server_row(server: &Server, active: bool, cx: &App) -> AnyElement {
     row(SharedString::from(format!("platform-server-{}", server.id)), dot, server.name.clone(), active, INDENT, cx)
         .tooltip(move |window, cx| Tooltip::new(status.clone()).build(window, cx))
         .on_click(move |_, _, cx| {
-            Backend::core(cx).platform().open_server(&id);
+            let id = id.clone();
+            Backend::run(cx, move |core| async move { core.platform().open_server_and_load(&id).await });
         })
         .test_support()
         .into_any_element()

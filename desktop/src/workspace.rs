@@ -3550,6 +3550,68 @@ mod tests {
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
+    /// Abrir un servidor desde la tabla enseña su página: cabecera,
+    /// pestañas y el resumen con lo que ha mordido, sus despliegues y cómo se
+    /// llega a él; una pestaña que aún no está lo dice; volver deja la tabla.
+    ///
+    /// Roturas que atrapan: un nombre que no abre nada; un resumen que no
+    /// pinta lo que llegó; pestañas que no cambian; no poder volver.
+    #[gpui_kit::test]
+    fn opening_a_server_shows_its_page_and_overview(cx: &mut TestAppContext) {
+        let (server, window) = platform_as("member", cx);
+        let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+        server.mount(get("/api/v1/servers/s1/incidents").respond_with(ok(json!({ "incidents": [
+            { "id": "i1", "title": "cert-manager no renueva", "status": "open", "servers": [], "areas": ["cert-manager"], "recordedAt": "2026-11-01T10:00:00Z" }
+        ] }))));
+        server.mount(get("/api/v1/servers/s1/deployables").respond_with(ok(json!([{ "id": "d1", "name": "api", "currentImage": "ghcr.io/o/api:abc1234", "onCINotify": "deploy" }]))));
+        server.mount(get("/api/v1/servers/s1/provisioning-runs").respond_with(ok(json!([]))));
+
+        click(window, "platform-open-s1", cx);
+        wait_until(cx, "llega el resumen", |cx| on_screen(window, "server-incident-i1", cx));
+        assert_eq!(label(window, "server-title", cx), "pixel-vps");
+        assert_eq!(label(window, "server-incident-i1", cx), "cert-manager no renueva");
+        assert!(on_screen(window, "server-deployable-d1", cx));
+        assert!(on_screen(window, "server-provisioning-empty", cx), "sin ejecuciones no dice cómo empezar");
+        assert!(on_screen(window, "server-tab-backups", cx), "un swarm sin sus ocho pestañas");
+
+        click(window, "server-tab-services", cx);
+        wait_until(cx, "la pestaña cambia", |cx| on_screen(window, "server-tab-pending", cx));
+        click(window, "server-back", cx);
+        wait_until(cx, "vuelve la tabla", |cx| on_screen(window, "platform-row-s1", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Un kubernetes no enseña las pestañas de swarm ni la tarjeta del
+    /// agente de swarm.
+    ///
+    /// Rotura que atrapa: ofrecer servicios, nodos o el agente en un
+    /// servidor que no los tiene.
+    #[gpui_kit::test]
+    fn a_kubernetes_server_shows_no_swarm_tabs(cx: &mut TestAppContext) {
+        let server = FakeServer::start();
+        let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+        server.mount(get("/api/v1/organizations/").respond_with(ok(json!([org("o1", "G Studio")]))));
+        server.mount(get("/api/v1/task-spaces/").respond_with(ok(json!([space("a", "Producto")]))));
+        server.mount(get("/api/v1/docs/").respond_with(ok(json!({}))));
+        server.mount(get("/api/v1/tasks/").respond_with(ok(json!([]))));
+        let mut kubernetes = platform_server("k1", "o1", "k8s-contabo", "pending");
+        kubernetes["type"] = json!("kubernetes");
+        server.mount(get("/api/v1/servers/").respond_with(ok(json!([kubernetes]))));
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-l-a", cx));
+        click(window, "rail-platform", cx);
+        wait_until(cx, "llega el panel", |cx| on_screen(window, "platform-server-k1", cx));
+
+        click(window, "platform-server-k1", cx);
+        wait_until(cx, "llega el resumen", |cx| on_screen(window, "server-overview", cx));
+        assert!(on_screen(window, "server-tab-provision", cx));
+        for id in ["server-tab-services", "server-tab-nodes", "server-agent", "server-deploys"] {
+            assert!(!on_screen(window, id, cx), "un kubernetes enseña {id}");
+        }
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
     /// El agente SSH y el llavero, de mentira: dos agentes (uno sin
     /// contestar) y dos llaves; lo guardado, apuntado.
     #[derive(Default)]
