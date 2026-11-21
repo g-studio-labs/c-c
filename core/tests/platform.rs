@@ -483,6 +483,7 @@ async fn opening_a_server_brings_its_overview() {
     assert_eq!(overview.incidents.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(), ["cert-manager no renueva"]);
     assert!(overview.incidents[0].is_open());
     assert_eq!(overview.deployables[0].image_tag().as_deref(), Some("abc1234"));
+    assert_eq!(overview.deployables[0].on_ci_notify, "deploy");
     assert_eq!(overview.last_run.map(|run| run.playbook), Some("docker.yml".into()));
 }
 

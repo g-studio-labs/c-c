@@ -117,8 +117,9 @@ pub struct DeployableSummary {
     pub environment: String,
     #[serde(default)]
     pub current_image: String,
-    /// `record` o `deploy`: qué hace cac cuando avisa el CI.
-    #[serde(default)]
+    /// `record` o `deploy`: qué hace cac cuando avisa el CI. En camelCase
+    /// saldría `onCiNotify`; el backend lo escribe con las siglas enteras.
+    #[serde(default, rename = "onCINotify")]
     pub on_ci_notify: String,
 }
 
