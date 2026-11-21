@@ -6,12 +6,14 @@
 //! app nativa». Cada fase añade su fichero junto a éstos.
 
 pub mod agent;
+pub mod edit;
 pub mod servers;
 
 use serde::{Deserialize, Serialize};
 
 use crate::Core;
 pub use agent::{agent_base, Agent, AgentStream, AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT};
+pub use edit::{server_edit_phrase, server_permissions, ServerEditError, ServerField, ServerForm, ServerPermissions, MAX_SERVER_NAME};
 pub use servers::{platform_sections, servers_of, PlatformSection, Server, ServerHealth, ServerKind};
 
 /// Lo que se pinta de Plataforma.
@@ -33,6 +35,7 @@ pub struct PlatformState {
     pub error: Option<String>,
     /// El servidor abierto, si se entró en uno.
     pub open_server: Option<String>,
+    pub permissions: ServerPermissions,
 }
 
 #[derive(Default)]
@@ -68,6 +71,91 @@ impl Platform {
             loading: data.loading,
             error: data.error.clone(),
             open_server: data.open_server.clone(),
+            permissions: self.permissions(),
+        }
+    }
+
+    fn permissions(&self) -> ServerPermissions {
+        let role = self.core.orgs().state().current().map(|org| org.role.clone()).unwrap_or_default();
+        let superadmin = self.core.session().is_some_and(|session| session.superadmin);
+        server_permissions(&role, superadmin)
+    }
+
+    /// Da de alta un servidor en la organización que se mira.
+    pub async fn create_server(&self, form: &ServerForm) -> Result<(), ServerEditError> {
+        let permissions = self.permissions();
+        if !permissions.create {
+            return Err(ServerEditError::ReadOnly);
+        }
+        let fields = form.validate()?;
+        if fields.kind == ServerKind::Kubernetes && !permissions.kubernetes {
+            return Err(ServerEditError::KubernetesSuperadminOnly);
+        }
+        let org_id = self.core.orgs().state().current_org_id.ok_or(ServerEditError::NoOrganization)?;
+        let mut body = fields.body();
+        body["orgId"] = serde_json::Value::String(org_id);
+        let created: Server = self.core.call("POST", "/api/v1/servers/", Some(body)).await?;
+        self.edit_list(|all| all.push(created));
+        Ok(())
+    }
+
+    /// Edita un servidor de la organización que se mira. Si nada cambió, no
+    /// se manda.
+    pub async fn update_server(&self, server_id: &str, form: &ServerForm) -> Result<(), ServerEditError> {
+        let permissions = self.permissions();
+        if !permissions.edit {
+            return Err(ServerEditError::ReadOnly);
+        }
+        let server = self.server(server_id)?;
+        let fields = form.validate()?;
+        if fields.unchanged(&server) {
+            return Ok(());
+        }
+        let touches_kubernetes = fields.kind != server.kind && (fields.kind == ServerKind::Kubernetes || server.kind == ServerKind::Kubernetes);
+        if touches_kubernetes && !permissions.kubernetes {
+            return Err(ServerEditError::KubernetesSuperadminOnly);
+        }
+        if !fields.same_connection(&server) && !permissions.edit_connection {
+            return Err(ServerEditError::ConnectionAdminOnly);
+        }
+        let updated: Server = self.core.call("PATCH", &format!("/api/v1/servers/{server_id}"), Some(fields.body())).await?;
+        self.edit_list(|all| {
+            if let Some(slot) = all.iter_mut().find(|server| server.id == updated.id) {
+                *slot = updated;
+            }
+        });
+        Ok(())
+    }
+
+    /// Borra un servidor de cac (la máquina no se toca). **Quien llama ya
+    /// preguntó.**
+    pub async fn delete_server(&self, server_id: &str) -> Result<(), ServerEditError> {
+        if !self.permissions().delete {
+            return Err(ServerEditError::AdminOnly);
+        }
+        self.server(server_id)?;
+        self.core.call_ok("DELETE", &format!("/api/v1/servers/{server_id}"), None).await?;
+        self.edit_list(|all| all.retain(|server| server.id != server_id));
+        if self.data().open_server.as_deref() == Some(server_id) {
+            self.close_server();
+        }
+        Ok(())
+    }
+
+    fn server(&self, server_id: &str) -> Result<Server, ServerEditError> {
+        self.state().servers.into_iter().find(|server| server.id == server_id).ok_or(ServerEditError::ServerGone)
+    }
+
+    /// Lo que contestó el servidor, a la lista que se tiene, sin volver a
+    /// pedirla entera; y el número del riel, que cuenta de ella.
+    fn edit_list(&self, edit: impl FnOnce(&mut Vec<Server>)) {
+        self.change(|data| {
+            if let Some(all) = data.all.as_mut() {
+                edit(all);
+            }
+        });
+        if let Some(all) = self.data().all.clone() {
+            self.core.counters().servers_seen(&all);
         }
     }
 
@@ -169,16 +257,13 @@ impl Platform {
         if changed.is_empty() {
             return;
         }
-        self.change(|data| {
-            for server in data.all.iter_mut().flatten() {
+        self.edit_list(|all| {
+            for server in all.iter_mut() {
                 if let Some((_, seen)) = changed.iter().find(|(id, _)| *id == server.id) {
                     server.status = *seen;
                 }
             }
         });
-        if let Some(all) = self.data().all.clone() {
-            self.core.counters().servers_seen(&all);
-        }
         for (id, seen) in changed {
             let Some(status) = seen.as_reported() else { continue };
             // Si no se pudo escribir, la próxima app que mire lo vuelve a

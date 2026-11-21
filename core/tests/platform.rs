@@ -315,3 +315,126 @@ async fn a_stream_brings_each_event_with_the_pass() {
     assert_eq!(stream.next().await.map(|e| e.data), Some("dos".into()));
     assert_eq!(stream.next().await, None);
 }
+
+// ─── Altas, edición y borrado ────────────────────────────────────────────────
+
+use cac_core::{ServerEditError, ServerForm, ServerKind};
+
+/// Una organización `o1` donde la persona tiene ese papel, y su lista.
+async fn as_role(rig: &Rig, role: &str, rows: Vec<Value>) {
+    let mut org = org("o1");
+    org["role"] = json!(role);
+    Mock::given(method("GET")).and(path("/api/v1/organizations/")).respond_with(ok(json!([org]))).mount(&rig.server).await;
+    rig.core.orgs().load().await;
+    mount_servers(rig, rows).await;
+    rig.core.platform().refresh().await;
+}
+
+fn new_form() -> ServerForm {
+    ServerForm { name: " prod-02 ".into(), host: "10.0.0.2".into(), ssh_user: "root".into(), ..ServerForm::default() }
+}
+
+async fn writes(rig: &Rig) -> Vec<Request> {
+    rig.server.received_requests().await.unwrap().into_iter().filter(|r| r.method.as_str() != "GET" && !r.url.path().ends_with("/agent-session")).collect()
+}
+
+/// Rotura que atrapa: no mandar la organización que se mira, mandar el
+/// formulario sin limpiar, o no poner el nuevo en la lista ni en el número
+/// del riel.
+#[tokio::test]
+async fn adding_a_server_sends_the_org_and_joins_the_list() {
+    let rig = rig().await;
+    as_role(&rig, "member", vec![row(&rig, "a", "o1", "online", true)]).await;
+    let created = json!({ "id": "n", "orgId": "o1", "name": "prod-02", "host": "10.0.0.2", "sshPort": 22, "sshUser": "root",
+        "type": "docker-swarm", "agentPort": 9090, "status": "pending", "agentVersion": 0 });
+    Mock::given(method("POST"))
+        .and(path("/api/v1/servers/"))
+        .and(body_json(json!({ "orgId": "o1", "name": "prod-02", "host": "10.0.0.2", "sshUser": "root", "sshPort": 22, "agentPort": 9090, "type": "docker-swarm" })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": created })))
+        .expect(1)
+        .mount(&rig.server)
+        .await;
+
+    rig.core.counters().load(Some("o1".into())).await;
+    rig.core.platform().create_server(&new_form()).await.unwrap();
+
+    let ids: Vec<_> = rig.core.platform().state().servers.into_iter().map(|s| s.id).collect();
+    assert_eq!(ids, ["a", "n"]);
+    assert_eq!(rig.core.counters().state().servers, Some(1), "el nuevo está pendiente: cuenta en el riel");
+}
+
+/// Rotura que atrapa: dejar que un lector dé de alta o edite, o que alguien
+/// que no es superadmin cree un kubernetes. No llega ni a mandarse.
+#[tokio::test]
+async fn who_cannot_add_or_edit_sends_nothing() {
+    let rig = rig().await;
+    as_role(&rig, "viewer", vec![row(&rig, "a", "o1", "online", true)]).await;
+    assert!(!rig.core.platform().state().permissions.create);
+    assert_eq!(rig.core.platform().create_server(&new_form()).await, Err(ServerEditError::ReadOnly));
+    let server = rig.core.platform().state().servers[0].clone();
+    let renamed = ServerForm { name: "otro".into(), ..ServerForm::from(&server) };
+    assert_eq!(rig.core.platform().update_server("a", &renamed).await, Err(ServerEditError::ReadOnly));
+    assert!(writes(&rig).await.is_empty());
+
+    let rig = rig_admin_without_superadmin().await;
+    let kubernetes = ServerForm { kind: ServerKind::Kubernetes, ..new_form() };
+    assert_eq!(rig.core.platform().create_server(&kubernetes).await, Err(ServerEditError::KubernetesSuperadminOnly));
+    assert!(writes(&rig).await.is_empty());
+}
+
+async fn rig_admin_without_superadmin() -> Rig {
+    let rig = rig().await;
+    as_role(&rig, "admin", vec![row(&rig, "a", "o1", "online", true)]).await;
+    rig
+}
+
+/// Rotura que atrapa: dejar que un miembro mueva a dónde se conecta (su SSH
+/// y los pases de un admin irían a otra máquina) o lo vuelva kubernetes, o
+/// impedirle el nombre.
+#[tokio::test]
+async fn a_member_renames_but_does_not_move_the_connection() {
+    let rig = rig().await;
+    let current = row(&rig, "a", "o1", "online", true);
+    as_role(&rig, "member", vec![current.clone()]).await;
+    let server = server_of(current.clone());
+
+    let moved = ServerForm { host: "10.9.9.9".into(), ..ServerForm::from(&server) };
+    assert_eq!(rig.core.platform().update_server("a", &moved).await, Err(ServerEditError::ConnectionAdminOnly));
+    let kubernetes = ServerForm { kind: ServerKind::Kubernetes, ..ServerForm::from(&server) };
+    assert_eq!(rig.core.platform().update_server("a", &kubernetes).await, Err(ServerEditError::KubernetesSuperadminOnly));
+    assert!(writes(&rig).await.is_empty());
+
+    let mut renamed_row = current;
+    renamed_row["name"] = json!("vps-nuevo");
+    Mock::given(method("PATCH")).and(path("/api/v1/servers/a")).respond_with(ok(renamed_row)).expect(1).mount(&rig.server).await;
+    let renamed = ServerForm { name: "vps-nuevo".into(), ..ServerForm::from(&server) };
+    rig.core.platform().update_server("a", &renamed).await.unwrap();
+    assert_eq!(rig.core.platform().state().servers[0].name, "vps-nuevo");
+}
+
+/// Rotura que atrapa: mandar una edición que no cambia nada.
+#[tokio::test]
+async fn an_unchanged_edit_is_not_sent() {
+    let rig = rig_admin_without_superadmin().await;
+    let server = rig.core.platform().state().servers[0].clone();
+    rig.core.platform().update_server("a", &ServerForm::from(&server)).await.unwrap();
+    assert!(writes(&rig).await.is_empty());
+}
+
+/// Rotura que atrapa: dejar el borrado en la lista, o abierto; o dejar que
+/// un miembro borre.
+#[tokio::test]
+async fn deleting_takes_it_out_and_closes_it() {
+    let rig = rig().await;
+    as_role(&rig, "member", vec![row(&rig, "a", "o1", "online", true)]).await;
+    assert_eq!(rig.core.platform().delete_server("a").await, Err(ServerEditError::AdminOnly));
+    assert!(writes(&rig).await.is_empty());
+
+    let rig = rig_admin_without_superadmin().await;
+    rig.core.platform().open_server("a");
+    Mock::given(method("DELETE")).and(path("/api/v1/servers/a")).respond_with(ok(json!(null))).expect(1).mount(&rig.server).await;
+    rig.core.platform().delete_server("a").await.unwrap();
+    let state = rig.core.platform().state();
+    assert!(state.servers.is_empty());
+    assert_eq!(state.open_server, None);
+}

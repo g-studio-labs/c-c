@@ -96,6 +96,7 @@ pub struct Workspace {
     /// La lista de comunicación: lo que el panel enseña mientras se está en
     /// ese módulo.
     pub(crate) comms: Entity<CommsView>,
+    servers: Entity<crate::platform::servers::ServersView>,
     _on_comms: Subscription,
     /// La conversación que se tiene delante.
     pub(crate) chat: Entity<ChatView>,
@@ -184,6 +185,7 @@ impl Workspace {
             docs: cx.new(DocsView::new),
             task: cx.new(|cx| TaskView::new(window, cx)),
             comms,
+            servers: cx.new(|_| crate::platform::servers::ServersView::new()),
             _on_comms: on_comms,
             chat,
             tree_filter: cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)),
@@ -1563,7 +1565,7 @@ impl Render for Workspace {
         } else if snapshot.comms.on_screen {
             crate::comms::conversation(&self.chat, cx)
         } else if snapshot.platform.on_screen {
-            crate::platform::servers::page(cx)
+            self.servers.clone().into_any_element()
         } else if snapshot.docs.target.is_some() {
             self.docs.clone().into_any_element()
         } else {
@@ -3414,6 +3416,134 @@ mod tests {
         click(window, "rail-work", cx);
         wait_until(cx, "«Trabajo» devuelve el árbol", |cx| on_screen(window, "tree-l-a", cx));
         assert!(!on_screen(window, "platform-server-s1", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Un servidor de mentira donde la persona tiene ese papel en `o1`, con
+    /// `pixel-vps` en la lista, y la app abierta en Plataforma.
+    fn platform_as(role: &str, cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle) {
+        let server = FakeServer::start();
+        let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+        let mut mine = org("o1", "G Studio");
+        mine["role"] = json!(role);
+        server.mount(get("/api/v1/organizations/").respond_with(ok(json!([mine]))));
+        server.mount(get("/api/v1/task-spaces/").respond_with(ok(json!([space("a", "Producto")]))));
+        server.mount(get("/api/v1/docs/").respond_with(ok(json!({}))));
+        server.mount(get("/api/v1/tasks/").respond_with(ok(json!([]))));
+        server.mount(get("/api/v1/servers/").respond_with(ok(json!([platform_server("s1", "o1", "pixel-vps", "online")]))));
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-l-a", cx));
+        click(window, "rail-platform", cx);
+        wait_until(cx, "llega la tabla", |cx| on_screen(window, "platform-row-s1", cx));
+        (server, window)
+    }
+
+    fn server_writes(server: &FakeServer) -> Vec<(String, String, serde_json::Value)> {
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.method.as_str() != "GET" && request.url.path().starts_with("/api/v1/servers/"))
+            .map(|request| (request.method.to_string(), request.url.path().to_string(), serde_json::from_slice(&request.body).unwrap_or_default()))
+            .collect()
+    }
+
+    /// Un miembro da de alta desde el diálogo: se manda lo escrito con la
+    /// organización, el diálogo se cierra y el nuevo sale en la tabla. Lo que
+    /// no puede (borrar, kubernetes) no se le ofrece.
+    ///
+    /// Roturas que atrapa: un botón de alta que no abre nada; un diálogo que
+    /// no manda lo escrito o no se cierra; ofrecer a un miembro lo que el
+    /// servidor le va a negar.
+    #[gpui_kit::test]
+    fn a_member_adds_a_server_from_the_dialog(cx: &mut TestAppContext) {
+        let (server, window) = platform_as("member", cx);
+        assert!(on_screen(window, "platform-edit-s1", cx));
+        assert!(!on_screen(window, "platform-delete-s1", cx), "ofrece borrar a un miembro");
+        let created = json!({ "id": "s2", "orgId": "o1", "name": "prod-02", "host": "10.0.0.2", "sshPort": 22, "sshUser": "root",
+            "type": "docker-swarm", "agentPort": 9090, "status": "pending", "hasAgentToken": true, "agentVersion": 2 });
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/servers/")).respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": created }))));
+
+        click(window, "platform-add", cx);
+        wait_until(cx, "se abre el diálogo", |cx| on_screen(window, "server-dialog", cx));
+        assert!(!on_screen(window, "server-kind-kubernetes", cx), "ofrece kubernetes a quien no es superadmin");
+        type_text(window, "prod-02", cx);
+        click(window, "server-host", cx);
+        type_text(window, "10.0.0.2", cx);
+        click(window, "server-ssh-user", cx);
+        type_text(window, "root", cx);
+        click(window, "server-dialog-save", cx);
+
+        wait_until(cx, "sale el nuevo", |cx| on_screen(window, "platform-row-s2", cx));
+        assert!(!on_screen(window, "server-dialog", cx), "el diálogo se queda abierto");
+        assert_eq!(
+            server_writes(&server),
+            [("POST".into(), "/api/v1/servers/".into(), json!({ "orgId": "o1", "name": "prod-02", "host": "10.0.0.2", "sshUser": "root", "sshPort": 22, "agentPort": 9090, "type": "docker-swarm" }))]
+        );
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Lo que el core no deja mandar se dice en el diálogo, que sigue abierto
+    /// con lo escrito.
+    ///
+    /// Rotura que atrapa: cerrar el diálogo, o callarse, cuando no se guardó.
+    #[gpui_kit::test]
+    fn a_refused_edit_says_why_and_stays_open(cx: &mut TestAppContext) {
+        let (server, window) = platform_as("member", cx);
+        click(window, "platform-edit-s1", cx);
+        wait_until(cx, "se abre el diálogo", |cx| on_screen(window, "server-dialog", cx));
+        assert_eq!(label(window, "server-dialog-title", cx), "Editar pixel-vps");
+        click(window, "server-host", cx);
+        type_text(window, "9", cx);
+        click(window, "server-dialog-save", cx);
+
+        wait_until(cx, "dice por qué", |cx| on_screen(window, "server-dialog-problem", cx));
+        assert!(on_screen(window, "server-dialog", cx));
+        assert!(server_writes(&server).is_empty());
+        click(window, "server-dialog-cancel", cx);
+        wait_until(cx, "Cancelar lo cierra", |cx| !on_screen(window, "server-dialog", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// A quien sólo mira, ni alta, ni editar, ni borrar.
+    ///
+    /// Rotura que atrapa: enseñar a un lector acciones que el servidor le va
+    /// a negar.
+    #[gpui_kit::test]
+    fn a_viewer_gets_no_server_actions(cx: &mut TestAppContext) {
+        let (_server, window) = platform_as("viewer", cx);
+        for id in ["platform-add", "platform-edit-s1", "platform-delete-s1"] {
+            assert!(!on_screen(window, id, cx), "ofrece {id} a quien sólo mira");
+        }
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Borrar pregunta nombrando el servidor; cancelar no manda nada, y
+    /// confirmar lo quita de la tabla.
+    ///
+    /// Roturas que atrapa: borrar sin preguntar; una pregunta que no dice
+    /// cuál; borrar al cancelar.
+    #[gpui_kit::test]
+    fn deleting_asks_naming_the_server(cx: &mut TestAppContext) {
+        let (server, window) = platform_as("admin", cx);
+        server.mount(Mock::given(method("DELETE")).and(path("/api/v1/servers/s1")).respond_with(ok(json!(null))));
+
+        click(window, "platform-delete-s1", cx);
+        let (title, body) = cx.pending_prompt().expect("borró sin preguntar");
+        assert_eq!(title, "¿Borrar «pixel-vps»?");
+        assert!(body.contains("se quedan intactos"), "{body}");
+        cx.simulate_prompt_answer("Cancelar");
+        cx.run_until_parked();
+        // El borrado saldría por el runtime de tokio, no por el de la
+        // ventana: hay que darle tiempo de llegar para poder decir que no
+        // llegó.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(server_writes(&server).is_empty(), "borró al cancelar");
+
+        click(window, "platform-delete-s1", cx);
+        cx.simulate_prompt_answer("Borrar");
+        wait_until(cx, "sale de la tabla", |cx| !on_screen(window, "platform-row-s1", cx));
+        assert_eq!(server_writes(&server).iter().map(|(verb, route, _)| (verb.as_str(), route.as_str())).collect::<Vec<_>>(), [("DELETE", "/api/v1/servers/s1")]);
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 

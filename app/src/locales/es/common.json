@@ -359,7 +359,20 @@
       "behind": "Volvió en v{{version}}, pero esta app instala la v{{latest}}: la imagen nueva no se bajó.",
       "waiting": "Esperando al agente…"
     },
-    "secretsMoved": "Los secrets que cac lleva al servidor (desde 1Password) están ahora en"
+    "secretsMoved": "Los secrets que cac lleva al servidor (desde 1Password) están ahora en",
+    "badPort": "Un puerto va de 1 a 65535",
+    "nameTooLong": "Como mucho {{max}} caracteres",
+    "unknownKind": "Elige Docker Swarm o Kubernetes",
+    "serverGone": "Ese servidor ya no está en la lista",
+    "editTitle": "Editar {{name}}",
+    "deleteTitle": "¿Borrar «{{name}}»?",
+    "sshKeyTitle": "Llave SSH de {{name}}",
+    "readingAgent": "Leyendo el agente SSH…",
+    "agentHoldsNoKeys": "Este agente no tiene llaves. Si es 1Password, desbloquéalo: una bóveda cerrada contesta pero no ofrece nada.",
+    "agentNotRunning": "no está corriendo",
+    "agentKeys_one": "{{count}} llave",
+    "agentKeys_other": "{{count}} llaves",
+    "retry": "Reintentar"
   },
   "admin": {
     "users": "Usuarios",

@@ -4,6 +4,7 @@
 //! Plataforma en la app nativa», en cac) añade el suyo.
 
 pub mod panel;
+pub mod server_dialog;
 pub mod servers;
 
 use cac_core::ServerHealth;

@@ -359,7 +359,20 @@
       "behind": "It came back as v{{version}}, but this app installs v{{latest}}: the new image wasn't pulled.",
       "waiting": "Waiting for the agent…"
     },
-    "secretsMoved": "The secrets cac takes to the server (from 1Password) are now in"
+    "secretsMoved": "The secrets cac takes to the server (from 1Password) are now in",
+    "badPort": "A port goes from 1 to 65535",
+    "nameTooLong": "At most {{max}} characters",
+    "unknownKind": "Pick Docker Swarm or Kubernetes",
+    "serverGone": "That server is no longer on the list",
+    "editTitle": "Edit {{name}}",
+    "deleteTitle": "Delete \"{{name}}\"?",
+    "sshKeyTitle": "SSH key for {{name}}",
+    "readingAgent": "Reading SSH agent…",
+    "agentHoldsNoKeys": "This agent holds no keys. If it's 1Password, unlock it — a locked vault answers but offers nothing.",
+    "agentNotRunning": "not running",
+    "agentKeys_one": "{{count}} key",
+    "agentKeys_other": "{{count}} keys",
+    "retry": "Retry"
   },
   "admin": {
     "users": "Users",
