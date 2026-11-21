@@ -10,6 +10,7 @@ use gpui_kit::*;
 
 use super::agent_install::{install_for, installer, outcome_phrase};
 use super::server_dialog::{ServerDialog, ServerDialogClosed};
+use super::services::ServicesView;
 use super::ssh_key::{SshKeyClosed, SshKeyDialog};
 use crate::backend::Backend;
 use crate::lang::{locale, tr};
@@ -28,11 +29,14 @@ pub struct ServersView {
     /// Cómo acabó la última instalación del agente: de qué servidor, la
     /// frase y si es un aviso.
     agent_line: Option<(String, String, bool)>,
+    /// La pestaña de servicios, con su filtro: se crea al abrirla la primera
+    /// vez, que es cuando hay ventana.
+    services: Option<Entity<ServicesView>>,
 }
 
 impl ServersView {
     pub fn new() -> Self {
-        ServersView { dialog: None, ssh_key: None, problem: None, agent_line: None }
+        ServersView { dialog: None, ssh_key: None, problem: None, agent_line: None, services: None }
     }
 
     fn open_dialog(&mut self, editing: Option<Server>, window: &mut Window, cx: &mut Context<Self>) {
@@ -251,12 +255,14 @@ impl ServersView {
 }
 
 impl Render for ServersView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = Backend::snapshot(cx).read(cx).platform.clone();
         let open = state.open_server.as_ref().and_then(|id| state.servers.iter().find(|server| &server.id == id));
         if let Some(server) = open {
             let actions = self.agent_actions(server, &state, cx);
-            return div().size_full().child(super::server_page::page(server, &state, actions, cx)).into_any_element();
+            let services = (state.tab == cac_core::ServerTab::Services)
+                .then(|| self.services.get_or_insert_with(|| cx.new(|cx| ServicesView::new(window, cx))).clone().into_any_element());
+            return div().size_full().child(super::server_page::page(server, &state, actions, services, cx)).into_any_element();
         }
         let theme = cx.theme();
         let (background, foreground, border, danger) = (theme.background, theme.foreground, theme.border, theme.danger);

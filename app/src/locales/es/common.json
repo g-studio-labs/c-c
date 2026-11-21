@@ -204,6 +204,8 @@
     "reconnecting": "Reconectando…",
     "connectionFailed": "Falló la conexión — puede que no se alcance el agente o que el endpoint no exista",
     "waitingForLogs": "Esperando los logs…",
+    "noMatches": "Ningún servicio casa con «{{filter}}».",
+    "showingOf": "Mostrando {{shown}} de {{total}}",
     "filterServices": "Filtra por nombre, imagen o stack…",
     "clearFilter": "Limpiar el filtro",
     "noServices": "No se encontró ningún servicio.",

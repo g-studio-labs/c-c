@@ -204,6 +204,8 @@
     "reconnecting": "Reconnecting…",
     "connectionFailed": "Connection failed — agent may be unreachable or endpoint not available",
     "waitingForLogs": "Waiting for logs…",
+    "noMatches": "No services match \"{{filter}}\".",
+    "showingOf": "Showing {{shown}} of {{total}}",
     "filterServices": "Filter by name, image or stack…",
     "clearFilter": "Clear filter",
     "noServices": "No services found.",

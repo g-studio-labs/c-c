@@ -3575,7 +3575,7 @@ mod tests {
         assert!(on_screen(window, "server-tab-backups", cx), "un swarm sin sus ocho pestañas");
         assert!(!on_screen(window, "server-agent-install", cx), "a un miembro, instalar el agente que sólo puede un admin");
 
-        click(window, "server-tab-services", cx);
+        click(window, "server-tab-nodes", cx);
         wait_until(cx, "la pestaña cambia", |cx| on_screen(window, "server-tab-pending", cx));
         click(window, "server-back", cx);
         wait_until(cx, "vuelve la tabla", |cx| on_screen(window, "platform-row-s1", cx));
@@ -3610,6 +3610,89 @@ mod tests {
         for id in ["server-tab-services", "server-tab-nodes", "server-agent", "server-deploys"] {
             assert!(!on_screen(window, id, cx), "un kubernetes enseña {id}");
         }
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Un swarm cuyo agente es el mismo servidor de mentira (sin
+    /// identidad: no pide pase), con dos servicios, abierto en su pestaña.
+    fn services_as(role: &str, cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle) {
+        let server = FakeServer::start();
+        let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+        let mut mine = org("o1", "G Studio");
+        mine["role"] = json!(role);
+        server.mount(get("/api/v1/organizations/").respond_with(ok(json!([mine]))));
+        server.mount(get("/api/v1/task-spaces/").respond_with(ok(json!([space("a", "Producto")]))));
+        server.mount(get("/api/v1/docs/").respond_with(ok(json!({}))));
+        server.mount(get("/api/v1/tasks/").respond_with(ok(json!([]))));
+        let mut vps = platform_server("s1", "o1", "pixel-vps", "online");
+        (vps["host"], vps["agentPort"], vps["hasAgentToken"]) = (json!("127.0.0.1"), json!(server.port()), json!(false));
+        server.mount(get("/api/v1/servers/").respond_with(ok(json!([vps]))));
+        server.mount(get("/api/v1/nodes").respond_with(ok(json!([]))));
+        for what in ["incidents", "deployables", "provisioning-runs"] {
+            server.mount(get(&format!("/api/v1/servers/s1/{what}")).respond_with(ok(json!([]))));
+        }
+        server.mount(get("/api/v1/services").respond_with(ok(json!([
+            { "id": "svc1", "name": "shop_web", "image": "ghcr.io/o/web:v3", "stack": "shop", "replicas": { "running": 1, "desired": 2 }, "updatedAt": "2026-11-20T10:00:00Z" },
+            { "id": "svc2", "name": "shop_db", "image": "postgres:16", "stack": "shop", "replicas": { "running": 1, "desired": 1 }, "updatedAt": "2026-11-20T10:00:00Z" },
+        ]))));
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-l-a", cx));
+        click(window, "rail-platform", cx);
+        wait_until(cx, "llega la tabla", |cx| on_screen(window, "platform-row-s1", cx));
+        click(window, "platform-open-s1", cx);
+        wait_until(cx, "se abre", |cx| on_screen(window, "server-tab-services", cx));
+        click(window, "server-tab-services", cx);
+        wait_until(cx, "llegan los servicios", |cx| on_screen(window, "service-row-svc1", cx));
+        (server, window)
+    }
+
+    /// La pestaña de servicios: filtrar, reiniciar y seguir el log, que
+    /// llega con sus colores y sin códigos crudos.
+    ///
+    /// Roturas que atrapa: un filtro que no filtra o no se puede vaciar; un
+    /// reinicio que no llega al agente o no dice nada; un log que no se
+    /// pinta, o que pinta `[32m`.
+    #[gpui_kit::test]
+    fn the_services_tab_filters_restarts_and_follows_a_log(cx: &mut TestAppContext) {
+        let (server, window) = services_as("member", cx);
+        server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/services/svc1/logs"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw("data: \u{1b}[32mconexión\u{1b}[0m lista\n\n", "text/event-stream")),
+        );
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/services/svc1/force-update")).respond_with(ok(json!({ "message": "service update triggered" }))));
+        assert!(on_screen(window, "service-row-svc2", cx));
+
+        click(window, "services-filter", cx);
+        type_text(window, "POSTGRES", cx);
+        wait_until(cx, "el filtro deja uno", |cx| !on_screen(window, "service-row-svc1", cx));
+        assert!(on_screen(window, "service-row-svc2", cx));
+        assert_eq!(label(window, "services-count", cx), "Mostrando 1 de 2");
+        click(window, "services-filter-clear", cx);
+        wait_until(cx, "vaciar el filtro los trae", |cx| on_screen(window, "service-row-svc1", cx));
+        assert!(!on_screen(window, "services-count", cx));
+
+        click(window, "service-restart-svc1", cx);
+        wait_until(cx, "dice que reinicia", |cx| on_screen(window, "services-restart-result", cx));
+        assert_eq!(label(window, "services-restart-result", cx), "Reiniciando shop_web");
+        assert_eq!(server.hits("/api/v1/services/svc1/force-update"), 1);
+
+        click(window, "service-logs-svc1", cx);
+        wait_until(cx, "llega el log", |cx| on_screen(window, "service-log-line-0", cx));
+        assert_eq!(label(window, "service-log-line-0", cx), "conexión lista");
+        click(window, "service-logs-close", cx);
+        wait_until(cx, "se cierra", |cx| !on_screen(window, "service-logs", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Rotura que atrapa: ofrecerle reiniciar a un lector, cuyo pase al
+    /// agente es de lectura.
+    #[gpui_kit::test]
+    fn a_reader_sees_the_services_but_no_restart(cx: &mut TestAppContext) {
+        let (_server, window) = services_as("viewer", cx);
+        assert!(on_screen(window, "service-logs-svc1", cx));
+        assert!(!on_screen(window, "service-restart-svc1", cx));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 

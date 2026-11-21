@@ -51,6 +51,12 @@ impl FakeServer {
         self.runtime.block_on(self.server.received_requests()).unwrap_or_default()
     }
 
+    /// El puerto donde escucha: un servidor de la lista que apunte aquí
+    /// tiene aquí también su agente.
+    pub fn port(&self) -> u16 {
+        self.server.address().port()
+    }
+
     /// Cuántas peticiones llegaron a esa ruta.
     pub fn hits(&self, path: &str) -> usize {
         self.requests().iter().filter(|request| request.url.path() == path).count()

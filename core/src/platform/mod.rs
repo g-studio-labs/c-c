@@ -10,6 +10,7 @@ pub mod detail;
 pub mod edit;
 pub mod install;
 pub mod servers;
+pub mod services;
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,7 @@ pub use detail::{server_tabs, AgentNote, DeployableSummary, IncidentServerRef, I
 pub use edit::{server_edit_phrase, server_permissions, ServerEditError, ServerField, ServerForm, ServerPermissions, MAX_SERVER_NAME};
 pub use install::{agent_update_outcome, AgentIdentity, AgentInstallOutcome, AgentInstallPhase, AgentJob, AgentWait, AGENT_VERSION_LATEST};
 pub use servers::{platform_sections, servers_of, PlatformSection, Server, ServerHealth, ServerKind};
+pub use services::{filter_services, LogLine, LogStatus, ServiceHealth, ServiceLogs, ServiceReplicas, SwarmService, LOG_LINES_KEPT};
 
 /// Lo que se pinta de Plataforma.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -46,6 +48,13 @@ pub struct PlatformState {
     pub permissions: ServerPermissions,
     /// La instalación del agente en curso, si hay una.
     pub agent_job: Option<AgentJob>,
+    /// Los servicios del servidor abierto, cuando contestó su agente.
+    pub services: Option<Vec<SwarmService>>,
+    pub services_loading: bool,
+    /// Por qué no contestó. Los que hubiera se quedan.
+    pub services_error: Option<String>,
+    /// El log que se está siguiendo.
+    pub logs: Option<ServiceLogs>,
 }
 
 #[derive(Default)]
@@ -59,6 +68,13 @@ pub(crate) struct PlatformData {
     tab: ServerTab,
     overview: Option<ServerOverview>,
     agent_job: Option<AgentJob>,
+    services: Option<Vec<SwarmService>>,
+    services_loading: bool,
+    services_error: Option<String>,
+    logs: Option<ServiceLogs>,
+    /// Quien sigue el log. Se corta al cerrarlo: un servicio callado deja la
+    /// lectura esperando para siempre, y no se puede esperar a que acabe.
+    logs_task: Option<tokio::task::AbortHandle>,
 }
 
 /// Plataforma en este core.
@@ -88,6 +104,10 @@ impl Platform {
             overview: data.overview.clone(),
             permissions: self.permissions(),
             agent_job: data.agent_job.clone(),
+            services: data.services.clone(),
+            services_loading: data.services_loading,
+            services_error: data.services_error.clone(),
+            logs: data.logs.clone(),
         }
     }
 
@@ -286,9 +306,8 @@ impl Platform {
             return false;
         }
         self.change(|data| {
+            close(data);
             data.open_server = Some(server_id.to_string());
-            data.tab = ServerTab::Overview;
-            data.overview = None;
         });
         true
     }
@@ -305,14 +324,137 @@ impl Platform {
         self.change(close);
     }
 
-    /// Cambia de pestaña. Una que ese servidor no tiene no se elige.
+    /// Cambia de pestaña. Una que ese servidor no tiene no se elige. El log
+    /// que se siguiera es de la pestaña que se deja.
     pub fn select_tab(&self, tab: ServerTab) -> bool {
         let Some(server) = self.open() else { return false };
         if !server_tabs(server.kind).contains(&tab) {
             return false;
         }
-        self.change(|data| data.tab = tab);
+        self.change(|data| {
+            data.tab = tab;
+            stop_logs(data);
+        });
         true
+    }
+
+    /// Cambia de pestaña y pide lo que ésa enseña.
+    pub async fn open_tab(&self, tab: ServerTab) {
+        if self.select_tab(tab) && tab == ServerTab::Services {
+            self.load_services().await;
+        }
+    }
+
+    /// Pide al agente del servidor abierto sus servicios.
+    pub async fn load_services(&self) {
+        let Some(server) = self.open() else { return };
+        self.change(|data| {
+            data.services_loading = true;
+            data.services_error = None;
+        });
+        let answer = self.core.agent().get_data::<Option<Vec<SwarmService>>>(&server, "/api/v1/services").await;
+        self.change(|data| {
+            if data.open_server.as_deref() != Some(server.id.as_str()) {
+                return;
+            }
+            data.services_loading = false;
+            match answer {
+                Ok(services) => data.services = Some(services.unwrap_or_default()),
+                Err(error) => data.services_error = Some(error.to_string()),
+            }
+        });
+    }
+
+    /// Reinicia un servicio del servidor abierto (`force-update`: Swarm
+    /// cambia sus contenedores uno a uno). Un lector no puede: su pase al
+    /// agente es de lectura.
+    pub async fn restart_service(&self, service_id: &str) -> Result<(), ServerEditError> {
+        if !self.permissions().restart_service {
+            return Err(ServerEditError::ReadOnly);
+        }
+        let server = self.open().ok_or(ServerEditError::ServerGone)?;
+        let reply = self.core.agent().post(&server, &format!("/api/v1/services/{service_id}/force-update"), None).await?;
+        if reply.status >= 400 {
+            return Err(crate::session::server_error(&reply).into());
+        }
+        Ok(())
+    }
+
+    /// Sigue el log de un servicio del servidor abierto, en vez del que se
+    /// siguiera. Llega a `logs` línea a línea, ya en tramos con su color.
+    pub fn follow_logs(&self, service: &SwarmService) {
+        let Some(server) = self.open() else { return };
+        let platform = self.core.platform();
+        let service_id = service.id.clone();
+        self.change(|data| {
+            stop_logs(data);
+            data.logs = Some(ServiceLogs::new(service));
+        });
+        let task = tokio::spawn(async move { platform.run_logs(server, service_id).await });
+        let mut data = self.data();
+        // Si mientras arrancaba se cerró o se abrió otro, éste sobra.
+        if data.logs.as_ref().is_some_and(|logs| logs.service_id == service.id) && data.logs_task.is_none() {
+            data.logs_task = Some(task.abort_handle());
+        } else {
+            task.abort();
+        }
+    }
+
+    /// Deja de seguir el log.
+    pub fn close_logs(&self) {
+        self.change(stop_logs);
+    }
+
+    /// Vacía lo que hay en pantalla sin cortar: para ver qué pasa a partir
+    /// de ahora.
+    pub fn clear_logs(&self) {
+        self.change(|data| {
+            if let Some(logs) = data.logs.as_mut() {
+                logs.lines.clear();
+            }
+        });
+    }
+
+    /// Abre el stream y lo reabre si se corta: tres cortes seguidos y se
+    /// deja. Sólo uno que aguantó abierto (`LOG_STEADY`) pone la cuenta a
+    /// cero: contando cada apertura, un agente que abre y cierra en el acto
+    /// se reconectaba sin fin, cada vez con sus cien últimas líneas otra vez.
+    async fn run_logs(&self, server: Server, service_id: String) {
+        let path = format!("/api/v1/services/{service_id}/logs");
+        let mut failures: u32 = 0;
+        loop {
+            match self.core.agent().stream(&server, &path).await {
+                Ok(mut stream) => {
+                    let opened = tokio::time::Instant::now();
+                    self.edit_logs(&service_id, |logs| logs.status = LogStatus::Streaming);
+                    while let Some(event) = stream.next().await {
+                        self.edit_logs(&service_id, |logs| match event.event.as_str() {
+                            "error" => logs.error = Some(event.data),
+                            _ => logs.push(&event.data),
+                        });
+                    }
+                    if opened.elapsed() >= services::LOG_STEADY {
+                        failures = 0;
+                    }
+                }
+                Err(error) => self.edit_logs(&service_id, |logs| logs.error = Some(error.to_string())),
+            }
+            failures += 1;
+            if failures >= 3 {
+                self.edit_logs(&service_id, |logs| logs.status = LogStatus::Failed);
+                return;
+            }
+            self.edit_logs(&service_id, |logs| logs.status = LogStatus::Reconnecting);
+            tokio::time::sleep(crate::stream::backoff(self.core.inner.config.stream_backoff, failures - 1)).await;
+        }
+    }
+
+    fn edit_logs(&self, service_id: &str, edit: impl FnOnce(&mut ServiceLogs)) {
+        self.change(|data| {
+            if let Some(logs) = data.logs.as_mut().filter(|logs| logs.service_id == service_id) {
+                edit(logs);
+            }
+        });
     }
 
     /// El servidor abierto, si sigue en la lista.
@@ -358,7 +500,10 @@ impl Platform {
     /// siguiente.
     pub(crate) fn clear(&self) {
         self.core.agent().clear();
-        self.change(|data| *data = PlatformData::default());
+        self.change(|data| {
+            stop_logs(data);
+            *data = PlatformData::default();
+        });
     }
 
     /// Pregunta a los agentes sin identidad si contestan, y lo que cambie lo
@@ -421,6 +566,17 @@ fn close(data: &mut PlatformData) {
     data.open_server = None;
     data.tab = ServerTab::Overview;
     data.overview = None;
+    data.services = None;
+    data.services_loading = false;
+    data.services_error = None;
+    stop_logs(data);
+}
+
+fn stop_logs(data: &mut PlatformData) {
+    if let Some(task) = data.logs_task.take() {
+        task.abort();
+    }
+    data.logs = None;
 }
 
 #[cfg(test)]

@@ -28,6 +28,7 @@ mod files;
 mod identity;
 mod inbox;
 mod lang;
+mod log_view;
 mod mentions;
 mod message_actions;
 mod mywork;

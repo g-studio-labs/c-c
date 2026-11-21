@@ -14,7 +14,7 @@ use crate::backend::Backend;
 use crate::lang::{locale, tr};
 use crate::theme::Leading as _;
 
-pub(crate) fn page(server: &Server, state: &PlatformState, agent_actions: Option<AnyElement>, cx: &App) -> AnyElement {
+pub(crate) fn page(server: &Server, state: &PlatformState, agent_actions: Option<AnyElement>, services: Option<AnyElement>, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let (background, foreground) = (theme.background, theme.foreground);
     div()
@@ -35,6 +35,7 @@ pub(crate) fn page(server: &Server, state: &PlatformState, agent_actions: Option
                 .p_4()
                 .child(match state.tab {
                     ServerTab::Overview => overview(server, state.overview.as_ref(), agent_actions, cx),
+                    ServerTab::Services => services.unwrap_or_else(|| pending(cx)),
                     _ => pending(cx),
                 }),
         )
@@ -93,9 +94,7 @@ fn tabs(server: &Server, current: ServerTab, cx: &App) -> impl IntoElement {
             .text_color(if active { foreground } else { muted })
             .cursor_pointer()
             .hover(move |style| style.text_color(foreground))
-            .on_click(move |_, _, cx| {
-                Backend::core(cx).platform().select_tab(tab);
-            })
+            .on_click(move |_, _, cx| Backend::run(cx, move |core| async move { core.platform().open_tab(tab).await }))
             .child(tr(cx, tab.label_key()))
             .test_support()
     }))

@@ -9,6 +9,7 @@
 uniffi::setup_scaffolding!();
 
 pub mod account;
+pub mod ansi;
 pub mod chat;
 pub mod comms;
 pub mod comms_text;
@@ -91,8 +92,9 @@ pub use hue::{hue_index, HUES};
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
 pub use platform::{
     agent_base, agent_update_outcome, platform_sections, server_edit_phrase, server_permissions, server_tabs, servers_of, Agent, AgentIdentity, AgentInstallOutcome, AgentInstallPhase, AgentJob, AgentNote, AgentWait, AGENT_VERSION_LATEST, DeployableSummary, IncidentServerRef, IncidentSummary, ProvisioningRun, ServerOverview, ServerTab, AGENT_VERSION_DEPLOYS, AgentStream, Platform, PlatformSection, PlatformState, Server, ServerEditError, ServerField, ServerForm, ServerHealth, ServerKind, ServerPermissions,
-    AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT,
+    AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT, filter_services, LogLine, LogStatus, ServiceHealth, ServiceLogs, ServiceReplicas, SwarmService, LOG_LINES_KEPT,
 };
+pub use ansi::{ansi_spans, AnsiColor, AnsiSpan};
 pub use prose::prose_for_painting;
 pub use prefs::{first_spoken, folds_panel, is_dark, shortcut_text, KeysHeld, ThemePreference, WorkLayout};
 pub use session::Session;

@@ -8,6 +8,7 @@ pub mod panel;
 pub mod server_dialog;
 pub mod server_page;
 pub mod servers;
+pub mod services;
 pub mod ssh_key;
 
 use cac_core::ServerHealth;

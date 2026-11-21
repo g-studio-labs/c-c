@@ -53,7 +53,9 @@ struct Rig {
 async fn rig() -> Rig {
     let server = MockServer::start().await;
     let recorder = Arc::new(Recorder::default());
-    let core = Core::new(Config::new(server.uri()), Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
+    let mut config = Config::new(server.uri());
+    config.stream_backoff = Duration::from_millis(5);
+    let core = Core::new(config, Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
     let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana" })).unwrap();
     core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
     Rig { server, core, recorder }
@@ -669,4 +671,210 @@ async fn a_second_install_waits_for_the_first() {
     assert_eq!(second, Err(ServerEditError::AgentBusy));
     release.send(()).unwrap();
     assert_eq!(first.await.unwrap(), Err(ServerEditError::Ssh("cortado".into())));
+}
+
+// ─── Servicios y logs ────────────────────────────────────────────────────────
+
+use cac_core::{LogStatus, SwarmService};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+fn web_service() -> Value {
+    json!({ "id": "svc1", "name": "shop_web", "image": "ghcr.io/o/web:v3", "stack": "shop", "replicas": { "running": 1, "desired": 2 }, "updatedAt": "2026-11-20T10:00:00Z" })
+}
+
+/// Rotura que atrapa: pedir los servicios sin el pase del agente, o leerlos
+/// mal; y que un agente caído borre la lista que había.
+#[tokio::test]
+async fn the_services_tab_asks_the_agent_and_keeps_them_when_it_fails() {
+    let rig = rig().await;
+    as_role(&rig, "viewer", vec![row(&rig, "s", "o1", "online", true)]).await;
+    Mock::given(method("POST")).and(path("/api/v1/servers/s/agent-session")).respond_with(pass("p", 600)).mount(&rig.server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/services"))
+        .and(header("authorization", "Bearer p"))
+        .respond_with(ok(json!([web_service()])))
+        .up_to_n_times(1)
+        .mount(&rig.server)
+        .await;
+    Mock::given(method("GET")).and(path("/api/v1/services")).respond_with(ResponseTemplate::new(502)).mount(&rig.server).await;
+    rig.core.platform().open_server("s");
+    rig.core.platform().open_tab(ServerTab::Services).await;
+    let state = rig.core.platform().state();
+    let services = state.services.unwrap();
+    assert_eq!((services[0].name.as_str(), services[0].replicas.running, services[0].replicas.desired), ("shop_web", 1, 2));
+    rig.core.platform().load_services().await;
+    let state = rig.core.platform().state();
+    assert_eq!(state.services.map(|s| s.len()), Some(1));
+    assert!(state.services_error.is_some());
+    assert!(!state.services_loading);
+}
+
+/// Rotura que atrapa: dejar que un lector reinicie (su pase es de
+/// lectura), o que un miembro mande el reinicio sin pase o a otro camino.
+#[tokio::test]
+async fn a_reader_does_not_restart_and_a_member_does() {
+    let rig = rig().await;
+    as_role(&rig, "viewer", vec![row(&rig, "s", "o1", "online", true)]).await;
+    Mock::given(method("POST")).and(path("/api/v1/servers/s/agent-session")).respond_with(pass("p", 600)).mount(&rig.server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/services/svc1/force-update"))
+        .and(header("authorization", "Bearer p"))
+        .respond_with(ok(json!({ "message": "service update triggered" })))
+        .mount(&rig.server)
+        .await;
+    rig.core.platform().open_server("s");
+    assert!(!rig.core.platform().state().permissions.restart_service);
+    assert_eq!(rig.core.platform().restart_service("svc1").await, Err(ServerEditError::ReadOnly));
+    assert!(writes(&rig).await.is_empty());
+
+    let rig = rig_as_member_with_open("s").await;
+    Mock::given(method("POST")).and(path("/api/v1/servers/s/agent-session")).respond_with(pass("p", 600)).mount(&rig.server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/services/svc1/force-update"))
+        .and(header("authorization", "Bearer p"))
+        .respond_with(ok(json!({ "message": "service update triggered" })))
+        .expect(1)
+        .mount(&rig.server)
+        .await;
+    Mock::given(method("POST")).and(path("/api/v1/services/gone/force-update")).respond_with(ResponseTemplate::new(500)).mount(&rig.server).await;
+    assert_eq!(rig.core.platform().restart_service("svc1").await, Ok(()));
+    assert!(rig.core.platform().restart_service("gone").await.is_err());
+}
+
+async fn rig_as_member_with_open(id: &str) -> Rig {
+    let rig = rig().await;
+    as_role(&rig, "member", vec![row(&rig, id, "o1", "online", true)]).await;
+    rig.core.platform().open_server(id);
+    rig
+}
+
+/// Un agente de verdad por TCP, que manda el cuerpo del log en estos trozos
+/// y con pausas entre ellos, para que lleguen separados. A lo demás (la
+/// prueba de vida de la lista) contesta 404.
+async fn chunked_agent(chunks: Vec<Vec<u8>>) -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 2048];
+            let read = socket.read(&mut request).await.unwrap_or(0);
+            if !String::from_utf8_lossy(&request[..read]).contains("/logs") {
+                let _ = socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                continue;
+            }
+            let chunks = chunks.clone();
+            tokio::spawn(async move {
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+                for chunk in chunks {
+                    socket.write_all(format!("{:x}\r\n", chunk.len()).as_bytes()).await.unwrap();
+                    socket.write_all(&chunk).await.unwrap();
+                    socket.write_all(b"\r\n").await.unwrap();
+                    socket.flush().await.unwrap();
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                }
+                // Se queda abierto, como un servicio callado.
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            });
+        }
+    });
+    port
+}
+
+async fn until(rig: &Rig, done: impl Fn(&PlatformState) -> bool) -> PlatformState {
+    for _ in 0..200 {
+        let state = rig.core.platform().state();
+        if done(&state) {
+            return state;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no llegó: {:?}", rig.core.platform().state().logs);
+}
+
+/// Rotura que atrapa: pasar cada trozo de la red a texto por su cuenta (la
+/// «ó» partida sale «��») o pintar crudo el código de color partido entre
+/// dos trozos.
+#[tokio::test]
+async fn a_log_cut_mid_character_is_painted_whole() {
+    let rig = rig().await;
+    let body = "data: \u{1b}[32mconexión\u{1b}[0m lista\n\n".as_bytes().to_vec();
+    let accent = body.iter().position(|&b| b == 0xC3).unwrap();
+    let escape = body.iter().position(|&b| b == b'[').unwrap();
+    let chunks = vec![body[..escape].to_vec(), body[escape..accent + 1].to_vec(), body[accent + 1..].to_vec()];
+    let mut vps = row(&rig, "s", "o1", "online", false);
+    vps["agentPort"] = json!(chunked_agent(chunks).await);
+    as_role(&rig, "viewer", vec![vps]).await;
+    rig.core.platform().open_server("s");
+    rig.core.platform().follow_logs(&SwarmService { id: "svc1".into(), name: "shop_web".into(), ..Default::default() });
+    let state = until(&rig, |state| state.logs.as_ref().is_some_and(|logs| !logs.lines.is_empty())).await;
+    let logs = state.logs.unwrap();
+    assert_eq!(logs.status, LogStatus::Streaming);
+    let spans = &logs.lines[0].spans;
+    assert_eq!(spans.iter().map(|s| s.text.as_str()).collect::<String>(), "conexión lista");
+    assert_eq!(spans[0].text, "conexión");
+    assert!(spans[0].fg.is_some() && spans[1].fg.is_none());
+
+    rig.core.platform().close_logs();
+    assert_eq!(rig.core.platform().state().logs, None);
+}
+
+/// Rotura que atrapa: reintentar para siempre contra un agente que no da
+/// el log, o dejarlo de golpe al primer fallo; y no decir por qué.
+#[tokio::test]
+async fn a_log_that_never_opens_gives_up_after_three_tries() {
+    let rig = rig().await;
+    as_role(&rig, "viewer", vec![row(&rig, "s", "o1", "online", false)]).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/services/svc1/logs"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({ "success": false, "message": "no such service" })))
+        .mount(&rig.server)
+        .await;
+    rig.core.platform().open_server("s");
+    rig.core.platform().follow_logs(&SwarmService { id: "svc1".into(), name: "shop_web".into(), ..Default::default() });
+    let state = until(&rig, |state| state.logs.as_ref().is_some_and(|logs| logs.status == LogStatus::Failed)).await;
+    assert!(state.logs.unwrap().error.unwrap().contains("no such service"));
+    let statuses: Vec<_> = rig.recorder.platform.lock().unwrap().iter().filter_map(|s| s.logs.as_ref().map(|l| l.status)).collect();
+    assert!(statuses.contains(&LogStatus::Reconnecting));
+    assert_eq!(hits(&rig, "/api/v1/services/svc1/logs").await.len(), 3);
+}
+
+/// Rotura que atrapa: seguir con el log (y su conexión) al cambiar de
+/// pestaña o de servidor.
+#[tokio::test]
+async fn leaving_the_tab_stops_the_log() {
+    let rig = rig().await;
+    let mut vps = row(&rig, "s", "o1", "online", false);
+    vps["agentPort"] = json!(chunked_agent(vec![b"data: uno\n\n".to_vec()]).await);
+    as_role(&rig, "viewer", vec![vps]).await;
+    rig.core.platform().open_server("s");
+    rig.core.platform().select_tab(ServerTab::Services);
+    rig.core.platform().follow_logs(&SwarmService { id: "svc1".into(), name: "shop_web".into(), ..Default::default() });
+    until(&rig, |state| state.logs.as_ref().is_some_and(|logs| !logs.lines.is_empty())).await;
+    rig.core.platform().select_tab(ServerTab::Overview);
+    assert_eq!(rig.core.platform().state().logs, None);
+    rig.core.platform().clear_logs();
+    assert_eq!(rig.core.platform().state().logs, None);
+}
+
+/// Rotura que atrapa: dar cada apertura por buena y reconectar sin fin a
+/// un agente que abre y cierra en el acto, cada vez con sus últimas líneas
+/// otra vez (así se comió la memoria la primera versión); o pintar como
+/// línea del servicio el aviso de error del agente, o perderlo.
+#[tokio::test]
+async fn a_log_that_closes_at_once_is_not_reopened_forever() {
+    let rig = rig().await;
+    as_role(&rig, "viewer", vec![row(&rig, "s", "o1", "online", false)]).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/services/svc1/logs"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("data: uno\n\nevent: error\ndata: docker: no such service\n\n", "text/event-stream"))
+        .mount(&rig.server)
+        .await;
+    rig.core.platform().open_server("s");
+    rig.core.platform().follow_logs(&SwarmService { id: "svc1".into(), name: "shop_web".into(), ..Default::default() });
+    let state = until(&rig, |state| state.logs.as_ref().is_some_and(|logs| logs.status == LogStatus::Failed)).await;
+    assert_eq!(hits(&rig, "/api/v1/services/svc1/logs").await.len(), 3);
+    let logs = state.logs.unwrap();
+    assert_eq!(logs.lines.len(), 3, "el aviso de error del agente no es una línea del servicio");
+    assert_eq!(logs.error.as_deref(), Some("docker: no such service"));
 }
