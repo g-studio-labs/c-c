@@ -105,8 +105,10 @@ beat=$!
 # exec` sin terminal no pasa las señales, y un Ctrl-C aquí dejaría `cargo`
 # compilando allí.
 run="run-$$-$(date +%s)"
+# Sin `--`: el `sh` de la caja es dash, y su `kill` lo toma por un pid
+# («Illegal number»), falla callado y deja el comando vivo allá.
 stop() {
-  kube exec "$POD" -- sh -c "kill -TERM -- -\$(cat /work/tmp/$run.pid) 2>/dev/null; rm -f /work/tmp/$run.pid" || true
+  kube exec "$POD" -- sh -c "kill -TERM -\$(cat /work/tmp/$run.pid) 2>/dev/null; rm -f /work/tmp/$run.pid" || true
 }
 finish() {
   # El `sleep` del latido primero: huérfano, seguiría vivo cinco minutos.
