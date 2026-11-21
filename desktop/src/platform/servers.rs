@@ -11,6 +11,7 @@ use gpui_kit::*;
 use super::agent_install::{install_for, installer, outcome_phrase};
 use super::server_dialog::{ServerDialog, ServerDialogClosed};
 use super::services::ServicesView;
+use super::stats::StatsPanel;
 use super::ssh_key::{SshKeyClosed, SshKeyDialog};
 use crate::backend::Backend;
 use crate::lang::{locale, tr};
@@ -32,11 +33,12 @@ pub struct ServersView {
     /// La pestaña de servicios, con su filtro: se crea al abrirla la primera
     /// vez, que es cuando hay ventana.
     services: Option<Entity<ServicesView>>,
+    stats: Option<Entity<StatsPanel>>,
 }
 
 impl ServersView {
     pub fn new() -> Self {
-        ServersView { dialog: None, ssh_key: None, problem: None, agent_line: None, services: None }
+        ServersView { dialog: None, ssh_key: None, problem: None, agent_line: None, services: None, stats: None }
     }
 
     fn open_dialog(&mut self, editing: Option<Server>, window: &mut Window, cx: &mut Context<Self>) {
@@ -262,7 +264,8 @@ impl Render for ServersView {
             let actions = self.agent_actions(server, &state, cx);
             let services = (state.tab == cac_core::ServerTab::Services)
                 .then(|| self.services.get_or_insert_with(|| cx.new(|cx| ServicesView::new(window, cx))).clone().into_any_element());
-            return div().size_full().child(super::server_page::page(server, &state, actions, services, cx)).into_any_element();
+            let stats = (state.tab == cac_core::ServerTab::Stats).then(|| self.stats.get_or_insert_with(|| cx.new(|cx| StatsPanel::new(window, cx))).clone().into_any_element());
+            return div().size_full().child(super::server_page::page(server, &state, actions, services, stats, cx)).into_any_element();
         }
         let theme = cx.theme();
         let (background, foreground, border, danger) = (theme.background, theme.foreground, theme.border, theme.danger);

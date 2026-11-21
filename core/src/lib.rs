@@ -92,7 +92,7 @@ pub use hue::{hue_index, HUES};
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
 pub use platform::{
     agent_base, agent_update_outcome, platform_sections, server_edit_phrase, server_permissions, server_tabs, servers_of, Agent, AgentIdentity, AgentInstallOutcome, AgentInstallPhase, AgentJob, AgentNote, AgentWait, AGENT_VERSION_LATEST, DeployableSummary, IncidentServerRef, IncidentSummary, ProvisioningRun, ServerOverview, ServerTab, AGENT_VERSION_DEPLOYS, AgentStream, Platform, PlatformSection, PlatformState, Server, ServerEditError, ServerField, ServerForm, ServerHealth, ServerKind, ServerPermissions,
-    AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT, filter_services, LogLine, LogStatus, ServiceHealth, ServiceLogs, ServiceReplicas, SwarmService, LOG_LINES_KEPT,
+    AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT, filter_services, LogLine, LogStatus, ServiceHealth, ServiceLogs, ServiceReplicas, SwarmService, LOG_LINES_KEPT, cpu_load, format_bytes, mem_load, stats_view, ContainerStats, Load, StatsColumn, StatsSort, StatsView, SwarmNode,
 };
 pub use ansi::{ansi_spans, AnsiColor, AnsiSpan};
 pub use prose::prose_for_painting;
@@ -162,6 +162,9 @@ pub struct Config {
     /// coincidir con `service.TimbreTTL` del backend**, que pone el
     /// `expiresAt` del que entra.
     pub ring_for: Duration,
+    /// Cada cuánto se leen los recursos de un servidor mientras se mira su
+    /// pestaña.
+    pub stats_every: Duration,
 }
 
 impl Config {
@@ -176,6 +179,7 @@ impl Config {
             stream_grace: Duration::from_secs(45),
             voice_presence_every: Duration::from_secs(15),
             ring_for: Duration::from_secs(20),
+            stats_every: Duration::from_secs(5),
         }
     }
 }

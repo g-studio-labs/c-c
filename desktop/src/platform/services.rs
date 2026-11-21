@@ -278,7 +278,7 @@ impl Render for ServicesView {
     }
 }
 
-fn empty(id: &'static str, phrase: String, muted: Hsla) -> AnyElement {
+pub(crate) fn empty(id: &'static str, phrase: String, muted: Hsla) -> AnyElement {
     div().id(id).py_8().text_center().leading_sm().text_color(muted).child(phrase).test_support().into_any_element()
 }
 
@@ -301,6 +301,6 @@ fn row(cells: Vec<AnyElement>, actions: AnyElement) -> Div {
 }
 
 /// Como el `Badge` de Tauri: el stack y el estado se leen de un vistazo.
-fn pill(text: String, background: Hsla, color: Hsla) -> Div {
+pub(crate) fn pill(text: String, background: Hsla, color: Hsla) -> Div {
     div().flex().child(div().px_1p5().rounded(px(4.)).bg(background).text_color(color).text_xs().leading_xs().font_weight(FontWeight::MEDIUM).truncate().child(text))
 }

@@ -11,6 +11,7 @@ pub mod edit;
 pub mod install;
 pub mod servers;
 pub mod services;
+pub mod swarm;
 
 use serde::{Deserialize, Serialize};
 
@@ -21,9 +22,10 @@ pub use edit::{server_edit_phrase, server_permissions, ServerEditError, ServerFi
 pub use install::{agent_update_outcome, AgentIdentity, AgentInstallOutcome, AgentInstallPhase, AgentJob, AgentWait, AGENT_VERSION_LATEST};
 pub use servers::{platform_sections, servers_of, PlatformSection, Server, ServerHealth, ServerKind};
 pub use services::{filter_services, LogLine, LogStatus, ServiceHealth, ServiceLogs, ServiceReplicas, SwarmService, LOG_LINES_KEPT};
+pub use swarm::{cpu_load, format_bytes, mem_load, stats_view, ContainerStats, Load, StatsColumn, StatsSort, StatsView, SwarmNode};
 
 /// Lo que se pinta de Plataforma.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformState {
@@ -55,6 +57,18 @@ pub struct PlatformState {
     pub services_error: Option<String>,
     /// El log que se está siguiendo.
     pub logs: Option<ServiceLogs>,
+    /// Los nodos del swarm, cuando contestó su agente.
+    pub nodes: Option<Vec<SwarmNode>>,
+    pub nodes_error: Option<String>,
+    /// Lo que gasta cada contenedor, en la última lectura. Se queda al
+    /// pausar y si falla la siguiente.
+    pub stats: Option<Vec<ContainerStats>>,
+    pub stats_loading: bool,
+    pub stats_error: Option<String>,
+    /// Pausado a mano: lo último leído se queda en pantalla.
+    pub stats_paused: bool,
+    /// Cuándo llegó la última lectura (RFC 3339).
+    pub stats_fetched_at: Option<String>,
 }
 
 #[derive(Default)]
@@ -75,6 +89,16 @@ pub(crate) struct PlatformData {
     /// Quien sigue el log. Se corta al cerrarlo: un servicio callado deja la
     /// lectura esperando para siempre, y no se puede esperar a que acabe.
     logs_task: Option<tokio::task::AbortHandle>,
+    nodes: Option<Vec<SwarmNode>>,
+    nodes_error: Option<String>,
+    stats: Option<Vec<ContainerStats>>,
+    stats_loading: bool,
+    stats_error: Option<String>,
+    stats_paused: bool,
+    stats_fetched_at: Option<String>,
+    /// El sondeo de la pestaña de recursos: vive mientras se mira, sin
+    /// pausa. Cada lectura recorre todos los contenedores de la máquina.
+    stats_task: Option<tokio::task::AbortHandle>,
 }
 
 /// Plataforma en este core.
@@ -108,6 +132,13 @@ impl Platform {
             services_loading: data.services_loading,
             services_error: data.services_error.clone(),
             logs: data.logs.clone(),
+            nodes: data.nodes.clone(),
+            nodes_error: data.nodes_error.clone(),
+            stats: data.stats.clone(),
+            stats_loading: data.stats_loading,
+            stats_error: data.stats_error.clone(),
+            stats_paused: data.stats_paused,
+            stats_fetched_at: data.stats_fetched_at.clone(),
         }
     }
 
@@ -334,15 +365,122 @@ impl Platform {
         self.change(|data| {
             data.tab = tab;
             stop_logs(data);
+            stop_stats(data);
         });
         true
     }
 
     /// Cambia de pestaña y pide lo que ésa enseña.
     pub async fn open_tab(&self, tab: ServerTab) {
-        if self.select_tab(tab) && tab == ServerTab::Services {
-            self.load_services().await;
+        if !self.select_tab(tab) {
+            return;
         }
+        match tab {
+            ServerTab::Services => self.load_services().await,
+            ServerTab::Nodes => self.load_nodes().await,
+            ServerTab::Stats => {
+                self.start_stats();
+                // Los nodos ponen nombre a la columna de nodo.
+                if self.data().nodes.is_none() {
+                    self.load_nodes().await;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Pide al agente del servidor abierto sus nodos.
+    pub async fn load_nodes(&self) {
+        let Some(server) = self.open() else { return };
+        let answer = self.core.agent().get_data::<Option<Vec<SwarmNode>>>(&server, "/api/v1/nodes").await;
+        self.change(|data| {
+            if data.open_server.as_deref() != Some(server.id.as_str()) {
+                return;
+            }
+            match answer {
+                Ok(nodes) => {
+                    data.nodes = Some(nodes.unwrap_or_default());
+                    data.nodes_error = None;
+                }
+                Err(error) => data.nodes_error = Some(error.to_string()),
+            }
+        });
+    }
+
+    /// Empieza a leer lo que gastan los contenedores, una vez ahora y luego
+    /// cada `stats_every`, salvo que esté pausado. Necesita el runtime de
+    /// tokio: el escritorio lo llama dentro de `Backend::run`.
+    pub fn start_stats(&self) {
+        let Some(server) = self.open() else { return };
+        let ready = {
+            let data = self.data();
+            !data.stats_paused && data.tab == ServerTab::Stats
+        };
+        if !ready {
+            return;
+        }
+        let server_id = server.id.clone();
+        let platform = self.core.platform();
+        let every = self.core.inner.config.stats_every;
+        self.change(stop_stats);
+        let task = tokio::spawn(async move {
+            loop {
+                platform.load_stats(&server).await;
+                tokio::time::sleep(every).await;
+            }
+        });
+        let mut data = self.data();
+        // Si mientras arrancaba se salió de la pestaña o se pausó, sobra.
+        if data.tab == ServerTab::Stats && !data.stats_paused && data.stats_task.is_none() && data.open_server.as_deref() == Some(server_id.as_str()) {
+            data.stats_task = Some(task.abort_handle());
+        } else {
+            task.abort();
+        }
+    }
+
+    /// Pausa o reanuda el sondeo. Lo leído se queda.
+    pub fn pause_stats(&self, paused: bool) {
+        self.change(|data| {
+            data.stats_paused = paused;
+            if paused {
+                stop_stats(data);
+            }
+        });
+        if !paused {
+            self.start_stats();
+        }
+    }
+
+    /// Una lectura ahora, aunque esté pausado.
+    pub async fn refresh_stats(&self) {
+        if let Some(server) = self.open() {
+            self.load_stats(&server).await;
+        }
+    }
+
+    async fn load_stats(&self, server: &Server) {
+        // Una lectura que no vuelve no puede tapar las siguientes: el plazo
+        // del agente la corta, y mientras tanto no se pide otra.
+        let mut busy = false;
+        self.change(|data| busy = std::mem::replace(&mut data.stats_loading, true));
+        if busy {
+            return;
+        }
+        let answer = self.core.agent().get_data::<Option<Vec<ContainerStats>>>(server, "/api/v1/stats").await;
+        self.change(|data| {
+            data.stats_loading = false;
+            if data.open_server.as_deref() != Some(server.id.as_str()) {
+                return;
+            }
+            match answer {
+                Ok(stats) => {
+                    data.stats = Some(stats.unwrap_or_default());
+                    data.stats_error = None;
+                    data.stats_fetched_at = Some(chrono::Utc::now().to_rfc3339());
+                }
+                Err(error) => data.stats_error = Some(error.to_string()),
+            }
+        });
     }
 
     /// Pide al agente del servidor abierto sus servicios.
@@ -502,6 +640,7 @@ impl Platform {
         self.core.agent().clear();
         self.change(|data| {
             stop_logs(data);
+            stop_stats(data);
             *data = PlatformData::default();
         });
     }
@@ -570,6 +709,18 @@ fn close(data: &mut PlatformData) {
     data.services_loading = false;
     data.services_error = None;
     stop_logs(data);
+    stop_stats(data);
+    data.nodes = None;
+    data.nodes_error = None;
+    data.stats = None;
+    data.stats_error = None;
+    data.stats_fetched_at = None;
+}
+
+fn stop_stats(data: &mut PlatformData) {
+    if let Some(task) = data.stats_task.take() {
+        task.abort();
+    }
 }
 
 fn stop_logs(data: &mut PlatformData) {

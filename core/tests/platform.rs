@@ -55,6 +55,7 @@ async fn rig() -> Rig {
     let recorder = Arc::new(Recorder::default());
     let mut config = Config::new(server.uri());
     config.stream_backoff = Duration::from_millis(5);
+    config.stats_every = Duration::from_millis(20);
     let core = Core::new(config, Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
     let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana" })).unwrap();
     core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
@@ -877,4 +878,112 @@ async fn a_log_that_closes_at_once_is_not_reopened_forever() {
     let logs = state.logs.unwrap();
     assert_eq!(logs.lines.len(), 3, "el aviso de error del agente no es una línea del servicio");
     assert_eq!(logs.error.as_deref(), Some("docker: no such service"));
+}
+
+async fn stats_hits(rig: &Rig) -> usize {
+    rig.server.received_requests().await.unwrap().iter().filter(|request| request.url.path() == "/api/v1/stats").count()
+}
+
+fn container(id: &str, cpu: f64) -> Value {
+    json!({ "containerId": id, "nodeId": "n1", "serviceName": "shop_web", "stack": "shop", "state": "running", "cpuPercent": cpu, "onlineCpus": 2, "memUsage": 10, "memLimit": 100 })
+}
+
+async fn rig_on_stats() -> Rig {
+    let rig = rig_as_member_with_open("s").await;
+    Mock::given(method("POST")).and(path("/api/v1/servers/s/agent-session")).respond_with(pass("p", 600)).mount(&rig.server).await;
+    Mock::given(method("GET")).and(path("/api/v1/stats")).respond_with(ok(json!([container("abc", 12.5)]))).mount(&rig.server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/nodes"))
+        .respond_with(ok(json!([{ "id": "n1", "hostname": "manager-1", "role": "manager", "status": "ready", "availability": "active", "engineVersion": "27.3.1" }])))
+        .mount(&rig.server)
+        .await;
+    rig.core.platform().open_tab(ServerTab::Stats).await;
+    rig
+}
+
+/// Rotura que atrapa: seguir preguntando al agente con la pestaña cerrada
+/// (cada lectura recorre todos los contenedores de la máquina), o leer una
+/// sola vez y no volver a preguntar.
+#[tokio::test]
+async fn the_resources_tab_polls_until_you_leave_it() {
+    let rig = rig_on_stats().await;
+    let state = until(&rig, |state| state.stats.is_some() && state.nodes.is_some()).await;
+    assert_eq!(state.stats.unwrap()[0].cpu_percent, 12.5);
+    assert_eq!(state.nodes.unwrap()[0].hostname, "manager-1");
+    assert!(state.stats_fetched_at.is_some());
+    for _ in 0..100 {
+        if stats_hits(&rig).await >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(stats_hits(&rig).await >= 3, "no volvió a preguntar");
+    rig.core.platform().select_tab(ServerTab::Nodes);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let left_at = stats_hits(&rig).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(stats_hits(&rig).await, left_at, "siguió preguntando fuera de la pestaña");
+}
+
+/// Rotura que atrapa: que pausar no pare, que se lleve lo leído, que volver
+/// a la pestaña se salte la pausa, o que reanudar no vuelva a empezar; y que cerrar el servidor deje el sondeo.
+#[tokio::test]
+async fn pausing_keeps_what_was_read_and_closing_stops_it() {
+    let rig = rig_on_stats().await;
+    until(&rig, |state| state.stats.is_some()).await;
+    rig.core.platform().pause_stats(true);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let paused_at = stats_hits(&rig).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(stats_hits(&rig).await, paused_at, "siguió con la pausa puesta");
+    let state = rig.core.platform().state();
+    assert!(state.stats_paused);
+    assert_eq!(state.stats.map(|stats| stats.len()), Some(1));
+    // Volver a la pestaña no quita la pausa.
+    rig.core.platform().select_tab(ServerTab::Nodes);
+    rig.core.platform().open_tab(ServerTab::Stats).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(stats_hits(&rig).await, paused_at, "volver a la pestaña se saltó la pausa");
+
+    rig.core.platform().refresh_stats().await;
+    assert_eq!(stats_hits(&rig).await, paused_at + 1, "refrescar lee una vez aunque esté pausado");
+
+    rig.core.platform().pause_stats(false);
+    for _ in 0..100 {
+        if stats_hits(&rig).await >= paused_at + 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(stats_hits(&rig).await >= paused_at + 3, "reanudar no volvió a preguntar");
+
+    rig.core.platform().close_server();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let closed_at = stats_hits(&rig).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(stats_hits(&rig).await, closed_at, "siguió con el servidor cerrado");
+    assert!(rig.core.platform().state().stats.is_none());
+}
+
+/// Rotura que atrapa: no pedir los nodos al abrir su pestaña, o que un
+/// agente caído borre los que había.
+#[tokio::test]
+async fn the_nodes_tab_asks_the_agent_and_keeps_them_when_it_fails() {
+    let rig = rig_as_member_with_open("s").await;
+    Mock::given(method("POST")).and(path("/api/v1/servers/s/agent-session")).respond_with(pass("p", 600)).mount(&rig.server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/nodes"))
+        .and(header("authorization", "Bearer p"))
+        .respond_with(ok(json!([{ "id": "n1", "hostname": "manager-1", "role": "manager", "status": "ready", "availability": "active", "engineVersion": "27.3.1" }])))
+        .up_to_n_times(1)
+        .mount(&rig.server)
+        .await;
+    Mock::given(method("GET")).and(path("/api/v1/nodes")).respond_with(ResponseTemplate::new(502)).mount(&rig.server).await;
+    rig.core.platform().open_tab(ServerTab::Nodes).await;
+    let nodes = rig.core.platform().state().nodes.unwrap();
+    assert_eq!((nodes[0].hostname.as_str(), nodes[0].engine_version.as_str()), ("manager-1", "27.3.1"));
+    rig.core.platform().load_nodes().await;
+    let state = rig.core.platform().state();
+    assert_eq!(state.nodes.map(|nodes| nodes.len()), Some(1));
+    assert!(state.nodes_error.is_some());
 }

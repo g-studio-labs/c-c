@@ -3575,7 +3575,7 @@ mod tests {
         assert!(on_screen(window, "server-tab-backups", cx), "un swarm sin sus ocho pestañas");
         assert!(!on_screen(window, "server-agent-install", cx), "a un miembro, instalar el agente que sólo puede un admin");
 
-        click(window, "server-tab-nodes", cx);
+        click(window, "server-tab-deploy", cx);
         wait_until(cx, "la pestaña cambia", |cx| on_screen(window, "server-tab-pending", cx));
         click(window, "server-back", cx);
         wait_until(cx, "vuelve la tabla", |cx| on_screen(window, "platform-row-s1", cx));
@@ -3616,6 +3616,15 @@ mod tests {
     /// Un swarm cuyo agente es el mismo servidor de mentira (sin
     /// identidad: no pide pase), con dos servicios, abierto en su pestaña.
     fn services_as(role: &str, cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle) {
+        let (server, window) = swarm_server_as(role, json!([]), cx);
+        click(window, "server-tab-services", cx);
+        wait_until(cx, "llegan los servicios", |cx| on_screen(window, "service-row-svc1", cx));
+        (server, window)
+    }
+
+    /// Un swarm abierto en su resumen, con estos nodos, cuyo agente es el
+    /// servidor de mentira.
+    fn swarm_server_as(role: &str, nodes: serde_json::Value, cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle) {
         let server = FakeServer::start();
         let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
         let mut mine = org("o1", "G Studio");
@@ -3627,7 +3636,7 @@ mod tests {
         let mut vps = platform_server("s1", "o1", "pixel-vps", "online");
         (vps["host"], vps["agentPort"], vps["hasAgentToken"]) = (json!("127.0.0.1"), json!(server.port()), json!(false));
         server.mount(get("/api/v1/servers/").respond_with(ok(json!([vps]))));
-        server.mount(get("/api/v1/nodes").respond_with(ok(json!([]))));
+        server.mount(get("/api/v1/nodes").respond_with(ok(nodes)));
         for what in ["incidents", "deployables", "provisioning-runs"] {
             server.mount(get(&format!("/api/v1/servers/s1/{what}")).respond_with(ok(json!([]))));
         }
@@ -3642,9 +3651,70 @@ mod tests {
         wait_until(cx, "llega la tabla", |cx| on_screen(window, "platform-row-s1", cx));
         click(window, "platform-open-s1", cx);
         wait_until(cx, "se abre", |cx| on_screen(window, "server-tab-services", cx));
-        click(window, "server-tab-services", cx);
-        wait_until(cx, "llegan los servicios", |cx| on_screen(window, "service-row-svc1", cx));
         (server, window)
+    }
+
+    fn two_nodes() -> serde_json::Value {
+        json!([
+            { "id": "n1", "hostname": "manager-1", "role": "manager", "status": "ready", "availability": "active", "engineVersion": "27.3.1" },
+            { "id": "n2", "hostname": "worker-2", "role": "worker", "status": "down", "availability": "drain", "engineVersion": "27.3.1" },
+        ])
+    }
+
+    /// La pestaña de nodos pide los suyos al agente y los enseña.
+    ///
+    /// Rotura que atrapa: una pestaña que no pide los nodos, o que se queda
+    /// en «todavía no está».
+    #[gpui_kit::test]
+    fn the_nodes_tab_lists_the_swarm_nodes(cx: &mut TestAppContext) {
+        let (_server, window) = swarm_server_as("viewer", two_nodes(), cx);
+        click(window, "server-tab-nodes", cx);
+        wait_until(cx, "llegan los nodos", |cx| on_screen(window, "node-row-n1", cx));
+        assert_eq!(label(window, "node-row-n2", cx), "worker-2");
+        assert!(!on_screen(window, "server-tab-pending", cx));
+    }
+
+    /// La pestaña de recursos: los parados ocultos hasta pedirlos, el filtro,
+    /// el orden por columna, los nombres de los nodos y la pausa.
+    ///
+    /// Roturas que atrapa: enseñar los parados sin pedirlos o no poder
+    /// verlos; un filtro que no filtra; una columna que no ordena o no da
+    /// la vuelta; el nodo por su identificador cuando se sabe su nombre; una
+    /// pausa que no se nota.
+    #[gpui_kit::test]
+    fn the_resources_tab_hides_the_stopped_filters_sorts_and_pauses(cx: &mut TestAppContext) {
+        let (server, window) = swarm_server_as("viewer", two_nodes(), cx);
+        let container = |id: &str, service: &str, state: &str, cpu: f64, mem: u64| {
+            json!({ "containerId": id, "nodeId": "n1", "serviceName": service, "stack": "shop", "state": state, "cpuPercent": cpu, "onlineCpus": 2, "memUsage": mem, "memLimit": 1000 })
+        };
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/stats")).respond_with(ok(json!([
+            container("aaa", "shop_web", "running", 10., 900),
+            container("bbb", "shop_db", "running", 90., 100),
+            container("ccc", "old_job", "exited", 0., 0),
+        ]))));
+        click(window, "server-tab-stats", cx);
+        wait_until(cx, "llegan los contenedores", |cx| on_screen(window, "stats-row-aaa", cx));
+        assert!(!on_screen(window, "stats-row-ccc", cx));
+        assert_eq!(label(window, "stats-count", cx), "Contenedores (2 de 3)");
+        assert_eq!(label(window, "stats-hidden", cx), "1 contenedor parado oculto — enseñarlos");
+        assert!(top(window, "stats-row-bbb", cx) < top(window, "stats-row-aaa", cx), "por CPU, el que más gasta arriba");
+        wait_until(cx, "los nodos ponen nombre", |cx| on_screen(window, "stats-node-aaa", cx) && label(window, "stats-node-aaa", cx) == "manager-1");
+
+        click(window, "stats-sort-Memory", cx);
+        wait_until(cx, "por memoria", |cx| top(window, "stats-row-aaa", cx) < top(window, "stats-row-bbb", cx));
+        click(window, "stats-sort-Memory", cx);
+        wait_until(cx, "la misma columna le da la vuelta", |cx| top(window, "stats-row-bbb", cx) < top(window, "stats-row-aaa", cx));
+
+        click(window, "stats-hidden", cx);
+        wait_until(cx, "se ven los parados", |cx| on_screen(window, "stats-row-ccc", cx));
+        click(window, "stats-filter", cx);
+        type_text(window, "OLD", cx);
+        wait_until(cx, "el filtro deja uno", |cx| !on_screen(window, "stats-row-aaa", cx));
+        assert!(on_screen(window, "stats-row-ccc", cx));
+
+        assert!(label(window, "stats-status", cx).starts_with("Cada 5 s"));
+        click(window, "stats-pause", cx);
+        wait_until(cx, "se nota la pausa", |cx| label(window, "stats-status", cx).starts_with("En pausa"));
     }
 
     /// La pestaña de servicios: filtrar, reiniciar y seguir el log, que

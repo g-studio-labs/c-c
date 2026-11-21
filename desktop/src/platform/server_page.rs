@@ -14,7 +14,7 @@ use crate::backend::Backend;
 use crate::lang::{locale, tr};
 use crate::theme::Leading as _;
 
-pub(crate) fn page(server: &Server, state: &PlatformState, agent_actions: Option<AnyElement>, services: Option<AnyElement>, cx: &App) -> AnyElement {
+pub(crate) fn page(server: &Server, state: &PlatformState, agent_actions: Option<AnyElement>, services: Option<AnyElement>, stats: Option<AnyElement>, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let (background, foreground) = (theme.background, theme.foreground);
     div()
@@ -36,6 +36,8 @@ pub(crate) fn page(server: &Server, state: &PlatformState, agent_actions: Option
                 .child(match state.tab {
                     ServerTab::Overview => overview(server, state.overview.as_ref(), agent_actions, cx),
                     ServerTab::Services => services.unwrap_or_else(|| pending(cx)),
+                    ServerTab::Nodes => super::nodes::nodes(state, cx),
+                    ServerTab::Stats => stats.unwrap_or_else(|| pending(cx)),
                     _ => pending(cx),
                 }),
         )
