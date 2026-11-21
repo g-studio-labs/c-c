@@ -11,6 +11,7 @@ use gpui_kit::*;
 use super::agent_install::{install_for, installer, outcome_phrase};
 use super::server_dialog::{ServerDialog, ServerDialogClosed};
 use super::services::ServicesView;
+use super::k8s_hub::K8sConsole;
 use super::stats::StatsPanel;
 use super::ssh_key::{SshKeyClosed, SshKeyDialog};
 use crate::backend::Backend;
@@ -34,11 +35,12 @@ pub struct ServersView {
     /// vez, que es cuando hay ventana.
     services: Option<Entity<ServicesView>>,
     stats: Option<Entity<StatsPanel>>,
+    k8s: Option<Entity<K8sConsole>>,
 }
 
 impl ServersView {
     pub fn new() -> Self {
-        ServersView { dialog: None, ssh_key: None, problem: None, agent_line: None, services: None, stats: None }
+        ServersView { dialog: None, ssh_key: None, problem: None, agent_line: None, services: None, stats: None, k8s: None }
     }
 
     fn open_dialog(&mut self, editing: Option<Server>, window: &mut Window, cx: &mut Context<Self>) {
@@ -182,12 +184,17 @@ impl ServersView {
         let theme = cx.theme();
         let (border, muted, accent, mono) = (theme.border, theme.muted_foreground, theme.accent, theme.mono_font_family.clone());
         let open = state.open_server.as_deref() == Some(&server.id);
-        let status = div()
-            .flex()
-            .items_center()
-            .gap_1p5()
-            .child(div().size_2().flex_none().rounded_full().bg(super::health_color(server.status, cx)))
-            .child(tr(cx, server.status.label_key()));
+        // Un clúster no lleva el agente de swarm cuyo ciclo sigue `status`.
+        let status = if server.kind == cac_core::ServerKind::Kubernetes {
+            div().child(super::k8s_hub::cluster_badge(&server.id, state, cx))
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .child(div().size_2().flex_none().rounded_full().bg(super::health_color(server.status, cx)))
+                .child(tr(cx, server.status.label_key()))
+        };
         let (editing, deleting, keyed) = (server.clone(), server.clone(), server.clone());
         // La llave vive en el llavero de esta máquina, no en cac: cualquiera
         // puede elegir la suya.
@@ -265,7 +272,8 @@ impl Render for ServersView {
             let services = (state.tab == cac_core::ServerTab::Services)
                 .then(|| self.services.get_or_insert_with(|| cx.new(|cx| ServicesView::new(window, cx))).clone().into_any_element());
             let stats = (state.tab == cac_core::ServerTab::Stats).then(|| self.stats.get_or_insert_with(|| cx.new(|cx| StatsPanel::new(window, cx))).clone().into_any_element());
-            return div().size_full().child(super::server_page::page(server, &state, actions, services, stats, cx)).into_any_element();
+            let k8s = (server.kind == cac_core::ServerKind::Kubernetes && state.tab == cac_core::ServerTab::Overview).then(|| self.k8s.get_or_insert_with(|| cx.new(|_| K8sConsole::new())).clone().into_any_element());
+            return div().size_full().child(super::server_page::page(server, &state, actions, services, stats, k8s, cx)).into_any_element();
         }
         let theme = cx.theme();
         let (background, foreground, border, danger) = (theme.background, theme.foreground, theme.border, theme.danger);

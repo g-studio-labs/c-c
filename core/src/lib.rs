@@ -92,7 +92,7 @@ pub use hue::{hue_index, HUES};
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
 pub use platform::{
     agent_base, agent_update_outcome, platform_sections, server_edit_phrase, server_permissions, server_tabs, servers_of, Agent, AgentIdentity, AgentInstallOutcome, AgentInstallPhase, AgentJob, AgentNote, AgentWait, AGENT_VERSION_LATEST, DeployableSummary, IncidentServerRef, IncidentSummary, ProvisioningRun, ServerOverview, ServerTab, AGENT_VERSION_DEPLOYS, AgentStream, Platform, PlatformSection, PlatformState, Server, ServerEditError, ServerField, ServerForm, ServerHealth, ServerKind, ServerPermissions,
-    AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT, filter_services, LogLine, LogStatus, ServiceHealth, ServiceLogs, ServiceReplicas, SwarmService, LOG_LINES_KEPT, cpu_load, format_bytes, mem_load, stats_view, ContainerStats, Load, StatsColumn, StatsSort, StatsView, SwarmNode,
+    AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT, filter_services, LogLine, LogStatus, ServiceHealth, ServiceLogs, ServiceReplicas, SwarmService, LOG_LINES_KEPT, cpu_load, format_bytes, mem_load, stats_view, cert_warns, cluster_status, days_until, route_links, workloads_failing_first, ClusterBadge, ClusterStatus, Integration, K8sCert, K8sDatastore, K8sGateway, K8sHealth, K8sHub, K8sNode, K8sRoute, K8sRoutes, K8sWorkload, CERT_WARN_DAYS, ContainerStats, Load, StatsColumn, StatsSort, StatsView, SwarmNode,
 };
 pub use ansi::{ansi_spans, AnsiColor, AnsiSpan};
 pub use prose::prose_for_painting;

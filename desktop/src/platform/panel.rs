@@ -2,7 +2,7 @@
 //! de estado, y debajo lo que todavía no está en esta app
 //! (`app/src/components/sidebar/panels/PlatformPanel.tsx`).
 
-use cac_core::{platform_sections, PlatformSection, Server};
+use cac_core::{PlatformSection, PlatformState, Server, ServerKind, platform_sections};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon};
@@ -25,7 +25,7 @@ pub(crate) fn panel(cx: &App) -> AnyElement {
     let servers: Vec<AnyElement> = if state.loaded && state.servers.is_empty() {
         vec![div().id("platform-no-servers").px_4().pb_1().leading_xs().text_color(muted).child(tr(cx, "nav:panel.noServers")).test_support().into_any_element()]
     } else {
-        state.servers.iter().map(|server| server_row(server, state.open_server.as_deref() == Some(&server.id), cx)).collect()
+        state.servers.iter().map(|server| server_row(server, &state, state.open_server.as_deref() == Some(&server.id), cx)).collect()
     };
 
     div()
@@ -51,15 +51,21 @@ pub(crate) fn panel(cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn server_row(server: &Server, active: bool, cx: &App) -> AnyElement {
-    let status = tr(cx, server.status.label_key());
+fn server_row(server: &Server, state: &PlatformState, active: bool, cx: &App) -> AnyElement {
+    // Un clúster no lleva el agente cuyo ciclo sigue `status`: diría
+    // «pendiente» para siempre. Su punto es su salud.
+    let (color, status) = if server.kind == ServerKind::Kubernetes {
+        super::k8s_hub::cluster_dot(&server.id, state, cx)
+    } else {
+        (super::health_color(server.status, cx), tr(cx, server.status.label_key()))
+    };
     // El estado lo dice el punto, también a quien no lo ve (`aria-label` en
     // `PlatformPanel.tsx`).
     let dot = div()
         .id(SharedString::from(format!("platform-dot-{}", server.id)))
         .size_2()
         .rounded_full()
-        .bg(super::health_color(server.status, cx))
+        .bg(color)
         .aria_label(status.clone())
         .test_support();
     let id = server.id.clone();

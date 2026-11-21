@@ -987,3 +987,130 @@ async fn the_nodes_tab_asks_the_agent_and_keeps_them_when_it_fails() {
     assert_eq!(state.nodes.map(|nodes| nodes.len()), Some(1));
     assert!(state.nodes_error.is_some());
 }
+
+use cac_core::ClusterStatus;
+
+fn cluster(rig: &Rig, id: &str) -> Value {
+    let mut cluster = row(rig, id, "o1", "pending", false);
+    (cluster["type"], cluster["agentPort"]) = (json!("kubernetes"), json!(0));
+    cluster
+}
+
+fn health(ready: bool) -> Value {
+    json!({
+        "nodes": [{ "name": "vmi1", "kubeletVersion": "v1.35.10", "ready": ready }],
+        "workloads": [{ "name": "web", "namespace": "cac", "ready": 1, "desired": 2, "healthy": false }],
+        "certs": [{ "name": "cac-tls", "namespace": "cac", "dnsNames": ["cac.dev"], "daysLeft": 12, "ready": true }],
+        "datastores": [],
+    })
+}
+
+async fn mount_console(rig: &Rig, id: &str) {
+    let get = |what: &str| Mock::given(method("GET")).and(path(format!("/api/v1/servers/{id}/{what}")));
+    get("k8s/routes")
+        .respond_with(ok(json!({ "gateways": [{ "name": "gw", "namespace": "default", "address": "203.0.113.7", "programmed": true }], "routes": [{ "name": "cac", "namespace": "cac", "gateway": "gw", "hostnames": ["cac.dev"], "links": ["https://cac.dev"], "certReady": true }] })))
+        .up_to_n_times(1)
+        .mount(&rig.server)
+        .await;
+    get("k8s/routes").respond_with(ResponseTemplate::new(502)).mount(&rig.server).await;
+    get("k8s/health").respond_with(ok(health(true))).mount(&rig.server).await;
+    get("integrations")
+        .respond_with(ok(json!([
+            { "id": "g", "serverId": id, "kind": "grafana", "name": "Grafana", "url": "http://grafana.monitoring:3000", "authMethod": "header", "hasSecret": false },
+            { "id": "p", "serverId": id, "kind": "pgadmin", "name": "pgAdmin", "url": "https://pg.dev", "authMethod": "none", "hasSecret": true },
+        ])))
+        .mount(&rig.server)
+        .await;
+    for what in ["incidents", "deployables", "provisioning-runs"] {
+        get(what).respond_with(ok(json!([]))).mount(&rig.server).await;
+    }
+}
+
+/// Rotura que atrapa: no leer la consola al abrir un clúster, leerla a
+/// medias, o que un fallo al volver a leer borre lo que había.
+#[tokio::test]
+async fn opening_a_cluster_reads_its_console_and_a_failure_keeps_it() {
+    let rig = rig().await;
+    mount_console(&rig, "k").await;
+    as_role(&rig, "viewer", vec![cluster(&rig, "k")]).await;
+    rig.core.platform().open_server_and_load("k").await;
+    let hub = rig.core.platform().state().k8s.unwrap();
+    assert_eq!(hub.server_id, "k");
+    assert_eq!(hub.routes.as_ref().unwrap().routes[0].hostnames, ["cac.dev"]);
+    assert_eq!(hub.health.as_ref().unwrap().certs[0].days_left, Some(12));
+    assert_eq!(hub.integrations.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["Grafana", "pgAdmin"]);
+    assert!(hub.error.is_none());
+    assert!(!rig.core.platform().state().k8s_loading);
+
+    rig.core.platform().load_k8s().await;
+    let hub = rig.core.platform().state().k8s.unwrap();
+    assert_eq!(hub.routes.map(|routes| routes.gateways.len()), Some(1), "un fallo borró las rutas");
+    assert!(hub.error.is_some());
+    rig.core.platform().close_server();
+    assert!(rig.core.platform().state().k8s.is_none());
+}
+
+/// Rotura que atrapa: dejar un clúster en «pendiente» (la columna del
+/// agente de swarm), dar por caído uno que no contesta, o preguntar por la
+/// salud de un swarm.
+#[tokio::test]
+async fn each_cluster_in_the_list_gets_its_badge() {
+    let rig = rig().await;
+    Mock::given(method("GET")).and(path("/api/v1/servers/k1/k8s/health")).respond_with(ok(health(true))).mount(&rig.server).await;
+    Mock::given(method("GET")).and(path("/api/v1/servers/k2/k8s/health")).respond_with(ok(health(false))).mount(&rig.server).await;
+    Mock::given(method("GET")).and(path("/api/v1/servers/k3/k8s/health")).respond_with(ResponseTemplate::new(503)).mount(&rig.server).await;
+    as_role(&rig, "viewer", vec![cluster(&rig, "k1"), cluster(&rig, "k2"), cluster(&rig, "k3"), row(&rig, "s", "o1", "online", true)]).await;
+    let badges = rig.core.platform().state().cluster_badges;
+    let of = |id: &str| badges.iter().find(|badge| badge.server_id == id).map(|badge| badge.status.clone());
+    assert_eq!(of("k1"), Some(ClusterStatus::Issues { count: 1, detail: "cac/web 1/2".into() }));
+    assert_eq!(of("k2"), Some(ClusterStatus::Down { detail: "vmi1".into() }));
+    assert!(matches!(of("k3"), Some(ClusterStatus::Unknown { .. })));
+    assert_eq!(of("s"), None);
+    let asked_swarm = rig.server.received_requests().await.unwrap().iter().any(|request| request.url.path() == "/api/v1/servers/s/k8s/health");
+    assert!(!asked_swarm);
+}
+
+/// Rotura que atrapa: que un lector vea el secreto guardado, o que un
+/// miembro no lo pueda leer.
+#[tokio::test]
+async fn a_reader_cannot_reveal_and_a_member_reads_the_secret() {
+    let rig = rig().await;
+    mount_console(&rig, "k").await;
+    Mock::given(method("POST")).and(path("/api/v1/servers/k/integrations/p/reveal")).respond_with(ok(json!({ "secret": "admin:hunter2" }))).mount(&rig.server).await;
+    as_role(&rig, "viewer", vec![cluster(&rig, "k")]).await;
+    rig.core.platform().open_server("k");
+    assert_eq!(rig.core.platform().reveal_integration("p").await, Err(ServerEditError::ReadOnly));
+    assert!(writes(&rig).await.is_empty(), "un lector llegó a pedir el secreto");
+
+    let rig = rig_with_cluster_as("member").await;
+    assert_eq!(rig.core.platform().reveal_integration("p").await.unwrap(), "admin:hunter2");
+}
+
+async fn rig_with_cluster_as(role: &str) -> Rig {
+    let rig = rig().await;
+    mount_console(&rig, "k").await;
+    Mock::given(method("POST")).and(path("/api/v1/servers/k/integrations/p/reveal")).respond_with(ok(json!({ "secret": "admin:hunter2" }))).mount(&rig.server).await;
+    as_role(&rig, role, vec![cluster(&rig, "k")]).await;
+    rig.core.platform().open_server("k");
+    rig
+}
+
+/// Rotura que atrapa: abrir Grafana en su dirección del clúster (no se
+/// alcanza, y entrarías sin cac), o pedirle enlace al proxy para una que
+/// abre directa.
+#[tokio::test]
+async fn an_integration_through_cac_opens_the_proxy_link() {
+    let rig = rig_with_cluster_as("viewer").await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/servers/k/integrations/g/launch"))
+        .respond_with(ok(json!({ "path": "/t/abc", "url": "https://tools.guz-studio.dev/t/abc" })))
+        .mount(&rig.server)
+        .await;
+    rig.core.platform().load_k8s().await;
+    let hub = rig.core.platform().state().k8s.unwrap();
+    let (grafana, pgadmin) = (&hub.integrations[0], &hub.integrations[1]);
+    assert_eq!(rig.core.platform().integration_link(grafana).await.unwrap(), "https://tools.guz-studio.dev/t/abc");
+    let before = writes(&rig).await.len();
+    assert_eq!(rig.core.platform().integration_link(pgadmin).await.unwrap(), "https://pg.dev");
+    assert_eq!(writes(&rig).await.len(), before, "pidió enlace al proxy para una que abre directa");
+}

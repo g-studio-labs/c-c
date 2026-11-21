@@ -14,7 +14,7 @@ use crate::backend::Backend;
 use crate::lang::{locale, tr};
 use crate::theme::Leading as _;
 
-pub(crate) fn page(server: &Server, state: &PlatformState, agent_actions: Option<AnyElement>, services: Option<AnyElement>, stats: Option<AnyElement>, cx: &App) -> AnyElement {
+pub(crate) fn page(server: &Server, state: &PlatformState, agent_actions: Option<AnyElement>, services: Option<AnyElement>, stats: Option<AnyElement>, k8s: Option<AnyElement>, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let (background, foreground) = (theme.background, theme.foreground);
     div()
@@ -34,7 +34,7 @@ pub(crate) fn page(server: &Server, state: &PlatformState, agent_actions: Option
                 .overflow_y_scroll()
                 .p_4()
                 .child(match state.tab {
-                    ServerTab::Overview => overview(server, state.overview.as_ref(), agent_actions, cx),
+                    ServerTab::Overview => overview(server, state.overview.as_ref(), agent_actions, k8s, cx),
                     ServerTab::Services => services.unwrap_or_else(|| pending(cx)),
                     ServerTab::Nodes => super::nodes::nodes(state, cx),
                     ServerTab::Stats => stats.unwrap_or_else(|| pending(cx)),
@@ -108,7 +108,7 @@ fn pending(cx: &App) -> AnyElement {
 
 /// Cada tarjeta sin datos enseña cómo empezar, nunca un error: un servidor
 /// que todavía no despliega nada desde cac está bien, sólo no ha optado.
-fn overview(server: &Server, overview: Option<&ServerOverview>, agent_actions: Option<AnyElement>, cx: &App) -> AnyElement {
+fn overview(server: &Server, overview: Option<&ServerOverview>, agent_actions: Option<AnyElement>, k8s: Option<AnyElement>, cx: &App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let Some(overview) = overview.filter(|overview| overview.server_id == server.id) else {
         return div().id("server-overview-loading").leading_sm().text_color(muted).child(tr(cx, "common:servers.loading")).test_support().into_any_element();
@@ -128,7 +128,8 @@ fn overview(server: &Server, overview: Option<&ServerOverview>, agent_actions: O
         let right = halves.next().unwrap_or_else(|| div().flex_1().into_any_element());
         rows.push(div().flex().gap_4().child(left).child(right).into_any_element());
     }
-    div().id("server-overview").flex().flex_col().gap_4().children(rows).test_support().into_any_element()
+    // La consola de un clúster va debajo de lo que ha mordido en él.
+    div().id("server-overview").flex().flex_col().gap_4().children(rows).children(k8s).test_support().into_any_element()
 }
 
 fn card(id: &'static str, icon: Lucide, title_key: &str, body: AnyElement, cx: &App) -> AnyElement {

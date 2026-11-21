@@ -9,6 +9,7 @@ pub mod agent;
 pub mod detail;
 pub mod edit;
 pub mod install;
+pub mod k8s;
 pub mod servers;
 pub mod services;
 pub mod swarm;
@@ -22,6 +23,7 @@ pub use edit::{server_edit_phrase, server_permissions, ServerEditError, ServerFi
 pub use install::{agent_update_outcome, AgentIdentity, AgentInstallOutcome, AgentInstallPhase, AgentJob, AgentWait, AGENT_VERSION_LATEST};
 pub use servers::{platform_sections, servers_of, PlatformSection, Server, ServerHealth, ServerKind};
 pub use services::{filter_services, LogLine, LogStatus, ServiceHealth, ServiceLogs, ServiceReplicas, SwarmService, LOG_LINES_KEPT};
+pub use k8s::{cert_warns, cluster_status, days_until, route_links, workloads_failing_first, ClusterBadge, ClusterStatus, Integration, K8sCert, K8sDatastore, K8sGateway, K8sHealth, K8sHub, K8sNode, K8sRoute, K8sRoutes, K8sWorkload, CERT_WARN_DAYS};
 pub use swarm::{cpu_load, format_bytes, mem_load, stats_view, ContainerStats, Load, StatsColumn, StatsSort, StatsView, SwarmNode};
 
 /// Lo que se pinta de Plataforma.
@@ -69,6 +71,11 @@ pub struct PlatformState {
     pub stats_paused: bool,
     /// Cuándo llegó la última lectura (RFC 3339).
     pub stats_fetched_at: Option<String>,
+    /// La consola del servidor kubernetes abierto.
+    pub k8s: Option<K8sHub>,
+    pub k8s_loading: bool,
+    /// La etiqueta de cada clúster de la lista, cuando se leyó su salud.
+    pub cluster_badges: Vec<ClusterBadge>,
 }
 
 #[derive(Default)]
@@ -99,6 +106,9 @@ pub(crate) struct PlatformData {
     /// El sondeo de la pestaña de recursos: vive mientras se mira, sin
     /// pausa. Cada lectura recorre todos los contenedores de la máquina.
     stats_task: Option<tokio::task::AbortHandle>,
+    k8s: Option<K8sHub>,
+    k8s_loading: bool,
+    cluster_badges: Vec<ClusterBadge>,
 }
 
 /// Plataforma en este core.
@@ -139,6 +149,9 @@ impl Platform {
             stats_error: data.stats_error.clone(),
             stats_paused: data.stats_paused,
             stats_fetched_at: data.stats_fetched_at.clone(),
+            k8s: data.k8s.clone(),
+            k8s_loading: data.k8s_loading,
+            cluster_badges: data.cluster_badges.clone(),
         }
     }
 
@@ -320,6 +333,7 @@ impl Platform {
                     data.loading = false;
                 });
                 self.probe_old_agents().await;
+                self.load_cluster_badges().await;
             }
             Err(error) => self.change(|data| {
                 data.error = Some(error.to_string());
@@ -345,9 +359,106 @@ impl Platform {
 
     /// Abre un servidor y pide su resumen.
     pub async fn open_server_and_load(&self, server_id: &str) {
-        if self.open_server(server_id) {
+        if !self.open_server(server_id) {
+            return;
+        }
+        if self.open().is_some_and(|server| server.kind == ServerKind::Kubernetes) {
+            let platform = self.core.platform();
+            let console = tokio::spawn(async move { platform.load_k8s().await });
+            self.load_overview().await;
+            let _ = console.await;
+        } else {
             self.load_overview().await;
         }
+    }
+
+    /// Lee la consola del servidor kubernetes abierto: rutas, salud e
+    /// integraciones, a la vez. Lo que falle se queda vacío y lo dice
+    /// `error`; lo que hubiera de antes no se borra.
+    pub async fn load_k8s(&self) {
+        let Some(server_id) = self.data().open_server.clone() else { return };
+        self.change(|data| data.k8s_loading = true);
+        let route = |what: &str| format!("/api/v1/servers/{server_id}/{what}");
+        let (core, path) = (self.core.clone(), route("k8s/routes"));
+        let routes = tokio::spawn(async move { core.get::<K8sRoutes>(&path).await });
+        let (core, path) = (self.core.clone(), route("k8s/health"));
+        let health = tokio::spawn(async move { core.get::<K8sHealth>(&path).await });
+        let (core, path) = (self.core.clone(), route("integrations"));
+        let integrations = tokio::spawn(async move { core.get_list::<Integration>(&path).await });
+        let (routes, health, integrations) = (flatten(routes.await), flatten(health.await), flatten(integrations.await));
+        let error = [routes.as_ref().err(), health.as_ref().err(), integrations.as_ref().err()].into_iter().flatten().next().cloned();
+        if let Ok(health) = &health {
+            let badge = ClusterBadge { server_id: server_id.clone(), status: cluster_status(health) };
+            self.change(|data| set_badge(data, badge));
+        }
+        self.change(|data| {
+            if data.open_server.as_deref() != Some(server_id.as_str()) {
+                return;
+            }
+            data.k8s_loading = false;
+            let before = data.k8s.take().filter(|hub| hub.server_id == server_id).unwrap_or_default();
+            data.k8s = Some(K8sHub {
+                server_id: server_id.clone(),
+                routes: routes.ok().or(before.routes),
+                health: health.ok().or(before.health),
+                integrations: integrations.unwrap_or(before.integrations),
+                error,
+            });
+        });
+    }
+
+    /// La salud de cada clúster de la lista, para su etiqueta. Uno que no
+    /// contesta queda «desconocido», no caído.
+    async fn load_cluster_badges(&self) {
+        let clusters: Vec<String> = self.data().all.iter().flatten().filter(|server| server.kind == ServerKind::Kubernetes).map(|server| server.id.clone()).collect();
+        let reads: Vec<_> = clusters
+            .into_iter()
+            .map(|id| {
+                let core = self.core.clone();
+                tokio::spawn(async move {
+                    let status = match core.get::<K8sHealth>(&format!("/api/v1/servers/{id}/k8s/health")).await {
+                        Ok(health) => cluster_status(&health),
+                        Err(error) => ClusterStatus::Unknown { detail: error.to_string() },
+                    };
+                    ClusterBadge { server_id: id, status }
+                })
+            })
+            .collect();
+        for read in reads {
+            if let Ok(badge) = read.await {
+                self.change(|data| set_badge(data, badge));
+            }
+        }
+    }
+
+    /// El secreto de una integración, para quien puede verlo. No se guarda
+    /// en el estado: lo enseña quien lo pidió, y nada más.
+    pub async fn reveal_integration(&self, integration_id: &str) -> Result<String, ServerEditError> {
+        if !self.permissions().reveal_integrations {
+            return Err(ServerEditError::ReadOnly);
+        }
+        let server = self.open().ok_or(ServerEditError::ServerGone)?;
+        #[derive(Deserialize)]
+        struct Revealed {
+            secret: String,
+        }
+        let revealed: Revealed = self.core.call("POST", &format!("/api/v1/servers/{}/integrations/{integration_id}/reveal", server.id), Some(serde_json::json!({}))).await?;
+        Ok(revealed.secret)
+    }
+
+    /// A dónde se abre una integración. Las que entran por cac piden su
+    /// enlace al proxy (`tools.guz-studio.dev`), nunca al origen de cac; las
+    /// demás abren su propia dirección.
+    pub async fn integration_link(&self, integration: &Integration) -> Result<String, crate::ApiError> {
+        if !integration.through_cac() {
+            return Ok(integration.url.clone());
+        }
+        #[derive(Deserialize)]
+        struct Launch {
+            url: Option<String>,
+        }
+        let launch: Launch = self.core.call("POST", &format!("/api/v1/servers/{}/integrations/{}/launch", integration.server_id, integration.id), Some(serde_json::json!({}))).await?;
+        Ok(launch.url.unwrap_or_else(|| integration.url.clone()))
     }
 
     /// Vuelve a la lista de servidores.
@@ -715,6 +826,18 @@ fn close(data: &mut PlatformData) {
     data.stats = None;
     data.stats_error = None;
     data.stats_fetched_at = None;
+    data.k8s = None;
+    data.k8s_loading = false;
+}
+
+/// Lo que contestó una tarea de lectura, con su fallo como frase.
+fn flatten<T>(joined: Result<Result<T, crate::ApiError>, tokio::task::JoinError>) -> Result<T, String> {
+    joined.map_err(|error| error.to_string()).and_then(|answer| answer.map_err(|error| error.to_string()))
+}
+
+fn set_badge(data: &mut PlatformData, badge: ClusterBadge) {
+    data.cluster_badges.retain(|known| known.server_id != badge.server_id);
+    data.cluster_badges.push(badge);
 }
 
 fn stop_stats(data: &mut PlatformData) {

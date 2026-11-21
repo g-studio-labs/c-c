@@ -8,6 +8,7 @@ pub mod panel;
 pub mod server_dialog;
 pub mod server_page;
 pub mod servers;
+pub mod k8s_hub;
 pub mod nodes;
 pub mod services;
 pub mod stats;

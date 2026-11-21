@@ -3613,6 +3613,98 @@ mod tests {
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
+    /// Un clúster con su consola, visto con este papel desde la tabla de
+    /// servidores.
+    fn cluster_as(role: &str, cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle) {
+        let server = FakeServer::start();
+        let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+        let mut mine = org("o1", "G Studio");
+        mine["role"] = json!(role);
+        server.mount(get("/api/v1/organizations/").respond_with(ok(json!([mine]))));
+        server.mount(get("/api/v1/task-spaces/").respond_with(ok(json!([space("a", "Producto")]))));
+        server.mount(get("/api/v1/docs/").respond_with(ok(json!({}))));
+        server.mount(get("/api/v1/tasks/").respond_with(ok(json!([]))));
+        let mut kubernetes = platform_server("k1", "o1", "k8s-contabo", "pending");
+        kubernetes["type"] = json!("kubernetes");
+        server.mount(get("/api/v1/servers/").respond_with(ok(json!([kubernetes]))));
+        for what in ["incidents", "deployables", "provisioning-runs"] {
+            server.mount(get(&format!("/api/v1/servers/k1/{what}")).respond_with(ok(json!([]))));
+        }
+        server.mount(get("/api/v1/servers/k1/k8s/routes").respond_with(ok(json!({
+            "gateways": [{ "name": "gw", "namespace": "default", "address": "203.0.113.7", "programmed": true }],
+            "routes": [{ "name": "cac", "namespace": "cac", "gateway": "gw", "hostnames": ["cac.dev"], "links": ["https://cac.dev"], "certReady": true }],
+        }))));
+        server.mount(get("/api/v1/servers/k1/k8s/health").respond_with(ok(json!({
+            "nodes": [{ "name": "vmi1", "kubeletVersion": "v1.35.10", "ready": true }],
+            // Llegan con el que falla detrás: la consola lo sube.
+            "workloads": [{ "name": "api", "namespace": "cac", "ready": 1, "desired": 1, "healthy": true }, { "name": "web", "namespace": "cac", "ready": 1, "desired": 2, "healthy": false }],
+            "certs": [{ "name": "cac-tls", "namespace": "cac", "dnsNames": ["cac.dev"], "daysLeft": 12, "ready": true }],
+            "datastores": [{ "kind": "postgres-cnpg", "name": "postgres", "namespace": "data", "instances": 1, "ready": 1, "phase": "Cluster in healthy state", "healthy": true }],
+        }))));
+        server.mount(get("/api/v1/servers/k1/integrations").respond_with(ok(json!([
+            { "id": "g", "serverId": "k1", "kind": "grafana", "name": "Grafana", "url": "http://grafana.monitoring:3000", "authMethod": "header", "hasSecret": false },
+            { "id": "p", "serverId": "k1", "kind": "pgadmin", "name": "pgAdmin", "url": "https://pg.dev", "authMethod": "none", "hasSecret": true },
+        ]))));
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/servers/k1/integrations/p/reveal")).respond_with(ok(json!({ "secret": "admin:hunter2" }))));
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/servers/k1/integrations/g/launch")).respond_with(ok(json!({ "path": "/t/x", "url": "https://tools.guz-studio.dev/t/x" }))));
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-l-a", cx));
+        click(window, "rail-platform", cx);
+        wait_until(cx, "llega la tabla", |cx| on_screen(window, "platform-row-k1", cx));
+        (server, window)
+    }
+
+    /// La consola de un clúster: su etiqueta en la lista, y al abrirlo sus
+    /// rutas, salud, cargas, certificados e integraciones; un miembro ve el
+    /// secreto guardado y Grafana se abre por el proxy de cac.
+    ///
+    /// Roturas que atrapa: un clúster en «pendiente» en la lista; una consola
+    /// que no se lee o se pinta a medias; un certificado a punto de caducar
+    /// sin aviso; un secreto que no se enseña; Grafana abierto sin pasar por
+    /// cac.
+    #[gpui_kit::test]
+    fn a_cluster_shows_its_badge_and_its_console(cx: &mut TestAppContext) {
+        let (server, window) = cluster_as("member", cx);
+        wait_until(cx, "la etiqueta del clúster", |cx| on_screen(window, "cluster-badge-k1", cx) && label(window, "cluster-badge-k1", cx) == "1 problema");
+        assert_eq!(label(window, "platform-dot-k1", cx), "1 problema", "el panel dice el estado del agente, que un clúster no lleva");
+
+        click(window, "platform-open-k1", cx);
+        wait_until(cx, "llega la consola", |cx| on_screen(window, "k8s-route-cac.dev", cx));
+        assert!(on_screen(window, "server-incidents", cx), "lo que ha mordido sigue arriba");
+        assert_eq!(label(window, "k8s-gateway-default-gw", cx), "gw programado");
+        assert_eq!(label(window, "k8s-node-vmi1", cx), "vmi1 · v1.35.10");
+        assert_eq!(label(window, "k8s-cert-cac-cac-tls", cx), "cac-tls !", "a doce días no avisa");
+        let place = |id: &str, cx: &mut TestAppContext| {
+            let (x, y, _) = place_on_screen(window, id, cx);
+            (y, x)
+        };
+        assert!(place("k8s-workload-cac-web", cx) < place("k8s-workload-cac-api", cx), "lo que falla, primero");
+        assert!(on_screen(window, "k8s-store-data-postgres", cx));
+        assert!(!on_screen(window, "k8s-reveal-g", cx), "una sin secreto ofrece revelarlo");
+
+        click(window, "k8s-reveal-p", cx);
+        wait_until(cx, "se ve el secreto", |cx| on_screen(window, "k8s-secret-p", cx));
+        assert_eq!(label(window, "k8s-secret-p", cx), "admin:hunter2");
+
+        click(window, "k8s-open-g", cx);
+        wait_until(cx, "pide el enlace al proxy", |_| server.hits("/api/v1/servers/k1/integrations/g/launch") == 1);
+        assert!(!on_screen(window, "k8s-error", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Rotura que atrapa: ofrecer a un lector el secreto guardado de una
+    /// integración.
+    #[gpui_kit::test]
+    fn a_reader_is_not_offered_the_secret(cx: &mut TestAppContext) {
+        let (server, window) = cluster_as("viewer", cx);
+        click(window, "platform-open-k1", cx);
+        wait_until(cx, "llega la consola", |cx| on_screen(window, "k8s-open-p", cx));
+        assert!(!on_screen(window, "k8s-reveal-p", cx));
+        assert_eq!(server.hits("/api/v1/servers/k1/integrations/p/reveal"), 0);
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
     /// Un swarm cuyo agente es el mismo servidor de mentira (sin
     /// identidad: no pide pase), con dos servicios, abierto en su pestaña.
     fn services_as(role: &str, cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle) {
