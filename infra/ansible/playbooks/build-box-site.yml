@@ -1,0 +1,9 @@
+---
+# La caja donde se compila y se prueba la app nativa, para no hacerlo en la
+# máquina de quien desarrolla. Idempotente. No enciende ni apaga la caja: eso
+# lo hacen `scripts/remote.sh` y su apagado por falta de uso.
+- name: Caja de compilación (rust-box)
+  hosts: k8s_control_plane
+  become: true
+  roles:
+    - {role: build_box, tags: [build_box]}
