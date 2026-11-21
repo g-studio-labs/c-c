@@ -28,12 +28,15 @@ pub struct ServerPermissions {
     /// la app de un admin mandaría allí su SSH y sus pases de agente.
     pub edit_connection: bool,
     pub delete: bool,
+    /// Instalar o actualizar su agente: acuñar la identidad nueva revoca la
+    /// anterior (`MintToken`, sólo admin).
+    pub install_agent: bool,
 }
 
 pub fn server_permissions(role: &str, superadmin: bool) -> ServerPermissions {
     let writer = superadmin || matches!(role, "admin" | "member");
     let admin = superadmin || role == "admin";
-    ServerPermissions { create: writer, kubernetes: superadmin, edit: writer, edit_connection: admin, delete: admin }
+    ServerPermissions { create: writer, kubernetes: superadmin, edit: writer, edit_connection: admin, delete: admin, install_agent: admin }
 }
 
 /// Un campo del formulario de un servidor.
@@ -195,6 +198,12 @@ pub enum ServerEditError {
     /// Ya no está en la lista de la organización que se mira.
     #[error("server-gone")]
     ServerGone,
+    /// Ya se está instalando un agente.
+    #[error("agent-busy")]
+    AgentBusy,
+    /// Lo que contestó el SSH al instalar el agente.
+    #[error("{0}")]
+    Ssh(String),
     #[error(transparent)]
     Api(#[from] ApiError),
 }
@@ -210,6 +219,8 @@ pub fn server_edit_phrase(locale: Locale, error: &ServerEditError, fallback_key:
         ServerEditError::UnknownKind => text(locale, "common:servers.unknownKind"),
         ServerEditError::ServerGone => text(locale, "common:servers.serverGone"),
         ServerEditError::NoOrganization => text(locale, "work:tree.pickOrg"),
+        ServerEditError::AgentBusy => text(locale, "common:servers.agentUpdate.busy"),
+        ServerEditError::Ssh(message) => message.clone(),
         ServerEditError::ReadOnly | ServerEditError::KubernetesSuperadminOnly | ServerEditError::ConnectionAdminOnly | ServerEditError::AdminOnly => {
             text(locale, &format!("errors:{error}"))
         }
@@ -228,8 +239,8 @@ mod tests {
         let p = |role, superadmin| server_permissions(role, superadmin);
         assert_eq!(p("viewer", false), ServerPermissions::default());
         assert_eq!(p("member", false), ServerPermissions { create: true, edit: true, ..Default::default() });
-        assert_eq!(p("admin", false), ServerPermissions { create: true, edit: true, edit_connection: true, delete: true, kubernetes: false });
-        assert_eq!(p("", true), ServerPermissions { create: true, edit: true, edit_connection: true, delete: true, kubernetes: true });
+        assert_eq!(p("admin", false), ServerPermissions { create: true, edit: true, edit_connection: true, delete: true, kubernetes: false, install_agent: true });
+        assert_eq!(p("", true), ServerPermissions { create: true, edit: true, edit_connection: true, delete: true, kubernetes: true, install_agent: true });
     }
 
     fn form() -> ServerForm {

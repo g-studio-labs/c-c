@@ -544,3 +544,129 @@ async fn tabs_follow_the_kind_of_server() {
     platform.close_server();
     assert_eq!(platform.state().tab, ServerTab::Overview, "cerrar deja la pestaña del que se cerró");
 }
+
+// ─── Instalar el agente ──────────────────────────────────────────────────────
+
+use cac_core::{AgentInstallOutcome, AgentInstallPhase, AgentWait};
+use std::time::Duration;
+
+const QUICK: AgentWait = AgentWait { total: Duration::from_millis(300), every: Duration::from_millis(10) };
+
+fn seen(mut row: Value, at: &str, version: i64) -> Value {
+    row["agentSeenAt"] = json!(at);
+    row["agentVersion"] = json!(version);
+    row
+}
+
+async fn admin_with_agent(rig: &Rig) -> Value {
+    let current = seen(row(rig, "a", "o1", "online", true), "2026-11-20T10:00:00Z", 2);
+    as_role(rig, "admin", vec![current.clone()]).await;
+    current
+}
+
+async fn mount_mint(rig: &Rig) {
+    Mock::given(method("POST"))
+        .and(path("/api/v1/servers/a/agent-token"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": { "token": "cac_agent_NEW", "sessionKey": "cd".repeat(32) } })))
+        .expect(1)
+        .mount(&rig.server)
+        .await;
+}
+
+/// Rotura que atrapa: llevar por SSH otra identidad que la recién acuñada,
+/// dar por vuelto al agente viejo (su latido de antes), o no poner la
+/// versión nueva en la lista.
+#[tokio::test]
+async fn installing_carries_the_new_identity_and_waits_for_a_new_heartbeat() {
+    let rig = rig().await;
+    let current = admin_with_agent(&rig).await;
+    mount_mint(&rig).await;
+    Mock::given(method("GET")).and(path("/api/v1/servers/a")).respond_with(ok(current.clone())).up_to_n_times(2).mount(&rig.server).await;
+    Mock::given(method("GET")).and(path("/api/v1/servers/a")).respond_with(ok(seen(current, "2026-11-20T10:05:00Z", 14))).mount(&rig.server).await;
+
+    let carried = Arc::new(Mutex::new(Vec::new()));
+    let sink = carried.clone();
+    let outcome = rig
+        .core
+        .platform()
+        .install_agent("a", AgentWait { total: Duration::from_secs(5), ..QUICK }, move |server, identity| {
+            sink.lock().unwrap().push((server.id.clone(), identity.token, identity.session_key));
+            Ok(())
+        })
+        .await;
+
+    assert_eq!(outcome, Ok(AgentInstallOutcome::Changed { from: 2, to: 14 }));
+    assert_eq!(*carried.lock().unwrap(), [("a".to_string(), "cac_agent_NEW".to_string(), "cd".repeat(32))]);
+    let state = rig.core.platform().state();
+    assert_eq!(state.servers[0].agent_version, 14);
+    assert_eq!(state.agent_job, None);
+    let phases: Vec<_> = rig.recorder.platform.lock().unwrap().iter().filter_map(|s| s.agent_job.as_ref().map(|job| job.phase)).collect();
+    assert_eq!(phases.first(), Some(&AgentInstallPhase::Installing));
+    assert_eq!(phases.last(), Some(&AgentInstallPhase::Waiting));
+}
+
+/// Rotura que atrapa: dejar que un miembro reacuñe la identidad (tumba el
+/// agente) o lance el SSH.
+#[tokio::test]
+async fn a_member_cannot_install_and_nothing_is_minted() {
+    let rig = rig().await;
+    as_role(&rig, "member", vec![row(&rig, "a", "o1", "online", true)]).await;
+    assert!(!rig.core.platform().state().permissions.install_agent);
+    let outcome = rig.core.platform().install_agent("a", QUICK, |_, _| panic!("no debe llegar al SSH")).await;
+    assert_eq!(outcome, Err(ServerEditError::AdminOnly));
+    assert!(writes(&rig).await.is_empty());
+}
+
+/// Rotura que atrapa: tragarse el fallo del SSH y quedarse esperando un
+/// latido que no va a llegar, o dejar la instalación en curso.
+#[tokio::test]
+async fn a_failed_ssh_says_why_and_does_not_wait() {
+    let rig = rig().await;
+    admin_with_agent(&rig).await;
+    mount_mint(&rig).await;
+    let outcome = rig.core.platform().install_agent("a", QUICK, |_, _| Err("Permission denied (publickey)".into())).await;
+    assert_eq!(outcome, Err(ServerEditError::Ssh("Permission denied (publickey)".into())));
+    assert!(hits(&rig, "/api/v1/servers/a").await.is_empty());
+    assert_eq!(rig.core.platform().state().agent_job, None);
+}
+
+/// Rotura que atrapa: esperar para siempre a un agente que no arranca, o
+/// darlo por vuelto.
+#[tokio::test]
+async fn an_agent_that_never_speaks_is_silent() {
+    let rig = rig().await;
+    let current = admin_with_agent(&rig).await;
+    mount_mint(&rig).await;
+    Mock::given(method("GET")).and(path("/api/v1/servers/a")).respond_with(ok(current)).mount(&rig.server).await;
+    let started = std::time::Instant::now();
+    let outcome = rig.core.platform().install_agent("a", QUICK, |_, _| Ok(())).await;
+    assert_eq!(outcome, Ok(AgentInstallOutcome::Silent));
+    assert!(started.elapsed() < QUICK.total * 5, "esperó más de lo que se le dio: {:?}", started.elapsed());
+    assert_eq!(rig.core.platform().state().servers[0].agent_version, 2);
+}
+
+/// Rotura que atrapa: dejar empezar una segunda instalación mientras la
+/// primera sigue: acuñaría otra identidad y tumbaría la que se está llevando.
+#[tokio::test]
+async fn a_second_install_waits_for_the_first() {
+    let rig = rig().await;
+    admin_with_agent(&rig).await;
+    mount_mint(&rig).await;
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let platform = rig.core.platform();
+    let first = tokio::spawn(async move {
+        platform
+            .install_agent("a", QUICK, move |_, _| {
+                held.recv().ok();
+                Err("cortado".into())
+            })
+            .await
+    });
+    while rig.core.platform().state().agent_job.is_none() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let second = rig.core.platform().install_agent("a", QUICK, |_, _| panic!("la segunda no debe llegar al SSH")).await;
+    assert_eq!(second, Err(ServerEditError::AgentBusy));
+    release.send(()).unwrap();
+    assert_eq!(first.await.unwrap(), Err(ServerEditError::Ssh("cortado".into())));
+}

@@ -3573,6 +3573,7 @@ mod tests {
         assert!(on_screen(window, "server-deployable-d1", cx));
         assert!(on_screen(window, "server-provisioning-empty", cx), "sin ejecuciones no dice cómo empezar");
         assert!(on_screen(window, "server-tab-backups", cx), "un swarm sin sus ocho pestañas");
+        assert!(!on_screen(window, "server-agent-install", cx), "a un miembro, instalar el agente que sólo puede un admin");
 
         click(window, "server-tab-services", cx);
         wait_until(cx, "la pestaña cambia", |cx| on_screen(window, "server-tab-pending", cx));
@@ -3664,6 +3665,74 @@ mod tests {
         click(window, "ssh-key-save", cx);
         wait_until(cx, "se cierra", |cx| !on_screen(window, "ssh-key-dialog", cx));
         assert_eq!(*keys.writes.lock().unwrap(), [("s1".to_string(), "ssh-ed25519 AAAA pixel".to_string())]);
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Lo que se llevaría al servidor, apuntado en vez de entrar por SSH.
+    #[derive(Default)]
+    struct FakeInstaller {
+        carried: std::sync::Mutex<Vec<(String, String, Option<String>, String)>>,
+    }
+
+    impl crate::platform::agent_install::AgentInstaller for FakeInstaller {
+        fn install(&self, install: &cac_ops::agent_install::AgentInstall) -> Result<(), String> {
+            self.carried.lock().unwrap().push((install.server_id.clone(), install.agent_token.clone(), install.identity_key.clone(), install.backend_url.clone()));
+            Ok(())
+        }
+        fn wait(&self) -> cac_core::AgentWait {
+            cac_core::AgentWait { total: std::time::Duration::from_secs(10), every: std::time::Duration::from_millis(20) }
+        }
+    }
+
+    /// Instalar el agente pregunta nombrando el servidor; al confirmar lleva
+    /// la identidad recién acuñada con la llave elegida para él y dice cómo
+    /// volvió.
+    ///
+    /// Roturas que atrapa: reacuñar sin preguntar (tumba el agente que hay)
+    /// o al cancelar; llevar otra identidad, otra llave u otro backend; no
+    /// decir cómo acabó.
+    #[gpui_kit::test]
+    fn installing_the_agent_asks_and_says_how_it_came_back(cx: &mut TestAppContext) {
+        let keys = std::sync::Arc::new(FakeKeys::default());
+        *keys.saved.lock().unwrap() = Some("ssh-ed25519 AAAA pixel".into());
+        let shared: std::sync::Arc<dyn crate::platform::ssh_key::SshKeys> = keys.clone();
+        let installer = std::sync::Arc::new(FakeInstaller::default());
+        let installing: std::sync::Arc<dyn crate::platform::agent_install::AgentInstaller> = installer.clone();
+        cx.update(|cx| {
+            cx.set_global(crate::platform::ssh_key::LocalKeys(shared));
+            cx.set_global(crate::platform::agent_install::LocalInstaller(installing));
+        });
+        let (server, window) = platform_as("admin", cx);
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path("/api/v1/servers/s1/agent-token"))
+                .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": { "token": "cac_agent_NEW", "sessionKey": "cd".repeat(32) } }))),
+        );
+        let mut back = platform_server("s1", "o1", "pixel-vps", "online");
+        back["agentVersion"] = json!(14);
+        back["agentSeenAt"] = json!("2026-11-20T10:05:00Z");
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/servers/s1")).respond_with(ok(back)));
+
+        click(window, "platform-open-s1", cx);
+        wait_until(cx, "sale el botón", |cx| on_screen(window, "server-agent-install", cx));
+        click(window, "server-agent-install", cx);
+        let (title, body) = cx.pending_prompt().expect("instaló sin preguntar");
+        assert_eq!(title, "¿Instalar el agente en pixel-vps?");
+        assert!(body.contains("deja de valer"), "{body}");
+        cx.simulate_prompt_answer("Cancelar");
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(server_writes(&server).is_empty(), "reacuñó al cancelar");
+
+        click(window, "server-agent-install", cx);
+        cx.simulate_prompt_answer("Instalar");
+        wait_until(cx, "dice cómo volvió", |cx| on_screen(window, "server-agent-result", cx));
+        assert_eq!(label(window, "server-agent-result", cx), "pixel-vps: agente v2 → v14, en línea");
+        let backend = cx.update(|cx| Backend::core(cx).base_url().to_string());
+        assert_eq!(
+            *installer.carried.lock().unwrap(),
+            [("s1".to_string(), "cac_agent_NEW".to_string(), Some("ssh-ed25519 AAAA pixel".to_string()), backend)]
+        );
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 

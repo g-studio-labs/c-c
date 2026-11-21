@@ -242,8 +242,9 @@ hay modo abierto al que caer; sin secrets contesta 503.
 → Guardianes: `TestNoAgentRouteWithoutAuth` (recorre el router del agente con
 `chi.Walk`), `TestSessionVector` / `TestAgentSessionVector` (el **mismo**
 vector en el agente y en el backend: si cambias uno, cambia el otro) y
-`la_imagen_es_la_version_del_agente` (la app clava la versión que publica el
-workflow).
+`la_imagen_es_la_version_del_agente` (en `ops/`: las dos apps instalan la
+imagen que publica el workflow; y `the_latest_version_is_the_one_published` en
+el core, la versión con la que la app nativa dice si un agente quedó atrás).
 
 Y el agente **actualiza servicios con `service update` por la API de Docker,
 nunca con `stack deploy`**: un stack que creó el CI de un proyecto no se recrea

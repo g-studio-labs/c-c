@@ -10,6 +10,7 @@
 //! lanza con `cac_mcp::host::command`, nunca con `Command::new` (guardián:
 //! `tests::every_system_program_is_launched_through_host`).
 
+pub mod agent_install;
 pub mod keychain;
 pub mod ssh;
 

@@ -14,7 +14,7 @@ use crate::backend::Backend;
 use crate::lang::{locale, tr};
 use crate::theme::Leading as _;
 
-pub(crate) fn page(server: &Server, state: &PlatformState, cx: &App) -> AnyElement {
+pub(crate) fn page(server: &Server, state: &PlatformState, agent_actions: Option<AnyElement>, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let (background, foreground) = (theme.background, theme.foreground);
     div()
@@ -34,7 +34,7 @@ pub(crate) fn page(server: &Server, state: &PlatformState, cx: &App) -> AnyEleme
                 .overflow_y_scroll()
                 .p_4()
                 .child(match state.tab {
-                    ServerTab::Overview => overview(server, state.overview.as_ref(), cx),
+                    ServerTab::Overview => overview(server, state.overview.as_ref(), agent_actions, cx),
                     _ => pending(cx),
                 }),
         )
@@ -107,7 +107,7 @@ fn pending(cx: &App) -> AnyElement {
 
 /// Cada tarjeta sin datos enseña cómo empezar, nunca un error: un servidor
 /// que todavía no despliega nada desde cac está bien, sólo no ha optado.
-fn overview(server: &Server, overview: Option<&ServerOverview>, cx: &App) -> AnyElement {
+fn overview(server: &Server, overview: Option<&ServerOverview>, agent_actions: Option<AnyElement>, cx: &App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let Some(overview) = overview.filter(|overview| overview.server_id == server.id) else {
         return div().id("server-overview-loading").leading_sm().text_color(muted).child(tr(cx, "common:servers.loading")).test_support().into_any_element();
@@ -116,7 +116,7 @@ fn overview(server: &Server, overview: Option<&ServerOverview>, cx: &App) -> Any
     let mut halves = Vec::new();
     // Uno de kubernetes no lleva este agente: su consola llega con el hub.
     if server.kind != ServerKind::Kubernetes {
-        halves.push(card("server-agent", Lucide::Bot, "common:servers.overview.agent", agent(server, cx), cx));
+        halves.push(card("server-agent", Lucide::Bot, "common:servers.overview.agent", agent(server, agent_actions, cx), cx));
         halves.push(card("server-connection", Lucide::Link2, "common:servers.overview.connection", connection(server, cx), cx));
         halves.push(card("server-deploys", Lucide::Rocket, "common:servers.overview.deploys", deploys(overview, cx), cx));
     }
@@ -204,7 +204,7 @@ fn incidents(overview: &ServerOverview, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn agent(server: &Server, cx: &App) -> AnyElement {
+fn agent(server: &Server, actions: Option<AnyElement>, cx: &App) -> AnyElement {
     let locale = locale(cx);
     let muted = cx.theme().muted_foreground;
     let mut facts = vec![tr(cx, server.status.label_key())];
@@ -226,6 +226,7 @@ fn agent(server: &Server, cx: &App) -> AnyElement {
         .leading_sm()
         .child(div().flex().items_center().gap_1p5().child(div().size_2().rounded_full().bg(super::health_color(server.status, cx))).child(facts.join(" · ")))
         .children(note.map(|note| div().id("server-agent-note").text_color(muted).child(note).test_support()))
+        .children(actions)
         .into_any_element()
 }
 

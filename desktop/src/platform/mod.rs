@@ -3,6 +3,7 @@
 //! en `app/src/pages/` de la app de Tauri. Cada fase del diseño («Diseño ·
 //! Plataforma en la app nativa», en cac) añade el suyo.
 
+pub mod agent_install;
 pub mod panel;
 pub mod server_dialog;
 pub mod server_page;

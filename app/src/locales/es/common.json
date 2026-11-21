@@ -357,7 +357,12 @@
       "silent": "{{name}}: el agente nuevo no ha dado señales en 90 s",
       "silentHint": "Mira los logs del servicio cac_swarm-manage en el servidor: puede que la imagen no bajara o que un secret esté mal.",
       "behind": "Volvió en v{{version}}, pero esta app instala la v{{latest}}: la imagen nueva no se bajó.",
-      "waiting": "Esperando al agente…"
+      "waiting": "Esperando al agente…",
+      "busy": "Ya se está instalando un agente: espera a que termine.",
+      "confirmTitle": "¿Instalar el agente en {{name}}?",
+      "confirmBody": "Se le da una identidad nueva y la anterior deja de valer. Si el SSH falla, el agente se queda sin hablar hasta que se reinstale.",
+      "confirm": "Instalar",
+      "failed": "No se pudo instalar el agente."
     },
     "secretsMoved": "Los secrets que cac lleva al servidor (desde 1Password) están ahora en",
     "badPort": "Un puerto va de 1 a 65535",

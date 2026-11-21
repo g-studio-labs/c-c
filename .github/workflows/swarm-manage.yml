@@ -27,7 +27,7 @@ jobs:
         run: go test ./...
 
       # La versión la lleva swarm-manage/VERSION y la app la clava
-      # (AGENT_IMAGE en lib.rs). Con `latest` a secas, una app nueva y un
+      # (AGENT_IMAGE en ops/src/agent_install.rs). Con `latest` a secas, una app nueva y un
       # agente viejo —o al revés— no tenían forma de saber que no se entienden.
       - name: Version
         id: version

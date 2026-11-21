@@ -303,7 +303,7 @@ async fn op_item_create(
 // capa fina, y los nombres que el resto del crate ya usaba.
 
 pub(crate) use cac_ops::ssh::{
-    ephemeral_suffix, ssh_run_input, stage_public_key, EphemeralIdentity, SshOutput,
+    ephemeral_suffix, ssh_run_input, stage_public_key, EphemeralIdentity,
 };
 use cac_ops::keychain;
 pub(crate) use cac_ops::keychain::ssh_key as stored_ssh_key;

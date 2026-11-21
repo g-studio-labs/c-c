@@ -1,13 +1,14 @@
 //! La lista de servidores (la tabla de `app/src/pages/Dashboard.tsx`): darlos
 //! de alta, editarlos y borrarlos, según el papel de quien mira.
 
-use cac_core::{server_edit_phrase, PlatformState, Server};
+use cac_core::{server_edit_phrase, AgentInstallPhase, PlatformState, Server};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{ActiveTheme, Icon, Sizable};
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
+use super::agent_install::{install_for, installer, outcome_phrase};
 use super::server_dialog::{ServerDialog, ServerDialogClosed};
 use super::ssh_key::{SshKeyClosed, SshKeyDialog};
 use crate::backend::Backend;
@@ -24,11 +25,14 @@ pub struct ServersView {
     ssh_key: Option<(Entity<SshKeyDialog>, Subscription)>,
     /// Por qué no se borró el último.
     problem: Option<String>,
+    /// Cómo acabó la última instalación del agente: de qué servidor, la
+    /// frase y si es un aviso.
+    agent_line: Option<(String, String, bool)>,
 }
 
 impl ServersView {
     pub fn new() -> Self {
-        ServersView { dialog: None, ssh_key: None, problem: None }
+        ServersView { dialog: None, ssh_key: None, problem: None, agent_line: None }
     }
 
     fn open_dialog(&mut self, editing: Option<Server>, window: &mut Window, cx: &mut Context<Self>) {
@@ -74,6 +78,83 @@ impl ServersView {
             .ok();
         })
         .detach();
+    }
+
+    /// Pregunta antes: la identidad nueva tumba la del agente que hay.
+    fn ask_install(&mut self, server: Server, window: &mut Window, cx: &mut Context<Self>) {
+        self.agent_line = None;
+        cx.notify();
+        let language = locale(cx);
+        let title = cac_core::text_with(language, "common:servers.agentUpdate.confirmTitle", &[("name", &server.name)]);
+        let (body, confirm, cancel) = (tr(cx, "common:servers.agentUpdate.confirmBody"), tr(cx, "common:servers.agentUpdate.confirm"), tr(cx, "common:servers.cancel"));
+        let answer = window.prompt(PromptLevel::Warning, &title, Some(&body), &[confirm.as_str(), cancel.as_str()], cx);
+        let (installer, keys) = (installer(cx), super::ssh_key::local(cx));
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let (id, name) = (server.id.clone(), server.name.clone());
+            let Ok(done) = cx.update(|_, cx| {
+                Backend::ask(cx, move |core| async move {
+                    let backend_url = core.base_url().to_string();
+                    let wait = installer.wait();
+                    core.platform()
+                        .install_agent(&id, wait, move |server, identity| {
+                            let identity_key = keys.saved(&server.id).ok().flatten().filter(|key| !key.trim().is_empty());
+                            installer.install(&install_for(server, identity, identity_key, &backend_url))
+                        })
+                        .await
+                })
+            }) else {
+                return;
+            };
+            let Ok(outcome) = done.await else { return };
+            this.update(cx, |this, cx| {
+                let (phrase, warning) = outcome_phrase(locale(cx), &name, &outcome);
+                this.agent_line = Some((server.id, phrase, warning));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// El botón de la tarjeta del agente y cómo acabó la última vez.
+    fn agent_actions(&self, server: &Server, state: &PlatformState, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !state.permissions.install_agent {
+            return None;
+        }
+        let job = state.agent_job.as_ref();
+        let label = match job.filter(|job| job.server_id == server.id).map(|job| job.phase) {
+            Some(AgentInstallPhase::Waiting) => tr(cx, "common:servers.agentUpdate.waiting"),
+            Some(AgentInstallPhase::Installing) => tr(cx, "common:admin.updating"),
+            None if server.has_agent_token => tr(cx, "common:admin.updateAgent"),
+            None => tr(cx, "common:admin.deployAgent"),
+        };
+        let theme = cx.theme();
+        let (muted, warning_color) = (theme.muted_foreground, theme.warning);
+        let line = self.agent_line.as_ref().filter(|(id, _, _)| *id == server.id).map(|(_, phrase, warning)| {
+            div().id("server-agent-result").aria_label(phrase.clone()).text_color(if *warning { warning_color } else { muted }).child(phrase.clone()).test_support()
+        });
+        let target = server.clone();
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap_1()
+                .children(line)
+                .child(
+                    Button::new("server-agent-install")
+                        .outline()
+                        .small()
+                        .icon(Icon::new(Lucide::RefreshCw))
+                        .label(label)
+                        .disabled(job.is_some())
+                        .on_click(cx.listener(move |this, _, window, cx| this.ask_install(target.clone(), window, cx))),
+                )
+                .into_any_element(),
+        )
     }
 
     fn content(&self, state: &PlatformState, cx: &mut Context<Self>) -> AnyElement {
@@ -174,7 +255,8 @@ impl Render for ServersView {
         let state = Backend::snapshot(cx).read(cx).platform.clone();
         let open = state.open_server.as_ref().and_then(|id| state.servers.iter().find(|server| &server.id == id));
         if let Some(server) = open {
-            return div().size_full().child(super::server_page::page(server, &state, cx)).into_any_element();
+            let actions = self.agent_actions(server, &state, cx);
+            return div().size_full().child(super::server_page::page(server, &state, actions, cx)).into_any_element();
         }
         let theme = cx.theme();
         let (background, foreground, border, danger) = (theme.background, theme.foreground, theme.border, theme.danger);

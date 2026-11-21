@@ -33,3 +33,8 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "async-
 # Las apps devuelven estos tipos tal cual a su interfaz (Tauri los serializa
 # para la página).
 serde = { version = "1", features = ["derive"] }
+# El instalador del agente: el nombre de cada Docker secret lleva un hash de
+# su valor, y las credenciales del registro van en JSON.
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"

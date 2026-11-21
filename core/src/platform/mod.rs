@@ -8,6 +8,7 @@
 pub mod agent;
 pub mod detail;
 pub mod edit;
+pub mod install;
 pub mod servers;
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ use crate::Core;
 pub use agent::{agent_base, Agent, AgentStream, AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT};
 pub use detail::{server_tabs, AgentNote, DeployableSummary, IncidentServerRef, IncidentSummary, ProvisioningRun, ServerOverview, ServerTab, AGENT_VERSION_DEPLOYS};
 pub use edit::{server_edit_phrase, server_permissions, ServerEditError, ServerField, ServerForm, ServerPermissions, MAX_SERVER_NAME};
+pub use install::{agent_update_outcome, AgentIdentity, AgentInstallOutcome, AgentInstallPhase, AgentJob, AgentWait, AGENT_VERSION_LATEST};
 pub use servers::{platform_sections, servers_of, PlatformSection, Server, ServerHealth, ServerKind};
 
 /// Lo que se pinta de Plataforma.
@@ -42,6 +44,8 @@ pub struct PlatformState {
     /// Su resumen, cuando llegó.
     pub overview: Option<ServerOverview>,
     pub permissions: ServerPermissions,
+    /// La instalación del agente en curso, si hay una.
+    pub agent_job: Option<AgentJob>,
 }
 
 #[derive(Default)]
@@ -54,6 +58,7 @@ pub(crate) struct PlatformData {
     open_server: Option<String>,
     tab: ServerTab,
     overview: Option<ServerOverview>,
+    agent_job: Option<AgentJob>,
 }
 
 /// Plataforma en este core.
@@ -82,6 +87,7 @@ impl Platform {
             tab: data.tab,
             overview: data.overview.clone(),
             permissions: self.permissions(),
+            agent_job: data.agent_job.clone(),
         }
     }
 
@@ -150,6 +156,69 @@ impl Platform {
             self.close_server();
         }
         Ok(())
+    }
+
+    /// Instala o actualiza el agente de un servidor: el backend acuña su
+    /// identidad, `ssh` la lleva a la máquina (en un hilo aparte: bloquea) y
+    /// se espera a que el agente nuevo lata. **Quien llama ya preguntó**: la
+    /// identidad nueva tumba la anterior, y si el SSH falla el agente se
+    /// queda sin hablar hasta que se reinstale.
+    pub async fn install_agent<F>(&self, server_id: &str, wait: AgentWait, ssh: F) -> Result<AgentInstallOutcome, ServerEditError>
+    where
+        F: FnOnce(&Server, AgentIdentity) -> Result<(), String> + Send + 'static,
+    {
+        if !self.permissions().install_agent {
+            return Err(ServerEditError::AdminOnly);
+        }
+        let before = self.server(server_id)?;
+        let mut started = false;
+        self.change(|data| {
+            if data.agent_job.is_none() {
+                data.agent_job = Some(AgentJob { server_id: server_id.to_string(), phase: AgentInstallPhase::Installing });
+                started = true;
+            }
+        });
+        if !started {
+            return Err(ServerEditError::AgentBusy);
+        }
+        let result = self.run_install(before, wait, ssh).await;
+        self.change(|data| data.agent_job = None);
+        result
+    }
+
+    async fn run_install<F>(&self, before: Server, wait: AgentWait, ssh: F) -> Result<AgentInstallOutcome, ServerEditError>
+    where
+        F: FnOnce(&Server, AgentIdentity) -> Result<(), String> + Send + 'static,
+    {
+        let id = before.id.clone();
+        let identity: AgentIdentity = self.core.call("POST", &format!("/api/v1/servers/{id}/agent-token"), Some(serde_json::json!({}))).await?;
+        let target = before.clone();
+        tokio::task::spawn_blocking(move || ssh(&target, identity))
+            .await
+            .map_err(|error| ServerEditError::Ssh(error.to_string()))?
+            .map_err(ServerEditError::Ssh)?;
+        self.change(|data| {
+            if let Some(job) = data.agent_job.as_mut() {
+                job.phase = AgentInstallPhase::Waiting;
+            }
+        });
+        let deadline = tokio::time::Instant::now() + wait.total;
+        loop {
+            tokio::time::sleep(wait.every).await;
+            if let Ok(now) = self.core.get::<Server>(&format!("/api/v1/servers/{id}")).await {
+                if let Some(outcome) = agent_update_outcome(&before, &now) {
+                    self.edit_list(|all| {
+                        if let Some(slot) = all.iter_mut().find(|server| server.id == now.id) {
+                            *slot = now;
+                        }
+                    });
+                    return Ok(outcome);
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(AgentInstallOutcome::Silent);
+            }
+        }
     }
 
     fn server(&self, server_id: &str) -> Result<Server, ServerEditError> {

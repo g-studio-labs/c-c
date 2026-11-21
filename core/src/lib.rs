@@ -90,7 +90,7 @@ pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClic
 pub use hue::{hue_index, HUES};
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
 pub use platform::{
-    agent_base, platform_sections, server_edit_phrase, server_permissions, server_tabs, servers_of, Agent, AgentNote, DeployableSummary, IncidentServerRef, IncidentSummary, ProvisioningRun, ServerOverview, ServerTab, AGENT_VERSION_DEPLOYS, AgentStream, Platform, PlatformSection, PlatformState, Server, ServerEditError, ServerField, ServerForm, ServerHealth, ServerKind, ServerPermissions,
+    agent_base, agent_update_outcome, platform_sections, server_edit_phrase, server_permissions, server_tabs, servers_of, Agent, AgentIdentity, AgentInstallOutcome, AgentInstallPhase, AgentJob, AgentNote, AgentWait, AGENT_VERSION_LATEST, DeployableSummary, IncidentServerRef, IncidentSummary, ProvisioningRun, ServerOverview, ServerTab, AGENT_VERSION_DEPLOYS, AgentStream, Platform, PlatformSection, PlatformState, Server, ServerEditError, ServerField, ServerForm, ServerHealth, ServerKind, ServerPermissions,
     AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT,
 };
 pub use prose::prose_for_painting;

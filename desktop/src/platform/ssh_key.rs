@@ -50,7 +50,7 @@ pub struct LocalKeys(pub Arc<dyn SshKeys>);
 
 impl Global for LocalKeys {}
 
-fn local(cx: &App) -> Arc<dyn SshKeys> {
+pub(crate) fn local(cx: &App) -> Arc<dyn SshKeys> {
     cx.try_global::<LocalKeys>().map(|keys| keys.0.clone()).unwrap_or_else(|| Arc::new(SystemKeys))
 }
 
