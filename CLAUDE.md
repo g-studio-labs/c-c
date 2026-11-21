@@ -238,6 +238,28 @@ Entera, antes de dar algo por hecho. Desde la raíz del repo:
 python3 .claude/hooks/hooks_test.py                                 # los hooks de cac
 ```
 
+**La app nativa (`core/`, `desktop/`, `voice/`) no se compila en la máquina de
+jose:** satura la CPU y la memoria (29 GB de `target/` el escritorio solo). Se
+compila en la caja de gstd (`rust-box`, command-and-control-464):
+
+```sh
+scripts/remote.sh -- cargo test                  # desde desktop/ o core/
+scripts/remote.sh --out capturas -- ./pasada.sh  # trae lo que deje en $CAC_OUT
+scripts/remote.sh --off                          # la apaga; si no, sola a las 2 h
+```
+
+- Desde un worktree cuya rama aún no lo tenga, se llama por la ruta de `main`:
+  `~/projects/personal/guz-studio/cac/scripts/remote.sh`.
+- Corre en la misma subcarpeta desde la que se llama, sobre una copia del árbol
+  con lo no commiteado. Lo que el comando cambie allí (las roturas de `/mutar`)
+  no vuelve.
+- Una sola corrida a la vez por worktree. Entre worktrees comparten `target/`
+  y cargo las pone en fila.
+- La caja es unas **3× más lenta por hilo**. Dos pruebas del escritorio que
+  dependen del reloj fallan ahí por tiempo, no por tu cambio:
+  `a_picture_comes_with_the_session…` y `the_follow_button_mutes…`
+  (command-and-control-436).
+
 **Los hooks de cac** (`.claude/hooks/`) corren en cada sesión de Claude Code:
 al arrancar meten en el contexto el espacio, lo que está en curso con su
 «dónde quedó» y las trampas abiertas; en cada prompt que nombra un servidor o
