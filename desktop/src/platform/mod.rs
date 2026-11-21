@@ -10,7 +10,7 @@ pub mod ssh_key;
 
 use cac_core::ServerHealth;
 use gpui_kit::component::ActiveTheme;
-use gpui_kit::{App, Hsla};
+use gpui_kit::{anchored, deferred, div, App, Hsla, InteractiveElement, IntoElement, ParentElement, Point, Styled, Window};
 
 /// El color del punto de estado de un servidor, el de `STATUS_DOT` en
 /// `PlatformPanel.tsx`: verde en línea, rojo caído, gris si nadie lo sabe.
@@ -21,4 +21,27 @@ pub(crate) fn health_color(health: ServerHealth, cx: &App) -> Hsla {
         ServerHealth::Offline | ServerHealth::Error => theme.danger,
         ServerHealth::Pending | ServerHealth::Unknown => theme.muted_foreground.opacity(0.5),
     }
+}
+
+/// El fondo de un diálogo, sobre la ventana entera: anclado a su origen y
+/// diferido, para tapar también el riel y el panel, como el `fixed inset-0`
+/// de los diálogos de la app de Tauri.
+pub(crate) fn veil(id: &'static str, card: impl IntoElement, window: &Window) -> impl IntoElement {
+    let size = window.viewport_size();
+    deferred(
+        anchored().position(Point::default()).child(
+            div()
+                .id(id)
+                .w(size.width)
+                .h(size.height)
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .bg(gpui_kit::black().opacity(0.35))
+                .child(card),
+        ),
+    )
+    .with_priority(1)
 }

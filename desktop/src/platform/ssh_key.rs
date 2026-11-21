@@ -259,7 +259,7 @@ impl SshKeyDialog {
 }
 
 impl Render for SshKeyDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (background, foreground, muted) = (theme.background, theme.foreground, theme.muted_foreground);
         let title = cac_core::text_with(locale(cx), "common:servers.sshKeyTitle", &[("name", &self.server_name)]);
@@ -324,16 +324,6 @@ impl Render for SshKeyDialog {
             )
             .test_support();
 
-        div()
-            .id("ssh-key-veil")
-            .absolute()
-            .inset_0()
-            .occlude()
-            .flex()
-            .items_center()
-            .justify_center()
-            .p_4()
-            .bg(gpui_kit::black().opacity(0.35))
-            .child(card)
+        super::veil("ssh-key-veil", card, window)
     }
 }

@@ -138,7 +138,7 @@ impl ServerDialog {
 }
 
 impl Render for ServerDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (background, foreground, muted, danger) = (theme.background, theme.foreground, theme.muted_foreground, theme.danger);
         let title = match &self.editing {
@@ -219,16 +219,6 @@ impl Render for ServerDialog {
             )
             .test_support();
 
-        div()
-            .id("server-dialog-veil")
-            .absolute()
-            .inset_0()
-            .occlude()
-            .flex()
-            .items_center()
-            .justify_center()
-            .p_4()
-            .bg(gpui_kit::black().opacity(0.35))
-            .child(card)
+        super::veil("server-dialog-veil", card, window)
     }
 }

@@ -3486,13 +3486,16 @@ mod tests {
     /// Lo que el core no deja mandar se dice en el diálogo, que sigue abierto
     /// con lo escrito.
     ///
-    /// Rotura que atrapa: cerrar el diálogo, o callarse, cuando no se guardó.
+    /// Roturas que atrapan: cerrar el diálogo, o callarse, cuando no se
+    /// guardó; un fondo que deja pulsar el riel por debajo.
     #[gpui_kit::test]
     fn a_refused_edit_says_why_and_stays_open(cx: &mut TestAppContext) {
         let (server, window) = platform_as("member", cx);
         click(window, "platform-edit-s1", cx);
         wait_until(cx, "se abre el diálogo", |cx| on_screen(window, "server-dialog", cx));
         assert_eq!(label(window, "server-dialog-title", cx), "Editar pixel-vps");
+        click(window, "rail-work", cx);
+        assert!(cx.update(|cx| Backend::core(cx).platform().state().on_screen), "el riel se puede pulsar con el diálogo abierto");
         click(window, "server-host", cx);
         type_text(window, "9", cx);
         click(window, "server-dialog-save", cx);
