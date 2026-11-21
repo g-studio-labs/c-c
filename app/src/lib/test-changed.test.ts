@@ -69,8 +69,12 @@ describe("test-changed.sh", () => {
     ]);
   });
 
-  it("ops arrastra a la app de Tauri, que lo envuelve", () => {
-    expect(plan("ops/src/ssh.rs")).toEqual(["cd ops && cargo test --locked", "cd app/src-tauri && cargo check --locked"]);
+  it("ops arrastra a la app de Tauri y al escritorio, que lo enlazan", () => {
+    expect(plan("ops/src/ssh.rs")).toEqual([
+      "cd ops && cargo test --locked",
+      "cd app/src-tauri && cargo check --locked",
+      "cd desktop && cargo test --locked",
+    ]);
     expect(quick("ops/src/ssh.rs", "desktop/src/chat.rs")).toContain("cd desktop && cargo test --locked");
   });
 

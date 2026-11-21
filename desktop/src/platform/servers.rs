@@ -9,6 +9,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use super::server_dialog::{ServerDialog, ServerDialogClosed};
+use super::ssh_key::{SshKeyClosed, SshKeyDialog};
 use crate::backend::Backend;
 use crate::lang::{locale, tr};
 use crate::theme::Leading as _;
@@ -20,13 +21,14 @@ const COLUMNS: [(&str, f32); 5] =
 
 pub struct ServersView {
     dialog: Option<(Entity<ServerDialog>, Subscription)>,
+    ssh_key: Option<(Entity<SshKeyDialog>, Subscription)>,
     /// Por qué no se borró el último.
     problem: Option<String>,
 }
 
 impl ServersView {
     pub fn new() -> Self {
-        ServersView { dialog: None, problem: None }
+        ServersView { dialog: None, ssh_key: None, problem: None }
     }
 
     fn open_dialog(&mut self, editing: Option<Server>, window: &mut Window, cx: &mut Context<Self>) {
@@ -37,6 +39,17 @@ impl ServersView {
         });
         self.dialog = Some((dialog, closed));
         self.problem = None;
+        cx.notify();
+    }
+
+    fn open_ssh_key(&mut self, server: &Server, cx: &mut Context<Self>) {
+        let (id, name) = (server.id.clone(), server.name.clone());
+        let dialog = cx.new(|cx| SshKeyDialog::new(id, name, cx));
+        let closed = cx.subscribe(&dialog, |this, _, _: &SshKeyClosed, cx| {
+            this.ssh_key = None;
+            cx.notify();
+        });
+        self.ssh_key = Some((dialog, closed));
         cx.notify();
     }
 
@@ -88,11 +101,21 @@ impl ServersView {
             .gap_1p5()
             .child(div().size_2().flex_none().rounded_full().bg(super::health_color(server.status, cx)))
             .child(tr(cx, server.status.label_key()));
-        let (editing, deleting) = (server.clone(), server.clone());
+        let (editing, deleting, keyed) = (server.clone(), server.clone(), server.clone());
+        // La llave vive en el llavero de esta máquina, no en cac: cualquiera
+        // puede elegir la suya.
         let actions = div()
             .flex()
             .justify_end()
             .gap_0p5()
+            .child(
+                Button::new(SharedString::from(format!("platform-ssh-{}", server.id)))
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(Lucide::KeyRound))
+                    .tooltip(tr(cx, "common:admin.sshKey"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_ssh_key(&keyed, cx))),
+            )
             .when(state.permissions.edit, |row| {
                 row.child(
                     Button::new(SharedString::from(format!("platform-edit-{}", server.id)))
@@ -194,6 +217,7 @@ impl Render for ServersView {
             .child(header)
             .child(body)
             .children(self.dialog.as_ref().map(|(dialog, _)| dialog.clone()))
+            .children(self.ssh_key.as_ref().map(|(dialog, _)| dialog.clone()))
     }
 }
 

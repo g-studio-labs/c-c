@@ -6,6 +6,7 @@
 pub mod panel;
 pub mod server_dialog;
 pub mod servers;
+pub mod ssh_key;
 
 use cac_core::ServerHealth;
 use gpui_kit::component::ActiveTheme;

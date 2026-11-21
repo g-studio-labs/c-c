@@ -14,6 +14,9 @@ cac-core = { path = "../core" }
 # misma lógica que `cac-mcp update` y que `scripts/install-mcp.sh`, en vez de
 # una copia. El servidor MCP no corre dentro de esta app.
 cac-mcp = { path = "../mcp" }
+# Lo que Plataforma hace en esta máquina (el agente SSH, el llavero), el
+# mismo código que usa la app de Tauri.
+cac-ops = { path = "../ops" }
 # GPUI y sus componentes. Versión **exacta**: cada release puede cambiar la API
 # de GPUI por debajo (su propio manifiesto lo avisa), así que subirla es una
 # tarea aparte, no algo que pasa con un `cargo update`.

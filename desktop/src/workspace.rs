@@ -3547,6 +3547,61 @@ mod tests {
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
+    /// El agente SSH y el llavero, de mentira: dos agentes (uno sin
+    /// contestar) y dos llaves; lo guardado, apuntado.
+    #[derive(Default)]
+    struct FakeKeys {
+        saved: std::sync::Mutex<Option<String>>,
+        writes: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl crate::platform::ssh_key::SshKeys for FakeKeys {
+        fn agents(&self) -> Vec<cac_ops::ssh::SshAgent> {
+            let agent = |socket: &str, label: &str, key_count, status: &str| cac_ops::ssh::SshAgent { socket: socket.into(), label: label.into(), key_count, status: status.into() };
+            vec![agent("/run/gnome", "GNOME", 0, "refused"), agent("/run/1password", "1Password", 2, "ok")]
+        }
+        fn keys(&self, socket: Option<String>) -> Result<Vec<cac_ops::ssh::SshKeyItem>, String> {
+            assert_eq!(socket.as_deref(), Some("/run/1password"), "no eligió el agente que contesta con llaves");
+            let key = |title: &str| cac_ops::ssh::SshKeyItem { public_key: format!("ssh-ed25519 AAAA {title}"), title: title.into(), fingerprint: "SHA256:x".into(), key_type: "ED25519".into() };
+            Ok(vec![key("contabo"), key("pixel")])
+        }
+        fn saved(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(self.saved.lock().unwrap().clone())
+        }
+        fn save(&self, server_id: &str, public_key: &str) -> Result<(), String> {
+            self.writes.lock().unwrap().push((server_id.into(), public_key.into()));
+            Ok(())
+        }
+    }
+
+    /// La llave de un servidor se elige entre las del agente que contesta y
+    /// se guarda en el llavero; sin cambiar nada no se guarda. También a
+    /// quien sólo mira: la llave es de su máquina, no de cac.
+    ///
+    /// Roturas que atrapa: preguntarle al agente caído; guardar otra llave
+    /// que la elegida, o en otro servidor; guardar sin haber cambiado nada;
+    /// esconderle el botón a un lector.
+    #[gpui_kit::test]
+    fn the_ssh_key_is_chosen_from_the_agent_and_kept_locally(cx: &mut TestAppContext) {
+        let keys = std::sync::Arc::new(FakeKeys::default());
+        let shared: std::sync::Arc<dyn crate::platform::ssh_key::SshKeys> = keys.clone();
+        cx.update(|cx| cx.set_global(crate::platform::ssh_key::LocalKeys(shared)));
+        let (_server, window) = platform_as("viewer", cx);
+
+        click(window, "platform-ssh-s1", cx);
+        wait_until(cx, "llegan las llaves", |cx| on_screen(window, "ssh-key-1", cx));
+        assert_eq!(label(window, "ssh-key-title", cx), "Llave SSH de pixel-vps");
+        click(window, "ssh-key-save", cx);
+        cx.run_until_parked();
+        assert!(keys.writes.lock().unwrap().is_empty(), "guardó sin cambiar nada");
+
+        click(window, "ssh-key-1", cx);
+        click(window, "ssh-key-save", cx);
+        wait_until(cx, "se cierra", |cx| !on_screen(window, "ssh-key-dialog", cx));
+        assert_eq!(*keys.writes.lock().unwrap(), [("s1".to_string(), "ssh-ed25519 AAAA pixel".to_string())]);
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
     /// «Usuarios» sale a quien administra la plataforma entera.
     ///
     /// Rotura que atrapa: esconderlo también al superadmin, o decidirlo con
