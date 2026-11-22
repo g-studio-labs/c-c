@@ -260,5 +260,13 @@
   "installation-taken": "Esa instalación ya es de otra organización.",
   "superadmin-in-person": "Sólo un superadmin, con su sesión (no con un token), puede hacer esto.",
   "not-this-cluster": "Este servidor no es el clúster donde corre cac: sus vistas enseñarían otro clúster.",
-  "work-still-open": "Todavía no se puede resolver ni cerrar: el equipo aún tiene trabajo abierto en él."
+  "work-still-open": "Todavía no se puede resolver ni cerrar: el equipo aún tiene trabajo abierto en él.",
+  "confirm-server-name": "Para aprobar algo destructivo hay que escribir el nombre del servidor tal cual.",
+  "acknowledge-flags": "Hay banderas rojas: hay que reconocerlas para aprobar.",
+  "provisioning-request-not-yours": "Esta petición la pidió otra persona: sólo ella o un admin pueden hacer esto.",
+  "provisioning-request-not-found": "Esa petición ya no está.",
+  "provisioning-request-state": "La petición ya no está en ese paso: alguien se adelantó. Recarga la bandeja.",
+  "provisioning-request-expired": "La petición caducó: hay que ensayar y pedir otra vez.",
+  "grant-mismatch": "La autorización no casa con lo que se quiere correr: hay que pedirla otra vez.",
+  "in-person-only": "Esto lo decide una persona en la app, no un token."
 }

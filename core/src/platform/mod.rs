@@ -12,6 +12,7 @@ pub mod edit;
 pub mod install;
 pub mod k8s;
 pub mod secret_refs;
+pub mod provision;
 pub mod servers;
 pub mod services;
 pub mod swarm;
@@ -29,6 +30,7 @@ pub use install::{agent_update_outcome, AgentIdentity, AgentInstallOutcome, Agen
 pub use servers::{platform_sections, servers_of, PlatformSection, Server, ServerHealth, ServerKind};
 pub use services::{filter_services, LogLine, LogStatus, ServiceHealth, ServiceLogs, ServiceReplicas, SwarmService, LOG_LINES_KEPT};
 pub use k8s::{cert_warns, cluster_status, days_until, route_links, workloads_failing_first, ClusterBadge, ClusterStatus, Integration, K8sCert, K8sDatastore, K8sGateway, K8sHealth, K8sHub, K8sNode, K8sRoute, K8sRoutes, K8sWorkload, CERT_WARN_DAYS};
+pub use provision::{can_approve, config_body, config_changed, from_input, from_items, grant_command, is_stale, json_object, line_diff, ordered_playbooks, provision_permissions, provision_phrase, sorted_json, stable_json, stage_playbooks, to_input, to_items, valid_op_ref, valid_secret_name, var_fields, visible_requests, with_required, AnsibleManifest, AnsibleTools, ConfigOrigin, ConfigProblem, DiffRow, EffectiveConfig, FlagLevel, InventoryHost, PlanGaps, PlaybookInfo, PlaybookVar, ProjectInfo, ProvisionError, ProvisionPermissions, ProvisionRun, ProvisionState, ProvisioningCheck, ProvisioningFailure, ProvisioningRequest, Risk, RiskFlag, SecretField, SecretRef, ServerConfigSummary, ServerConfigVersion, ServerConnection, ServerTemplate, ServerTemplateVersion, TemplateDraft, VarField, VarFields, GRANT_MINUTES, LIVE_STATUSES, RECENT_CLOSED, STALE_CHECK_SECONDS};
 pub use swarm::{cpu_load, format_bytes, mem_load, stats_view, ContainerStats, Load, StatsColumn, StatsSort, StatsView, SwarmNode};
 
 /// Lo que se pinta de Plataforma.
@@ -85,6 +87,8 @@ pub struct PlatformState {
     pub deploys: Option<DeploysState>,
     /// Los secrets del desplegable que se mira, por referencia.
     pub secrets: Option<SecretsState>,
+    /// Provisioning del servidor abierto, desde que se miró su pestaña.
+    pub provision: Option<ProvisionState>,
 }
 
 #[derive(Default)]
@@ -120,6 +124,7 @@ pub(crate) struct PlatformData {
     cluster_badges: Vec<ClusterBadge>,
     deploys: Option<DeploysState>,
     secrets: Option<SecretsState>,
+    provision: Option<ProvisionState>,
 }
 
 /// Plataforma en este core.
@@ -165,6 +170,11 @@ impl Platform {
             cluster_badges: data.cluster_badges.clone(),
             deploys: data.deploys.clone(),
             secrets: data.secrets.clone(),
+            provision: data.provision.clone().map(|mut provision| {
+                provision.permissions = self.provision_permissions();
+                provision.me = self.me();
+                provision
+            }),
         }
     }
 
@@ -543,6 +553,7 @@ impl Platform {
                     self.load_deployables().await;
                 }
             }
+            ServerTab::Provision => self.load_provision().await,
             ServerTab::Stats => {
                 self.start_stats();
                 // Los nodos ponen nombre a la columna de nodo.
@@ -920,6 +931,7 @@ fn close(data: &mut PlatformData) {
     data.k8s_loading = false;
     data.deploys = None;
     data.secrets = None;
+    data.provision = None;
 }
 
 /// Lo que contestó una tarea de lectura, con su fallo como frase.

@@ -260,5 +260,13 @@
   "installation-taken": "That installation already belongs to another organization.",
   "superadmin-in-person": "Only a superadmin, signed in (not with a token), can do this.",
   "not-this-cluster": "This server isn't the cluster cac runs in: its views would show another cluster.",
-  "work-still-open": "It can't be resolved or closed yet: the team still has open work on it."
+  "work-still-open": "It can't be resolved or closed yet: the team still has open work on it.",
+  "confirm-server-name": "To approve something destructive, type the server's name exactly.",
+  "acknowledge-flags": "There are red flags: acknowledge them to approve.",
+  "provisioning-request-not-yours": "Someone else asked for this: only they or an admin can do it.",
+  "provisioning-request-not-found": "That request is gone.",
+  "provisioning-request-state": "The request is no longer at that step: someone got there first. Reload the inbox.",
+  "provisioning-request-expired": "The request expired: rehearse and ask again.",
+  "grant-mismatch": "The grant doesn't match what you want to run: ask again.",
+  "in-person-only": "A person decides this in the app, not a token."
 }
