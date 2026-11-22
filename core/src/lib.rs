@@ -247,6 +247,9 @@ pub(crate) struct Inner {
     /// Qué timbre que sale es el vigente: su reloj sólo lo rinde si lo es.
     pub(crate) ring_turn: std::sync::atomic::AtomicU64,
     pub(crate) platform: Mutex<platform::PlatformData>,
+    /// Pone en fila los cambios de Plataforma con su aviso: ver
+    /// `Platform::change`.
+    pub(crate) platform_order: Mutex<()>,
     /// Los pases para hablar con los agentes, por servidor: ver
     /// `platform::agent`.
     pub(crate) agent_passes: Mutex<platform::agent::AgentPasses>,
@@ -293,6 +296,7 @@ impl Core {
                 occupancy_turn: std::sync::atomic::AtomicU64::new(0),
                 ring_turn: std::sync::atomic::AtomicU64::new(0),
                 platform: Mutex::new(platform::PlatformData::default()),
+                platform_order: Mutex::new(()),
                 agent_passes: Mutex::new(platform::agent::AgentPasses::default()),
             }),
         };

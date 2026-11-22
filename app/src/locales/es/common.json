@@ -384,7 +384,8 @@
       "confirmTitle": "¿Instalar el agente en {{name}}?",
       "confirmBody": "Se le da una identidad nueva y la anterior deja de valer. Si el SSH falla, el agente se queda sin hablar hasta que se reinstale.",
       "confirm": "Instalar",
-      "failed": "No se pudo instalar el agente."
+      "failed": "No se pudo instalar el agente.",
+      "keychainFailed": "No se pudo leer en el llavero la llave SSH de {{name}}, y el agente no se tocó: {{error}}"
     },
     "secretsMoved": "Los secrets que cac lleva al servidor (desde 1Password) están ahora en",
     "badPort": "Un puerto va de 1 a 65535",

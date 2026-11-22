@@ -445,6 +445,9 @@ impl Docs {
             return;
         }
         let target = DocTarget { kind, id: id.to_string(), name };
+        // Plataforma se pinta por delante de la documentación: un documento
+        // abierto desde la campana estando en ella no se veía.
+        self.core.platform().leave();
         // Quién puede escribir aquí: quien puede cambiar el árbol de la
         // organización que se mira (`can_edit_tree`). Un `viewer` lee.
         let can_edit = self.core.tree().can_edit();

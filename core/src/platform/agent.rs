@@ -115,6 +115,11 @@ impl Agent {
         crate::session::unwrap_data(&self.get(server, path).await?)
     }
 
+    /// Una lista del agente. Vacía, llega sin `data`.
+    pub async fn get_list<T: for<'de> Deserialize<'de>>(&self, server: &Server, path: &str) -> Result<Vec<T>, ApiError> {
+        crate::session::unwrap_list(&self.get(server, path).await?)
+    }
+
     /// ¿Contesta su agente?
     ///
     /// Pregunta por los nodos y no por las estadísticas: las dos prueban lo

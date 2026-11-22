@@ -83,6 +83,10 @@ pub const LOG_LINES_KEPT: usize = 500;
 /// uno nuevo y no como el mismo fallo repetido.
 pub const LOG_STEADY: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Cuánto se juntan las líneas de log antes de pintarlas: menos de lo que
+/// se nota, y bastante para no repintar por cada una.
+pub const LOG_FLUSH: std::time::Duration = std::time::Duration::from_millis(50);
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct LogLine {

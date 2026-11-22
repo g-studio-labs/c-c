@@ -179,6 +179,35 @@ async fn only_one_module_is_on_screen() {
     assert!(!rig.core.platform().state().on_screen);
 }
 
+/// Rotura que atrapa: avisar de un cambio con el candado ya suelto, de modo
+/// que dos cambios a la vez lleguen a la pantalla en orden inverso y se
+/// quede pintado el viejo (un log cerrado que sigue ahí).
+#[tokio::test]
+async fn the_last_change_is_the_last_one_painted() {
+    let rig = rig().await;
+    let mut stale = 0;
+    for _ in 0..2000 {
+        let (a, b) = (rig.core.clone(), rig.core.clone());
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let (sa, sb) = (start.clone(), start.clone());
+        let enter = std::thread::spawn(move || {
+            sa.wait();
+            a.platform().enter();
+        });
+        let leave = std::thread::spawn(move || {
+            sb.wait();
+            b.platform().leave();
+        });
+        enter.join().unwrap();
+        leave.join().unwrap();
+        let painted = rig.recorder.platform.lock().unwrap().last().map(|state| state.on_screen);
+        if painted != Some(rig.core.platform().state().on_screen) {
+            stale += 1;
+        }
+    }
+    assert_eq!(stale, 0, "veces que quedó pintado un estado viejo");
+}
+
 // ─── Los agentes de los de antes ─────────────────────────────────────────────
 
 /// Rotura que atrapa: dejar «pendiente» para siempre un agente que contesta,
@@ -409,7 +438,9 @@ async fn a_member_renames_but_does_not_move_the_connection() {
 
     let mut renamed_row = current;
     renamed_row["name"] = json!("vps-nuevo");
-    Mock::given(method("PATCH")).and(path("/api/v1/servers/a")).respond_with(ok(renamed_row)).expect(1).mount(&rig.server).await;
+    let port = rig.server.address().port();
+    let body = json!({ "name": "vps-nuevo", "host": "127.0.0.1", "sshUser": "deploy", "sshPort": 22, "agentPort": port, "type": "docker-swarm" });
+    Mock::given(method("PATCH")).and(path("/api/v1/servers/a")).and(body_json(body)).respond_with(ok(renamed_row)).expect(1).mount(&rig.server).await;
     let renamed = ServerForm { name: "vps-nuevo".into(), ..ServerForm::from(&server) };
     rig.core.platform().update_server("a", &renamed).await.unwrap();
     assert_eq!(rig.core.platform().state().servers[0].name, "vps-nuevo");
@@ -620,17 +651,31 @@ async fn a_member_cannot_install_and_nothing_is_minted() {
     assert!(writes(&rig).await.is_empty());
 }
 
+/// Un servidor sin identidad todavía, que tras acuñar el backend da con
+/// ella.
+async fn admin_without_agent(rig: &Rig) {
+    let first = row(rig, "a", "o1", "pending", false);
+    as_role(rig, "admin", vec![first.clone()]).await;
+    let mut minted = first;
+    minted["hasAgentToken"] = json!(true);
+    Mock::given(method("GET")).and(path("/api/v1/servers/a")).respond_with(ok(minted)).mount(&rig.server).await;
+}
+
 /// Rotura que atrapa: tragarse el fallo del SSH y quedarse esperando un
-/// latido que no va a llegar, o dejar la instalación en curso.
+/// latido que no va a llegar, o dejar la instalación en curso; o que la
+/// fila no se entere de que ya hay identidad acuñada (Servicios iría sin
+/// pase).
 #[tokio::test]
 async fn a_failed_ssh_says_why_and_does_not_wait() {
     let rig = rig().await;
-    admin_with_agent(&rig).await;
+    admin_without_agent(&rig).await;
     mount_mint(&rig).await;
     let outcome = rig.core.platform().install_agent("a", QUICK, |_, _| Err("Permission denied (publickey)".into())).await;
     assert_eq!(outcome, Err(ServerEditError::Ssh("Permission denied (publickey)".into())));
-    assert!(hits(&rig, "/api/v1/servers/a").await.is_empty());
-    assert_eq!(rig.core.platform().state().agent_job, None);
+    assert_eq!(hits(&rig, "/api/v1/servers/a").await.len(), 1, "una lectura de la fila, sin esperar latidos");
+    let state = rig.core.platform().state();
+    assert_eq!(state.agent_job, None);
+    assert!(state.servers[0].has_agent_token);
 }
 
 /// Rotura que atrapa: esperar para siempre a un agente que no arranca, o
@@ -646,6 +691,17 @@ async fn an_agent_that_never_speaks_is_silent() {
     assert_eq!(outcome, Ok(AgentInstallOutcome::Silent));
     assert!(started.elapsed() < QUICK.total * 5, "esperó más de lo que se le dio: {:?}", started.elapsed());
     assert_eq!(rig.core.platform().state().servers[0].agent_version, 2);
+}
+
+/// Rotura que atrapa: que tras un agente que no vuelve la fila siga sin
+/// identidad, aunque ya se acuñó.
+#[tokio::test]
+async fn a_silent_install_still_marks_the_identity() {
+    let rig = rig().await;
+    admin_without_agent(&rig).await;
+    mount_mint(&rig).await;
+    assert_eq!(rig.core.platform().install_agent("a", QUICK, |_, _| Ok(())).await, Ok(AgentInstallOutcome::Silent));
+    assert!(rig.core.platform().state().servers[0].has_agent_token);
 }
 
 /// Rotura que atrapa: dejar empezar una segunda instalación mientras la
@@ -753,6 +809,13 @@ async fn rig_as_member_with_open(id: &str) -> Rig {
 /// y con pausas entre ellos, para que lleguen separados. A lo demás (la
 /// prueba de vida de la lista) contesta 404.
 async fn chunked_agent(chunks: Vec<Vec<u8>>) -> u16 {
+    watched_agent(chunks).await.0
+}
+
+/// Lo mismo, contando las conexiones de log que la app cerró.
+async fn watched_agent(chunks: Vec<Vec<u8>>) -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+    let closed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = closed.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -765,6 +828,7 @@ async fn chunked_agent(chunks: Vec<Vec<u8>>) -> u16 {
                 continue;
             }
             let chunks = chunks.clone();
+            let counter = counter.clone();
             tokio::spawn(async move {
                 socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
                 for chunk in chunks {
@@ -774,12 +838,30 @@ async fn chunked_agent(chunks: Vec<Vec<u8>>) -> u16 {
                     socket.flush().await.unwrap();
                     tokio::time::sleep(Duration::from_millis(30)).await;
                 }
-                // Se queda abierto, como un servicio callado.
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                // Se queda abierto, como un servicio callado, hasta que la
+                // app cuelga.
+                let mut rest = [0u8; 64];
+                let hung_up = tokio::time::timeout(Duration::from_secs(30), async {
+                    while matches!(socket.read(&mut rest).await, Ok(n) if n > 0) {}
+                })
+                .await;
+                if hung_up.is_ok() {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
             });
         }
     });
-    port
+    (port, closed)
+}
+
+async fn hung_up(closed: &std::sync::atomic::AtomicUsize) -> bool {
+    for _ in 0..200 {
+        if closed.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
 }
 
 async fn until(rig: &Rig, done: impl Fn(&PlatformState) -> bool) -> PlatformState {
@@ -840,22 +922,61 @@ async fn a_log_that_never_opens_gives_up_after_three_tries() {
     assert_eq!(hits(&rig, "/api/v1/services/svc1/logs").await.len(), 3);
 }
 
-/// Rotura que atrapa: seguir con el log (y su conexión) al cambiar de
-/// pestaña o de servidor.
-#[tokio::test]
-async fn leaving_the_tab_stops_the_log() {
-    let rig = rig().await;
-    let mut vps = row(&rig, "s", "o1", "online", false);
-    vps["agentPort"] = json!(chunked_agent(vec![b"data: uno\n\n".to_vec()]).await);
-    as_role(&rig, "viewer", vec![vps]).await;
+/// Un log abierto en la pestaña de servicios de `s`, con su agente.
+async fn following(rig: &Rig, chunks: Vec<Vec<u8>>) -> Arc<std::sync::atomic::AtomicUsize> {
+    let (port, closed) = watched_agent(chunks).await;
+    let mut vps = row(rig, "s", "o1", "online", false);
+    vps["agentPort"] = json!(port);
+    as_role(rig, "viewer", vec![vps]).await;
     rig.core.platform().open_server("s");
     rig.core.platform().select_tab(ServerTab::Services);
     rig.core.platform().follow_logs(&SwarmService { id: "svc1".into(), name: "shop_web".into(), ..Default::default() });
-    until(&rig, |state| state.logs.as_ref().is_some_and(|logs| !logs.lines.is_empty())).await;
+    until(rig, |state| state.logs.as_ref().is_some_and(|logs| !logs.lines.is_empty())).await;
+    closed
+}
+
+/// Rotura que atrapa: quitar el log de la pantalla y dejar su conexión
+/// abierta al cambiar de pestaña; o cortarlo al pulsar la pestaña en la que
+/// ya se está.
+#[tokio::test]
+async fn leaving_the_tab_stops_the_log() {
+    let rig = rig().await;
+    let closed = following(&rig, vec![b"data: uno\n\n".to_vec()]).await;
+    rig.core.platform().select_tab(ServerTab::Services);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(rig.core.platform().state().logs.is_some(), "la misma pestaña cortó el log");
+    assert_eq!(closed.load(std::sync::atomic::Ordering::SeqCst), 0);
+
     rig.core.platform().select_tab(ServerTab::Overview);
     assert_eq!(rig.core.platform().state().logs, None);
+    assert!(hung_up(&closed).await, "la conexión del log siguió abierta");
     rig.core.platform().clear_logs();
     assert_eq!(rig.core.platform().state().logs, None);
+}
+
+/// Rotura que atrapa: seguir leyendo el log en segundo plano al irse a
+/// Trabajo o a Comunicación.
+#[tokio::test]
+async fn leaving_platform_stops_the_log() {
+    let rig = rig().await;
+    rig.core.platform().enter();
+    let closed = following(&rig, vec![b"data: uno\n\n".to_vec()]).await;
+    rig.core.comms().enter();
+    assert_eq!(rig.core.platform().state().logs, None);
+    assert!(hung_up(&closed).await, "la conexión del log siguió abierta");
+}
+
+/// Rotura que atrapa: avisar (y repintar con una copia del estado entero)
+/// por cada línea de un servicio hablador, en vez de por tandas.
+#[tokio::test]
+async fn a_burst_of_lines_is_painted_at_once() {
+    let rig = rig().await;
+    let burst: String = (0..20).map(|n| format!("data: línea {n}\n\n")).collect();
+    following(&rig, vec![burst.into_bytes()]).await;
+    let state = until(&rig, |state| state.logs.as_ref().is_some_and(|logs| logs.lines.len() == 20)).await;
+    assert_eq!(state.logs.unwrap().lines.len(), 20);
+    let counts: std::collections::BTreeSet<usize> = rig.recorder.platform.lock().unwrap().iter().filter_map(|s| s.logs.as_ref().map(|l| l.lines.len())).collect();
+    assert_eq!(counts, [0, 20].into(), "se pintó línea a línea");
 }
 
 /// Rotura que atrapa: dar cada apertura por buena y reconectar sin fin a
@@ -923,6 +1044,41 @@ async fn the_resources_tab_polls_until_you_leave_it() {
     let left_at = stats_hits(&rig).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(stats_hits(&rig).await, left_at, "siguió preguntando fuera de la pestaña");
+}
+
+/// Rotura que atrapa: seguir sondeando al irse de Plataforma, o no volver
+/// a hacerlo al regresar a la pestaña.
+#[tokio::test]
+async fn leaving_platform_pauses_the_polling_until_you_come_back() {
+    let rig = rig_on_stats().await;
+    rig.core.platform().enter();
+    until(&rig, |state| state.stats.is_some()).await;
+    rig.core.platform().leave();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let left_at = stats_hits(&rig).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(stats_hits(&rig).await, left_at, "siguió preguntando fuera de Plataforma");
+    rig.core.platform().enter();
+    rig.core.platform().start_stats();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(stats_hits(&rig).await > left_at, "no volvió a preguntar al regresar");
+}
+
+/// Rotura que atrapa: enseñar un error ante un swarm sin servicios, nodos
+/// o contenedores: el agente omite el `data` vacío.
+#[tokio::test]
+async fn an_empty_swarm_is_empty_not_an_error() {
+    let rig = rig_as_member_with_open("s").await;
+    Mock::given(method("POST")).and(path("/api/v1/servers/s/agent-session")).respond_with(pass("p", 600)).mount(&rig.server).await;
+    for route in ["/api/v1/services", "/api/v1/nodes", "/api/v1/stats"] {
+        Mock::given(method("GET")).and(path(route)).respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true }))).mount(&rig.server).await;
+    }
+    rig.core.platform().open_tab(ServerTab::Services).await;
+    rig.core.platform().open_tab(ServerTab::Stats).await;
+    let state = until(&rig, |state| state.stats.is_some()).await;
+    assert_eq!((state.services, state.services_error), (Some(vec![]), None));
+    assert_eq!((state.nodes, state.nodes_error), (Some(vec![]), None));
+    assert_eq!((state.stats, state.stats_error), (Some(vec![]), None));
 }
 
 /// Rotura que atrapa: que pausar no pare, que se lleve lo leído, que volver

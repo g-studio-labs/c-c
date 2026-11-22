@@ -157,6 +157,11 @@ pub fn ansi_spans(line: &str) -> Vec<AnsiSpan> {
                         }
                     }
                 }
+                // Elegir juego de caracteres lleva uno más: `ESC ( B` es lo
+                // que suelta `tput sgr0`, y sin esto la «B» se pintaba.
+                Some('(' | ')' | '*' | '+') => {
+                    chars.next();
+                }
                 _ => {}
             },
             '\t' => {
@@ -220,6 +225,12 @@ mod tests {
         assert_eq!(spans.iter().map(|span| span.text.as_str()).collect::<Vec<_>>(), ["a", "b", "cd"]);
         assert_eq!(plain(&ansi_spans("antes \u{1b}[3")), "antes ");
         assert_eq!(ansi_spans("\u{1b}[38;5m").len(), 0);
+    }
+
+    /// Rotura que atrapa: una «B» suelta tras cada `tput sgr0`.
+    #[test]
+    fn a_charset_switch_leaves_nothing_behind() {
+        assert_eq!(plain(&ansi_spans("\u{1b}[1mok\u{1b}(B\u{1b}[m listo\u{1b})0")), "ok listo");
     }
 
     /// Rotura que atrapa: pintar el tabulador como un cuadro o como un

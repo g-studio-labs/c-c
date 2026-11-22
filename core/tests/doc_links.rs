@@ -352,3 +352,15 @@ async fn leaving_a_draft_through_a_link_asks_first() {
     let state = docs.state();
     assert_eq!((rig.target().as_deref(), state.tab.as_str(), state.edit), (Some("b"), "runbook", None));
 }
+
+/// Rotura que atrapa: abrir un documento estando en Plataforma (desde la
+/// campana) y que no se vea, porque Plataforma se pinta por delante.
+#[tokio::test]
+async fn opening_a_doc_leaves_platform() {
+    let rig = rig().await;
+    rig.core.platform().enter();
+    assert!(rig.core.platform().state().on_screen);
+    rig.core.docs().open("b").await;
+    assert_eq!(rig.target().as_deref(), Some("b"));
+    assert!(!rig.core.platform().state().on_screen);
+}

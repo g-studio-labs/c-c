@@ -1027,7 +1027,12 @@ impl Workspace {
                             this.toggle_panel(cx);
                         } else {
                             Backend::core(cx).platform().enter();
-                            Backend::run(cx, |core| async move { core.platform().refresh().await });
+                            // Salir paró el sondeo de recursos; si se vuelve
+                            // a esa pestaña, sigue.
+                            Backend::run(cx, |core| async move {
+                                core.platform().start_stats();
+                                core.platform().refresh().await
+                            });
                         }
                     }))
                     .children(Self::rail_badge(servers, cx))
@@ -3717,6 +3722,12 @@ mod tests {
     /// Un swarm abierto en su resumen, con estos nodos, cuyo agente es el
     /// servidor de mentira.
     fn swarm_server_as(role: &str, nodes: serde_json::Value, cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle) {
+        swarm_servers_as(role, nodes, &["s1"], cx)
+    }
+
+    /// Lo mismo con varios swarms, todos con el mismo agente; abierto el
+    /// primero.
+    fn swarm_servers_as(role: &str, nodes: serde_json::Value, ids: &[&str], cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle) {
         let server = FakeServer::start();
         let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
         let mut mine = org("o1", "G Studio");
@@ -3725,12 +3736,21 @@ mod tests {
         server.mount(get("/api/v1/task-spaces/").respond_with(ok(json!([space("a", "Producto")]))));
         server.mount(get("/api/v1/docs/").respond_with(ok(json!({}))));
         server.mount(get("/api/v1/tasks/").respond_with(ok(json!([]))));
-        let mut vps = platform_server("s1", "o1", "pixel-vps", "online");
-        (vps["host"], vps["agentPort"], vps["hasAgentToken"]) = (json!("127.0.0.1"), json!(server.port()), json!(false));
-        server.mount(get("/api/v1/servers/").respond_with(ok(json!([vps]))));
+        let rows: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|id| {
+                let name = if *id == "s1" { "pixel-vps".to_string() } else { format!("vps-{id}") };
+                let mut vps = platform_server(id, "o1", &name, "online");
+                (vps["host"], vps["agentPort"], vps["hasAgentToken"]) = (json!("127.0.0.1"), json!(server.port()), json!(false));
+                vps
+            })
+            .collect();
+        server.mount(get("/api/v1/servers/").respond_with(ok(json!(rows))));
         server.mount(get("/api/v1/nodes").respond_with(ok(nodes)));
-        for what in ["incidents", "deployables", "provisioning-runs"] {
-            server.mount(get(&format!("/api/v1/servers/s1/{what}")).respond_with(ok(json!([]))));
+        for id in ids {
+            for what in ["incidents", "deployables", "provisioning-runs"] {
+                server.mount(get(&format!("/api/v1/servers/{id}/{what}")).respond_with(ok(json!([]))));
+            }
         }
         server.mount(get("/api/v1/services").respond_with(ok(json!([
             { "id": "svc1", "name": "shop_web", "image": "ghcr.io/o/web:v3", "stack": "shop", "replicas": { "running": 1, "desired": 2 }, "updatedAt": "2026-11-20T10:00:00Z" },
@@ -3848,6 +3868,27 @@ mod tests {
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
+    /// Rotura que atrapa: que la pestaña de servicios sea una para todos los
+    /// servidores y el filtro de uno aparezca en el siguiente.
+    #[gpui_kit::test]
+    fn each_server_has_its_own_services_tab(cx: &mut TestAppContext) {
+        let (_server, window) = swarm_servers_as("viewer", json!([]), &["s1", "s2"], cx);
+        click(window, "server-tab-services", cx);
+        wait_until(cx, "llegan los servicios", |cx| on_screen(window, "service-row-svc1", cx));
+        click(window, "services-filter", cx);
+        type_text(window, "POSTGRES", cx);
+        wait_until(cx, "el filtro deja uno", |cx| !on_screen(window, "service-row-svc1", cx));
+
+        click(window, "server-back", cx);
+        wait_until(cx, "vuelve la tabla", |cx| on_screen(window, "platform-open-s2", cx));
+        click(window, "platform-open-s2", cx);
+        wait_until(cx, "se abre el otro", |cx| on_screen(window, "server-tab-services", cx));
+        click(window, "server-tab-services", cx);
+        wait_until(cx, "llegan sus servicios, sin filtro", |cx| on_screen(window, "service-row-svc1", cx));
+        assert!(!on_screen(window, "services-count", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
     /// Rotura que atrapa: ofrecerle reiniciar a un lector, cuyo pase al
     /// agente es de lectura.
     #[gpui_kit::test]
@@ -3864,6 +3905,8 @@ mod tests {
     struct FakeKeys {
         saved: std::sync::Mutex<Option<String>>,
         writes: std::sync::Mutex<Vec<(String, String)>>,
+        /// El llavero bloqueado: leer falla.
+        locked: std::sync::atomic::AtomicBool,
     }
 
     impl crate::platform::ssh_key::SshKeys for FakeKeys {
@@ -3877,6 +3920,9 @@ mod tests {
             Ok(vec![key("contabo"), key("pixel")])
         }
         fn saved(&self, _: &str) -> Result<Option<String>, String> {
+            if self.locked.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("keychain: locked".into());
+            }
             Ok(self.saved.lock().unwrap().clone())
         }
         fn save(&self, server_id: &str, public_key: &str) -> Result<(), String> {
@@ -3978,6 +4024,31 @@ mod tests {
             *installer.carried.lock().unwrap(),
             [("s1".to_string(), "cac_agent_NEW".to_string(), Some("ssh-ed25519 AAAA pixel".to_string()), backend)]
         );
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Rotura que atrapa: reacuñar (y tumbar el agente) con el llavero
+    /// bloqueado, para luego entrar por SSH ofreciendo todas las llaves.
+    #[gpui_kit::test]
+    fn a_locked_keychain_leaves_the_agent_alone(cx: &mut TestAppContext) {
+        let keys = std::sync::Arc::new(FakeKeys::default());
+        keys.locked.store(true, std::sync::atomic::Ordering::SeqCst);
+        let shared: std::sync::Arc<dyn crate::platform::ssh_key::SshKeys> = keys.clone();
+        let installer = std::sync::Arc::new(FakeInstaller::default());
+        let installing: std::sync::Arc<dyn crate::platform::agent_install::AgentInstaller> = installer.clone();
+        cx.update(|cx| {
+            cx.set_global(crate::platform::ssh_key::LocalKeys(shared));
+            cx.set_global(crate::platform::agent_install::LocalInstaller(installing));
+        });
+        let (server, window) = platform_as("admin", cx);
+        click(window, "platform-open-s1", cx);
+        wait_until(cx, "sale el botón", |cx| on_screen(window, "server-agent-install", cx));
+        click(window, "server-agent-install", cx);
+        cx.simulate_prompt_answer("Instalar");
+        wait_until(cx, "dice por qué no", |cx| on_screen(window, "server-agent-result", cx));
+        assert!(label(window, "server-agent-result", cx).contains("llavero"), "{}", label(window, "server-agent-result", cx));
+        assert!(server_writes(&server).is_empty(), "reacuñó con el llavero bloqueado");
+        assert!(installer.carried.lock().unwrap().is_empty());
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 

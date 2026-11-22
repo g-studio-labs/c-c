@@ -283,6 +283,9 @@ pub fn ssh_base_args(
         args.push("IdentitiesOnly=yes".into());
     }
 
+    // Sin `--`, un usuario o un host que empiece por `-` (`-oProxyCommand=…`)
+    // lo leía ssh como una opción más, y una opción así ejecuta lo que diga.
+    args.push("--".into());
     args.push(target);
     args.push(remote_cmd.to_string());
     args
@@ -384,6 +387,16 @@ mod tests {
         let n = args.len();
         assert_eq!(args[n - 2], "deploy@10.0.0.1");
         assert_eq!(args[n - 1], "uptime");
+    }
+
+    /// Rotura que atrapa: que un usuario `-oProxyCommand=…` llegue a ssh como
+    /// opción (ejecutaría ese comando en esta máquina) en vez de destino.
+    #[test]
+    fn a_user_that_looks_like_an_option_is_still_the_destination() {
+        let args = ssh_base_args("h", 22, "-oProxyCommand=touch /tmp/x", "true", None);
+        let n = args.len();
+        assert_eq!(args[n - 3], "--");
+        assert_eq!(args[n - 2], "-oProxyCommand=touch /tmp/x@h");
     }
 
     /// Las opciones que hacen que un fallo sea un fallo y no una espera:

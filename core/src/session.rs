@@ -112,6 +112,17 @@ pub(crate) fn unwrap_data<T: for<'de> Deserialize<'de>>(reply: &Reply) -> Result
     Err(server_error(reply))
 }
 
+/// Saca una lista del `data` de una respuesta. Una lista vacía puede venir
+/// sin `data`: el backend y el agente lo omiten (`omitempty`).
+pub(crate) fn unwrap_list<T: for<'de> Deserialize<'de>>(reply: &Reply) -> Result<Vec<T>, ApiError> {
+    if reply.status < 400 {
+        if let Ok(Envelope { success: true, data, .. }) = serde_json::from_str::<Envelope<Vec<T>>>(&reply.body) {
+            return Ok(data.unwrap_or_default());
+        }
+    }
+    Err(server_error(reply))
+}
+
 /// El error que cuenta una respuesta, con su etiqueta y su frase.
 pub(crate) fn server_error(reply: &Reply) -> ApiError {
     // Un cuerpo de error puede no encajar en ningún tipo: se lee sin él.
@@ -296,13 +307,7 @@ impl Core {
     /// respuesta buena, que falte es «ninguno». Una lista con otra forma sí
     /// es un fallo: leerla como vacía sería decir «cero» sin saberlo.
     pub(crate) async fn get_list<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<Vec<T>, ApiError> {
-        let reply = self.request("GET", path, None, true).await?;
-        if reply.status < 400 {
-            if let Ok(Envelope { success: true, data, .. }) = serde_json::from_str::<Envelope<Vec<T>>>(&reply.body) {
-                return Ok(data.unwrap_or_default());
-            }
-        }
-        Err(server_error(&reply))
+        unwrap_list(&self.request("GET", path, None, true).await?)
     }
 
     /// Una petición con sesión y cuerpo JSON que devuelve el `data` del sobre.

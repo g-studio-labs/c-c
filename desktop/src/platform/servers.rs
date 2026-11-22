@@ -36,11 +36,15 @@ pub struct ServersView {
     services: Option<Entity<ServicesView>>,
     stats: Option<Entity<StatsPanel>>,
     k8s: Option<Entity<K8sConsole>>,
+    /// De qué servidor son las tres de arriba. Otro servidor empieza con
+    /// las suyas: el filtro, la línea de reinicio o un secreto revelado de
+    /// uno salían en el siguiente.
+    views_of: Option<String>,
 }
 
 impl ServersView {
     pub fn new() -> Self {
-        ServersView { dialog: None, ssh_key: None, problem: None, agent_line: None, services: None, stats: None, k8s: None }
+        ServersView { dialog: None, ssh_key: None, problem: None, agent_line: None, services: None, stats: None, k8s: None, views_of: None }
     }
 
     fn open_dialog(&mut self, editing: Option<Server>, window: &mut Window, cx: &mut Context<Self>) {
@@ -104,21 +108,31 @@ impl ServersView {
             let (id, name) = (server.id.clone(), server.name.clone());
             let Ok(done) = cx.update(|_, cx| {
                 Backend::ask(cx, move |core| async move {
+                    // La llave se lee antes de acuñar: reacuñar tumba la
+                    // identidad del agente, y con el llavero bloqueado el SSH
+                    // ofrecía todas las llaves y acababa en «Too many
+                    // authentication failures», con el agente ya sin hablar.
+                    let saved = {
+                        let id = id.clone();
+                        tokio::task::spawn_blocking(move || keys.saved(&id)).await.map_err(|error| error.to_string()).and_then(|saved| saved)
+                    };
+                    let identity_key = match saved {
+                        Ok(key) => key.filter(|key| !key.trim().is_empty()),
+                        Err(error) => return Err(error),
+                    };
                     let backend_url = core.base_url().to_string();
                     let wait = installer.wait();
-                    core.platform()
-                        .install_agent(&id, wait, move |server, identity| {
-                            let identity_key = keys.saved(&server.id).ok().flatten().filter(|key| !key.trim().is_empty());
-                            installer.install(&install_for(server, identity, identity_key, &backend_url))
-                        })
-                        .await
+                    Ok(core.platform().install_agent(&id, wait, move |server, identity| installer.install(&install_for(server, identity, identity_key, &backend_url))).await)
                 })
             }) else {
                 return;
             };
             let Ok(outcome) = done.await else { return };
             this.update(cx, |this, cx| {
-                let (phrase, warning) = outcome_phrase(locale(cx), &name, &outcome);
+                let (phrase, warning) = match &outcome {
+                    Ok(outcome) => outcome_phrase(locale(cx), &name, outcome),
+                    Err(error) => (cac_core::text_with(locale(cx), "common:servers.agentUpdate.keychainFailed", &[("name", &name), ("error", error)]), true),
+                };
                 this.agent_line = Some((server.id, phrase, warning));
                 cx.notify();
             })
@@ -268,6 +282,10 @@ impl Render for ServersView {
         let state = Backend::snapshot(cx).read(cx).platform.clone();
         let open = state.open_server.as_ref().and_then(|id| state.servers.iter().find(|server| &server.id == id));
         if let Some(server) = open {
+            if self.views_of.as_ref() != Some(&server.id) {
+                self.views_of = Some(server.id.clone());
+                (self.services, self.stats, self.k8s) = (None, None, None);
+            }
             let actions = self.agent_actions(server, &state, cx);
             let services = (state.tab == cac_core::ServerTab::Services)
                 .then(|| self.services.get_or_insert_with(|| cx.new(|cx| ServicesView::new(window, cx))).clone().into_any_element());

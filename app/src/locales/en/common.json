@@ -384,7 +384,8 @@
       "confirmTitle": "Install the agent on {{name}}?",
       "confirmBody": "It gets a new identity and the previous one stops working. If SSH fails, the agent stays silent until it is reinstalled.",
       "confirm": "Install",
-      "failed": "The agent could not be installed."
+      "failed": "The agent could not be installed.",
+      "keychainFailed": "Couldn't read {{name}}'s SSH key from the keychain, so the agent was left untouched: {{error}}"
     },
     "secretsMoved": "The secrets cac takes to the server (from 1Password) are now in",
     "badPort": "A port goes from 1 to 65535",

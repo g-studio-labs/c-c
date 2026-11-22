@@ -16,6 +16,7 @@ pub mod swarm;
 
 use serde::{Deserialize, Serialize};
 
+use crate::stream::ServerEvent;
 use crate::Core;
 pub use agent::{agent_base, Agent, AgentStream, AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT};
 pub use detail::{server_tabs, AgentNote, DeployableSummary, IncidentServerRef, IncidentSummary, ProvisioningRun, ServerOverview, ServerTab, AGENT_VERSION_DEPLOYS};
@@ -257,10 +258,14 @@ impl Platform {
         let id = before.id.clone();
         let identity: AgentIdentity = self.core.call("POST", &format!("/api/v1/servers/{id}/agent-token"), Some(serde_json::json!({}))).await?;
         let target = before.clone();
-        tokio::task::spawn_blocking(move || ssh(&target, identity))
+        let carried = tokio::task::spawn_blocking(move || ssh(&target, identity))
             .await
-            .map_err(|error| ServerEditError::Ssh(error.to_string()))?
-            .map_err(ServerEditError::Ssh)?;
+            .map_err(|error| ServerEditError::Ssh(error.to_string()))
+            .and_then(|carried| carried.map_err(ServerEditError::Ssh));
+        if let Err(error) = carried {
+            self.reload_server(&id).await;
+            return Err(error);
+        }
         self.change(|data| {
             if let Some(job) = data.agent_job.as_mut() {
                 job.phase = AgentInstallPhase::Waiting;
@@ -280,8 +285,22 @@ impl Platform {
                 }
             }
             if tokio::time::Instant::now() >= deadline {
+                self.reload_server(&id).await;
                 return Ok(AgentInstallOutcome::Silent);
             }
+        }
+    }
+
+    /// Ya acuñada la identidad, la fila tiene que saberlo aunque el agente
+    /// no haya vuelto: sin `has_agent_token`, Servicios iba sin pase, el
+    /// agente nuevo contestaba 401 y no se reintentaba hasta salir y volver.
+    async fn reload_server(&self, server_id: &str) {
+        if let Ok(now) = self.core.get::<Server>(&format!("/api/v1/servers/{server_id}")).await {
+            self.edit_list(|all| {
+                if let Some(slot) = all.iter_mut().find(|server| server.id == now.id) {
+                    *slot = now;
+                }
+            });
         }
     }
 
@@ -309,10 +328,16 @@ impl Platform {
         self.change(|data| data.on_screen = true);
     }
 
-    /// Volver a lo demás. El servidor abierto se queda para la vuelta.
+    /// Volver a lo demás. El servidor abierto se queda para la vuelta; el
+    /// log y el sondeo de recursos no, que nadie los mira: el sondeo vuelve
+    /// con `start_stats` al entrar.
     pub fn leave(&self) {
         if self.data().on_screen {
-            self.change(|data| data.on_screen = false);
+            self.change(|data| {
+                data.on_screen = false;
+                stop_logs(data);
+                stop_stats(data);
+            });
         }
     }
 
@@ -473,6 +498,10 @@ impl Platform {
         if !server_tabs(server.kind).contains(&tab) {
             return false;
         }
+        // La misma pestaña otra vez no es dejarla: no corta el log.
+        if self.data().tab == tab {
+            return true;
+        }
         self.change(|data| {
             data.tab = tab;
             stop_logs(data);
@@ -503,14 +532,14 @@ impl Platform {
     /// Pide al agente del servidor abierto sus nodos.
     pub async fn load_nodes(&self) {
         let Some(server) = self.open() else { return };
-        let answer = self.core.agent().get_data::<Option<Vec<SwarmNode>>>(&server, "/api/v1/nodes").await;
+        let answer = self.core.agent().get_list::<SwarmNode>(&server, "/api/v1/nodes").await;
         self.change(|data| {
             if data.open_server.as_deref() != Some(server.id.as_str()) {
                 return;
             }
             match answer {
                 Ok(nodes) => {
-                    data.nodes = Some(nodes.unwrap_or_default());
+                    data.nodes = Some(nodes);
                     data.nodes_error = None;
                 }
                 Err(error) => data.nodes_error = Some(error.to_string()),
@@ -577,7 +606,7 @@ impl Platform {
         if busy {
             return;
         }
-        let answer = self.core.agent().get_data::<Option<Vec<ContainerStats>>>(server, "/api/v1/stats").await;
+        let answer = self.core.agent().get_list::<ContainerStats>(server, "/api/v1/stats").await;
         self.change(|data| {
             data.stats_loading = false;
             if data.open_server.as_deref() != Some(server.id.as_str()) {
@@ -585,7 +614,7 @@ impl Platform {
             }
             match answer {
                 Ok(stats) => {
-                    data.stats = Some(stats.unwrap_or_default());
+                    data.stats = Some(stats);
                     data.stats_error = None;
                     data.stats_fetched_at = Some(chrono::Utc::now().to_rfc3339());
                 }
@@ -601,14 +630,14 @@ impl Platform {
             data.services_loading = true;
             data.services_error = None;
         });
-        let answer = self.core.agent().get_data::<Option<Vec<SwarmService>>>(&server, "/api/v1/services").await;
+        let answer = self.core.agent().get_list::<SwarmService>(&server, "/api/v1/services").await;
         self.change(|data| {
             if data.open_server.as_deref() != Some(server.id.as_str()) {
                 return;
             }
             data.services_loading = false;
             match answer {
-                Ok(services) => data.services = Some(services.unwrap_or_default()),
+                Ok(services) => data.services = Some(services),
                 Err(error) => data.services_error = Some(error.to_string()),
             }
         });
@@ -676,12 +705,30 @@ impl Platform {
                 Ok(mut stream) => {
                     let opened = tokio::time::Instant::now();
                     self.edit_logs(&service_id, |logs| logs.status = LogStatus::Streaming);
-                    while let Some(event) = stream.next().await {
-                        self.edit_logs(&service_id, |logs| match event.event.as_str() {
-                            "error" => logs.error = Some(event.data),
-                            _ => logs.push(&event.data),
-                        });
+                    // Las líneas se juntan en tandas de `LOG_FLUSH`: cada aviso
+                    // copia el estado entero y repinta, y un servicio que
+                    // escribe mucho lo hacía cientos de veces por segundo.
+                    let mut pending: Vec<ServerEvent> = Vec::new();
+                    let mut flush_at = tokio::time::Instant::now();
+                    loop {
+                        let next = if pending.is_empty() {
+                            stream.next().await
+                        } else {
+                            match tokio::time::timeout_at(flush_at, stream.next()).await {
+                                Ok(next) => next,
+                                Err(_) => {
+                                    self.push_logs(&service_id, std::mem::take(&mut pending));
+                                    continue;
+                                }
+                            }
+                        };
+                        let Some(event) = next else { break };
+                        if pending.is_empty() {
+                            flush_at = tokio::time::Instant::now() + services::LOG_FLUSH;
+                        }
+                        pending.push(event);
                     }
+                    self.push_logs(&service_id, pending);
                     if opened.elapsed() >= services::LOG_STEADY {
                         failures = 0;
                     }
@@ -696,6 +743,20 @@ impl Platform {
             self.edit_logs(&service_id, |logs| logs.status = LogStatus::Reconnecting);
             tokio::time::sleep(crate::stream::backoff(self.core.inner.config.stream_backoff, failures - 1)).await;
         }
+    }
+
+    fn push_logs(&self, service_id: &str, events: Vec<ServerEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        self.edit_logs(service_id, |logs| {
+            for event in events {
+                match event.event.as_str() {
+                    "error" => logs.error = Some(event.data),
+                    _ => logs.push(&event.data),
+                }
+            }
+        });
     }
 
     fn edit_logs(&self, service_id: &str, edit: impl FnOnce(&mut ServiceLogs)) {
@@ -806,7 +867,11 @@ impl Platform {
         self.core.inner.platform.lock().expect("platform lock")
     }
 
+    /// Cada cambio y su aviso van juntos y en fila: si no, dos a la vez
+    /// (una línea de log y el cierre del log) podían avisar en orden inverso
+    /// y dejar en pantalla el estado viejo.
     fn change(&self, edit: impl FnOnce(&mut PlatformData)) {
+        let _order = self.core.inner.platform_order.lock().expect("platform order lock");
         edit(&mut self.data());
         self.core.inner.listener.platform_changed(self.state());
     }
