@@ -304,7 +304,7 @@ impl Render for ServersView {
             let secrets = (state.tab == cac_core::ServerTab::Secrets).then(|| self.secrets.get_or_insert_with(|| cx.new(|cx| StackSecretsView::new(window, cx))).clone().into_any_element());
             let deploy = (state.tab == cac_core::ServerTab::Deploy).then(|| self.deploy.get_or_insert_with(|| cx.new(|cx| DeployView::new(window, cx))).clone().into_any_element());
             let provision = (state.tab == cac_core::ServerTab::Provision).then(|| self.provision.get_or_insert_with(|| cx.new(|cx| ProvisionView::new(window, cx))).clone().into_any_element());
-            let backups = (state.tab == cac_core::ServerTab::Backups).then(|| self.backups.get_or_insert_with(|| cx.new(|_| BackupsView::new())).clone().into_any_element());
+            let backups = (state.tab == cac_core::ServerTab::Backups).then(|| self.backups.get_or_insert_with(|| cx.new(|cx| BackupsView::new(window, cx))).clone().into_any_element());
             return div().size_full().child(super::server_page::page(server, &state, actions, super::server_page::Panels { services, stats, k8s, deploy, secrets, provision, backups }, cx)).into_any_element();
         }
         let theme = cx.theme();

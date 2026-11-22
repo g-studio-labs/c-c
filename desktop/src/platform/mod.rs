@@ -5,6 +5,7 @@
 
 pub mod agent_install;
 pub mod backup_form;
+pub mod backup_local;
 pub mod backups;
 pub mod deploy;
 pub mod deploy_settings;

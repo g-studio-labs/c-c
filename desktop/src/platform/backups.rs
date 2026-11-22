@@ -3,11 +3,17 @@
 //!
 //! El backup lo hace el agente dentro del contenedor de la base, lo cifra con
 //! age y lo sube al bucket: aquí se configura y se mira. Leer es de
-//! cualquiera; configurar y lanzar, de quien administra (lo decide el core).
+//! cualquiera; configurar, lanzar, descargar y tocar las llaves, de quien
+//! administra (lo decide el core). Lo que se descarga va **cifrado**; se abre
+//! con la llave privada, que no está en cac.
 
-use cac_core::{detect_databases, server_edit_phrase, Backup, BackupStatus, BackupTarget, BackupsState, LogLine, PlatformState};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use cac_core::{detect_databases, is_age_public_key, server_edit_phrase, Backup, BackupStatus, BackupTarget, BackupsState, LogLine, PlatformState};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -18,6 +24,7 @@ use crate::log_view::LogBox;
 use crate::theme::Leading as _;
 
 use super::backup_form::{BackupFormClosed, BackupFormDialog};
+use super::backup_local::{backup_local, CreateKeyClosed, CreateKeyDialog};
 use super::services::{empty, pill};
 
 pub struct BackupsView {
@@ -26,13 +33,212 @@ pub struct BackupsView {
     /// Cómo acabó lo último que se pidió: la frase y si falló.
     line: Option<(String, bool)>,
     logs: LogBox,
+    /// La llave pública que se escribe a mano, y su nombre.
+    key_label: Entity<InputState>,
+    key_value: Entity<InputState>,
+    key_dialog: Option<(Entity<CreateKeyDialog>, Subscription)>,
+    /// Lo que se está bajando, por backup: cuánto va y cuánto es.
+    downloading: HashMap<String, (u64, Option<u64>)>,
+    _changed: Vec<Subscription>,
 }
 
 type Work<T> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, cac_core::ServerEditError>> + Send>>;
 
 impl BackupsView {
-    pub fn new() -> Self {
-        BackupsView { form: None, busy: false, line: None, logs: LogBox::new() }
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let key_label = cx.new(|cx| InputState::new(window, cx).placeholder("jose"));
+        let key_value = cx.new(|cx| InputState::new(window, cx).placeholder("age1…"));
+        let repaint = |_: &mut Self, _: Entity<InputState>, event: &InputEvent, cx: &mut Context<Self>| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        };
+        let changed = vec![cx.subscribe(&key_label, repaint), cx.subscribe(&key_value, repaint)];
+        BackupsView { form: None, busy: false, line: None, logs: LogBox::new(), key_label, key_value, key_dialog: None, downloading: HashMap::new(), _changed: changed }
+    }
+
+    fn add_recipient(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let label = self.key_label.read(cx).value().trim().to_string();
+        let key = self.key_value.read(cx).value().trim().to_string();
+        self.busy = true;
+        self.line = None;
+        cx.notify();
+        let answer = Backend::ask(cx, move |core| async move { core.platform().add_backup_recipient(&label, &key).await });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(result) = answer.await else { return };
+            this.update_in(cx, |this, window, cx| {
+                this.busy = false;
+                match result {
+                    Ok(()) => {
+                        this.key_label.update(cx, |input, cx| input.set_value("", window, cx));
+                        this.key_value.update(cx, |input, cx| input.set_value("", window, cx));
+                    }
+                    Err(error) => this.line = Some((server_edit_phrase(locale(cx), &error, "common:backups.addKey"), true)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Pregunta: los backups nuevos ya no se cifrarán para ella.
+    fn ask_remove_recipient(&mut self, recipient: cac_core::BackupRecipient, window: &mut Window, cx: &mut Context<Self>) {
+        let title = cac_core::text_with(locale(cx), "common:backups.removeKeyTitle", &[("label", &recipient.label)]);
+        let (body, confirm, cancel) = (tr(cx, "common:backups.removeKeyBody"), tr(cx, "common:backups.removeKey"), tr(cx, "common:servers.cancel"));
+        let answer = window.prompt(PromptLevel::Warning, &title, Some(&body), &[confirm.as_str(), cancel.as_str()], cx);
+        cx.spawn(async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                let id = recipient.id.clone();
+                this.ask(cx, move |core| Box::pin(async move { core.platform().delete_backup_recipient(&id).await }), |_, _, _| {}, "common:backups.removeKey");
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn open_key_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dialog = cx.new(|cx| CreateKeyDialog::new(window, cx));
+        let closed = cx.subscribe(&dialog, |this, _, closed: &CreateKeyClosed, cx| {
+            this.key_dialog = None;
+            if let Some(phrase) = closed.0.clone() {
+                this.line = Some((phrase, false));
+            }
+            cx.notify();
+        });
+        self.key_dialog = Some((dialog, closed));
+        cx.notify();
+    }
+
+    /// Pregunta, deja elegir dónde y baja el fichero cifrado. En la app de
+    /// Tauri, abrir la URL no hacía nada en el escritorio (jose, 24-oct-2026).
+    fn ask_download(&mut self, run: Backup, database: String, window: &mut Window, cx: &mut Context<Self>) {
+        let (title, body) = (tr(cx, "common:backups.downloadTitle"), tr(cx, "common:backups.downloadBody"));
+        let (confirm, cancel) = (tr(cx, "common:backups.download"), tr(cx, "common:servers.cancel"));
+        let answer = window.prompt(PromptLevel::Info, &title, Some(&body), &[confirm.as_str(), cancel.as_str()], cx);
+        cx.spawn(async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let stamp: String = run.created_at.chars().take(16).map(|c| if c == ':' || c == 'T' { '-' } else { c }).collect();
+            let name = cac_core::safe_file_name(&format!("{database}-{stamp}.age"));
+            let home = std::env::home_dir().unwrap_or_else(std::env::temp_dir);
+            let Ok(chosen) = this.update(cx, |_, cx| cx.prompt_for_new_path(&home, Some(&name))) else { return };
+            let Ok(Ok(Some(target))) = chosen.await else { return };
+            this.update(cx, |this, cx| this.download(run.id.clone(), target, cx)).ok();
+        })
+        .detach();
+    }
+
+    fn download(&mut self, backup_id: String, target: std::path::PathBuf, cx: &mut Context<Self>) {
+        let seen = Arc::new(Mutex::new((0u64, None::<u64>)));
+        self.downloading.insert(backup_id.clone(), (0, None));
+        self.line = None;
+        cx.notify();
+        let (local, language, progress, id, path) = (backup_local(cx), locale(cx), seen.clone(), backup_id.clone(), target.clone());
+        let answer = Backend::ask(cx, move |core| async move {
+            let url = core.platform().backup_download_url(&id).await.map_err(|error| server_edit_phrase(language, &error, "common:backups.download"))?;
+            local.download(url, path, Box::new(move |done, total| *progress.lock().unwrap() = (done, total))).await
+        });
+        // El progreso llega en el hilo de la descarga; la fila lo lee a ratos.
+        let ticking = backup_id.clone();
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+            let going = this
+                .update(cx, |this, cx| match this.downloading.get_mut(&ticking) {
+                    Some(slot) => {
+                        *slot = *seen.lock().unwrap();
+                        cx.notify();
+                        true
+                    }
+                    None => false,
+                })
+                .unwrap_or(false);
+            if !going {
+                break;
+            }
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            let result = answer.await.unwrap_or_else(|_| Err(String::new()));
+            this.update(cx, |this, cx| {
+                this.downloading.remove(&backup_id);
+                this.line = Some(match result {
+                    Ok(()) => (cac_core::text_with(locale(cx), "common:backups.downloaded", &[("path", &target.display().to_string())]), false),
+                    Err(problem) => (problem, true),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn recipients(&self, state: &PlatformState, backups: &BackupsState, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (border, muted, danger, mono) = (theme.border, theme.muted_foreground, theme.danger, theme.mono_font_family.clone());
+        let admin = state.permissions.manage_backups;
+        let rows = backups.recipients.iter().flatten().map(|recipient| {
+            let removed = recipient.clone();
+            div()
+                .id(SharedString::from(format!("backup-recipient-{}", recipient.id)))
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().font_weight(FontWeight::MEDIUM).child(recipient.label.clone()))
+                .child(div().flex_1().min_w_0().truncate().font_family(mono.clone()).text_xs().text_color(muted).child(recipient.public_key.clone()))
+                .when(admin, |row| {
+                    row.child(
+                        Button::new(SharedString::from(format!("backup-recipient-delete-{}", recipient.id)))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(Lucide::Trash))
+                            .tooltip(tr(cx, "common:backups.removeKey"))
+                            .disabled(self.busy)
+                            .on_click(cx.listener(move |this, _, window, cx| this.ask_remove_recipient(removed.clone(), window, cx))),
+                    )
+                })
+                .test_support()
+        });
+        let typed = self.key_value.read(cx).value().trim().to_string();
+        let valid = is_age_public_key(&typed) && !self.key_label.read(cx).value().trim().is_empty();
+        let adding = admin.then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .items_end()
+                        .gap_2()
+                        .child(div().w(px(160.)).flex().flex_col().gap_1().child(div().leading_xs().child(tr(cx, "common:backups.keyLabel"))).child(div().id("backup-key-label").child(Input::new(&self.key_label).small()).test_support()))
+                        .child(div().flex_1().min_w_0().flex().flex_col().gap_1().child(div().leading_xs().child(tr(cx, "common:backups.keyValue"))).child(div().id("backup-key-value").child(Input::new(&self.key_value).small()).test_support()))
+                        .child(Button::new("backup-key-add").small().primary().label(tr(cx, "common:backups.addKey")).disabled(self.busy || !valid).on_click(cx.listener(|this, _, window, cx| this.add_recipient(window, cx)))),
+                )
+                .when(!typed.is_empty() && !is_age_public_key(&typed), |column| column.child(div().id("backup-key-invalid").text_xs().text_color(danger).child(tr(cx, "common:backups.keyInvalid")).test_support()))
+                .child(div().text_xs().text_color(muted).child(tr(cx, "common:backups.keyHelp")))
+                .child(div().flex().child(Button::new("backup-key-create").outline().small().icon(Icon::new(Lucide::KeyRound)).label(tr(cx, "common:backups.createInOp")).on_click(cx.listener(|this, _, window, cx| this.open_key_dialog(window, cx)))))
+        });
+        div()
+            .id("backup-recipients")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(border)
+            .leading_sm()
+            .child(div().flex().items_center().gap_2().font_weight(FontWeight::MEDIUM).child(Icon::new(Lucide::KeyRound).size_4().text_color(muted)).child(tr(cx, "common:backups.recipients")))
+            .child(div().text_xs().text_color(muted).child(tr(cx, "common:backups.recipientsLead")))
+            .children(rows)
+            .children(adding)
+            .test_support()
+            .into_any_element()
     }
 
     /// Lo que se pide al backend, con su fallo dicho arriba.
@@ -281,7 +487,7 @@ impl BackupsView {
         let runs = backups.runs_of(&target.id);
         let log = backups.log_of.as_ref().and_then(|id| runs.iter().find(|run| &run.id == id)).map(|run| self.log_panel(run, backups, cx));
         let history = (!runs.is_empty() && log.is_none()).then(|| {
-            div().id(SharedString::from(format!("backup-history-{}", target.id))).flex().flex_col().rounded(px(8.)).border_1().border_color(border).children(runs.iter().map(|run| history_row(run, cx))).test_support()
+            div().id(SharedString::from(format!("backup-history-{}", target.id))).flex().flex_col().rounded(px(8.)).border_1().border_color(border).children(runs.iter().map(|run| self.history_row(run, &target.database, admin, cx))).test_support()
         });
         div()
             .id(SharedString::from(format!("backup-target-{}", target.id)))
@@ -318,7 +524,8 @@ impl BackupsView {
     }
 }
 
-fn history_row(run: &Backup, cx: &mut Context<BackupsView>) -> AnyElement {
+impl BackupsView {
+fn history_row(&self, run: &Backup, database: &str, admin: bool, cx: &mut Context<BackupsView>) -> AnyElement {
     let theme = cx.theme();
     let (border, muted) = (theme.border, theme.muted_foreground);
     let language = locale(cx);
@@ -353,8 +560,32 @@ fn history_row(run: &Backup, cx: &mut Context<BackupsView>) -> AnyElement {
             let id = opened.clone();
             Backend::run(cx, move |core| async move { core.platform().open_backup_log(&id).await });
         }))
+        .children(self.downloading.get(&run.id).map(|(done, total)| {
+            let language = locale(cx);
+            let phrase = match total.filter(|total| *total > 0) {
+                Some(total) => cac_core::text_with(
+                    language,
+                    "common:backups.downloadingOf",
+                    &[("percent", &(done * 100 / total).to_string()), ("done", &cac_core::format_bytes(*done)), ("total", &cac_core::format_bytes(total))],
+                ),
+                None => cac_core::text_with(language, "common:backups.downloading", &[("done", &cac_core::format_bytes(*done))]),
+            };
+            div().id(SharedString::from(format!("backup-downloading-{}", run.id))).aria_label(phrase.clone()).text_xs().text_color(muted).child(phrase).test_support()
+        }))
+        .when(admin && run.downloadable() && !self.downloading.contains_key(&run.id), |row| {
+            let (picked, database) = (run.clone(), database.to_string());
+            row.child(
+                Button::new(SharedString::from(format!("backup-download-{}", run.id)))
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(Lucide::Download))
+                    .tooltip(tr(cx, "common:backups.download"))
+                    .on_click(cx.listener(move |this, _, window, cx| this.ask_download(picked.clone(), database.clone(), window, cx))),
+            )
+        })
         .test_support()
         .into_any_element()
+}
 }
 
 /// Un instante como fecha y hora de esta máquina.
@@ -427,12 +658,14 @@ impl Render for BackupsView {
             .child(header)
             .child(div().leading_sm().text_color(muted).child(tr(cx, "common:backups.lead")))
             .children(notices)
+            .child(self.recipients(&state, &backups, cx))
             .children(error)
             .children(line)
             .children(detected)
             .children(none)
             .children(cards)
             .children(self.form.as_ref().map(|(dialog, _)| dialog.clone()))
+            .children(self.key_dialog.as_ref().map(|(dialog, _)| dialog.clone()))
             .test_support()
             .into_any_element()
     }
