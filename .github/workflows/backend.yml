@@ -54,7 +54,8 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: backend/go.mod
+          go-version: stable # go.mod's line is a minimum; setup-go would install exactly that patch
+          check-latest: true
           cache-dependency-path: backend/go.sum
 
       - name: Vet
@@ -96,6 +97,7 @@ jobs:
         with:
           context: ./backend
           push: true
+          pull: true
           tags: ghcr.io/g-studio-labs/c-c/backend:latest
 
   deploy:
