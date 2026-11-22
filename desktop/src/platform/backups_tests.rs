@@ -154,7 +154,8 @@ fn a_reader_cannot_download_or_touch_keys(cx: &mut TestAppContext) {
 /// Descargar pregunta, elige dónde y baja el fichero de la URL que da el
 /// backend; cancelar no pide la URL.
 ///
-/// Roturas que atrapa: descargar sin preguntar; pedir la URL (que firma una
+/// Roturas que atrapa: descargar sin preguntar (o preguntar dónde sin
+/// esperar a que se conteste); pedir la URL (que firma una
 /// descarga) al cancelar; bajar a otro sitio que el elegido o de otra URL.
 #[gpui_kit::test]
 fn an_admin_downloads_asking_where(cx: &mut TestAppContext) {
@@ -171,6 +172,7 @@ fn an_admin_downloads_asking_where(cx: &mut TestAppContext) {
     cx.simulate_prompt_answer("Cancelar");
     cx.run_until_parked();
     assert_eq!(server.hits("/api/v1/servers/s1/backups/runs/b1/download"), 0, "pidió la URL al cancelar");
+    assert!(!cx.did_prompt_for_new_path(), "preguntó dónde guardar sin esperar a la respuesta");
 
     click(window, "backup-download-b1", cx);
     cx.simulate_prompt_answer("Descargar");
@@ -203,11 +205,15 @@ fn the_1password_key_registers_only_its_public_half(cx: &mut TestAppContext) {
             .respond_with(ok(json!({ "id": "r2", "orgId": "o1", "label": "cac backups – llave age (1Password · Private)", "publicKey": public }))),
     );
 
+    // Con nombre, para que lo único que apague «Añadir» sea la llave.
+    click(window, "backup-key-label", cx);
+    type_text(window, "jose", cx);
     click(window, "backup-key-value", cx);
     type_text(window, &format!("AGE-SECRET-KEY-1{}", "Q".repeat(58)), cx);
     wait_until(cx, "dice que no es una pública", |cx| on_screen(window, "backup-key-invalid", cx));
     click(window, "backup-key-add", cx);
     cx.run_until_parked();
+    assert!(!on_screen(window, "backups-result", cx), "«Añadir» se pudo pulsar con una llave privada");
 
     click(window, "backup-key-create", cx);
     wait_until(cx, "salen las bóvedas", |cx| on_screen(window, "backup-vault-0", cx));
