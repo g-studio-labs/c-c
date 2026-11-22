@@ -4138,6 +4138,224 @@ mod tests {
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
+    /// 1Password y el ssh de mentira: apunta lo que se le pidió.
+    #[derive(Default)]
+    struct FakeOnePassword {
+        unreadable: Vec<String>,
+        rotated: std::sync::Mutex<Vec<(String, Vec<String>, Option<String>)>>,
+    }
+
+    impl crate::platform::secret_refs::OnePassword for FakeOnePassword {
+        fn check(&self, op_ref: &str) -> Result<(), String> {
+            if self.unreadable.iter().any(|bad| bad == op_ref) { Err("1Password está bloqueado".into()) } else { Ok(()) }
+        }
+        fn item_fields(&self, item: &str) -> Result<Vec<(String, String)>, String> {
+            Ok(vec![("api key".into(), format!("{item}/api key")), ("smtp pass".into(), format!("{item}/smtp pass"))])
+        }
+        fn rotate(&self, _: &cac_ops::secrets::SshTarget, service: &str, refs: &[cac_ops::secrets::SecretRef], command: Option<&str>, progress: Box<dyn Fn(&'static str, usize, usize) + Send>) -> Result<crate::platform::secret_refs::Rotated, String> {
+            progress("read", refs.len(), refs.len());
+            self.rotated.lock().unwrap().push((service.into(), refs.iter().map(|r| r.name.clone()).collect(), command.map(str::to_string)));
+            Ok(crate::platform::secret_refs::Rotated { items: refs.iter().map(|r| (r.name.clone(), format!("{}_v2", r.name), true)).collect(), updated: true })
+        }
+        fn capture(&self, _: &cac_ops::secrets::SshTarget, _: &str, vault: &str, title: &str) -> Result<(String, Vec<String>), String> {
+            Ok((format!("op://{vault}/{title}"), vec!["REDIS_URL".into()]))
+        }
+    }
+
+    fn with_one_password(fake: FakeOnePassword, cx: &mut TestAppContext) -> std::sync::Arc<FakeOnePassword> {
+        let fake = std::sync::Arc::new(fake);
+        let shared: std::sync::Arc<dyn crate::platform::secret_refs::OnePassword> = fake.clone();
+        cx.update(|cx| cx.set_global(crate::platform::secret_refs::LocalOnePassword(shared)));
+        fake
+    }
+
+    fn mount_secret_refs(server: &FakeServer, refs: serde_json::Value) {
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/servers/s1/deployables/d1/secret-refs")).respond_with(ok(refs)));
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/servers/s1/deployables/d1/secret-rotations")).respond_with(ok(json!([]))));
+    }
+
+    /// Un miembro ve de dónde salen los secrets pero no lo cambia, y no rota
+    /// donde el CI despliega: diciendo por qué. «Probar» dice cuál no se lee.
+    ///
+    /// Roturas que atrapa: dejar que un miembro guarde referencias; rotar en
+    /// un servicio que despliega el CI (su stack deploy tiraría los secrets);
+    /// un «Probar» que no dice cuál falla ni por qué.
+    #[gpui_kit::test]
+    fn a_member_reads_the_refs_checks_them_and_cannot_rotate_under_ci(cx: &mut TestAppContext) {
+        with_repo_secrets(false, cx);
+        with_one_password(FakeOnePassword { unreadable: vec!["op://Prod/api/smtp".into()], ..Default::default() }, cx);
+        let (server, window) = deploys_as("member", cx);
+        mount_secret_refs(&server, json!([{ "name": "DATABASE_URL", "opRef": "op://Prod/api/url", "usage": "runtime" }, { "name": "SMTP_PASS", "opRef": "op://Prod/api/smtp", "usage": "runtime" }]));
+        click(window, "deploy-service-svc1", cx);
+        wait_until(cx, "llegan los secrets", |cx| on_screen(window, "secret-row-1", cx));
+        assert!(!on_screen(window, "secrets-save", cx));
+        reveal(window, "server-body", "secrets-rotate", cx);
+        assert!(on_screen(window, "secrets-rotate-why", cx), "no dijo por qué no se rota");
+        reveal(window, "server-body", "secrets-check", cx);
+        click(window, "secrets-check", cx);
+        wait_until(cx, "dice cuál no se lee", |cx| on_screen(window, "secrets-unreadable", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Roturas que atrapa: importar campos de 1Password con nombres que no
+    /// valen o repetidos; guardar sin el cambio o sin recortar.
+    #[gpui_kit::test]
+    fn an_admin_imports_an_item_and_saves_the_refs(cx: &mut TestAppContext) {
+        with_repo_secrets(false, cx);
+        with_one_password(FakeOnePassword::default(), cx);
+        let (server, window) = deploys_as("admin", cx);
+        mount_secret_refs(&server, json!([{ "name": "API_KEY", "opRef": "op://Prod/old/api key", "usage": "runtime" }]));
+        server.mount(
+            Mock::given(method("PUT"))
+                .and(path("/api/v1/servers/s1/deployables/d1/secret-refs"))
+                .and(wiremock::matchers::body_json(json!({ "refs": [{ "name": "API_KEY", "opRef": "op://Prod/old/api key", "usage": "runtime" }, { "name": "SMTP_PASS", "opRef": "op://Prod/api/smtp pass", "usage": "runtime" }] })))
+                .respond_with(ok(json!(null))),
+        );
+        click(window, "deploy-service-svc1", cx);
+        wait_until(cx, "llegan los secrets", |cx| on_screen(window, "secret-row-0", cx));
+        reveal(window, "server-body", "secrets-item", cx);
+        click(window, "secrets-item", cx);
+        type_text(window, "op://Prod/api", cx);
+        click(window, "secrets-import", cx);
+        wait_until(cx, "se añade el que faltaba", |cx| on_screen(window, "secret-row-1", cx));
+        assert!(!on_screen(window, "secret-row-2", cx), "repitió el que ya estaba");
+        reveal(window, "server-body", "secrets-save", cx);
+        click(window, "secrets-save", cx);
+        let saved = json!({ "refs": [{ "name": "API_KEY", "opRef": "op://Prod/old/api key", "usage": "runtime" }, { "name": "SMTP_PASS", "opRef": "op://Prod/api/smtp pass", "usage": "runtime" }] });
+        wait_until(cx, "guarda la lista entera", |_| server.requests().iter().any(|r| r.method.as_str() == "PUT" && serde_json::from_slice::<serde_json::Value>(&r.body).ok() == Some(saved.clone())));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Roturas que atrapa: rotar sin preguntar; llevar otros secrets que los
+    /// guardados; apuntar en cac algo más que nombres y versiones.
+    #[gpui_kit::test]
+    fn a_member_rotates_where_cac_deploys_and_only_names_are_recorded(cx: &mut TestAppContext) {
+        with_repo_secrets(false, cx);
+        let op = with_one_password(FakeOnePassword::default(), cx);
+        let web = json!({ "id": "d1", "orgId": "o1", "serverId": "s1", "name": "web", "stack": "shop", "serviceName": "shop_web", "imageRepo": "ghcr.io/o/web", "repoFullName": "o/web", "onCINotify": "deploy", "currentImage": "ghcr.io/o/web:aaa1111" });
+        let (server, window) = swarm_servers_with("member", json!([]), &["s1"], true, json!([web]), cx);
+        for what in ["deployments", "builds", "commits"] {
+            server.mount(Mock::given(method("GET")).and(path(format!("/api/v1/servers/s1/deployables/d1/{what}"))).respond_with(ok(json!([]))));
+        }
+        mount_secret_refs(&server, json!([{ "name": "DATABASE_URL", "opRef": "op://Prod/api/url", "usage": "runtime" }]));
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path("/api/v1/servers/s1/deployables/d1/secret-rotations"))
+                .and(wiremock::matchers::body_json(json!({ "names": ["DATABASE_URL"], "versions": { "DATABASE_URL": "DATABASE_URL_v2" }, "status": "succeeded", "error": "" })))
+                .respond_with(ok(json!(null))),
+        );
+        click(window, "server-tab-deploy", cx);
+        wait_until(cx, "salen los servicios", |cx| on_screen(window, "deploy-service-svc1", cx));
+        click(window, "deploy-service-svc1", cx);
+        wait_until(cx, "llegan los secrets", |cx| on_screen(window, "secret-row-0", cx));
+        reveal(window, "server-body", "secrets-rotate", cx);
+        click(window, "secrets-rotate", cx);
+        let (title, _) = cx.pending_prompt().expect("rotó sin preguntar");
+        assert_eq!(title, "¿Rotar los secrets de shop_web?");
+        cx.simulate_prompt_answer("Cancelar");
+        settle_frames(window, cx);
+        assert!(op.rotated.lock().unwrap().is_empty(), "rotó al cancelar");
+        click(window, "secrets-rotate", cx);
+        cx.simulate_prompt_answer("Rotar en el servidor");
+        wait_until(cx, "dice lo que rotó", |cx| on_screen(window, "secrets-rotated", cx));
+        assert_eq!(*op.rotated.lock().unwrap(), [("shop_web".to_string(), vec!["DATABASE_URL".to_string()], None)]);
+        let recorded = json!({ "names": ["DATABASE_URL"], "versions": { "DATABASE_URL": "DATABASE_URL_v2" }, "status": "succeeded", "error": "" });
+        wait_until(cx, "apunta en cac sólo nombres y versiones", |_| {
+            server.requests().iter().any(|r| r.method.as_str() == "POST" && r.url.path().ends_with("secret-rotations") && serde_json::from_slice::<serde_json::Value>(&r.body).ok() == Some(recorded.clone()))
+        });
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// GitHub y el llavero de mentira: un PAT, y lo que se guardaría.
+    #[derive(Default)]
+    struct FakeGitHub {
+        token: std::sync::Mutex<Option<String>>,
+        put: std::sync::Mutex<Vec<(String, String, String, String, Option<bool>)>>,
+        deleted: std::sync::Mutex<Vec<(String, bool)>>,
+    }
+
+    impl crate::platform::stack_secrets::GitHubRepo for FakeGitHub {
+        fn configured(&self) -> bool {
+            self.token.lock().unwrap().is_some()
+        }
+        fn op_reference(&self) -> Option<String> {
+            None
+        }
+        fn set_token(&self, token: &str) -> Result<(), String> {
+            *self.token.lock().unwrap() = Some(token.into());
+            Ok(())
+        }
+        fn delete_token(&self) -> Result<(), String> {
+            *self.token.lock().unwrap() = None;
+            Ok(())
+        }
+        fn load_from_1password(&self, _: &str) -> Result<(), String> {
+            Err("no".into())
+        }
+        fn refresh_from_1password(&self) -> Result<(), String> {
+            Err("no".into())
+        }
+        fn list(&self, owner: String, repo: String, variables: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<crate::platform::stack_secrets::RepoEntry>, String>> + Send>> {
+            assert_eq!((owner.as_str(), repo.as_str()), ("o", "web"), "pidió otro repo");
+            let entry = |name: &str, value: Option<&str>| crate::platform::stack_secrets::RepoEntry { name: name.into(), value: value.map(str::to_string), created_at: "2026-11-01T00:00:00Z".into(), updated_at: "2026-11-02T00:00:00Z".into() };
+            let list = if variables { vec![entry("NODE_ENV", Some("production"))] } else { vec![entry("CAC_DEPLOY_KEY", None)] };
+            Box::pin(async move { Ok(list) })
+        }
+        fn put(&self, owner: String, repo: String, name: String, value: String, variable: Option<bool>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> {
+            self.put.lock().unwrap().push((owner, repo, name, value, variable));
+            Box::pin(async { Ok(()) })
+        }
+        fn delete(&self, _: String, _: String, name: String, variable: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> {
+            self.deleted.lock().unwrap().push((name, variable));
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// La pestaña Secrets: sin PAT lo pide; con él lista los secrets del repo
+    /// que sale de la imagen, guarda uno nuevo sin que su valor se quede y
+    /// borra preguntando.
+    ///
+    /// Roturas que atrapa: pedir los de otro repo; guardar el PAT o el
+    /// secret con otro valor, o un secret como variable; borrar sin
+    /// preguntar o borrar una variable creyendo que es un secret.
+    #[gpui_kit::test]
+    fn the_secrets_tab_keeps_the_pat_and_writes_secrets_without_keeping_them(cx: &mut TestAppContext) {
+        let fake = std::sync::Arc::new(FakeGitHub::default());
+        let shared: std::sync::Arc<dyn crate::platform::stack_secrets::GitHubRepo> = fake.clone();
+        cx.update(|cx| cx.set_global(crate::platform::stack_secrets::LocalGitHub(shared)));
+        let (_server, window) = swarm_server_as("member", json!([]), cx);
+        click(window, "server-tab-secrets", cx);
+        wait_until(cx, "pide el PAT", |cx| on_screen(window, "github-pat-status", cx) && label(window, "github-pat-status", cx) == "Sin configurar");
+        click(window, "github-token", cx);
+        type_text(window, "ghp_DEMENTIRA", cx);
+        click(window, "github-token-save", cx);
+        wait_until(cx, "lista los del repo", |cx| on_screen(window, "github-entry-CAC_DEPLOY_KEY", cx));
+        assert_eq!(fake.token.lock().unwrap().as_deref(), Some("ghp_DEMENTIRA"));
+
+        click(window, "github-new", cx);
+        click(window, "github-form-name", cx);
+        type_text(window, "SENTRY_DSN", cx);
+        click(window, "github-form-value", cx);
+        type_text(window, "https://valor", cx);
+        click(window, "github-form-save", cx);
+        wait_until(cx, "se cierra el formulario", |cx| !on_screen(window, "github-form", cx));
+        assert_eq!(*fake.put.lock().unwrap(), [("o".into(), "web".into(), "SENTRY_DSN".into(), "https://valor".into(), None)]);
+
+        click(window, "github-tab-variables", cx);
+        wait_until(cx, "las variables", |cx| on_screen(window, "github-entry-NODE_ENV", cx));
+        reveal(window, "server-body", "github-delete-NODE_ENV", cx);
+        click(window, "github-delete-NODE_ENV", cx);
+        assert!(cx.pending_prompt().is_some(), "borró sin preguntar");
+        cx.simulate_prompt_answer("Cancelar");
+        settle_frames(window, cx);
+        assert!(fake.deleted.lock().unwrap().is_empty(), "borró al cancelar");
+        click(window, "github-delete-NODE_ENV", cx);
+        cx.simulate_prompt_answer("Borrar");
+        wait_until(cx, "borra la variable", |_| !fake.deleted.lock().unwrap().is_empty());
+        assert_eq!(*fake.deleted.lock().unwrap(), [("NODE_ENV".to_string(), true)]);
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
     /// Rotura que atrapa: registrar con lo que no es (el nombre largo, la
     /// imagen con su tag) o no pasar a desplegarlo al registrarlo.
     #[gpui_kit::test]

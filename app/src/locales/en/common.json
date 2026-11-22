@@ -400,7 +400,8 @@
     "agentNotRunning": "not running",
     "agentKeys_one": "{{count}} key",
     "agentKeys_other": "{{count}} keys",
-    "retry": "Retry"
+    "retry": "Retry",
+    "variables": "Variables"
   },
   "admin": {
     "users": "Users",

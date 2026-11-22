@@ -1394,3 +1394,48 @@ async fn the_ci_key_is_shown_once_and_only_an_admin_manages() {
     rig.core.platform().update_deployable("d1", &settings).await.unwrap();
     assert_eq!(rig.core.platform().state().deploys.unwrap().deployables.unwrap()[0].migrate_command, "npx prisma migrate deploy");
 }
+
+// ─── Secrets por referencia ──────────────────────────────────────────────────
+
+use cac_core::{SecretRefRow, SecretUsage};
+
+/// Rotura que atrapa: dejar que un miembro cambie de dónde salen los
+/// secrets, mandar las filas sin recortar o sin su uso, o apuntar una
+/// rotación con algo más que nombres y versiones.
+#[tokio::test]
+async fn refs_are_saved_by_an_admin_and_a_rotation_records_only_names() {
+    let member = deploys_as("member").await;
+    let rows = [SecretRefRow { name: " DATABASE_URL ".into(), op_ref: "op://Prod/api/url ".into(), usage: SecretUsage::Both }];
+    assert_eq!(member.core.platform().save_secret_refs("d1", &rows).await, Err(ServerEditError::AdminOnly));
+
+    let rig = deploys_as("admin").await;
+    let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+    get("/api/v1/servers/s/deployables/d1/secret-refs").respond_with(ok(json!([{ "name": "DATABASE_URL", "opRef": "op://Prod/api/url", "usage": "both" }]))).mount(&rig.server).await;
+    get("/api/v1/servers/s/deployables/d1/secret-rotations").respond_with(ok(json!([]))).mount(&rig.server).await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/servers/s/deployables/d1/secret-refs"))
+        .and(body_json(json!({ "refs": [{ "name": "DATABASE_URL", "opRef": "op://Prod/api/url", "usage": "both" }] })))
+        .respond_with(ok(json!(null)))
+        .expect(1)
+        .mount(&rig.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/servers/s/deployables/d1/secret-rotations"))
+        .and(body_json(json!({ "names": ["DATABASE_URL"], "versions": { "DATABASE_URL": "DATABASE_URL_a1b2" }, "status": "succeeded", "error": "" })))
+        .respond_with(ok(json!(null)))
+        .expect(1)
+        .mount(&rig.server)
+        .await;
+    rig.core.platform().save_secret_refs("d1", &rows).await.unwrap();
+    assert_eq!(rig.core.platform().state().secrets.unwrap().refs.unwrap()[0].usage, SecretUsage::Both);
+    rig.core.platform().record_rotation("d1", &["DATABASE_URL".into()], &[("DATABASE_URL".into(), "DATABASE_URL_a1b2".into())], None).await.unwrap();
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/servers/s/deployables/d1/secret-rotations"))
+        .and(body_json(json!({ "names": ["DATABASE_URL"], "versions": {}, "status": "failed", "error": "op: locked" })))
+        .respond_with(ok(json!(null)))
+        .expect(1)
+        .mount(&rig.server)
+        .await;
+    rig.core.platform().record_rotation("d1", &["DATABASE_URL".into()], &[], Some("op: locked")).await.unwrap();
+}

@@ -18,6 +18,7 @@ use crate::log_view::LogBox;
 use crate::theme::Leading as _;
 
 use super::deploy_settings::DeploySettingsView;
+use super::secret_refs::SecretRefsView;
 use super::services::{empty, pill};
 
 const LIST_WIDTH: f32 = 240.;
@@ -43,6 +44,9 @@ pub struct DeployView {
     prefilled_for: Option<String>,
     /// Los ajustes del desplegable que se mira, para quien administra.
     settings: Option<Entity<DeploySettingsView>>,
+    /// Sus secrets por referencia: los ve quien mira, los cambia quien
+    /// administra y los rota un miembro.
+    secrets: Option<Entity<SecretRefsView>>,
 }
 
 impl DeployView {
@@ -64,6 +68,7 @@ impl DeployView {
             logs: LogBox::new(),
             prefilled_for: None,
             settings: None,
+            secrets: None,
         }
     }
 
@@ -83,6 +88,7 @@ impl DeployView {
         // Otro servicio: los ajustes del anterior (y su llave del CI, que se
         // enseña una sola vez) no se quedan.
         self.settings = None;
+        self.secrets = None;
     }
 
     /// Lo que se pide al backend, con su fallo dicho debajo.
@@ -540,6 +546,13 @@ impl DeployView {
                             None => self.history(deployable, state, blocked, cx),
                         })
                         .children(settings.flatten())
+                        .child({
+                            if self.secrets.as_ref().is_none_or(|view| view.read(cx).deployable_id() != deployable.id) {
+                                let target = deployable.clone();
+                                self.secrets = Some(cx.new(|cx| SecretRefsView::new(&target, window, cx)));
+                            }
+                            self.secrets.clone().map(|view| view.into_any_element()).unwrap_or_else(|| div().into_any_element())
+                        })
                         .into_any_element()
                 }
             }

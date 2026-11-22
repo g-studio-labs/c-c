@@ -400,7 +400,8 @@
     "agentNotRunning": "no está corriendo",
     "agentKeys_one": "{{count}} llave",
     "agentKeys_other": "{{count}} llaves",
-    "retry": "Reintentar"
+    "retry": "Reintentar",
+    "variables": "Variables"
   },
   "admin": {
     "users": "Usuarios",

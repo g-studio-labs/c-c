@@ -6,6 +6,8 @@
 pub mod agent_install;
 pub mod deploy;
 pub mod deploy_settings;
+pub mod secret_refs;
+pub mod stack_secrets;
 pub mod panel;
 pub mod server_dialog;
 pub mod server_page;

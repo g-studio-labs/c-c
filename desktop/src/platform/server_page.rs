@@ -21,10 +21,11 @@ pub(crate) struct Panels {
     pub stats: Option<AnyElement>,
     pub k8s: Option<AnyElement>,
     pub deploy: Option<AnyElement>,
+    pub secrets: Option<AnyElement>,
 }
 
 pub(crate) fn page(server: &Server, state: &PlatformState, agent_actions: Option<AnyElement>, panels: Panels, cx: &App) -> AnyElement {
-    let Panels { services, stats, k8s, deploy } = panels;
+    let Panels { services, stats, k8s, deploy, secrets } = panels;
     let theme = cx.theme();
     let (background, foreground) = (theme.background, theme.foreground);
     div()
@@ -50,6 +51,7 @@ pub(crate) fn page(server: &Server, state: &PlatformState, agent_actions: Option
                     ServerTab::Nodes => super::nodes::nodes(state, cx),
                     ServerTab::Stats => stats.unwrap_or_else(|| pending(cx)),
                     ServerTab::Deploy => deploy.unwrap_or_else(|| pending(cx)),
+                    ServerTab::Secrets => secrets.unwrap_or_else(|| pending(cx)),
                     _ => pending(cx),
                 }),
         )

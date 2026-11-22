@@ -11,6 +11,7 @@ pub mod detail;
 pub mod edit;
 pub mod install;
 pub mod k8s;
+pub mod secret_refs;
 pub mod servers;
 pub mod services;
 pub mod swarm;
@@ -21,6 +22,7 @@ use crate::stream::ServerEvent;
 use crate::Core;
 pub use agent::{agent_base, Agent, AgentStream, AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT};
 pub use deploys::{commit_pick, infer_owner_repo, repo_of_deployable, CommitPick, CommitRow, ci_notice_step, guess_environment, is_sha, repo_from_image, runs_commit, short_ref, short_service_name, uses_short_sha, CiKey, CiNotify, DeployStatus, Deployable, DeployableSettings, Deployment, DeploysState, ImageBuild, NewDeployable, RepoCommit, AGENT_VERSION_BUILDS, AGENT_VERSION_MIGRATES, LIST_PREVIEW, SECRETS_ENTRYPOINT_SNIPPET};
+pub use secret_refs::{append_rows, label_to_name, merge_build_args, ref_problems, valid_secret_name, valid_secret_ref, RefProblem, SecretRefRow, SecretRotation, SecretUsage, SecretsState};
 pub use detail::{server_tabs, AgentNote, DeployableSummary, IncidentServerRef, IncidentSummary, ProvisioningRun, ServerOverview, ServerTab, AGENT_VERSION_DEPLOYS};
 pub use edit::{server_edit_phrase, server_permissions, ServerEditError, ServerField, ServerForm, ServerPermissions, MAX_SERVER_NAME};
 pub use install::{agent_update_outcome, AgentIdentity, AgentInstallOutcome, AgentInstallPhase, AgentJob, AgentWait, AGENT_VERSION_LATEST};
@@ -81,6 +83,8 @@ pub struct PlatformState {
     pub cluster_badges: Vec<ClusterBadge>,
     /// Los despliegues del servidor abierto, desde que se miró su pestaña.
     pub deploys: Option<DeploysState>,
+    /// Los secrets del desplegable que se mira, por referencia.
+    pub secrets: Option<SecretsState>,
 }
 
 #[derive(Default)]
@@ -115,6 +119,7 @@ pub(crate) struct PlatformData {
     k8s_loading: bool,
     cluster_badges: Vec<ClusterBadge>,
     deploys: Option<DeploysState>,
+    secrets: Option<SecretsState>,
 }
 
 /// Plataforma en este core.
@@ -159,6 +164,7 @@ impl Platform {
             k8s_loading: data.k8s_loading,
             cluster_badges: data.cluster_badges.clone(),
             deploys: data.deploys.clone(),
+            secrets: data.secrets.clone(),
         }
     }
 
@@ -524,6 +530,8 @@ impl Platform {
         match tab {
             ServerTab::Services => self.load_services().await,
             ServerTab::Nodes => self.load_nodes().await,
+            // De la imagen de sus servicios sale el repo de GitHub.
+            ServerTab::Secrets if self.data().services.is_none() => self.load_services().await,
             ServerTab::Deploy => {
                 // La lista de la izquierda son los servicios del swarm.
                 if self.data().services.is_none() {
@@ -911,6 +919,7 @@ fn close(data: &mut PlatformData) {
     data.k8s = None;
     data.k8s_loading = false;
     data.deploys = None;
+    data.secrets = None;
 }
 
 /// Lo que contestó una tarea de lectura, con su fallo como frase.
