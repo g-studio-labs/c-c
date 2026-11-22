@@ -23,6 +23,7 @@ use crate::theme::Leading as _;
 
 use super::provision_config::ConfigPanel;
 use super::provision_engine::engine;
+use super::provision_requests::RequestsPanel;
 use super::services::pill;
 
 const FORM_WIDTH: f32 = 420.;
@@ -46,8 +47,10 @@ pub struct ProvisionView {
     /// La ejecución del historial cuya config aplicada se mira.
     open_run: Option<String>,
     logs: LogBox,
-    /// La config del servidor, del servidor de esta vista (`servers.rs` la rehace al cambiar de servidor).
+    /// La config del servidor y la bandeja de peticiones, del servidor de
+    /// esta vista (`servers.rs` la rehace al cambiar de servidor).
     config: Option<Entity<ConfigPanel>>,
+    requests: Option<Entity<RequestsPanel>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -85,6 +88,7 @@ impl ProvisionView {
             open_run: None,
             logs: LogBox::new(),
             config: None,
+            requests: None,
             _subscriptions: subscriptions,
         }
     }
@@ -637,8 +641,9 @@ impl Render for ProvisionView {
         let playbook = self.playbook_card(&server, &state, &provision, window, cx);
         let server_id = server.id.clone();
         let config = self.config.get_or_insert_with(|| cx.new(|cx| ConfigPanel::new(server_id.clone(), window, cx))).clone();
+        let requests = self.requests.get_or_insert_with(|| cx.new(|cx| RequestsPanel::new(server_id, cx))).clone();
         let left = div().w(px(FORM_WIDTH)).flex_none().flex().flex_col().gap_3().child(project).children(playbook).children(line).child(config);
-        let right = div().flex_1().min_w_0().flex().flex_col().gap_4().child(self.output(&server, &state, cx)).child(self.history(&provision, cx));
+        let right = div().flex_1().min_w_0().flex().flex_col().gap_4().child(self.output(&server, &state, cx)).child(requests).child(self.history(&provision, cx));
         div().id("server-provision").flex().flex_col().gap_3().children(error).child(div().flex().items_start().gap_4().child(left).child(right)).test_support().into_any_element()
     }
 }

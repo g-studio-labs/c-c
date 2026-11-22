@@ -17,6 +17,7 @@ pub mod nodes;
 pub mod provision;
 pub mod provision_config;
 pub mod provision_engine;
+pub mod provision_requests;
 pub mod provision_template;
 pub mod services;
 pub mod stats;

@@ -143,6 +143,93 @@ fn a_member_rehearses_asking_and_the_check_goes_to_cac(cx: &mut TestAppContext) 
     cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
 }
 
+/// Rotura que atrapa: ofrecerle aplicar, aprobar o guardar la config a un
+/// lector, o no decirle quién aprueba.
+#[gpui_kit::test]
+fn a_reader_sees_everything_but_cannot_run_decide_or_save(cx: &mut TestAppContext) {
+    let (_server, window, _) = provision_as("viewer", json!([request_row("r1", "change", "awaiting_approval", json!([]))]), cx);
+    wait_until(cx, "llega la bandeja", |cx| on_screen(window, "request-r1", cx));
+    assert!(on_screen(window, "request-admin-decides-r1", cx));
+    assert!(!on_screen(window, "request-approve-r1", cx));
+    assert!(!on_screen(window, "provision-run", cx));
+    assert!(on_screen(window, "provision-run-x1", cx), "el historial se lee");
+    reveal(window, "server-body", "provision-config", cx);
+    assert!(!on_screen(window, "provision-config-save", cx));
+    cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+}
+
+/// Aprobar una destructiva: el botón no se enciende hasta escribir el
+/// nombre exacto y reconocer la bandera roja, y aun así pregunta.
+///
+/// Roturas que atrapa: aprobar con otro nombre o sin reconocer la bandera;
+/// aprobar sin preguntar; mandar otra cosa que lo escrito.
+#[gpui_kit::test]
+fn an_admin_approves_a_destructive_only_with_the_exact_name(cx: &mut TestAppContext) {
+    let (server, window, _) = provision_as("admin", json!([request_row("r1", "destructive", "awaiting_approval", json!([{ "code": "destructive", "level": "red" }]))]), cx);
+    let mut approved = request_row("r1", "destructive", "approved", json!([{ "code": "destructive", "level": "red" }]));
+    approved["decidedByName"] = json!("Ana");
+    server.mount(
+        Mock::given(method("POST"))
+            .and(path("/api/v1/servers/s1/provisioning-requests/r1/decision"))
+            .and(wiremock::matchers::body_json(json!({ "approve": true, "note": "", "confirmServer": "pixel-vps", "acknowledgeFlags": true })))
+            .respond_with(ok(approved)),
+    );
+    wait_until(cx, "llega la bandeja", |cx| on_screen(window, "request-approve-r1", cx));
+    click(window, "request-approve-r1", cx);
+    assert!(cx.pending_prompt().is_none(), "se pudo aprobar sin nombre ni bandera");
+
+    click(window, "request-typed-r1", cx);
+    type_text(window, "PIXEL-VPS", cx);
+    click(window, "request-ack-r1", cx);
+    cx.run_until_parked();
+    click(window, "request-approve-r1", cx);
+    assert!(cx.pending_prompt().is_none(), "se pudo aprobar con otro nombre");
+
+    click(window, "request-typed-r1", cx);
+    cx.simulate_keystrokes(window, &["backspace"; 9].join(" "));
+    type_text(window, "pixel-vps", cx);
+    cx.run_until_parked();
+    click(window, "request-approve-r1", cx);
+    let (title, _) = cx.pending_prompt().expect("aprobó sin preguntar");
+    assert_eq!(title, "¿Aprobar swarm en pixel-vps?");
+    cx.simulate_prompt_answer("Aprobar");
+    wait_until(cx, "aprueba", |_| server.hits("/api/v1/servers/s1/provisioning-requests/r1/decision") == 1);
+    wait_until(cx, "queda autorizada", |cx| on_screen(window, "request-command-r1", cx));
+    cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+}
+
+/// «Correr ahora» corre lo autorizado y, si sale bien, su verificación,
+/// cada una abierta y cerrada en cac con la autorización.
+///
+/// Roturas que atrapa: correr sin preguntar o al cancelar; correr en ensayo lo autorizado
+/// (o de verdad algo que no lo está); saltarse la verificación; abrir la
+/// ejecución sin la petición, que es lo que gasta la autorización.
+#[gpui_kit::test]
+fn run_now_runs_the_grant_and_then_its_verification(cx: &mut TestAppContext) {
+    let (server, window, engine) = provision_as("admin", json!([request_row("r1", "change", "approved", json!([]))]), cx);
+    server.mount(Mock::given(method("POST")).and(path("/api/v1/servers/s1/provisioning-runs")).respond_with(ok(json!({ "id": "run1" }))));
+    server.mount(Mock::given(method("PATCH")).and(path("/api/v1/servers/s1/provisioning-runs/run1")).respond_with(ok(json!(null))));
+    server.mount(Mock::given(method("GET")).and(path("/api/v1/servers/s1/config/effective")).and(wiremock::matchers::query_param("seq", "4")).respond_with(ok(json!({
+        "serverId": "s1", "configSeq": 4, "playbooks": ["swarm"], "vars": { "domain": "x.dev" }, "opRefs": {}, "requires": [], "perServer": [], "missing": [],
+        "connection": { "name": "pixel-vps", "host": "127.0.0.1", "sshPort": 22, "sshUser": "deploy" }
+    }))).with_priority(1));
+    wait_until(cx, "llega la bandeja", |cx| on_screen(window, "request-run-r1", cx));
+    click(window, "request-run-r1", cx);
+    let (title, _) = cx.pending_prompt().expect("corrió sin preguntar");
+    assert_eq!(title, "¿Aplicar «Swarm» a pixel-vps?");
+    cx.simulate_prompt_answer("Cancelar");
+    cx.run_until_parked();
+    assert!(engine.runs.lock().unwrap().is_empty(), "corrió al cancelar");
+    click(window, "request-run-r1", cx);
+    cx.simulate_prompt_answer("Aplicar");
+    wait_until(cx, "corre las dos", |_| engine.runs.lock().unwrap().len() == 2);
+    assert_eq!(*engine.runs.lock().unwrap(), [("swarm".to_string(), false), ("swarm-check".to_string(), false)]);
+    wait_until(cx, "cierra las dos", |_| server.requests().iter().filter(|r| r.method.as_str() == "PATCH").count() == 2);
+    let opened: Vec<serde_json::Value> = writes(&server).into_iter().filter(|(verb, route, _)| verb == "POST" && route.ends_with("/provisioning-runs")).filter_map(|(_, _, body)| body).collect();
+    assert_eq!(opened.iter().map(|body| (body["playbook"].clone(), body["requestId"].clone())).collect::<Vec<_>>(), [(json!("swarm"), json!("r1")), (json!("swarm-check"), json!("r1"))]);
+    cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+}
+
 /// La config: un admin añade un secreto por su referencia y lo guarda como
 /// versión nueva; un valor pegado en vez de la referencia no deja guardar;
 /// restaurar una versión pregunta.
