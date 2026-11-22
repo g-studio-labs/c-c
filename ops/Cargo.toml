@@ -49,3 +49,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 crypto_box = "0.9"
 blake2 = "0.10"
 base64 = "0.22"
+
+[dev-dependencies]
+# Las pruebas de la descarga corren su cliente async; el runtime lo pone
+# quien llama (Tauri, o el core en la app nativa).
+tokio = { version = "1", features = ["macros", "rt"] }
