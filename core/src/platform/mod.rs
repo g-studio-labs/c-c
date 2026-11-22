@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::stream::ServerEvent;
 use crate::Core;
 pub use agent::{agent_base, Agent, AgentStream, AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT};
-pub use deploys::{commit_pick, CommitPick, CommitRow, ci_notice_step, guess_environment, is_sha, repo_from_image, runs_commit, short_ref, short_service_name, uses_short_sha, CiKey, CiNotify, DeployStatus, Deployable, DeployableSettings, Deployment, DeploysState, ImageBuild, NewDeployable, RepoCommit, AGENT_VERSION_BUILDS, AGENT_VERSION_MIGRATES, LIST_PREVIEW, SECRETS_ENTRYPOINT_SNIPPET};
+pub use deploys::{commit_pick, infer_owner_repo, repo_of_deployable, CommitPick, CommitRow, ci_notice_step, guess_environment, is_sha, repo_from_image, runs_commit, short_ref, short_service_name, uses_short_sha, CiKey, CiNotify, DeployStatus, Deployable, DeployableSettings, Deployment, DeploysState, ImageBuild, NewDeployable, RepoCommit, AGENT_VERSION_BUILDS, AGENT_VERSION_MIGRATES, LIST_PREVIEW, SECRETS_ENTRYPOINT_SNIPPET};
 pub use detail::{server_tabs, AgentNote, DeployableSummary, IncidentServerRef, IncidentSummary, ProvisioningRun, ServerOverview, ServerTab, AGENT_VERSION_DEPLOYS};
 pub use edit::{server_edit_phrase, server_permissions, ServerEditError, ServerField, ServerForm, ServerPermissions, MAX_SERVER_NAME};
 pub use install::{agent_update_outcome, AgentIdentity, AgentInstallOutcome, AgentInstallPhase, AgentJob, AgentWait, AGENT_VERSION_LATEST};

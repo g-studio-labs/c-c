@@ -5,6 +5,7 @@
 
 pub mod agent_install;
 pub mod deploy;
+pub mod deploy_settings;
 pub mod panel;
 pub mod server_dialog;
 pub mod server_page;

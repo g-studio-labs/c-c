@@ -1781,6 +1781,38 @@ mod tests {
         .unwrap();
     }
 
+    /// Baja la rueda sobre ese elemento, que tiene su propio scroll.
+    fn wheel_in(window: AnyWindowHandle, id: &str, down: f32, cx: &mut TestAppContext) {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll(id, gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-down))), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// Baja por ese scroll de poco en poco hasta que el elemento se ve.
+    fn reveal(window: AnyWindowHandle, scroll: &str, id: &str, cx: &mut TestAppContext) {
+        let target = gpui_kit::SharedString::from(id.to_string());
+        for _ in 0..40 {
+            let seen = cx
+                .update_window(window, |_, window, cx| {
+                    window.render_frame(cx);
+                    window.try_find(target.clone()).is_some_and(|found| found.visible())
+                })
+                .unwrap();
+            if seen {
+                // Se ve el borde: un poco más, para que el centro (donde
+                // cae el clic) también esté dentro.
+                wheel_in(window, scroll, 120., cx);
+                return;
+            }
+            wheel_in(window, scroll, 80., cx);
+        }
+        panic!("no se llega a ver {id}");
+    }
+
     /// Deja correr lo que un clic haya puesto en marcha.
     fn settle_frames(window: AnyWindowHandle, cx: &mut TestAppContext) {
         cx.run_until_parked();
@@ -3951,6 +3983,7 @@ mod tests {
         wait_until(cx, "llegan los commits", |cx| on_screen(window, "deploy-commit-bbb2222", cx));
         assert_eq!(label(window, "deploy-behind", cx), "1 sin desplegar");
         assert!(on_screen(window, "deploy-row-x1", cx));
+        assert!(!on_screen(window, "deploy-settings", cx), "los ajustes son de quien administra");
 
         click(window, "deploy-rollback-x1", cx);
         let (title, _) = cx.pending_prompt().expect("volvió atrás sin preguntar");
@@ -3996,6 +4029,112 @@ mod tests {
         click(window, "deploy-service-svc2", cx);
         wait_until(cx, "el otro no está registrado", |cx| on_screen(window, "deploy-not-yet", cx));
         assert!(!on_screen(window, "deploy-register", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// El PAT de mentira: apunta lo que se guardaría en GitHub.
+    #[derive(Default)]
+    struct FakeRepoSecrets {
+        configured: bool,
+        put: std::sync::Mutex<Vec<(String, String, String, String)>>,
+    }
+
+    impl crate::platform::deploy_settings::RepoSecrets for FakeRepoSecrets {
+        fn configured(&self) -> bool {
+            self.configured
+        }
+        fn put(&self, owner: String, repo: String, name: String, value: String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> {
+            self.put.lock().unwrap().push((owner, repo, name, value));
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn with_repo_secrets(configured: bool, cx: &mut TestAppContext) -> std::sync::Arc<FakeRepoSecrets> {
+        let fake = std::sync::Arc::new(FakeRepoSecrets { configured, ..Default::default() });
+        let shared: std::sync::Arc<dyn crate::platform::deploy_settings::RepoSecrets> = fake.clone();
+        cx.update(|cx| cx.set_global(crate::platform::deploy_settings::LocalRepoSecrets(shared)));
+        fake
+    }
+
+    fn mount_mint(server: &FakeServer) {
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/servers/s1/deployables/d1/ci-key")).respond_with(ok(json!({ "key": "cac_dk_ENTERA", "preview": "cac_dk_EN" }))));
+    }
+
+    /// Sin PAT, la llave del CI se enseña una vez y no vuelve al dejar el
+    /// servicio; con PAT, va sola al repo y no se enseña.
+    ///
+    /// Roturas que atrapa: guardar la llave en otro repo u otro secret;
+    /// enseñarla habiéndola guardado; que siga a la vista al volver.
+    #[gpui_kit::test]
+    fn the_ci_key_goes_to_the_repo_or_is_shown_once(cx: &mut TestAppContext) {
+        let secrets = with_repo_secrets(false, cx);
+        let (server, window) = deploys_as("admin", cx);
+        mount_mint(&server);
+        click(window, "deploy-service-svc1", cx);
+        wait_until(cx, "salen los ajustes", |cx| on_screen(window, "deploy-ci-mint", cx));
+        reveal(window, "server-body", "deploy-ci-mint", cx);
+        click(window, "deploy-ci-mint", cx);
+        wait_until(cx, "se enseña la llave", |cx| on_screen(window, "deploy-ci-key", cx));
+        assert!(secrets.put.lock().unwrap().is_empty());
+        wheel_in(window, "server-body", -3000., cx);
+        click(window, "deploy-service-svc2", cx);
+        wait_until(cx, "el otro", |cx| on_screen(window, "deploy-register", cx));
+        click(window, "deploy-service-svc1", cx);
+        wait_until(cx, "vuelve", |cx| on_screen(window, "deploy-ci-mint", cx));
+        assert!(!on_screen(window, "deploy-ci-key", cx), "la llave siguió a la vista");
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    #[gpui_kit::test]
+    fn with_a_pat_the_ci_key_is_saved_in_the_repo(cx: &mut TestAppContext) {
+        let secrets = with_repo_secrets(true, cx);
+        let (server, window) = deploys_as("admin", cx);
+        mount_mint(&server);
+        click(window, "deploy-service-svc1", cx);
+        wait_until(cx, "salen los ajustes", |cx| on_screen(window, "deploy-ci-mint", cx));
+        reveal(window, "server-body", "deploy-ci-mint", cx);
+        click(window, "deploy-ci-mint", cx);
+        wait_until(cx, "dice dónde quedó", |cx| on_screen(window, "deploy-ci-saved", cx));
+        assert!(!on_screen(window, "deploy-ci-key", cx));
+        assert_eq!(*secrets.put.lock().unwrap(), [("o".to_string(), "web".to_string(), "CAC_DEPLOY_KEY".to_string(), "cac_dk_ENTERA".to_string())]);
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Roturas que atrapa: guardar el build sin la fila entera o sin el
+    /// cambio; pasar a que cac despliegue cada aviso del CI sin preguntar.
+    #[gpui_kit::test]
+    fn an_admin_saves_the_build_and_is_asked_before_cac_deploys_the_ci(cx: &mut TestAppContext) {
+        with_repo_secrets(false, cx);
+        let (server, window) = deploys_as("admin", cx);
+        let mut saved = json!({ "id": "d1", "orgId": "o1", "serverId": "s1", "name": "web", "stack": "shop", "serviceName": "shop_web", "imageRepo": "ghcr.io/o/web", "repoFullName": "o/web", "onCINotify": "record", "currentImage": "ghcr.io/o/web:aaa1111" });
+        saved["branch"] = json!("main");
+        saved["buildOnHost"] = json!(true);
+        server.mount(
+            Mock::given(method("PATCH"))
+                .and(path("/api/v1/servers/s1/deployables/d1"))
+                .and(wiremock::matchers::body_json(json!({ "name": "web", "environment": "", "repoFullName": "o/web", "onCINotify": "record", "buildWorkflow": "", "shortTags": false, "migrateCommand": "", "rotateCommand": "", "branch": "main", "buildOnHost": true, "dockerfile": "", "buildContext": "" })))
+                .respond_with(ok(saved)),
+        );
+        click(window, "deploy-service-svc1", cx);
+        wait_until(cx, "salen los ajustes", |cx| on_screen(window, "deploy-build-save", cx));
+        reveal(window, "server-body", "deploy-ci-deploy", cx);
+        click(window, "deploy-ci-deploy", cx);
+        let (title, _) = cx.pending_prompt().expect("cambió quién despliega sin preguntar");
+        assert_eq!(title, "¿Que cac despliegue cada aviso del CI?");
+        cx.simulate_prompt_answer("Cancelar");
+        cx.run_until_parked();
+        assert!(server_writes(&server).iter().all(|(method, _, _)| method != "PATCH"), "cambió el modo al cancelar");
+
+        reveal(window, "server-body", "deploy-branch", cx);
+        click(window, "deploy-branch", cx);
+        type_text(window, "main", cx);
+        reveal(window, "server-body", "deploy-build-on-host", cx);
+        click(window, "deploy-build-on-host", cx);
+        wait_until(cx, "se marca construir aquí", |cx| on_screen(window, "deploy-build-context", cx));
+        reveal(window, "server-body", "deploy-build-save", cx);
+        click(window, "deploy-build-save", cx);
+        wait_until(cx, "dice cómo acabó", |cx| on_screen(window, "deploy-settings-result", cx));
+        assert_eq!(label(window, "deploy-settings-result", cx), "Guardado", "{:?}", server_writes(&server));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 

@@ -43,6 +43,7 @@ pub(crate) fn page(server: &Server, state: &PlatformState, agent_actions: Option
                 .min_h_0()
                 .overflow_y_scroll()
                 .p_4()
+                .test_support()
                 .child(match state.tab {
                     ServerTab::Overview => overview(server, state.overview.as_ref(), agent_actions, k8s, cx),
                     ServerTab::Services => services.unwrap_or_else(|| pending(cx)),

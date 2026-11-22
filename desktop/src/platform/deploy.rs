@@ -17,6 +17,7 @@ use crate::lang::{locale, tr};
 use crate::log_view::LogBox;
 use crate::theme::Leading as _;
 
+use super::deploy_settings::DeploySettingsView;
 use super::services::{empty, pill};
 
 const LIST_WIDTH: f32 = 240.;
@@ -40,6 +41,8 @@ pub struct DeployView {
     /// De qué servicio es lo escrito en el registro: se elige aquí o desde
     /// su fila en Servicios, y al cambiar se vuelve a prellenar.
     prefilled_for: Option<String>,
+    /// Los ajustes del desplegable que se mira, para quien administra.
+    settings: Option<Entity<DeploySettingsView>>,
 }
 
 impl DeployView {
@@ -60,6 +63,7 @@ impl DeployView {
             line: None,
             logs: LogBox::new(),
             prefilled_for: None,
+            settings: None,
         }
     }
 
@@ -76,6 +80,9 @@ impl DeployView {
         self.sha.update(cx, |input, cx| input.set_value("", window, cx));
         (self.picked, self.manual, self.all_commits, self.all_history, self.line) = (None, false, false, false, None);
         self.prefilled_for = Some(service.name.clone());
+        // Otro servicio: los ajustes del anterior (y su llave del CI, que se
+        // enseña una sola vez) no se quedan.
+        self.settings = None;
     }
 
     /// Lo que se pide al backend, con su fallo dicho debajo.
@@ -498,7 +505,7 @@ impl DeployView {
         )
     }
 
-    fn detail(&self, server: &Server, service: &SwarmService, state: &PlatformState, cx: &mut Context<Self>) -> AnyElement {
+    fn detail(&mut self, server: &Server, service: &SwarmService, state: &PlatformState, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (muted, warning, danger, mono) = (theme.muted_foreground, theme.warning, theme.danger, theme.mono_font_family.clone());
         let deploys = state.deploys.as_ref();
@@ -516,6 +523,13 @@ impl DeployView {
                 if !ready {
                     empty("deploy-loading", tr(cx, "common:servers.loading"), muted)
                 } else {
+                    let settings = state.permissions.manage_deploys.then(|| {
+                        if self.settings.as_ref().is_none_or(|view| view.read(cx).deployable_id() != deployable.id) {
+                            let target = deployable.clone();
+                            self.settings = Some(cx.new(|cx| DeploySettingsView::new(&target, window, cx)));
+                        }
+                        self.settings.clone().map(|view| view.into_any_element())
+                    });
                     div()
                         .flex()
                         .flex_col()
@@ -525,6 +539,7 @@ impl DeployView {
                             Some(log) => log,
                             None => self.history(deployable, state, blocked, cx),
                         })
+                        .children(settings.flatten())
                         .into_any_element()
                 }
             }
@@ -582,7 +597,7 @@ impl Render for DeployView {
             self.prefill(service, window, cx);
         }
         let detail = match &chosen {
-            Some(service) => self.detail(&server, service, &state, cx),
+            Some(service) => self.detail(&server, service, &state, window, cx),
             None => div().flex_1().child(empty("deploy-lead", tr(cx, "common:deploy.pageLead"), muted)).into_any_element(),
         };
         div()

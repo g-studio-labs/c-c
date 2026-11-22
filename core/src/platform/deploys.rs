@@ -678,6 +678,28 @@ pub fn repo_from_image(image: &str) -> &str {
     }
 }
 
+/// `owner/repo` de una imagen, si se puede saber: `ghcr.io/owner/repo`,
+/// `registro.dominio/owner/repo` u `owner/repo` (`github-repo.ts`).
+pub fn infer_owner_repo(image: &str) -> Option<(String, String)> {
+    let name = |part: &str| part.split([':', '@']).next().unwrap_or_default().to_string();
+    let parts: Vec<&str> = image.split('/').collect();
+    match parts.as_slice() {
+        [registry, owner, repo, ..] if *registry == "ghcr.io" || registry.contains('.') => Some((owner.to_string(), name(repo))),
+        [owner, repo] => Some((owner.to_string(), name(repo))),
+        _ => None,
+    }
+    .filter(|(owner, repo)| !owner.is_empty() && !repo.is_empty())
+}
+
+/// El repo de un servicio: el que se le puso, o el que se deduce de su
+/// imagen. Es a donde va sola la llave del CI.
+pub fn repo_of_deployable(deployable: &Deployable) -> String {
+    if !deployable.repo_full_name.is_empty() {
+        return deployable.repo_full_name.clone();
+    }
+    infer_owner_repo(&deployable.image_repo).map(|(owner, repo)| format!("{owner}/{repo}")).unwrap_or_default()
+}
+
 /// El entorno por el sufijo del stack (`beta-api-prod` → `prod`).
 pub fn guess_environment(stack: &str) -> String {
     let lower = stack.to_lowercase();
@@ -864,6 +886,20 @@ mod tests {
         assert_eq!(pick.chosen.as_deref(), Some("ccc3333aaaa"));
         assert_eq!(pick.value_of("bbb2222aaaa", &host), "bbb2222aaaa");
         assert!(pick.rows.iter().all(|row| !row.published));
+    }
+
+    /// Rotura que atrapa: guardar la llave del CI en otro repo que el del
+    /// servicio (el registro tomado por dueño, el tag pegado al nombre), o
+    /// preferir el deducido al que se le puso.
+    #[test]
+    fn the_repo_comes_from_the_service_or_its_image() {
+        let of = |repo: &str, image: &str| repo_of_deployable(&Deployable { repo_full_name: repo.into(), image_repo: image.into(), ..Default::default() });
+        assert_eq!(of("", "ghcr.io/g-studio/api"), "g-studio/api");
+        assert_eq!(of("", "registry.example.com/o/web:v1"), "o/web");
+        assert_eq!(of("", "o/web@sha256:ab"), "o/web");
+        assert_eq!(of("", "postgres"), "");
+        assert_eq!(of("", "a/b/c"), "", "tres tramos sin registro no se sabe");
+        assert_eq!(of("o/real", "ghcr.io/o/otro"), "o/real");
     }
 
     /// Rotura que atrapa: mandar el sha entero a un CI que etiqueta con el
