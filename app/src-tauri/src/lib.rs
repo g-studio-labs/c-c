@@ -38,7 +38,6 @@ pub fn run_provision_cli(args: Vec<String>) -> i32 {
 // Lo que la app comparte con el MCP vive en su crate (`mcp/`), que no depende
 // de Tauri. Aquí entra con los nombres que ya tenía.
 use cac_mcp::files::{free_name, safe_file_name};
-use cac_mcp::op::read as op_read;
 use cac_mcp::ssh_agent::resolve_agent_socket;
 use cac_mcp::{dropped, image};
 
@@ -51,34 +50,9 @@ fn executable_path() -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-use std::collections::HashMap;
 use std::sync::Mutex;
 
-use serde::{Deserialize, Serialize};
-
-const GITHUB_API: &str = "https://api.github.com";
-
-// In-memory cache: survives the process lifetime, avoids repeated keychain reads
-// from async contexts where some Linux keyring backends fail.
-struct TokenCache(Mutex<HashMap<String, String>>);
-
-impl TokenCache {
-    fn get(&self, server_id: &str) -> Option<String> {
-        self.0.lock().ok()?.get(server_id).cloned()
-    }
-
-    fn set(&self, server_id: &str, token: &str) {
-        if let Ok(mut m) = self.0.lock() {
-            m.insert(server_id.to_string(), token.to_string());
-        }
-    }
-
-    fn remove(&self, server_id: &str) {
-        if let Ok(mut m) = self.0.lock() {
-            m.remove(server_id);
-        }
-    }
-}
+use cac_ops::github::{self, GitHubSecret, GitHubVariable, TokenCache};
 
 /// Para la app: si esta copia quedó vieja tras una actualización. Una
 /// instancia así funciona para casi todo, pero 1Password ya no le habla
@@ -88,93 +62,14 @@ fn binary_replaced() -> bool {
     cac_mcp::op::running_binary_replaced()
 }
 
-/// One place a secret can be filed: an account and one of its vaults.
-#[derive(serde::Serialize)]
-struct OpVault {
-    account: String, // the sign-in URL, which is what `--account` takes
-    email: String,
-    vault: String,
-}
-
-/// Lists every vault the signed-in accounts can write to.
-///
-/// Exists because the vault used to be a text box defaulting to "Private", and
-/// that only exists in *some* accounts — a personal one has it, a business one
-/// typically has "Employee" and named vaults instead. Typing the wrong name
-/// failed at save time with a message from `op` that didn't say which of your
-/// accounts it had even tried.
-///
-/// Returns an empty list rather than an error when 1Password isn't reachable:
-/// the caller hides the feature instead of showing a scary message next to
-/// secrets the user still needs to copy.
+/// Ver `cac_ops::op::list_vaults`.
 #[tauri::command]
-async fn op_list_vaults() -> Vec<OpVault> {
-
-    let accounts = match crate::host::command("op")
-        .args(["account", "list", "--format", "json"])
-        .output()
-    {
-        Ok(o) if o.status.success() => o.stdout,
-        _ => return vec![],
-    };
-    let accounts: serde_json::Value = match serde_json::from_slice(&accounts) {
-        Ok(v) => v,
-        Err(_) => return vec![],
-    };
-
-    let mut out = vec![];
-    for a in accounts.as_array().unwrap_or(&vec![]) {
-        let url = a
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let email = a
-            .get("email")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        if url.is_empty() {
-            continue;
-        }
-        let vaults = match crate::host::command("op")
-            .args(["vault", "list", "--account", &url, "--format", "json"])
-            .output()
-        {
-            Ok(o) if o.status.success() => o.stdout,
-            // One unreachable account shouldn't hide the others.
-            _ => continue,
-        };
-        let vaults: serde_json::Value = match serde_json::from_slice(&vaults) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        for v in vaults.as_array().unwrap_or(&vec![]) {
-            if let Some(name) = v.get("name").and_then(|x| x.as_str()) {
-                out.push(OpVault {
-                    account: url.clone(),
-                    email: email.clone(),
-                    vault: name.to_string(),
-                });
-            }
-        }
-    }
-    out
+async fn op_list_vaults() -> Vec<cac_ops::op::OpVault> {
+    cac_ops::op::list_vaults()
 }
 
-/// Stores secrets that are shown exactly once as a new 1Password item, and
-/// returns an `op://` reference per field.
-///
-/// The ingest key and the webhook secret are unrecoverable after the dialog
-/// closes: cac keeps only a hash of one and never returns the other. Copying
-/// them into a scratch file is what people actually do, so this offers the
-/// alternative in the same breath — and hands back references a deploy config
-/// can use directly instead of the literal values.
-///
-/// Values travel in a **0600 temp file passed with `--template`**, never in
-/// argv: 1Password's own docs warn that command arguments land in shell history
-/// and are readable by other processes. (Assignment statements and a template
-/// on stdin were both tried; stdin silently discards the values.)
+/// Ver `cac_ops::op::item_create`: los valores van en un fichero 0600, nunca
+/// en el argv.
 #[tauri::command]
 async fn op_item_create(
     title: String,
@@ -182,118 +77,7 @@ async fn op_item_create(
     vault: String,
     fields: Vec<(String, String)>,
 ) -> Result<Vec<(String, String)>, String> {
-    use std::io::Write as _;
-
-    if fields.is_empty() {
-        return Err("Nothing to save".into());
-    }
-    if account.trim().is_empty() || vault.trim().is_empty() {
-        return Err("Pick an account and a vault first".into());
-    }
-
-    let op_err = |e: std::io::Error| match e.kind() {
-        std::io::ErrorKind::NotFound => {
-            "1Password CLI (op) not found. Install from https://developer.1password.com/docs/cli/"
-                .to_string()
-        }
-        _ => format!("Failed to execute op: {e}"),
-    };
-    let friendly = |stderr: &str, status: std::process::ExitStatus| {
-        let s = stderr.trim();
-        if s.contains("not currently signed in") || s.contains("session expired") {
-            "1Password session expired. Run `op signin` (or open the desktop app) and try again."
-                .to_string()
-        } else if s.is_empty() {
-            format!("op exited with {status}")
-        } else {
-            s.to_string()
-        }
-    };
-
-    // Start from the real category template so the item looks native in the app.
-    // --account on every call: with more than one account signed in, letting op
-    // pick means the item can land somewhere the user never chose.
-    let tpl_out = crate::host::command("op")
-        .args([
-            "item",
-            "template",
-            "get",
-            "API Credential",
-            "--account",
-            &account,
-        ])
-        .output()
-        .map_err(op_err)?;
-    if !tpl_out.status.success() {
-        return Err(friendly(
-            &String::from_utf8_lossy(&tpl_out.stderr),
-            tpl_out.status,
-        ));
-    }
-    let mut tpl: serde_json::Value = serde_json::from_slice(&tpl_out.stdout)
-        .map_err(|e| format!("Unexpected op template: {e}"))?;
-
-    let arr = tpl
-        .get_mut("fields")
-        .and_then(|f| f.as_array_mut())
-        .ok_or("op template has no fields")?;
-    for (name, value) in &fields {
-        arr.push(serde_json::json!({
-            "id": name, "type": "CONCEALED", "label": name, "value": value
-        }));
-    }
-
-    // 0600 before anything is written, and removed on every path out.
-    let path = std::env::temp_dir().join(format!("cac-op-{}.json", ephemeral_suffix()));
-    let write_template = || -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
-        f.write_all(tpl.to_string().as_bytes())
-    };
-    write_template().map_err(|e| format!("Could not stage the template: {e}"))?;
-
-    // The category lives in the template; passing --category too is an error.
-    let out = crate::host::command("op")
-        .args([
-            "item",
-            "create",
-            "--account",
-            &account,
-            "--vault",
-            &vault,
-            "--title",
-            &title,
-            "--format",
-            "json",
-        ])
-        .arg("--template")
-        .arg(&path)
-        .output();
-    let _ = std::fs::remove_file(&path);
-    let out = out.map_err(op_err)?;
-    if !out.status.success() {
-        return Err(friendly(&String::from_utf8_lossy(&out.stderr), out.status));
-    }
-
-    // Reference by item id, not title: a title with spaces or a duplicate name
-    // would make the reference ambiguous.
-    let parsed: serde_json::Value =
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("Unexpected op output: {e}"))?;
-    let id = parsed
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    if id.is_empty() {
-        return Err("op created the item but returned no id".into());
-    }
-    Ok(fields
-        .iter()
-        .map(|(name, _)| (name.clone(), format!("op://{vault}/{id}/{name}")))
-        .collect())
+    cac_ops::op::item_create(&title, &account, &vault, &fields)
 }
 
 // ─── SSH y llavero ────────────────────────────────────────────────────────────
@@ -330,24 +114,16 @@ fn get_server_ssh_key(server_id: String) -> Result<Option<String>, String> {
     keychain::ssh_key(&server_id)
 }
 
-// ─── Keychain commands ────────────────────────────────────────────────────────
+// ─── El token de GitHub y los secrets de Actions (`cac_ops::github`) ─────────
 
 #[tauri::command]
-fn set_github_token(
-    server_id: String,
-    token: String,
-    cache: tauri::State<TokenCache>,
-) -> Result<(), String> {
-    keychain::set_github_token(&server_id, &token)?;
-    cache.set(&server_id, &token);
-    Ok(())
+fn set_github_token(server_id: String, token: String, cache: tauri::State<TokenCache>) -> Result<(), String> {
+    github::set_token(&cache, &server_id, &token)
 }
 
 #[tauri::command]
 fn delete_github_token(server_id: String, cache: tauri::State<TokenCache>) -> Result<(), String> {
-    cache.remove(&server_id);
-    let _ = keychain::delete_op_reference(&server_id);
-    keychain::delete_github_token(&server_id)
+    github::delete_token(&cache, &server_id)
 }
 
 #[tauri::command]
@@ -356,25 +132,12 @@ fn load_github_token_from_1password(
     op_reference: String,
     cache: tauri::State<TokenCache>,
 ) -> Result<(), String> {
-    let token = op_read(&op_reference)?;
-    keychain::set_github_token(&server_id, &token)?;
-    let _ = keychain::set_op_reference(&server_id, &op_reference);
-    cache.set(&server_id, &token);
-    Ok(())
+    github::load_token_from_1password(&cache, &server_id, &op_reference)
 }
 
 #[tauri::command]
-fn refresh_github_token_from_1password(
-    server_id: String,
-    cache: tauri::State<TokenCache>,
-) -> Result<(), String> {
-    let reference = keychain::op_reference(&server_id).map_err(|_| {
-        "No 1Password reference saved for this server. Use 'Load from 1Password' first.".to_string()
-    })?;
-    let token = op_read(&reference)?;
-    keychain::set_github_token(&server_id, &token)?;
-    cache.set(&server_id, &token);
-    Ok(())
+fn refresh_github_token_from_1password(server_id: String, cache: tauri::State<TokenCache>) -> Result<(), String> {
+    github::refresh_token_from_1password(&cache, &server_id)
 }
 
 #[tauri::command]
@@ -389,150 +152,8 @@ fn clear_op_reference(server_id: String) -> Result<(), String> {
 
 #[tauri::command]
 fn github_token_configured(server_id: String, cache: tauri::State<TokenCache>) -> bool {
-    if cache.get(&server_id).is_some() {
-        return true;
-    }
-    // Try loading from keychain and warming the cache
-    if let Ok(token) = keychain::github_token(&server_id) {
-        cache.set(&server_id, &token);
-        return true;
-    }
-    false
+    github::token_configured(&cache, &server_id)
 }
-
-// Retrieve token: cache-first, then keychain fallback
-fn get_token(server_id: &str, cache: &TokenCache) -> Result<String, String> {
-    if let Some(t) = cache.get(server_id) {
-        return Ok(t);
-    }
-    let t = keychain::github_token(server_id)?;
-    cache.set(server_id, &t);
-    Ok(t)
-}
-
-// ─── Domain types ─────────────────────────────────────────────────────────────
-
-#[derive(Serialize, Deserialize)]
-pub struct GitHubSecret {
-    pub name: String,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct GitHubVariable {
-    pub name: String,
-    pub value: String,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Deserialize)]
-struct SecretsPage {
-    secrets: Vec<GitHubSecret>,
-}
-
-#[derive(Deserialize)]
-struct VariablesPage {
-    variables: Vec<GitHubVariable>,
-}
-
-// ─── HTTP helpers ─────────────────────────────────────────────────────────────
-
-fn gh_client(token: &str) -> Result<reqwest::Client, String> {
-    use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION};
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        ACCEPT,
-        HeaderValue::from_static("application/vnd.github+json"),
-    );
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {token}")).map_err(|e| e.to_string())?,
-    );
-    headers.insert(
-        HeaderName::from_static("x-github-api-version"),
-        HeaderValue::from_static("2022-11-28"),
-    );
-    headers.insert(
-        HeaderName::from_static("user-agent"),
-        HeaderValue::from_static("cac_desktop_application"),
-    );
-
-    reqwest::Client::builder()
-        .default_headers(headers)
-        .build()
-        .map_err(|e| e.to_string())
-}
-
-async fn gh_get<T: serde::de::DeserializeOwned>(
-    client: &reqwest::Client,
-    url: &str,
-) -> Result<T, String> {
-    let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("GitHub API {status}: {body}"));
-    }
-    resp.json::<T>().await.map_err(|e| e.to_string())
-}
-
-async fn gh_send(req: reqwest::RequestBuilder, expected: &[u16]) -> Result<(), String> {
-    let resp = req.send().await.map_err(|e| e.to_string())?;
-    let status = resp.status().as_u16();
-    if !expected.contains(&status) {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("GitHub API {status}: {body}"));
-    }
-    Ok(())
-}
-
-// ─── NaCl sealed box (crypto_box_seal, libsodium-compatible) ─────────────────
-
-fn seal_box(recipient_pub_b64: &str, plaintext: &[u8]) -> Result<String, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    use blake2::{
-        digest::{Update, VariableOutput},
-        Blake2bVar,
-    };
-    use crypto_box::{aead::Aead, PublicKey, SalsaBox, SecretKey};
-    use rand::rngs::OsRng;
-
-    let pub_bytes = STANDARD
-        .decode(recipient_pub_b64)
-        .map_err(|e| e.to_string())?;
-    let pub_array: [u8; 32] = pub_bytes
-        .try_into()
-        .map_err(|_| "public key must be 32 bytes".to_string())?;
-    let recipient_pub = PublicKey::from(pub_array);
-
-    let eph_priv = SecretKey::generate(&mut OsRng);
-    let eph_pub = eph_priv.public_key();
-
-    // nonce = BLAKE2b-192(eph_pub || recipient_pub) — matches libsodium crypto_box_seal
-    let mut hasher = Blake2bVar::new(24).map_err(|e| e.to_string())?;
-    hasher.update(eph_pub.as_bytes());
-    hasher.update(recipient_pub.as_bytes());
-    let mut nonce_bytes = [0u8; 24];
-    hasher
-        .finalize_variable(&mut nonce_bytes)
-        .map_err(|e| e.to_string())?;
-    let nonce = crypto_box::Nonce::from_slice(&nonce_bytes);
-
-    let nacl_box = SalsaBox::new(&recipient_pub, &eph_priv);
-    let ciphertext = nacl_box
-        .encrypt(nonce, plaintext)
-        .map_err(|e| e.to_string())?;
-
-    let mut out = Vec::with_capacity(32 + ciphertext.len());
-    out.extend_from_slice(eph_pub.as_bytes());
-    out.extend_from_slice(&ciphertext);
-    Ok(STANDARD.encode(out))
-}
-
-// ─── GitHub API commands ──────────────────────────────────────────────────────
 
 #[tauri::command]
 async fn list_github_secrets(
@@ -541,13 +162,7 @@ async fn list_github_secrets(
     repo: String,
     cache: tauri::State<'_, TokenCache>,
 ) -> Result<Vec<GitHubSecret>, String> {
-    let client = gh_client(&get_token(&server_id, &cache)?)?;
-    let page: SecretsPage = gh_get(
-        &client,
-        &format!("{GITHUB_API}/repos/{owner}/{repo}/actions/secrets"),
-    )
-    .await?;
-    Ok(page.secrets)
+    github::list_secrets(&cache, &server_id, &owner, &repo).await
 }
 
 #[tauri::command]
@@ -557,13 +172,7 @@ async fn list_github_variables(
     repo: String,
     cache: tauri::State<'_, TokenCache>,
 ) -> Result<Vec<GitHubVariable>, String> {
-    let client = gh_client(&get_token(&server_id, &cache)?)?;
-    let page: VariablesPage = gh_get(
-        &client,
-        &format!("{GITHUB_API}/repos/{owner}/{repo}/actions/variables"),
-    )
-    .await?;
-    Ok(page.variables)
+    github::list_variables(&cache, &server_id, &owner, &repo).await
 }
 
 #[tauri::command]
@@ -575,30 +184,7 @@ async fn set_github_secret(
     value: String,
     cache: tauri::State<'_, TokenCache>,
 ) -> Result<(), String> {
-    let client = gh_client(&get_token(&server_id, &cache)?)?;
-
-    #[derive(Deserialize)]
-    struct PubKey {
-        key_id: String,
-        key: String,
-    }
-    let pk: PubKey = gh_get(
-        &client,
-        &format!("{GITHUB_API}/repos/{owner}/{repo}/actions/secrets/public-key"),
-    )
-    .await?;
-
-    let encrypted = seal_box(&pk.key, value.as_bytes())?;
-    let body = serde_json::json!({ "encrypted_value": encrypted, "key_id": pk.key_id });
-    gh_send(
-        client
-            .put(format!(
-                "{GITHUB_API}/repos/{owner}/{repo}/actions/secrets/{name}"
-            ))
-            .json(&body),
-        &[201, 204],
-    )
-    .await
+    github::set_secret(&cache, &server_id, &owner, &repo, &name, &value).await
 }
 
 #[tauri::command]
@@ -611,22 +197,7 @@ async fn set_github_variable(
     exists: bool,
     cache: tauri::State<'_, TokenCache>,
 ) -> Result<(), String> {
-    let client = gh_client(&get_token(&server_id, &cache)?)?;
-    let body = serde_json::json!({ "name": name, "value": value });
-    let req = if exists {
-        client
-            .patch(format!(
-                "{GITHUB_API}/repos/{owner}/{repo}/actions/variables/{name}"
-            ))
-            .json(&body)
-    } else {
-        client
-            .post(format!(
-                "{GITHUB_API}/repos/{owner}/{repo}/actions/variables"
-            ))
-            .json(&body)
-    };
-    gh_send(req, &[200, 201, 204]).await
+    github::set_variable(&cache, &server_id, &owner, &repo, &name, &value, exists).await
 }
 
 #[tauri::command]
@@ -637,14 +208,7 @@ async fn delete_github_secret(
     name: String,
     cache: tauri::State<'_, TokenCache>,
 ) -> Result<(), String> {
-    let client = gh_client(&get_token(&server_id, &cache)?)?;
-    gh_send(
-        client.delete(format!(
-            "{GITHUB_API}/repos/{owner}/{repo}/actions/secrets/{name}"
-        )),
-        &[204],
-    )
-    .await
+    github::delete_secret(&cache, &server_id, &owner, &repo, &name).await
 }
 
 #[tauri::command]
@@ -655,14 +219,7 @@ async fn delete_github_variable(
     name: String,
     cache: tauri::State<'_, TokenCache>,
 ) -> Result<(), String> {
-    let client = gh_client(&get_token(&server_id, &cache)?)?;
-    gh_send(
-        client.delete(format!(
-            "{GITHUB_API}/repos/{owner}/{repo}/actions/variables/{name}"
-        )),
-        &[204],
-    )
-    .await
+    github::delete_variable(&cache, &server_id, &owner, &repo, &name).await
 }
 
 // ─── Image compression ───────────────────────────────────────────────────────
@@ -1050,7 +607,7 @@ pub fn run() {
                 voice::close_all();
             }
         })
-        .manage(TokenCache(Mutex::new(HashMap::new())))
+        .manage(TokenCache::default())
         // La sesión ya no se copia desde la pantalla (`set_session`): es del
         // core, y quien necesita el token se lo pide a él.
         .manage(core_bridge::CoreSlot::default())

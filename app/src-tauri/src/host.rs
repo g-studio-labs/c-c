@@ -26,7 +26,7 @@ use std::process::Command;
 // Limpiar el entorno no necesita Tauri y lo usa también el MCP: vive en su
 // crate (`mcp/src/host.rs`). Aquí queda lo que sí es de la app: el pty de la
 // terminal y abrir enlaces y ficheros.
-pub use cac_mcp::host::{appimage_cleanup, command};
+pub use cac_mcp::host::appimage_cleanup;
 use cac_mcp::host::clean_with;
 
 /// Lo mismo para un `CommandBuilder` de un pty (la terminal).

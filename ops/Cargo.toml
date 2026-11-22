@@ -43,3 +43,9 @@ hex = "0.4"
 x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
 bech32 = "0.9.1"
 rand = "0.8"
+# Los secrets y variables de Actions (`github`): la API por HTTPS, sin OpenSSL
+# del sistema, y la caja sellada de libsodium (crypto_box_seal) en Rust puro.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+crypto_box = "0.9"
+blake2 = "0.10"
+base64 = "0.22"
