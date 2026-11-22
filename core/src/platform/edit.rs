@@ -37,12 +37,18 @@ pub struct ServerPermissions {
     /// Ver el secreto guardado de una integración de un clúster: miembro o
     /// más, como en Tauri.
     pub reveal_integrations: bool,
+    /// Desplegar un commit o volver al anterior: miembro (`DeployHandler`).
+    pub deploy: bool,
+    /// Registrar, ajustar o borrar un desplegable, y acuñar la llave de su
+    /// CI: admin. Los ajustes llevan el comando de migraciones, un `sh -c`
+    /// que corre en el servidor.
+    pub manage_deploys: bool,
 }
 
 pub fn server_permissions(role: &str, superadmin: bool) -> ServerPermissions {
     let writer = superadmin || matches!(role, "admin" | "member");
     let admin = superadmin || role == "admin";
-    ServerPermissions { create: writer, kubernetes: superadmin, edit: writer, edit_connection: admin, delete: admin, install_agent: admin, restart_service: writer, reveal_integrations: writer }
+    ServerPermissions { create: writer, kubernetes: superadmin, edit: writer, edit_connection: admin, delete: admin, install_agent: admin, restart_service: writer, reveal_integrations: writer, deploy: writer, manage_deploys: admin }
 }
 
 /// Un campo del formulario de un servidor.
@@ -244,9 +250,9 @@ mod tests {
     fn permissions_mirror_the_backend() {
         let p = |role, superadmin| server_permissions(role, superadmin);
         assert_eq!(p("viewer", false), ServerPermissions::default());
-        assert_eq!(p("member", false), ServerPermissions { create: true, edit: true, restart_service: true, reveal_integrations: true, ..Default::default() });
-        assert_eq!(p("admin", false), ServerPermissions { create: true, edit: true, edit_connection: true, delete: true, kubernetes: false, install_agent: true, restart_service: true, reveal_integrations: true });
-        assert_eq!(p("", true), ServerPermissions { create: true, edit: true, edit_connection: true, delete: true, kubernetes: true, install_agent: true, restart_service: true, reveal_integrations: true });
+        assert_eq!(p("member", false), ServerPermissions { create: true, edit: true, restart_service: true, reveal_integrations: true, deploy: true, ..Default::default() });
+        assert_eq!(p("admin", false), ServerPermissions { create: true, edit: true, edit_connection: true, delete: true, kubernetes: false, install_agent: true, restart_service: true, reveal_integrations: true, deploy: true, manage_deploys: true });
+        assert_eq!(p("", true), ServerPermissions { create: true, edit: true, edit_connection: true, delete: true, kubernetes: true, install_agent: true, restart_service: true, reveal_integrations: true, deploy: true, manage_deploys: true });
     }
 
     fn form() -> ServerForm {

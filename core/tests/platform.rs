@@ -1270,3 +1270,127 @@ async fn an_integration_through_cac_opens_the_proxy_link() {
     assert_eq!(rig.core.platform().integration_link(pgadmin).await.unwrap(), "https://pg.dev");
     assert_eq!(writes(&rig).await.len(), before, "pidió enlace al proxy para una que abre directa");
 }
+
+// ─── Despliegues ─────────────────────────────────────────────────────────────
+
+use cac_core::{CiNotify, DeployStatus, NewDeployable, ServerEvent};
+
+fn deployable_row() -> Value {
+    json!({ "id": "d1", "orgId": "o1", "serverId": "s", "name": "web", "stack": "shop", "serviceName": "shop_web", "imageRepo": "ghcr.io/o/web", "onCINotify": "record", "ciKeyPreview": "", "currentImage": "ghcr.io/o/web:abc1234" })
+}
+
+fn deployment_row(id: &str, status: &str) -> Value {
+    json!({ "id": id, "createdAt": "2026-11-21T10:00:00Z", "deployableId": "d1", "serverId": "s", "image": "ghcr.io/o/web:abc1234", "requestedBy": "user", "status": status })
+}
+
+/// Un servidor `s` abierto con un desplegable `d1` mirado: su historial
+/// tiene un despliegue de Ana.
+async fn deploys_as(role: &str) -> Rig {
+    let rig = rig().await;
+    as_role(&rig, role, vec![row(&rig, "s", "o1", "online", true)]).await;
+    let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+    get("/api/v1/servers/s/deployables").respond_with(ok(json!([deployable_row()]))).mount(&rig.server).await;
+    let mut first = deployment_row("x1", "succeeded");
+    first["requestedByName"] = json!("Ana");
+    get("/api/v1/servers/s/deployables/d1/deployments").respond_with(ok(json!([first]))).mount(&rig.server).await;
+    get("/api/v1/servers/s/deployables/d1/builds").respond_with(ok(json!([]))).mount(&rig.server).await;
+    get("/api/v1/servers/s/deployables/d1/commits").respond_with(ok(json!([{ "sha": "def5678", "message": "arregla", "author": "ana", "date": "2026-11-21" }]))).mount(&rig.server).await;
+    rig.core.platform().open_server("s");
+    Mock::given(method("GET")).and(path("/api/v1/services")).respond_with(ok(json!([web_service()]))).mount(&rig.server).await;
+    Mock::given(method("POST")).and(path("/api/v1/servers/s/agent-session")).respond_with(pass("p", 600)).mount(&rig.server).await;
+    rig.core.platform().open_tab(ServerTab::Deploy).await;
+    assert_eq!(rig.core.platform().state().services.map(|s| s.len()), Some(1), "la pestaña pide los servicios del swarm");
+    rig.core.platform().choose_service("shop_web").await;
+    assert_eq!(rig.core.platform().state().deploys.unwrap().selected.as_deref(), Some("d1"), "elegir un servicio registrado mira su desplegable");
+    rig
+}
+
+fn event(name: &str, data: Value) -> ServerEvent {
+    ServerEvent { event: name.into(), data: data.to_string() }
+}
+
+/// Rotura que atrapa: volver a pedir el historial por cada evento (un
+/// despliegue que avanza no puede depender de refrescar), sustituir la fila
+/// y perder quién lo pidió, o pegar al log que se mira las líneas de otro
+/// despliegue.
+#[tokio::test]
+async fn the_stream_moves_a_deployment_without_asking_again() {
+    let rig = deploys_as("viewer").await;
+    let deploys = rig.core.platform().state().deploys.unwrap();
+    assert_eq!(deploys.deployables.unwrap()[0].on_ci_notify, CiNotify::Record);
+    assert_eq!(deploys.commits.unwrap()[0].sha, "def5678");
+
+    rig.core.stream().deliver(event("deploy:status", deployment_row("x1", "running")));
+    rig.core.stream().deliver(event("deploy:status", deployment_row("x2", "queued")));
+    let history = rig.core.platform().state().deploys.unwrap().history;
+    assert_eq!(history.iter().map(|d| (d.id.as_str(), d.status)).collect::<Vec<_>>(), [("x2", DeployStatus::Queued), ("x1", DeployStatus::Running)]);
+    assert_eq!(history[1].requested_by_name.as_deref(), Some("Ana"));
+    assert_eq!(hits(&rig, "/api/v1/servers/s/deployables/d1/deployments").await.len(), 1);
+
+    Mock::given(method("GET")).and(path("/api/v1/servers/s/deployables/d1/deployments/x2")).respond_with(ok(json!({ "id": "x2", "log": "pull\n" }))).mount(&rig.server).await;
+    rig.core.platform().open_deploy_log("x2").await;
+    rig.core.stream().deliver(event("deploy:log", json!({ "deploymentId": "x2", "deployableId": "d1", "lines": ["update"] })));
+    rig.core.stream().deliver(event("deploy:log", json!({ "deploymentId": "x1", "deployableId": "d1", "lines": ["ajeno"] })));
+    assert_eq!(rig.core.platform().state().deploys.unwrap().log, "pull\nupdate\n");
+
+    rig.core.stream().deliver(event("deploy:build", json!({ "id": "b1", "deployableId": "d1", "sha": "fff0000" })));
+    let deploys = rig.core.platform().state().deploys.unwrap();
+    assert_eq!(deploys.builds.len(), 1);
+    assert!(deploys.commits_stale);
+}
+
+/// Rotura que atrapa: dejar que un lector despliegue o vuelva atrás, o que
+/// un miembro mande otro sha u otro despliegue que el elegido.
+#[tokio::test]
+async fn a_member_deploys_and_rolls_back_what_was_chosen() {
+    let reader = deploys_as("viewer").await;
+    assert_eq!(reader.core.platform().deploy("d1", "def5678").await, Err(ServerEditError::ReadOnly));
+    assert_eq!(reader.core.platform().rollback("d1", "x1").await, Err(ServerEditError::ReadOnly));
+    assert!(writes(&reader).await.iter().all(|r| !r.url.path().contains("deployables")));
+
+    let rig = deploys_as("member").await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/servers/s/deployables/d1/deploy"))
+        .and(body_json(json!({ "sha": "def5678" })))
+        .respond_with(ok(deployment_row("x2", "queued")))
+        .expect(1)
+        .mount(&rig.server)
+        .await;
+    Mock::given(method("POST")).and(path("/api/v1/servers/s/deployables/d1/deployments/x1/rollback")).respond_with(ok(deployment_row("x3", "queued"))).expect(1).mount(&rig.server).await;
+    rig.core.platform().deploy("d1", "def5678").await.unwrap();
+    rig.core.platform().rollback("d1", "x1").await.unwrap();
+    let history = rig.core.platform().state().deploys.unwrap().history;
+    assert_eq!(history.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), ["x3", "x2", "x1"]);
+}
+
+/// Rotura que atrapa: dejar la llave del CI entera en el estado (se pinta
+/// y viaja a cada aviso), o que un miembro registre o ajuste un servicio
+/// (los ajustes llevan un `sh -c` que corre en el servidor).
+#[tokio::test]
+async fn the_ci_key_is_shown_once_and_only_an_admin_manages() {
+    let member = deploys_as("member").await;
+    assert_eq!(member.core.platform().mint_ci_key("d1").await, Err(ServerEditError::AdminOnly));
+    assert_eq!(member.core.platform().create_deployable(&NewDeployable::default()).await.err(), Some(ServerEditError::AdminOnly));
+
+    let rig = deploys_as("admin").await;
+    Mock::given(method("POST")).and(path("/api/v1/servers/s/deployables/d1/ci-key")).respond_with(ok(json!({ "key": "cac_dk_SECRETO", "preview": "cac_dk_SE" }))).mount(&rig.server).await;
+    let key = rig.core.platform().mint_ci_key("d1").await.unwrap();
+    assert_eq!(key.key, "cac_dk_SECRETO");
+    let painted = format!("{:?}", rig.recorder.platform.lock().unwrap());
+    assert!(!painted.contains("cac_dk_SECRETO"));
+    assert_eq!(rig.core.platform().state().deploys.unwrap().deployables.unwrap()[0].ci_key_preview, "cac_dk_SE");
+
+    let mut settings = rig.core.platform().state().deploys.unwrap().deployables.unwrap()[0].settings();
+    settings.migrate_command = "npx prisma migrate deploy".into();
+    let mut back = deployable_row();
+    back["migrateCommand"] = json!("npx prisma migrate deploy");
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/servers/s/deployables/d1"))
+        .and(body_json(json!({ "name": "web", "environment": "", "repoFullName": "", "onCINotify": "record", "buildWorkflow": "", "shortTags": false, "migrateCommand": "npx prisma migrate deploy", "rotateCommand": "", "branch": "", "buildOnHost": false, "dockerfile": "", "buildContext": "" })))
+        .respond_with(ok(back))
+        .expect(1)
+        .mount(&rig.server)
+        .await;
+    rig.core.platform().update_deployable("d1", &settings).await.unwrap();
+    assert_eq!(rig.core.platform().state().deploys.unwrap().deployables.unwrap()[0].migrate_command, "npx prisma migrate deploy");
+}

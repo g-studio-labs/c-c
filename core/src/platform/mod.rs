@@ -6,6 +6,7 @@
 //! app nativa». Cada fase añade su fichero junto a éstos.
 
 pub mod agent;
+pub mod deploys;
 pub mod detail;
 pub mod edit;
 pub mod install;
@@ -19,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::stream::ServerEvent;
 use crate::Core;
 pub use agent::{agent_base, Agent, AgentStream, AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT};
+pub use deploys::{commit_pick, CommitPick, CommitRow, ci_notice_step, guess_environment, is_sha, repo_from_image, runs_commit, short_ref, short_service_name, uses_short_sha, CiKey, CiNotify, DeployStatus, Deployable, DeployableSettings, Deployment, DeploysState, ImageBuild, NewDeployable, RepoCommit, AGENT_VERSION_BUILDS, AGENT_VERSION_MIGRATES, LIST_PREVIEW, SECRETS_ENTRYPOINT_SNIPPET};
 pub use detail::{server_tabs, AgentNote, DeployableSummary, IncidentServerRef, IncidentSummary, ProvisioningRun, ServerOverview, ServerTab, AGENT_VERSION_DEPLOYS};
 pub use edit::{server_edit_phrase, server_permissions, ServerEditError, ServerField, ServerForm, ServerPermissions, MAX_SERVER_NAME};
 pub use install::{agent_update_outcome, AgentIdentity, AgentInstallOutcome, AgentInstallPhase, AgentJob, AgentWait, AGENT_VERSION_LATEST};
@@ -77,6 +79,8 @@ pub struct PlatformState {
     pub k8s_loading: bool,
     /// La etiqueta de cada clúster de la lista, cuando se leyó su salud.
     pub cluster_badges: Vec<ClusterBadge>,
+    /// Los despliegues del servidor abierto, desde que se miró su pestaña.
+    pub deploys: Option<DeploysState>,
 }
 
 #[derive(Default)]
@@ -110,6 +114,7 @@ pub(crate) struct PlatformData {
     k8s: Option<K8sHub>,
     k8s_loading: bool,
     cluster_badges: Vec<ClusterBadge>,
+    deploys: Option<DeploysState>,
 }
 
 /// Plataforma en este core.
@@ -153,6 +158,7 @@ impl Platform {
             k8s: data.k8s.clone(),
             k8s_loading: data.k8s_loading,
             cluster_badges: data.cluster_badges.clone(),
+            deploys: data.deploys.clone(),
         }
     }
 
@@ -518,6 +524,17 @@ impl Platform {
         match tab {
             ServerTab::Services => self.load_services().await,
             ServerTab::Nodes => self.load_nodes().await,
+            ServerTab::Deploy => {
+                // La lista de la izquierda son los servicios del swarm.
+                if self.data().services.is_none() {
+                    let platform = self.core.platform();
+                    let services = tokio::spawn(async move { platform.load_services().await });
+                    self.load_deployables().await;
+                    let _ = services.await;
+                } else {
+                    self.load_deployables().await;
+                }
+            }
             ServerTab::Stats => {
                 self.start_stats();
                 // Los nodos ponen nombre a la columna de nodo.
@@ -893,6 +910,7 @@ fn close(data: &mut PlatformData) {
     data.stats_fetched_at = None;
     data.k8s = None;
     data.k8s_loading = false;
+    data.deploys = None;
 }
 
 /// Lo que contestó una tarea de lectura, con su fallo como frase.

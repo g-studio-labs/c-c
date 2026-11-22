@@ -348,6 +348,7 @@ impl Stream {
         self.core.notices().server_event(&event);
         self.core.inbox().server_event(&event);
         self.core.voice().server_event(&event);
+        self.core.platform().deploy_event(&event);
         self.core.inner.listener.server_event(event);
     }
 }
