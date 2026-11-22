@@ -21,6 +21,7 @@ use crate::lang::{locale, tr};
 use crate::log_view::LogBox;
 use crate::theme::Leading as _;
 
+use super::provision_config::ConfigPanel;
 use super::provision_engine::engine;
 use super::services::pill;
 
@@ -45,6 +46,8 @@ pub struct ProvisionView {
     /// La ejecución del historial cuya config aplicada se mira.
     open_run: Option<String>,
     logs: LogBox,
+    /// La config del servidor, del servidor de esta vista (`servers.rs` la rehace al cambiar de servidor).
+    config: Option<Entity<ConfigPanel>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -81,6 +84,7 @@ impl ProvisionView {
             line: None,
             open_run: None,
             logs: LogBox::new(),
+            config: None,
             _subscriptions: subscriptions,
         }
     }
@@ -631,7 +635,9 @@ impl Render for ProvisionView {
         let error = provision.error.clone().map(|error| div().id("provision-error").leading_xs().text_color(danger).child(error).test_support());
         let project = self.project_card(&provision, cx);
         let playbook = self.playbook_card(&server, &state, &provision, window, cx);
-        let left = div().w(px(FORM_WIDTH)).flex_none().flex().flex_col().gap_3().child(project).children(playbook).children(line);
+        let server_id = server.id.clone();
+        let config = self.config.get_or_insert_with(|| cx.new(|cx| ConfigPanel::new(server_id.clone(), window, cx))).clone();
+        let left = div().w(px(FORM_WIDTH)).flex_none().flex().flex_col().gap_3().child(project).children(playbook).children(line).child(config);
         let right = div().flex_1().min_w_0().flex().flex_col().gap_4().child(self.output(&server, &state, cx)).child(self.history(&provision, cx));
         div().id("server-provision").flex().flex_col().gap_3().children(error).child(div().flex().items_start().gap_4().child(left).child(right)).test_support().into_any_element()
     }

@@ -142,3 +142,82 @@ fn a_member_rehearses_asking_and_the_check_goes_to_cac(cx: &mut TestAppContext) 
     assert!(!writes(&server).iter().any(|(_, route, _)| route.ends_with("/provisioning-runs")), "un ensayo abrió una ejecución en cac");
     cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
 }
+
+/// La config: un admin añade un secreto por su referencia y lo guarda como
+/// versión nueva; un valor pegado en vez de la referencia no deja guardar;
+/// restaurar una versión pregunta.
+///
+/// Roturas que atrapa: guardar un valor en vez de su referencia; mandar algo
+/// distinto de lo escrito; restaurar sin preguntar.
+#[gpui_kit::test]
+fn an_admin_saves_references_and_restoring_asks(cx: &mut TestAppContext) {
+    let (server, window, _) = provision_as("admin", json!([]), cx);
+    server.mount(Mock::given(method("PUT")).and(path("/api/v1/servers/s1/config")).respond_with(ok(json!({ "id": "v5", "seq": 5 }))));
+    reveal(window, "server-body", "provision-secret-add", cx);
+    click(window, "provision-secret-add", cx);
+    wait_until(cx, "sale la fila", |cx| on_screen(window, "provision-secret-name-1", cx));
+    click(window, "provision-secret-name-1", cx);
+    type_text(window, "CF_TOKEN", cx);
+    click(window, "provision-secret-ref-1", cx);
+    type_text(window, "hunter2", cx);
+    wait_until(cx, "dice que no es una referencia", |cx| on_screen(window, "provision-config-problem", cx));
+    reveal(window, "server-body", "provision-config-save", cx);
+    click(window, "provision-config-save", cx);
+    cx.run_until_parked();
+    assert!(!writes(&server).iter().any(|(verb, _, _)| verb == "PUT"), "con un valor pegado llegó a guardar");
+
+    reveal(window, "server-body", "provision-secret-remove-1", cx);
+    click(window, "provision-secret-remove-1", cx);
+    reveal(window, "server-body", "provision-secret-add", cx);
+    click(window, "provision-secret-add", cx);
+    wait_until(cx, "sale otra fila", |cx| on_screen(window, "provision-secret-name-1", cx) && !on_screen(window, "provision-config-problem", cx));
+    click(window, "provision-secret-name-1", cx);
+    type_text(window, "CF_TOKEN", cx);
+    click(window, "provision-secret-ref-1", cx);
+    type_text(window, "op://Infra/cloudflare/token", cx);
+    cx.run_until_parked();
+    reveal(window, "server-body", "provision-config-save", cx);
+    click(window, "provision-config-save", cx);
+    wait_until(cx, "guarda", |_| server.requests().iter().any(|r| r.method.as_str() == "PUT"));
+    let saved = writes(&server).into_iter().find(|(verb, _, _)| verb == "PUT").and_then(|(_, _, body)| body).unwrap();
+    assert_eq!(saved["opRefs"], json!({ "CF_TOKEN": "op://Infra/cloudflare/token", "OPS_PASSWORD": "op://Infra/pixel/password" }));
+    assert_eq!(saved["templateId"], "t1");
+
+    reveal(window, "server-body", "provision-version-restore-3", cx);
+    click(window, "provision-version-restore-3", cx);
+    let (title, _) = cx.pending_prompt().expect("restauró sin preguntar");
+    assert_eq!(title, "¿Restaurar la versión 3?");
+    cx.simulate_prompt_answer("Cancelar");
+    cx.run_until_parked();
+    assert_eq!(writes(&server).iter().filter(|(verb, _, _)| verb == "PUT").count(), 1, "restauró al cancelar");
+    cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+}
+
+/// Una plantilla nueva sale de las etapas elegidas del manifiesto, con sus
+/// valores por defecto y la contraseña de sudo como propia de cada servidor.
+///
+/// Roturas que atrapa: crear la plantilla sin etapas; perder los
+/// defaults o el secreto de cada máquina; no cerrar el diálogo al guardar.
+#[gpui_kit::test]
+fn a_new_template_comes_from_the_chosen_stages(cx: &mut TestAppContext) {
+    let (server, window, _) = provision_as("admin", json!([]), cx);
+    server.mount(Mock::given(method("POST")).and(path("/api/v1/organizations/o1/server-templates/")).respond_with(ok(json!({ "id": "t2", "orgId": "o1", "name": "Nueva" }))));
+    reveal(window, "server-body", "provision-template-new", cx);
+    click(window, "provision-template-new", cx);
+    wait_until(cx, "se abre", |cx| on_screen(window, "template-dialog", cx));
+    click(window, "template-name", cx);
+    type_text(window, "Nueva", cx);
+    cx.run_until_parked();
+    click(window, "template-save", cx);
+    cx.run_until_parked();
+    assert!(writes(&server).iter().all(|(_, route, _)| !route.contains("server-templates")), "creó una plantilla sin etapas");
+
+    click(window, "template-stage-swarm", cx);
+    cx.run_until_parked();
+    click(window, "template-save", cx);
+    wait_until(cx, "crea", |_| writes(&server).iter().any(|(_, route, _)| route.contains("server-templates")));
+    let body = writes(&server).into_iter().find(|(_, route, _)| route.contains("server-templates")).and_then(|(_, _, body)| body).unwrap();
+    assert_eq!((body["name"].clone(), body["playbooks"].clone(), body["vars"].clone(), body["requires"].clone(), body["perServer"].clone()), (json!("Nueva"), json!(["swarm"]), json!({ "traefik_version": "3.1" }), json!(["OPS_PASSWORD"]), json!(["OPS_PASSWORD"])));
+    wait_until(cx, "se cierra", |cx| !on_screen(window, "template-dialog", cx));
+    cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+}
