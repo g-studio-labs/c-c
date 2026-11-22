@@ -141,6 +141,12 @@ fn main() {
             voice_settings::restore_choices(cx);
         }
         theme::apply_preference(cx);
+        // Nada sigue tocando un servidor sin nadie mirando.
+        cx.on_app_quit(|_| {
+            platform::provision_engine::stop_all();
+            async {}
+        })
+        .detach();
         // Para «Conectar Claude Code»: dónde está `cac-mcp` en esta máquina y
         // de dónde se baja. Lo decide el MCP (`cac_mcp::update`).
         cx.set_global(connect::McpSetup { machine: cac_mcp::update::Machine::from_env(), server_url: server_url.clone() });

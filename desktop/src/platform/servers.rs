@@ -11,6 +11,7 @@ use gpui_kit::*;
 use super::agent_install::{install_for, installer, outcome_phrase};
 use super::server_dialog::{ServerDialog, ServerDialogClosed};
 use super::deploy::DeployView;
+use super::provision::ProvisionView;
 use super::services::ServicesView;
 use super::stack_secrets::StackSecretsView;
 use super::k8s_hub::K8sConsole;
@@ -40,6 +41,7 @@ pub struct ServersView {
     k8s: Option<Entity<K8sConsole>>,
     deploy: Option<Entity<DeployView>>,
     secrets: Option<Entity<StackSecretsView>>,
+    provision: Option<Entity<ProvisionView>>,
     /// De qué servidor son las tres de arriba. Otro servidor empieza con
     /// las suyas: el filtro, la línea de reinicio o un secreto revelado de
     /// uno salían en el siguiente.
@@ -48,7 +50,7 @@ pub struct ServersView {
 
 impl ServersView {
     pub fn new() -> Self {
-        ServersView { dialog: None, ssh_key: None, problem: None, agent_line: None, services: None, stats: None, k8s: None, deploy: None, secrets: None, views_of: None }
+        ServersView { dialog: None, ssh_key: None, problem: None, agent_line: None, services: None, stats: None, k8s: None, deploy: None, secrets: None, provision: None, views_of: None }
     }
 
     fn open_dialog(&mut self, editing: Option<Server>, window: &mut Window, cx: &mut Context<Self>) {
@@ -289,6 +291,7 @@ impl Render for ServersView {
             if self.views_of.as_ref() != Some(&server.id) {
                 self.views_of = Some(server.id.clone());
                 (self.services, self.stats, self.k8s, self.deploy, self.secrets) = (None, None, None, None, None);
+                self.provision = None;
             }
             let actions = self.agent_actions(server, &state, cx);
             let services = (state.tab == cac_core::ServerTab::Services)
@@ -297,7 +300,8 @@ impl Render for ServersView {
             let k8s = (server.kind == cac_core::ServerKind::Kubernetes && state.tab == cac_core::ServerTab::Overview).then(|| self.k8s.get_or_insert_with(|| cx.new(|_| K8sConsole::new())).clone().into_any_element());
             let secrets = (state.tab == cac_core::ServerTab::Secrets).then(|| self.secrets.get_or_insert_with(|| cx.new(|cx| StackSecretsView::new(window, cx))).clone().into_any_element());
             let deploy = (state.tab == cac_core::ServerTab::Deploy).then(|| self.deploy.get_or_insert_with(|| cx.new(|cx| DeployView::new(window, cx))).clone().into_any_element());
-            return div().size_full().child(super::server_page::page(server, &state, actions, super::server_page::Panels { services, stats, k8s, deploy, secrets }, cx)).into_any_element();
+            let provision = (state.tab == cac_core::ServerTab::Provision).then(|| self.provision.get_or_insert_with(|| cx.new(|cx| ProvisionView::new(window, cx))).clone().into_any_element());
+            return div().size_full().child(super::server_page::page(server, &state, actions, super::server_page::Panels { services, stats, k8s, deploy, secrets, provision }, cx)).into_any_element();
         }
         let theme = cx.theme();
         let (background, foreground, border, danger) = (theme.background, theme.foreground, theme.border, theme.danger);

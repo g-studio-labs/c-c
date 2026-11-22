@@ -1689,6 +1689,12 @@ mod tests {
     use wiremock::matchers::{method, path, query_param};
     use wiremock::Mock;
 
+    /// La pestaña Provisioning, en su fichero para no engordar éste.
+    mod provision {
+        use super::*;
+        include!("platform/provision_tests.rs");
+    }
+
     fn org(id: &str, name: &str) -> serde_json::Value {
         json!({
             "id": id, "name": name, "slug": id, "role": "member", "memberCount": 2,
