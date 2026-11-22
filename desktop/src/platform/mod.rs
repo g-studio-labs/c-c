@@ -4,6 +4,8 @@
 //! Plataforma en la app nativa», en cac) añade el suyo.
 
 pub mod agent_install;
+pub mod backup_form;
+pub mod backups;
 pub mod deploy;
 pub mod deploy_settings;
 pub mod secret_refs;

@@ -3619,7 +3619,8 @@ mod tests {
         assert!(!on_screen(window, "server-agent-install", cx), "a un miembro, instalar el agente que sólo puede un admin");
 
         click(window, "server-tab-backups", cx);
-        wait_until(cx, "la pestaña cambia", |cx| on_screen(window, "server-tab-pending", cx));
+        wait_until(cx, "la pestaña abre su vista", |cx| on_screen(window, "server-backups", cx) || on_screen(window, "backups-loading", cx));
+        assert!(!on_screen(window, "server-tab-pending", cx), "una pestaña de un swarm dice que todavía no está");
         click(window, "server-back", cx);
         wait_until(cx, "vuelve la tabla", |cx| on_screen(window, "platform-row-s1", cx));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
@@ -4598,4 +4599,7 @@ mod tests {
         assert_eq!(label(window, "notifications-bell", cx), "Notificaciones");
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
+
+    // La pestaña de backups, en su fichero (ver su cabecera).
+    include!("platform/backups_tests.rs");
 }
