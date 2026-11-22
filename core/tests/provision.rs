@@ -208,3 +208,256 @@ async fn a_stale_request_is_discarded_by_who_asked_or_an_admin() {
     let request = rig.core.platform().state().provision.unwrap().requests.into_iter().find(|r| r.id == "r2").unwrap();
     assert_eq!(request.status, "discarded");
 }
+
+// ─── Correr ──────────────────────────────────────────────────────────────────
+
+use cac_core::{AnsibleEngine, AnsibleManifest, AnsibleTools, EngineEvent, EngineSink, InventoryHost, ManualInputs, ManualRun, PlanGaps};
+
+/// El motor de mentira: apunta lo que le piden y cuenta una salida. Con
+/// `fail`, Ansible no llega a arrancar (1Password no contesta).
+#[derive(Default)]
+struct FakeEngine {
+    manifest: Mutex<Option<Value>>,
+    fail: Option<String>,
+    /// Cada ejecución: el playbook y si era un ensayo.
+    runs: Mutex<Vec<(String, bool)>>,
+    /// Lo que dijo cada ejecución a mano, para ver qué se tachó.
+    manual: Mutex<Vec<(Option<String>, Vec<String>)>>,
+    reports: Mutex<Vec<(Vec<String>, i32)>>,
+    /// Cómo acaba cada ejecución, por playbook (si no, bien).
+    exits: Mutex<HashMap<String, i32>>,
+    /// Cuándo se lanzó cada ejecución.
+    started: Mutex<Vec<std::time::Instant>>,
+}
+
+fn v2_manifest() -> Value {
+    json!({ "version": 2, "playbooks": [
+        { "id": "baseline", "file": "baseline.yml", "name": "Baseline", "risk": "change", "verify": "baseline-check" },
+        { "id": "swarm", "file": "swarm.yml", "name": "Swarm", "risk": "change", "verify": "swarm-check" },
+        { "id": "swarm-check", "file": "swarm-check.yml", "name": "Comprobar", "risk": "read" },
+    ] })
+}
+
+impl FakeEngine {
+    fn with(manifest: Value) -> Arc<FakeEngine> {
+        Arc::new(FakeEngine { manifest: Mutex::new(Some(manifest)), ..Default::default() })
+    }
+    fn failing(error: &str) -> Arc<FakeEngine> {
+        Arc::new(FakeEngine { manifest: Mutex::new(Some(v2_manifest())), fail: Some(error.into()), ..Default::default() })
+    }
+    fn say(sink: EngineSink, lines: Vec<String>, code: i32) {
+        std::thread::spawn(move || {
+            for line in lines {
+                sink(EngineEvent::Line(line));
+            }
+            sink(EngineEvent::Exit { code: Some(code), cancelled: false });
+        });
+    }
+}
+
+impl AnsibleEngine for FakeEngine {
+    fn manifest(&self, _project_dir: &str) -> Result<AnsibleManifest, String> {
+        Ok(serde_json::from_value(self.manifest.lock().unwrap().clone().unwrap()).unwrap())
+    }
+    fn tools(&self, _project_dir: &str, _venv: Option<&str>) -> AnsibleTools {
+        AnsibleTools { platform_supported: true, reason: String::new(), ansible_playbook: Some("/usr/bin/ansible-playbook".into()) }
+    }
+    fn inventory(&self, _project_dir: &str, _inventory: &str, _venv: Option<&str>) -> Result<Vec<InventoryHost>, String> {
+        Ok(vec![InventoryHost { name: "gstd".into(), groups: vec!["swarm".into()], ansible_host: None }])
+    }
+    fn plan_gaps(&self, _project_dir: &str, _playbook_id: &str, _effective: &str) -> Result<PlanGaps, String> {
+        Ok(PlanGaps::default())
+    }
+    fn run_with_config(&self, _project_dir: &str, playbook_id: &str, _effective: &str, check: bool, sink: EngineSink) -> Result<String, String> {
+        self.runs.lock().unwrap().push((playbook_id.to_string(), check));
+        self.started.lock().unwrap().push(std::time::Instant::now());
+        if let Some(error) = &self.fail {
+            return Err(error.clone());
+        }
+        let code = self.exits.lock().unwrap().get(playbook_id).copied().unwrap_or(0);
+        FakeEngine::say(sink, vec![format!("TASK [{playbook_id}]"), "PLAY RECAP ***".into(), "gstd : ok=1 changed=0".into()], code);
+        Ok(format!("run-{playbook_id}"))
+    }
+    fn run_manual(&self, spec: ManualRun, sink: EngineSink) -> Result<String, String> {
+        let password = spec.become_password.clone();
+        // Un playbook que se equivoca y escribe lo que le dieron.
+        let said = vec![format!("sudo: {}", password.clone().unwrap_or_default()), format!("token={}", spec.vars.iter().find(|v| v.name == "api_token").and_then(|v| v.value.clone()).unwrap_or_default())];
+        self.manual.lock().unwrap().push((password, said.clone()));
+        FakeEngine::say(sink, said, 0);
+        Ok("run-manual".into())
+    }
+    fn cancel(&self, _run_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn check_report(&self, lines: &[String], exit_code: i32) -> Value {
+        self.reports.lock().unwrap().push((lines.to_vec(), exit_code));
+        json!({ "hosts": ["gstd"], "ok": 1, "changed": 0, "exitCode": exit_code, "logTail": lines.join("\n") })
+    }
+}
+
+async fn with_project(rig: &Rig, engine: &Arc<FakeEngine>) {
+    rig.core.platform().set_project_dir("/home/ana/infra/ansible");
+    rig.core.platform().load_project(engine.clone()).await;
+    assert!(rig.core.platform().state().provision.unwrap().project.unwrap().manifest.is_some(), "no leyó el manifiesto");
+}
+
+fn requests_in_order(requests: &[Request]) -> Vec<String> {
+    requests.iter().filter(|r| r.method.as_str() != "GET").map(|r| format!("{} {}", r.method, r.url.path())).collect()
+}
+
+/// Rotura que atrapa: ensayar sin `--check` (aplicaría de verdad), no seguir
+/// el orden de la plantilla, abrir una ejecución en cac por un ensayo, no
+/// mandar su informe, o seguir con la etapa siguiente tras un ensayo que
+/// falla.
+#[tokio::test]
+async fn rehearsing_never_runs_without_check() {
+    let rig = provision_as("member").await;
+    let engine = FakeEngine::with(v2_manifest());
+    with_project(&rig, &engine).await;
+    Mock::given(method("POST")).and(path("/api/v1/servers/s/provisioning-requests")).respond_with(ok(request_row("r9", "change", "checking", json!([])))).mount(&rig.server).await;
+    Mock::given(method("PUT")).and(path("/api/v1/servers/s/provisioning-requests/r9/check")).respond_with(ok(request_row("r9", "change", "awaiting_approval", json!([])))).mount(&rig.server).await;
+    rig.core.platform().rehearse(engine.clone(), &["baseline".into(), "swarm".into()]).await.unwrap();
+    assert_eq!(*engine.runs.lock().unwrap(), [("baseline".to_string(), true), ("swarm".to_string(), true)]);
+    let sent = writes(&rig).await;
+    assert!(!sent.iter().any(|r| r.url.path().ends_with("/provisioning-runs")), "un ensayo abrió una ejecución en cac");
+    let asked: Vec<Value> = sent.iter().filter(|r| r.method.as_str() == "POST").map(|r| serde_json::from_slice(&r.body).unwrap()).collect();
+    assert_eq!(asked[0], json!({ "playbook": "baseline", "project": "ansible", "risk": "change", "verify": "baseline-check", "rollback": "", "configSeq": 4, "reason": "" }));
+    assert_eq!(sent.iter().filter(|r| r.method.as_str() == "PUT").count(), 2, "no mandó el informe de cada ensayo");
+    let output = rig.core.platform().state().provision_output.unwrap();
+    assert!(!output.running);
+
+    // El ensayo de una etapa que falla para la plantilla: la siguiente
+    // puede fallar sólo porque ésta no está aplicada.
+    engine.runs.lock().unwrap().clear();
+    engine.exits.lock().unwrap().insert("baseline".into(), 2);
+    rig.core.platform().rehearse(engine.clone(), &["baseline".into(), "swarm".into()]).await.unwrap();
+    assert_eq!(*engine.runs.lock().unwrap(), [("baseline".to_string(), true)], "siguió ensayando tras un ensayo que falló");
+}
+
+/// Rotura que atrapa: dejar la petición «ensayando» hasta caducar cuando el
+/// ensayo no llega a arrancar, en vez de cerrarla como ensayo fallido.
+#[tokio::test]
+async fn a_rehearsal_that_does_not_start_closes_its_request() {
+    let rig = provision_as("member").await;
+    let engine = FakeEngine::failing("[ERROR] op: no contesta");
+    with_project(&rig, &engine).await;
+    Mock::given(method("POST")).and(path("/api/v1/servers/s/provisioning-requests")).respond_with(ok(request_row("r9", "change", "checking", json!([])))).mount(&rig.server).await;
+    Mock::given(method("PUT")).and(path("/api/v1/servers/s/provisioning-requests/r9/check")).respond_with(ok(request_row("r9", "change", "awaiting_approval", json!([])))).expect(1).mount(&rig.server).await;
+    let failed = rig.core.platform().rehearse(engine.clone(), &["swarm".into()]).await;
+    assert_eq!(failed, Err(ProvisionError::Engine("[ERROR] op: no contesta".into())));
+    assert_eq!(*engine.reports.lock().unwrap(), [(vec!["[ERROR] op: no contesta".to_string()], -1)]);
+    assert!(!rig.core.platform().state().provision_output.unwrap().running, "se quedó «aplicando»");
+}
+
+fn approved(id: &str, risk: &str) -> Value {
+    let mut row = request_row(id, risk, "approved", json!([]));
+    row["grantExpiresAt"] = json!("2026-11-21T10:15:00Z");
+    row
+}
+
+const CLOSING: Duration = Duration::from_millis(300);
+
+async fn grant_rig(fail: Option<&str>) -> (Rig, Arc<FakeEngine>) {
+    let rig = provision_as("admin").await;
+    rig.server.reset().await;
+    let engine = match fail {
+        Some(error) => FakeEngine::failing(error),
+        None => FakeEngine::with(v2_manifest()),
+    };
+    get("/api/v1/servers/").respond_with(ok(json!([{ "id": "s", "orgId": "o1", "name": "gstd", "host": "203.0.113.9", "sshPort": 22, "sshUser": "ops", "type": "kubernetes", "agentPort": 9090, "status": "online" }]))).mount(&rig.server).await;
+    get("/api/v1/servers/s/config/effective").respond_with(ok(effective())).mount(&rig.server).await;
+    get("/api/v1/servers/s/provisioning-runs").respond_with(ok(json!([]))).mount(&rig.server).await;
+    let mut read = approved("r4", "read");
+    read["playbook"] = json!("swarm-check");
+    get("/api/v1/servers/s/provisioning-requests").respond_with(ok(json!([approved("r3", "change"), read]))).mount(&rig.server).await;
+    Mock::given(method("POST")).and(path("/api/v1/servers/s/provisioning-runs")).respond_with(ok(json!({ "id": "run1" }))).mount(&rig.server).await;
+    // Cerrar tarda: la verificación tiene que esperar a que cac conteste.
+    Mock::given(method("PATCH")).and(path("/api/v1/servers/s/provisioning-runs/run1")).respond_with(ok(json!(null)).set_delay(CLOSING)).mount(&rig.server).await;
+    rig.core.platform().reload_requests().await;
+    with_project(&rig, &engine).await;
+    (rig, engine)
+}
+
+/// Rotura que atrapa: gastar la autorización cuando Ansible no llegó a
+/// arrancar (sin `notStarted`, cac obligaría a ensayar y aprobar otra vez), o
+/// correr la verificación de algo que no se aplicó.
+#[tokio::test]
+async fn a_failure_before_starting_sends_not_started() {
+    let (rig, engine) = grant_rig(Some("op: 1Password no contesta")).await;
+    let failed = rig.core.platform().run_grant(engine.clone(), "r3").await;
+    assert_eq!(failed, Err(ProvisionError::Engine("op: 1Password no contesta".into())));
+    assert_eq!(*engine.runs.lock().unwrap(), [("swarm".to_string(), false)], "corrió la verificación de algo que no se aplicó");
+    let closed: Vec<Value> = writes(&rig).await.iter().filter(|r| r.method.as_str() == "PATCH").map(|r| serde_json::from_slice(&r.body).unwrap()).collect();
+    assert_eq!(closed, [json!({ "status": "failed", "summary": "op: 1Password no contesta", "logTail": "", "notStarted": true })]);
+}
+
+/// Rotura que atrapa: arrancar la verificación antes de cerrar el playbook en
+/// cac (la petición se quedaba «verificando» para siempre, gstd, 2-nov), no
+/// gastar la autorización al abrir, o correr en ensayo lo autorizado.
+#[tokio::test]
+async fn the_verification_runs_after_the_playbook_is_closed() {
+    let (rig, engine) = grant_rig(None).await;
+    rig.core.platform().run_grant(engine.clone(), "r3").await.unwrap();
+    assert_eq!(*engine.runs.lock().unwrap(), [("swarm".to_string(), false), ("swarm-check".to_string(), false)]);
+    let sent = rig.server.received_requests().await.unwrap();
+    assert_eq!(
+        requests_in_order(&sent),
+        ["POST /api/v1/servers/s/provisioning-runs", "PATCH /api/v1/servers/s/provisioning-runs/run1", "POST /api/v1/servers/s/provisioning-runs", "PATCH /api/v1/servers/s/provisioning-runs/run1"]
+    );
+    let opened: Value = serde_json::from_slice(&sent.iter().find(|r| r.method.as_str() == "POST").unwrap().body).unwrap();
+    assert_eq!((opened["playbook"].clone(), opened["requestId"].clone(), opened["configSeq"].clone(), opened["target"].clone()), (json!("swarm"), json!("r3"), json!(4), json!("gstd")));
+    let first_close: Value = serde_json::from_slice(&sent.iter().find(|r| r.method.as_str() == "PATCH").unwrap().body).unwrap();
+    assert_eq!((first_close["status"].clone(), first_close["summary"].clone()), (json!("succeeded"), json!("PLAY RECAP ***\ngstd : ok=1 changed=0")));
+    let started = engine.started.lock().unwrap().clone();
+    assert!(started[1] - started[0] >= CLOSING, "la verificación arrancó sin esperar a que cac cerrara el playbook");
+}
+
+/// Rotura que atrapa: verificar algo que no se aplicó bien, o «verificar»
+/// una lectura (no cambió nada que comprobar).
+#[tokio::test]
+async fn only_a_change_that_went_well_is_verified() {
+    let (rig, engine) = grant_rig(None).await;
+    engine.exits.lock().unwrap().insert("swarm".into(), 2);
+    rig.core.platform().run_grant(engine.clone(), "r3").await.unwrap();
+    assert_eq!(*engine.runs.lock().unwrap(), [("swarm".to_string(), false)], "verificó lo que falló");
+    engine.runs.lock().unwrap().clear();
+    rig.core.platform().run_grant(engine.clone(), "r4").await.unwrap();
+    assert_eq!(*engine.runs.lock().unwrap(), [("swarm-check".to_string(), false)], "verificó una lectura");
+}
+
+/// Rotura que atrapa: correr lo aprobado como `change` cuando el manifiesto
+/// ya dice otra cosa (lo aprobado ya no es esto).
+#[tokio::test]
+async fn a_risk_that_changed_is_asked_again() {
+    let (rig, engine) = grant_rig(None).await;
+    *engine.manifest.lock().unwrap() = Some(json!({ "version": 2, "playbooks": [{ "id": "swarm", "file": "swarm.yml", "name": "Swarm", "risk": "destructive" }] }));
+    with_project(&rig, &engine).await;
+    assert_eq!(rig.core.platform().run_grant(engine.clone(), "r3").await, Err(ProvisionError::RiskChanged("swarm".into())));
+    assert!(engine.runs.lock().unwrap().is_empty());
+    assert!(writes(&rig).await.is_empty());
+}
+
+/// Rotura que atrapa: guardar la contraseña de sudo (o un secreto escrito a
+/// mano) en el estado que se pinta, mandarla a cac, o dejarla en la salida
+/// cuando un playbook la escribe.
+#[tokio::test]
+async fn the_sudo_password_stays_out_of_the_state_and_the_output() {
+    let rig = provision_as("member").await;
+    let engine = FakeEngine::with(json!({ "version": 1, "inventory": "hosts.ini", "playbooks": [
+        { "id": "tds", "file": "tds.yml", "name": "TDS", "become": true, "vars": [{ "name": "api_token", "secret": true, "required": true }] }
+    ] }));
+    with_project(&rig, &engine).await;
+    rig.core.platform().set_limit("gstd");
+    Mock::given(method("POST")).and(path("/api/v1/servers/s/provisioning-runs")).respond_with(ok(json!({ "id": "run1" }))).mount(&rig.server).await;
+    Mock::given(method("PATCH")).and(path("/api/v1/servers/s/provisioning-runs/run1")).respond_with(ok(json!(null))).mount(&rig.server).await;
+    let inputs = ManualInputs { values: vec![("api_token".into(), "tok-SECRETO".into())], extra: "region=eu".into(), become_password: "sudo-SECRETA".into() };
+    rig.core.platform().run_manual(engine.clone(), inputs).await.unwrap();
+    assert_eq!(engine.manual.lock().unwrap()[0].0.as_deref(), Some("sudo-SECRETA"), "el motor no recibió la contraseña");
+    let output = rig.core.platform().state().provision_output.unwrap();
+    let painted: Vec<String> = output.lines.iter().map(|line| line.spans.iter().map(|span| span.text.as_str()).collect()).collect();
+    assert_eq!(painted, ["sudo: ***", "token=***"]);
+    let everything = format!("{}{:?}", rig.heard(), rig.server.received_requests().await.unwrap().iter().map(|r| String::from_utf8_lossy(&r.body).to_string()).collect::<Vec<_>>());
+    assert!(!everything.contains("sudo-SECRETA") && !everything.contains("tok-SECRETO"), "un secreto llegó al estado o a cac");
+    let opened: Value = serde_json::from_slice(&writes(&rig).await[0].body).unwrap();
+    assert_eq!(opened, json!({ "kind": "playbook", "project": "ansible", "playbook": "tds.yml", "target": "gstd", "varNames": ["api_token", "region"] }));
+}

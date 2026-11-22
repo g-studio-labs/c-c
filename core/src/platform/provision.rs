@@ -1042,6 +1042,12 @@ pub enum ProvisionError {
     RiskChanged(String),
     #[error("cancelled")]
     Cancelled,
+    /// Variables extra que no son `nombre=valor`.
+    #[error("bad-vars: {0}")]
+    BadVars(String),
+    /// Variables obligatorias sin valor.
+    #[error("missing-vars: {0}")]
+    MissingVars(String),
     /// Lo que dijo el motor de Ansible (un secreto que no se lee, el venv…).
     #[error("{0}")]
     Engine(String),
@@ -1064,6 +1070,8 @@ pub fn provision_phrase(locale: Locale, error: &ProvisionError, fallback_key: &s
         ProvisionError::NoRisk(id) => text_with(locale, "common:provision.noRisk", &[("id", id)]),
         ProvisionError::RiskChanged(id) => text_with(locale, "common:provision.riskChanged", &[("playbook", id)]),
         ProvisionError::Cancelled => text(locale, "common:provision.rehearseCancelled"),
+        ProvisionError::BadVars(lines) => text_with(locale, "common:provision.badVars", &[("lines", lines)]),
+        ProvisionError::MissingVars(names) => text_with(locale, "common:provision.missingVars", &[("names", names)]),
         ProvisionError::Engine(message) => message.clone(),
         ProvisionError::Api(error) => error_phrase(locale, error, Some(fallback_key)),
     }
@@ -1107,6 +1115,7 @@ impl Platform {
     /// peticiones, a la vez. Lo que falle se queda como estaba.
     pub async fn load_provision(&self) {
         let Some(server) = self.open() else { return };
+        self.close_orphan().await;
         let prefs = self.prefs().remove(&server.id).unwrap_or_default();
         self.change(|data| {
             if data.provision.as_ref().is_none_or(|p| p.server_id != server.id) {

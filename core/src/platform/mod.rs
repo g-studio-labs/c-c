@@ -13,6 +13,7 @@ pub mod install;
 pub mod k8s;
 pub mod secret_refs;
 pub mod provision;
+pub mod provision_run;
 pub mod servers;
 pub mod services;
 pub mod swarm;
@@ -31,6 +32,7 @@ pub use servers::{platform_sections, servers_of, PlatformSection, Server, Server
 pub use services::{filter_services, LogLine, LogStatus, ServiceHealth, ServiceLogs, ServiceReplicas, SwarmService, LOG_LINES_KEPT};
 pub use k8s::{cert_warns, cluster_status, days_until, route_links, workloads_failing_first, ClusterBadge, ClusterStatus, Integration, K8sCert, K8sDatastore, K8sGateway, K8sHealth, K8sHub, K8sNode, K8sRoute, K8sRoutes, K8sWorkload, CERT_WARN_DAYS};
 pub use provision::{can_approve, config_body, config_changed, from_input, from_items, grant_command, is_stale, json_object, line_diff, ordered_playbooks, provision_permissions, provision_phrase, sorted_json, stable_json, stage_playbooks, to_input, to_items, valid_op_ref, valid_secret_name, var_fields, visible_requests, with_required, AnsibleManifest, AnsibleTools, ConfigOrigin, ConfigProblem, DiffRow, EffectiveConfig, FlagLevel, InventoryHost, PlanGaps, PlaybookInfo, PlaybookVar, ProjectInfo, ProvisionError, ProvisionPermissions, ProvisionRun, ProvisionState, ProvisioningCheck, ProvisioningFailure, ProvisioningRequest, Risk, RiskFlag, SecretField, SecretRef, ServerConfigSummary, ServerConfigVersion, ServerConnection, ServerTemplate, ServerTemplateVersion, TemplateDraft, VarField, VarFields, GRANT_MINUTES, LIVE_STATUSES, RECENT_CLOSED, STALE_CHECK_SECONDS};
+pub use provision_run::{final_status, log_tail, parse_extra_vars, play_recap, strip_ansi, AnsibleEngine, EngineEvent, EngineSink, ManualInputs, ManualRun, ManualVar, ProvisionOutput, RunEnd, RunKind, MAX_LINES, TAIL_LINES};
 pub use swarm::{cpu_load, format_bytes, mem_load, stats_view, ContainerStats, Load, StatsColumn, StatsSort, StatsView, SwarmNode};
 
 /// Lo que se pinta de Plataforma.
@@ -89,6 +91,9 @@ pub struct PlatformState {
     pub secrets: Option<SecretsState>,
     /// Provisioning del servidor abierto, desde que se miró su pestaña.
     pub provision: Option<ProvisionState>,
+    /// La salida de lo que corre desde esta app, o de lo último. Sobrevive a
+    /// salir del servidor: una ejecución sigue aunque nadie la mire.
+    pub provision_output: Option<ProvisionOutput>,
 }
 
 #[derive(Default)]
@@ -125,6 +130,7 @@ pub(crate) struct PlatformData {
     deploys: Option<DeploysState>,
     secrets: Option<SecretsState>,
     provision: Option<ProvisionState>,
+    provision_output: Option<provision_run::OutputData>,
 }
 
 /// Plataforma en este core.
@@ -175,6 +181,7 @@ impl Platform {
                 provision.me = self.me();
                 provision
             }),
+            provision_output: data.provision_output.as_ref().map(|out| out.output.clone()),
         }
     }
 
