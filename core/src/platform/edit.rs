@@ -43,12 +43,16 @@ pub struct ServerPermissions {
     /// CI: admin. Los ajustes llevan el comando de migraciones, un `sh -c`
     /// que corre en el servidor.
     pub manage_deploys: bool,
+    /// Configurar, lanzar y descargar backups, y tocar sus llaves: admin
+    /// (`BackupHandler`). Quién se lleva una copia de la base de un cliente
+    /// es una decisión, no un clic de cualquiera.
+    pub manage_backups: bool,
 }
 
 pub fn server_permissions(role: &str, superadmin: bool) -> ServerPermissions {
     let writer = superadmin || matches!(role, "admin" | "member");
     let admin = superadmin || role == "admin";
-    ServerPermissions { create: writer, kubernetes: superadmin, edit: writer, edit_connection: admin, delete: admin, install_agent: admin, restart_service: writer, reveal_integrations: writer, deploy: writer, manage_deploys: admin }
+    ServerPermissions { create: writer, kubernetes: superadmin, edit: writer, edit_connection: admin, delete: admin, install_agent: admin, restart_service: writer, reveal_integrations: writer, deploy: writer, manage_deploys: admin, manage_backups: admin }
 }
 
 /// Un campo del formulario de un servidor.
@@ -216,6 +220,13 @@ pub enum ServerEditError {
     /// Lo que contestó el SSH al instalar el agente.
     #[error("{0}")]
     Ssh(String),
+    /// Una llave que no es una pública de age: no se manda.
+    #[error("bad-age-key")]
+    BadAgeKey,
+    /// Faltan datos de un backup (el servicio, la base, la variable o el
+    /// nombre de la llave).
+    #[error("backup-incomplete")]
+    BackupIncomplete,
     #[error(transparent)]
     Api(#[from] ApiError),
 }
@@ -233,6 +244,8 @@ pub fn server_edit_phrase(locale: Locale, error: &ServerEditError, fallback_key:
         ServerEditError::NoOrganization => text(locale, "work:tree.pickOrg"),
         ServerEditError::AgentBusy => text(locale, "common:servers.agentUpdate.busy"),
         ServerEditError::Ssh(message) => message.clone(),
+        ServerEditError::BadAgeKey => text(locale, "common:backups.keyInvalid"),
+        ServerEditError::BackupIncomplete => text(locale, "common:backups.incomplete"),
         ServerEditError::ReadOnly | ServerEditError::KubernetesSuperadminOnly | ServerEditError::ConnectionAdminOnly | ServerEditError::AdminOnly => {
             text(locale, &format!("errors:{error}"))
         }
@@ -251,8 +264,8 @@ mod tests {
         let p = |role, superadmin| server_permissions(role, superadmin);
         assert_eq!(p("viewer", false), ServerPermissions::default());
         assert_eq!(p("member", false), ServerPermissions { create: true, edit: true, restart_service: true, reveal_integrations: true, deploy: true, ..Default::default() });
-        assert_eq!(p("admin", false), ServerPermissions { create: true, edit: true, edit_connection: true, delete: true, kubernetes: false, install_agent: true, restart_service: true, reveal_integrations: true, deploy: true, manage_deploys: true });
-        assert_eq!(p("", true), ServerPermissions { create: true, edit: true, edit_connection: true, delete: true, kubernetes: true, install_agent: true, restart_service: true, reveal_integrations: true, deploy: true, manage_deploys: true });
+        assert_eq!(p("admin", false), ServerPermissions { create: true, edit: true, edit_connection: true, delete: true, kubernetes: false, install_agent: true, restart_service: true, reveal_integrations: true, deploy: true, manage_deploys: true, manage_backups: true });
+        assert_eq!(p("", true), ServerPermissions { create: true, edit: true, edit_connection: true, delete: true, kubernetes: true, install_agent: true, restart_service: true, reveal_integrations: true, deploy: true, manage_deploys: true, manage_backups: true });
     }
 
     fn form() -> ServerForm {

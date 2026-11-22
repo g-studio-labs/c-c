@@ -1318,7 +1318,8 @@
     "credentialEnvPasswordHint": "La variable con la contraseña. Si acaba en _FILE, es la ruta de un fichero dentro del contenedor y se lee ahí.",
     "downloading": "Bajando {{done}}…",
     "downloadingOf": "Bajando {{percent}} % ({{done}} de {{total}})",
-    "downloaded": "Guardado en {{path}}"
+    "downloaded": "Guardado en {{path}}",
+    "incomplete": "Faltan datos: el servicio, la base y la variable de la credencial, o el nombre de la llave."
   },
   "colors": {
     "pick": "Elegir color",

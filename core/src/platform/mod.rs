@@ -6,6 +6,7 @@
 //! app nativa». Cada fase añade su fichero junto a éstos.
 
 pub mod agent;
+pub mod backups;
 pub mod deploys;
 pub mod detail;
 pub mod edit;
@@ -23,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::stream::ServerEvent;
 use crate::Core;
 pub use agent::{agent_base, Agent, AgentStream, AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT};
+pub use backups::{detect_databases, is_age_public_key, Backup, BackupEngine, BackupKind, BackupRecipient, BackupStatus, BackupTarget, BackupTargetForm, BackupsState, BackupsStatus, DetectedDatabase, DEFAULT_BACKUP_TIMEZONE};
 pub use deploys::{commit_pick, infer_owner_repo, repo_of_deployable, CommitPick, CommitRow, ci_notice_step, guess_environment, is_sha, repo_from_image, runs_commit, short_ref, short_service_name, uses_short_sha, CiKey, CiNotify, DeployStatus, Deployable, DeployableSettings, Deployment, DeploysState, ImageBuild, NewDeployable, RepoCommit, AGENT_VERSION_BUILDS, AGENT_VERSION_MIGRATES, LIST_PREVIEW, SECRETS_ENTRYPOINT_SNIPPET};
 pub use secret_refs::{append_rows, label_to_name, merge_build_args, ref_problems, valid_secret_name, valid_secret_ref, RefProblem, SecretRefRow, SecretRotation, SecretUsage, SecretsState};
 pub use detail::{server_tabs, AgentNote, DeployableSummary, IncidentServerRef, IncidentSummary, ProvisioningRun, ServerOverview, ServerTab, AGENT_VERSION_DEPLOYS};
@@ -94,6 +96,8 @@ pub struct PlatformState {
     /// La salida de lo que corre desde esta app, o de lo último. Sobrevive a
     /// salir del servidor: una ejecución sigue aunque nadie la mire.
     pub provision_output: Option<ProvisionOutput>,
+    /// Los backups del servidor abierto, desde que se miró su pestaña.
+    pub backups: Option<BackupsState>,
 }
 
 #[derive(Default)]
@@ -131,6 +135,7 @@ pub(crate) struct PlatformData {
     secrets: Option<SecretsState>,
     provision: Option<ProvisionState>,
     provision_output: Option<provision_run::OutputData>,
+    backups: Option<BackupsState>,
 }
 
 /// Plataforma en este core.
@@ -182,6 +187,7 @@ impl Platform {
                 provision
             }),
             provision_output: data.provision_output.as_ref().map(|out| out.output.clone()),
+            backups: data.backups.clone(),
         }
     }
 
@@ -561,6 +567,17 @@ impl Platform {
                 }
             }
             ServerTab::Provision => self.load_provision().await,
+            ServerTab::Backups => {
+                // Las bases detectadas salen de los servicios del swarm.
+                if self.data().services.is_none() {
+                    let platform = self.core.platform();
+                    let services = tokio::spawn(async move { platform.load_services().await });
+                    self.load_backups().await;
+                    let _ = services.await;
+                } else {
+                    self.load_backups().await;
+                }
+            }
             ServerTab::Stats => {
                 self.start_stats();
                 // Los nodos ponen nombre a la columna de nodo.
@@ -939,6 +956,7 @@ fn close(data: &mut PlatformData) {
     data.deploys = None;
     data.secrets = None;
     data.provision = None;
+    data.backups = None;
 }
 
 /// Lo que contestó una tarea de lectura, con su fallo como frase.
