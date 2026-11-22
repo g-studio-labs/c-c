@@ -31,7 +31,7 @@ const COLUMNS: [(&str, Width); 6] = [
     ("common:servers.thStatus", Width::Fixed(84.)),
     ("common:servers.thUpdated", Width::Fixed(124.)),
 ];
-const ACTIONS_WIDTH: f32 = 140.;
+const ACTIONS_WIDTH: f32 = 168.;
 
 pub struct ServicesView {
     filter: Entity<InputState>,
@@ -117,7 +117,7 @@ impl ServicesView {
         let updated = chrono::DateTime::parse_from_rfc3339(&service.updated_at)
             .map(|at| cac_core::date_and_time(locale(cx), at.with_timezone(&chrono::Local).naive_local()))
             .unwrap_or_default();
-        let (logged, restarted) = (service.clone(), service.clone());
+        let (logged, restarted, deployed) = (service.clone(), service.clone(), service.name.clone());
         let actions = div()
             .flex()
             .justify_end()
@@ -140,6 +140,21 @@ impl ServicesView {
                             }
                         });
                     })),
+            )
+            // A su despliegue, con él elegido (`DeployDialog` en Tauri).
+            .child(
+                Button::new(SharedString::from(format!("service-deploy-{}", service.id)))
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(Lucide::Rocket))
+                    .tooltip(tr(cx, "common:deploy.deploy"))
+                    .on_click(move |_, _, cx| {
+                        let name = deployed.clone();
+                        Backend::run(cx, move |core| async move {
+                            core.platform().open_tab(cac_core::ServerTab::Deploy).await;
+                            core.platform().choose_service(&name).await;
+                        });
+                    }),
             )
             .when(state.permissions.restart_service, |actions| {
                 actions.child(

@@ -10,6 +10,7 @@ use gpui_kit::*;
 
 use super::agent_install::{install_for, installer, outcome_phrase};
 use super::server_dialog::{ServerDialog, ServerDialogClosed};
+use super::deploy::DeployView;
 use super::services::ServicesView;
 use super::k8s_hub::K8sConsole;
 use super::stats::StatsPanel;
@@ -36,6 +37,7 @@ pub struct ServersView {
     services: Option<Entity<ServicesView>>,
     stats: Option<Entity<StatsPanel>>,
     k8s: Option<Entity<K8sConsole>>,
+    deploy: Option<Entity<DeployView>>,
     /// De qué servidor son las tres de arriba. Otro servidor empieza con
     /// las suyas: el filtro, la línea de reinicio o un secreto revelado de
     /// uno salían en el siguiente.
@@ -44,7 +46,7 @@ pub struct ServersView {
 
 impl ServersView {
     pub fn new() -> Self {
-        ServersView { dialog: None, ssh_key: None, problem: None, agent_line: None, services: None, stats: None, k8s: None, views_of: None }
+        ServersView { dialog: None, ssh_key: None, problem: None, agent_line: None, services: None, stats: None, k8s: None, deploy: None, views_of: None }
     }
 
     fn open_dialog(&mut self, editing: Option<Server>, window: &mut Window, cx: &mut Context<Self>) {
@@ -284,14 +286,15 @@ impl Render for ServersView {
         if let Some(server) = open {
             if self.views_of.as_ref() != Some(&server.id) {
                 self.views_of = Some(server.id.clone());
-                (self.services, self.stats, self.k8s) = (None, None, None);
+                (self.services, self.stats, self.k8s, self.deploy) = (None, None, None, None);
             }
             let actions = self.agent_actions(server, &state, cx);
             let services = (state.tab == cac_core::ServerTab::Services)
                 .then(|| self.services.get_or_insert_with(|| cx.new(|cx| ServicesView::new(window, cx))).clone().into_any_element());
             let stats = (state.tab == cac_core::ServerTab::Stats).then(|| self.stats.get_or_insert_with(|| cx.new(|cx| StatsPanel::new(window, cx))).clone().into_any_element());
             let k8s = (server.kind == cac_core::ServerKind::Kubernetes && state.tab == cac_core::ServerTab::Overview).then(|| self.k8s.get_or_insert_with(|| cx.new(|_| K8sConsole::new())).clone().into_any_element());
-            return div().size_full().child(super::server_page::page(server, &state, actions, services, stats, k8s, cx)).into_any_element();
+            let deploy = (state.tab == cac_core::ServerTab::Deploy).then(|| self.deploy.get_or_insert_with(|| cx.new(|cx| DeployView::new(window, cx))).clone().into_any_element());
+            return div().size_full().child(super::server_page::page(server, &state, actions, super::server_page::Panels { services, stats, k8s, deploy }, cx)).into_any_element();
         }
         let theme = cx.theme();
         let (background, foreground, border, danger) = (theme.background, theme.foreground, theme.border, theme.danger);

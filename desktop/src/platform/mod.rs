@@ -4,6 +4,7 @@
 //! Plataforma en la app nativa», en cac) añade el suyo.
 
 pub mod agent_install;
+pub mod deploy;
 pub mod panel;
 pub mod server_dialog;
 pub mod server_page;

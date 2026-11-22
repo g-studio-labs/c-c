@@ -3580,7 +3580,7 @@ mod tests {
         assert!(on_screen(window, "server-tab-backups", cx), "un swarm sin sus ocho pestañas");
         assert!(!on_screen(window, "server-agent-install", cx), "a un miembro, instalar el agente que sólo puede un admin");
 
-        click(window, "server-tab-deploy", cx);
+        click(window, "server-tab-backups", cx);
         wait_until(cx, "la pestaña cambia", |cx| on_screen(window, "server-tab-pending", cx));
         click(window, "server-back", cx);
         wait_until(cx, "vuelve la tabla", |cx| on_screen(window, "platform-row-s1", cx));
@@ -3728,6 +3728,12 @@ mod tests {
     /// Lo mismo con varios swarms, todos con el mismo agente; abierto el
     /// primero.
     fn swarm_servers_as(role: &str, nodes: serde_json::Value, ids: &[&str], cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle) {
+        swarm_servers_with(role, nodes, ids, false, json!([]), cx)
+    }
+
+    /// Con `identity`, el agente tiene la suya (v14) y da pases: lo que
+    /// despliega lo pide.
+    fn swarm_servers_with(role: &str, nodes: serde_json::Value, ids: &[&str], identity: bool, deployables: serde_json::Value, cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle) {
         let server = FakeServer::start();
         let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
         let mut mine = org("o1", "G Studio");
@@ -3741,16 +3747,24 @@ mod tests {
             .map(|id| {
                 let name = if *id == "s1" { "pixel-vps".to_string() } else { format!("vps-{id}") };
                 let mut vps = platform_server(id, "o1", &name, "online");
-                (vps["host"], vps["agentPort"], vps["hasAgentToken"]) = (json!("127.0.0.1"), json!(server.port()), json!(false));
+                (vps["host"], vps["agentPort"], vps["hasAgentToken"]) = (json!("127.0.0.1"), json!(server.port()), json!(identity));
+                if identity {
+                    vps["agentVersion"] = json!(14);
+                }
                 vps
             })
             .collect();
         server.mount(get("/api/v1/servers/").respond_with(ok(json!(rows))));
         server.mount(get("/api/v1/nodes").respond_with(ok(nodes)));
         for id in ids {
-            for what in ["incidents", "deployables", "provisioning-runs"] {
+            if identity {
+                let expires_at = (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339();
+                server.mount(Mock::given(method("POST")).and(path(format!("/api/v1/servers/{id}/agent-session"))).respond_with(ok(json!({ "token": "p", "expiresAt": expires_at }))));
+            }
+            for what in ["incidents", "provisioning-runs"] {
                 server.mount(get(&format!("/api/v1/servers/{id}/{what}")).respond_with(ok(json!([]))));
             }
+            server.mount(get(&format!("/api/v1/servers/{id}/deployables")).respond_with(ok(deployables.clone())));
         }
         server.mount(get("/api/v1/services").respond_with(ok(json!([
             { "id": "svc1", "name": "shop_web", "image": "ghcr.io/o/web:v3", "stack": "shop", "replicas": { "running": 1, "desired": 2 }, "updatedAt": "2026-11-20T10:00:00Z" },
@@ -3886,6 +3900,123 @@ mod tests {
         click(window, "server-tab-services", cx);
         wait_until(cx, "llegan sus servicios, sin filtro", |cx| on_screen(window, "service-row-svc1", cx));
         assert!(!on_screen(window, "services-count", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Un swarm con agente y `shop_web` registrado: dos commits (el de
+    /// abajo corre; el de arriba tiene imagen publicada con el sha corto) y
+    /// un despliegue de Ana que se puede deshacer.
+    fn deploys_as(role: &str, cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle) {
+        let web = json!({ "id": "d1", "orgId": "o1", "serverId": "s1", "name": "web", "stack": "shop", "serviceName": "shop_web", "imageRepo": "ghcr.io/o/web", "repoFullName": "o/web", "onCINotify": "record", "currentImage": "ghcr.io/o/web:aaa1111" });
+        let (server, window) = swarm_servers_with(role, json!([]), &["s1"], true, json!([web]), cx);
+        let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+        server.mount(get("/api/v1/servers/s1/deployables/d1/deployments").respond_with(ok(json!([
+            { "id": "x1", "createdAt": "2026-11-21T10:00:00Z", "deployableId": "d1", "serverId": "s1", "image": "ghcr.io/o/web:aaa1111", "previousImage": "ghcr.io/o/web:9990000", "requestedBy": "user", "requestedByName": "Ana", "status": "succeeded" },
+        ]))));
+        server.mount(get("/api/v1/servers/s1/deployables/d1/builds").respond_with(ok(json!([{ "id": "b1", "deployableId": "d1", "sha": "bbb2222", "image": "ghcr.io/o/web:bbb2222", "source": "ci" }]))));
+        server.mount(get("/api/v1/servers/s1/deployables/d1/commits").respond_with(ok(json!([
+            { "sha": "bbb2222ffffffff", "message": "arregla el login", "author": "ana", "date": "2026-11-21T09:00:00Z" },
+            { "sha": "aaa1111ffffffff", "message": "lo que corre", "author": "luis", "date": "2026-11-20T09:00:00Z" },
+        ]))));
+        click(window, "server-tab-deploy", cx);
+        wait_until(cx, "salen los servicios", |cx| on_screen(window, "deploy-service-svc1", cx));
+        (server, window)
+    }
+
+    /// La pestaña de despliegue: elegir un servicio registrado enseña sus
+    /// commits con el publicado elegido, desplegarlo manda el tag con el que
+    /// se publicó y abre su log; volver atrás pregunta.
+    ///
+    /// Roturas que atrapa: desplegar otro sha (o el entero, que no existe
+    /// como tag); no abrir el log del nuevo; volver atrás sin preguntar o
+    /// mandando otro despliegue.
+    #[gpui_kit::test]
+    fn a_member_deploys_the_published_commit_and_rolls_back_asking(cx: &mut TestAppContext) {
+        let (server, window) = deploys_as("member", cx);
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path("/api/v1/servers/s1/deployables/d1/deploy"))
+                .and(wiremock::matchers::body_json(json!({ "sha": "bbb2222" })))
+                .respond_with(ok(json!({ "id": "x2", "createdAt": "2026-11-21T11:00:00Z", "deployableId": "d1", "serverId": "s1", "image": "ghcr.io/o/web:bbb2222", "requestedBy": "user", "status": "queued" }))),
+        );
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/servers/s1/deployables/d1/deployments/x2")).respond_with(ok(json!({ "id": "x2", "log": "pull ghcr.io/o/web:bbb2222\n" }))));
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path("/api/v1/servers/s1/deployables/d1/deployments/x1/rollback"))
+                .respond_with(ok(json!({ "id": "x3", "createdAt": "2026-11-21T12:00:00Z", "deployableId": "d1", "serverId": "s1", "image": "ghcr.io/o/web:9990000", "requestedBy": "user", "status": "queued" }))),
+        );
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/servers/s1/deployables/d1/deployments/x3")).respond_with(ok(json!({ "id": "x3", "log": "" }))));
+
+        click(window, "deploy-service-svc1", cx);
+        wait_until(cx, "llegan los commits", |cx| on_screen(window, "deploy-commit-bbb2222", cx));
+        assert_eq!(label(window, "deploy-behind", cx), "1 sin desplegar");
+        assert!(on_screen(window, "deploy-row-x1", cx));
+
+        click(window, "deploy-rollback-x1", cx);
+        let (title, _) = cx.pending_prompt().expect("volvió atrás sin preguntar");
+        assert_eq!(title, "¿Volver a lo que había antes de este deploy?");
+        cx.simulate_prompt_answer("Cancelar");
+        cx.run_until_parked();
+
+        click(window, "deploy-go", cx);
+        wait_until(cx, "se abre el log del nuevo", |cx| on_screen(window, "deploy-log-line-0", cx));
+        assert_eq!(label(window, "deploy-log-line-0", cx), "pull ghcr.io/o/web:bbb2222");
+        assert_eq!(server.hits("/api/v1/servers/s1/deployables/d1/deploy"), 1);
+        assert_eq!(server.hits("/api/v1/servers/s1/deployables/d1/deployments/x1/rollback"), 0, "volvió atrás al cancelar");
+
+        // El nuevo termina, por el stream, y se puede volver atrás del de antes.
+        let finished = cac_core::ServerEvent {
+            event: "deploy:status".into(),
+            data: json!({ "id": "x2", "deployableId": "d1", "serverId": "s1", "image": "ghcr.io/o/web:bbb2222", "requestedBy": "user", "status": "failed" }).to_string(),
+        };
+        cx.update(|cx| Backend::run(cx, move |core| async move { core.stream().deliver(finished) }));
+        wait_until(cx, "el log dice cómo acabó", |cx| label(window, "deploy-log-status", cx) == "Falló");
+        click(window, "deploy-log-back", cx);
+        wait_until(cx, "vuelve el historial", |cx| on_screen(window, "deploy-row-x2", cx));
+        click(window, "deploy-rollback-x1", cx);
+        cx.simulate_prompt_answer("Volver a lo de antes");
+        wait_until(cx, "vuelve atrás", |_| server.hits("/api/v1/servers/s1/deployables/d1/deployments/x1/rollback") == 1);
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Rotura que atrapa: ofrecerle desplegar o volver atrás a un lector, o
+    /// registrar un servicio a quien no administra; o que el botón de una
+    /// fila de Servicios no lleve a su despliegue.
+    #[gpui_kit::test]
+    fn a_reader_sees_what_was_deployed_but_cannot_deploy(cx: &mut TestAppContext) {
+        let (_server, window) = deploys_as("viewer", cx);
+        // Desde su fila en Servicios se llega con él elegido.
+        click(window, "server-tab-services", cx);
+        wait_until(cx, "llegan los servicios", |cx| on_screen(window, "service-deploy-svc1", cx));
+        click(window, "service-deploy-svc1", cx);
+        wait_until(cx, "llegan los commits", |cx| on_screen(window, "deploy-commit-bbb2222", cx));
+        assert!(on_screen(window, "deploy-row-x1", cx));
+        assert!(!on_screen(window, "deploy-go", cx));
+        assert!(!on_screen(window, "deploy-rollback-x1", cx));
+        click(window, "deploy-service-svc2", cx);
+        wait_until(cx, "el otro no está registrado", |cx| on_screen(window, "deploy-not-yet", cx));
+        assert!(!on_screen(window, "deploy-register", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Rotura que atrapa: registrar con lo que no es (el nombre largo, la
+    /// imagen con su tag) o no pasar a desplegarlo al registrarlo.
+    #[gpui_kit::test]
+    fn an_admin_registers_a_service_prefilled_from_what_runs(cx: &mut TestAppContext) {
+        let (server, window) = deploys_as("admin", cx);
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path("/api/v1/servers/s1/deployables"))
+                .and(wiremock::matchers::body_json(json!({ "name": "db", "stack": "shop", "serviceName": "shop_db", "imageRepo": "postgres", "environment": "", "shortTags": false })))
+                .respond_with(ok(json!({ "id": "d2", "orgId": "o1", "serverId": "s1", "name": "db", "stack": "shop", "serviceName": "shop_db", "imageRepo": "postgres", "onCINotify": "record" }))),
+        );
+        for what in ["deployments", "builds", "commits"] {
+            server.mount(Mock::given(method("GET")).and(path(format!("/api/v1/servers/s1/deployables/d2/{what}"))).respond_with(ok(json!([]))));
+        }
+        click(window, "deploy-service-svc2", cx);
+        wait_until(cx, "se ofrece registrarlo", |cx| on_screen(window, "deploy-register", cx));
+        click(window, "deploy-register", cx);
+        wait_until(cx, "pasa a desplegarlo", |cx| on_screen(window, "deploy-history-empty", cx));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
