@@ -31,6 +31,9 @@ cpal = "0.18.2"
 # Para oír a GPUI: qué tarjeta elige, con qué pinta. Sin un `log` instalado en
 # el proceso esas líneas se tiran.
 log = "0.4"
+# Las variables de un servidor en el panel de provisioning se editan también
+# como JSON. Ya venía con el core.
+serde_json = "1"
 # Los idiomas que el usuario eligió en macOS y en Windows, donde abrir la app
 # desde el Finder o el Explorador no deja ninguna variable `LANG` que leer.
 # Versión exacta, MIT o Apache-2.0, sin dependencias en ninguno de los tres
