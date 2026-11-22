@@ -121,7 +121,6 @@ dependencies = [
  "argon2",
  "base64 0.22.1",
  "bcrypt",
- "bech32",
  "blake2",
  "block2",
  "cac-core",
@@ -167,7 +166,6 @@ dependencies = [
  "uuid",
  "webkit2gtk",
  "webp",
- "x25519-dalek",
 ]
 
 [[package]]
@@ -743,12 +741,15 @@ dependencies = [
 name = "cac-ops"
 version = "0.1.0"
 dependencies = [
+ "bech32",
  "cac-mcp",
  "hex",
  "keyring",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "sha2",
+ "x25519-dalek",
 ]
 
 [[package]]

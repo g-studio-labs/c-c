@@ -1,5 +1,6 @@
 //! Lo que Plataforma hace en la máquina local: hablar por SSH con los
-//! servidores y guardar en el llavero del sistema lo que es de cada uno.
+//! servidores, guardar en el llavero del sistema lo que es de cada uno, y
+//! llevar los secretos de 1Password a los servicios.
 //!
 //! Sale de la app de Tauri (`app/src-tauri/src/lib.rs`) para que la app nativa
 //! use lo mismo: es código sensible —llaves, tokens, qué viaja como argumento y
@@ -12,6 +13,8 @@
 
 pub mod agent_install;
 pub mod keychain;
+pub mod op_env;
+pub mod secrets;
 pub mod ssh;
 
 #[cfg(test)]
