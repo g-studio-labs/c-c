@@ -732,11 +732,9 @@ pub fn to_items(value: Option<&Value>) -> Vec<String> {
 
 // ─── La config que se guarda ─────────────────────────────────────────────────
 
-/// Un nombre de secreto como lo acepta cac (`domain.SecretNamePattern`).
-pub fn valid_secret_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    matches!(chars.next(), Some('A'..='Z' | '_')) && name.len() <= 40 && chars.all(|c| matches!(c, 'A'..='Z' | '0'..='9' | '_'))
-}
+// Un nombre de secreto como lo acepta cac (`domain.SecretNamePattern`): el
+// mismo que el de los secrets de un desplegable.
+use super::secret_refs::valid_secret_name;
 
 /// Una referencia de 1Password: un ítem (`op://bóveda/ítem/campo`) o la
 /// variable de un Environment (`op-env://entorno/NOMBRE`).
