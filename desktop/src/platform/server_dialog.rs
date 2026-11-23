@@ -102,7 +102,7 @@ impl ServerDialog {
             .flex_col()
             .gap_1p5()
             .child(div().leading_xs().font_weight(FontWeight::MEDIUM).child(tr(cx, label_key)))
-            .child(div().id(id).child(Input::new(input).small().disabled(busy)).test_support())
+            .child(div().id(id).child(Input::new(input).disabled(busy)).test_support())
     }
 
     /// Las dos clases de servidor. Kubernetes sólo se ofrece a quien puede

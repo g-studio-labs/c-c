@@ -1084,7 +1084,7 @@ impl TaskView {
                 this.cancel_adding_subtask(window, cx);
                 cx.stop_propagation();
             }))
-            .child(div().id("task-new-subtask-title").flex_1().min_w_0().child(Input::new(&self.subtask_title).small()).test_support())
+            .child(div().id("task-new-subtask-title").flex_1().min_w_0().child(Input::new(&self.subtask_title)).test_support())
             .child(
                 Button::new("task-new-subtask-create")
                     .primary()
@@ -1160,7 +1160,7 @@ impl TaskView {
                 this.cancel_linking_pr(window, cx);
                 cx.stop_propagation();
             }))
-            .child(div().id("task-link-pr-url").flex_1().min_w_0().child(Input::new(&self.pr_url).small()).test_support())
+            .child(div().id("task-link-pr-url").flex_1().min_w_0().child(Input::new(&self.pr_url)).test_support())
             .child(
                 Button::new("task-link-pr-send")
                     .primary()
@@ -1705,7 +1705,7 @@ impl TaskView {
             .flex()
             .items_center()
             .gap_1()
-            .child(div().id("task-new-tag-name").test_support().flex_1().min_w_0().child(Input::new(&self.tag_name).small()))
+            .child(div().id("task-new-tag-name").test_support().flex_1().min_w_0().child(Input::new(&self.tag_name)))
             .child(
                 Button::new("task-new-tag-create")
                     .primary()

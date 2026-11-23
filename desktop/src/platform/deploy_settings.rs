@@ -223,7 +223,7 @@ impl DeploySettingsView {
     }
 
     fn field(label: String, input: &Entity<InputState>, id: &'static str) -> impl IntoElement {
-        div().flex_1().min_w(px(160.)).flex().flex_col().gap_1().child(div().leading_xs().text_xs().child(label)).child(div().id(id).child(Input::new(input).small()).test_support())
+        div().flex_1().min_w(px(160.)).flex().flex_col().gap_1().child(div().leading_xs().text_xs().child(label)).child(div().id(id).child(Input::new(input)).test_support())
     }
 
     fn section(id: &'static str, title: String, lead: Option<String>, cx: &App) -> Stateful<Div> {
@@ -463,7 +463,7 @@ impl DeploySettingsView {
         let dirty = command != deployable.migrate_command;
         let target = deployable.clone();
         Self::section("deploy-migrate", tr(cx, "common:deploy.migrate"), Some(tr(cx, "common:deploy.migrateLead")), cx)
-            .child(div().id("deploy-migrate-command").child(Input::new(&self.migrate).small()).test_support())
+            .child(div().id("deploy-migrate-command").child(Input::new(&self.migrate)).test_support())
             .when(too_old, |section| section.child(div().id("deploy-migrate-agent-old").text_xs().text_color(cx.theme().warning).child(tr(cx, "common:deploy.migrateAgentOld")).test_support()))
             .child(div().flex().justify_end().child(Button::new("deploy-migrate-save").outline().small().label(tr(cx, "common:deploy.migrateSave")).disabled(self.busy || !dirty).on_click(cx.listener(move |this, _, _, cx| {
                 let command = Self::value(&this.migrate, cx);

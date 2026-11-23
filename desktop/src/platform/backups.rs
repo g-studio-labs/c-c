@@ -215,8 +215,8 @@ impl BackupsView {
                         .flex()
                         .items_end()
                         .gap_2()
-                        .child(div().w(px(160.)).flex().flex_col().gap_1().child(div().leading_xs().child(tr(cx, "common:backups.keyLabel"))).child(div().id("backup-key-label").child(Input::new(&self.key_label).small()).test_support()))
-                        .child(div().flex_1().min_w_0().flex().flex_col().gap_1().child(div().leading_xs().child(tr(cx, "common:backups.keyValue"))).child(div().id("backup-key-value").child(Input::new(&self.key_value).small()).test_support()))
+                        .child(div().w(px(160.)).flex().flex_col().gap_1().child(div().leading_xs().child(tr(cx, "common:backups.keyLabel"))).child(div().id("backup-key-label").child(Input::new(&self.key_label)).test_support()))
+                        .child(div().flex_1().min_w_0().flex().flex_col().gap_1().child(div().leading_xs().child(tr(cx, "common:backups.keyValue"))).child(div().id("backup-key-value").child(Input::new(&self.key_value)).test_support()))
                         .child(Button::new("backup-key-add").small().primary().label(tr(cx, "common:backups.addKey")).disabled(self.busy || !valid).on_click(cx.listener(|this, _, window, cx| this.add_recipient(window, cx)))),
                 )
                 .when(!typed.is_empty() && !is_age_public_key(&typed), |column| column.child(div().id("backup-key-invalid").text_xs().text_color(danger).child(tr(cx, "common:backups.keyInvalid")).test_support()))

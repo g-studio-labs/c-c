@@ -249,7 +249,7 @@ impl ProvisionView {
                     div()
                         .flex()
                         .gap_2()
-                        .child(div().id("provision-project").flex_1().child(Input::new(&self.project).small()).test_support())
+                        .child(div().id("provision-project").flex_1().child(Input::new(&self.project)).test_support())
                         .child(
                             Button::new("provision-pick")
                                 .outline()
@@ -427,7 +427,7 @@ impl ProvisionView {
             let label = format!("{}{}", var.name, if var.required && var.from.is_none() { " *" } else { "" });
             let control = match (&var.from, self.vars.iter().find(|(name, _)| name == &var.name)) {
                 (Some(reference), _) => div().px_2().py_1().rounded(px(6.)).border_1().border_color(border).font_family(mono.clone()).text_xs().text_color(muted).truncate().child(cac_core::text_with(locale(cx), "common:provision.fromOp", &[("ref", reference)])).into_any_element(),
-                (None, Some((_, input))) => Input::new(input).small().into_any_element(),
+                (None, Some((_, input))) => Input::new(input).into_any_element(),
                 (None, None) => div().into_any_element(),
             };
             div()
@@ -457,7 +457,7 @@ impl ProvisionView {
                         .flex_col()
                         .gap_1()
                         .child(div().leading_xs().child(tr(cx, "common:provision.becomePassword")))
-                        .child(Input::new(&self.become_password).small())
+                        .child(Input::new(&self.become_password))
                         .test_support(),
                 )
             })

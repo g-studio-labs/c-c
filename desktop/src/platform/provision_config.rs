@@ -421,7 +421,7 @@ impl ConfigPanel {
         let suggestions: [(&str, Value); 2] = [("public_ip", Value::String(server.host.clone())), ("ssh_port", Value::from(server.ssh_port))];
         let field = |field: &VarField, input: &FieldInput, inherited: bool, cx: &mut Context<Self>| {
             let control = match input {
-                FieldInput::Line(input) => Input::new(input).small().disabled(!editable).into_any_element(),
+                FieldInput::Line(input) => Input::new(input).disabled(!editable).into_any_element(),
                 FieldInput::List(input) => Textarea::new(input).disabled(!editable).into_any_element(),
             };
             let heir = inherited.then(|| {
@@ -500,9 +500,9 @@ impl ConfigPanel {
                 .child(if fixed {
                     div().w(px(150.)).flex_none().font_family(mono.clone()).text_xs().truncate().child(name).into_any_element()
                 } else {
-                    div().id(SharedString::from(format!("provision-secret-name-{n}"))).w(px(150.)).flex_none().child(Input::new(&row.name).small().disabled(!editable)).test_support().into_any_element()
+                    div().id(SharedString::from(format!("provision-secret-name-{n}"))).w(px(150.)).flex_none().child(Input::new(&row.name).disabled(!editable)).test_support().into_any_element()
                 })
-                .child(div().id(SharedString::from(format!("provision-secret-ref-{n}"))).flex_1().min_w_0().child(Input::new(&row.reference).small().disabled(!editable)).test_support())
+                .child(div().id(SharedString::from(format!("provision-secret-ref-{n}"))).flex_1().min_w_0().child(Input::new(&row.reference).disabled(!editable)).test_support())
                 .children(check.map(|check| check.text_xs()))
                 .when(editable, |line| {
                     line.child(Button::new(SharedString::from(format!("provision-secret-remove-{n}"))).ghost().xsmall().icon(Icon::new(Lucide::Trash)).tooltip(tr(cx, "common:serverConfig.remove")).on_click(cx.listener(move |this, _, _, cx| {

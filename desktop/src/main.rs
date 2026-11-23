@@ -43,6 +43,8 @@ mod sound;
 mod spike;
 mod task;
 mod theme;
+#[cfg(test)]
+mod ui_rules;
 mod thumbs;
 mod voice;
 #[cfg(target_os = "linux")]

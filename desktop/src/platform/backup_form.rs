@@ -176,7 +176,7 @@ impl BackupFormDialog {
             .flex_col()
             .gap_1p5()
             .child(div().leading_xs().font_weight(FontWeight::MEDIUM).child(tr(cx, label_key)))
-            .child(div().id(id).child(Input::new(input).small().disabled(busy)).test_support())
+            .child(div().id(id).child(Input::new(input).disabled(busy)).test_support())
             .children(hint.map(|hint| div().text_xs().text_color(muted).child(hint)))
     }
 
@@ -231,7 +231,7 @@ impl BackupFormDialog {
             .gap_1p5()
             .child(Self::label("common:backups.service", cx))
             .child(picker)
-            .when(self.by_name, |column| column.child(div().id("backup-container").child(Input::new(&self.container).small().disabled(self.busy)).test_support()))
+            .when(self.by_name, |column| column.child(div().id("backup-container").child(Input::new(&self.container).disabled(self.busy)).test_support()))
     }
 
     fn every(&self, cx: &mut Context<Self>) -> Div {

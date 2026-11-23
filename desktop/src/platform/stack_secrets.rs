@@ -305,7 +305,7 @@ impl StackSecretsView {
                     .flex()
                     .items_end()
                     .gap_2()
-                    .child(div().id("github-op-reference").flex_1().child(Input::new(&self.op_reference).small()).test_support())
+                    .child(div().id("github-op-reference").flex_1().child(Input::new(&self.op_reference)).test_support())
                     .child(Button::new("github-op-load").outline().xsmall().label(tr(cx, if configured { "common:servers.update" } else { "common:servers.load" })).disabled(self.busy || !has_reference).on_click(cx.listener(|this, _, window, cx| {
                         let reference = Self::text(&this.op_reference, cx);
                         this.blocking(window, cx, move |github| github.load_from_1password(&reference), |this, result, window, cx| this.token_done(result, window, cx));
@@ -322,7 +322,7 @@ impl StackSecretsView {
                     .flex()
                     .items_end()
                     .gap_2()
-                    .child(div().id("github-token").flex_1().child(Input::new(&self.token).small()).test_support())
+                    .child(div().id("github-token").flex_1().child(Input::new(&self.token)).test_support())
                     .child(Button::new("github-token-save").outline().xsmall().label(tr(cx, if configured { "common:servers.update" } else { "common:servers.save" })).disabled(self.busy || self.token.read(cx).value().trim().is_empty()).on_click(cx.listener(|this, _, window, cx| {
                         let token = this.token.read(cx).value().trim().to_string();
                         this.blocking(window, cx, move |github| github.set_token(&token), |this, result, window, cx| this.token_done(result, window, cx));
@@ -386,9 +386,9 @@ impl StackSecretsView {
                 .bg(cx.theme().muted)
                 .child(match &editing {
                     Some(name) => div().w(px(200.)).font_family(mono.clone()).text_xs().child(name.clone()).into_any_element(),
-                    None => div().id("github-form-name").w(px(200.)).child(Input::new(&self.name).small()).test_support().into_any_element(),
+                    None => div().id("github-form-name").w(px(200.)).child(Input::new(&self.name)).test_support().into_any_element(),
                 })
-                .child(div().id("github-form-value").flex_1().child(Input::new(&self.value).small()).aria_label(placeholder).test_support())
+                .child(div().id("github-form-value").flex_1().child(Input::new(&self.value)).aria_label(placeholder).test_support())
                 .child(Button::new("github-form-save").primary().xsmall().label(tr(cx, "common:servers.save")).disabled(self.busy || !ready).on_click(cx.listener(|this, _, window, cx| this.save_entry(window, cx))))
                 .child(Button::new("github-form-cancel").ghost().xsmall().label(tr(cx, "common:servers.cancel")).on_click(cx.listener(|this, _, window, cx| {
                     this.editing = None;
@@ -476,8 +476,8 @@ impl Render for StackSecretsView {
                     .rounded(px(8.))
                     .border_1()
                     .border_color(border)
-                    .child(div().flex_1().flex().flex_col().gap_1().child(div().text_xs().child(tr(cx, "common:servers.owner"))).child(div().id("github-owner").child(Input::new(&self.owner).small()).test_support()))
-                    .child(div().flex_1().flex().flex_col().gap_1().child(div().text_xs().child(tr(cx, "common:servers.repository"))).child(div().id("github-repo").child(Input::new(&self.repo).small()).test_support()))
+                    .child(div().flex_1().flex().flex_col().gap_1().child(div().text_xs().child(tr(cx, "common:servers.owner"))).child(div().id("github-owner").child(Input::new(&self.owner)).test_support()))
+                    .child(div().flex_1().flex().flex_col().gap_1().child(div().text_xs().child(tr(cx, "common:servers.repository"))).child(div().id("github-repo").child(Input::new(&self.repo)).test_support()))
                     .child(Button::new("github-load").outline().xsmall().icon(Icon::new(Lucide::RefreshCw)).label(tr(cx, "common:servers.load")).disabled(self.busy || !ready || !configured).on_click(cx.listener(|this, _, window, cx| this.load(window, cx)))),
             )
             .children(line)

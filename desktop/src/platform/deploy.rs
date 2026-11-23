@@ -253,7 +253,7 @@ impl DeployView {
         if !state.permissions.manage_deploys {
             return div().id("deploy-not-yet").leading_sm().text_color(muted).child(tr(cx, "common:deploy.notYet")).test_support().into_any_element();
         }
-        let field = |label: String, input: &Entity<InputState>, id: &'static str| div().id(id).flex().flex_col().gap_1().child(div().leading_xs().child(label)).child(Input::new(input).small()).test_support();
+        let field = |label: String, input: &Entity<InputState>, id: &'static str| div().id(id).flex().flex_col().gap_1().child(div().leading_xs().child(label)).child(Input::new(input)).test_support();
         let ready = !self.name.read(cx).value().trim().is_empty() && !self.image_repo.read(cx).value().trim().is_empty();
         let target = service.clone();
         div()
@@ -297,7 +297,7 @@ impl DeployView {
             .flex()
             .items_end()
             .gap_2()
-            .child(div().flex_1().flex().flex_col().gap_1().child(div().leading_xs().child(tr(cx, "common:deploy.sha"))).child(Input::new(&self.sha).small()))
+            .child(div().flex_1().flex().flex_col().gap_1().child(div().leading_xs().child(tr(cx, "common:deploy.sha"))).child(Input::new(&self.sha)))
             .when(can_deploy, |row| {
                 row.child(
                     Button::new("deploy-manual-go")

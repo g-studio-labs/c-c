@@ -158,7 +158,7 @@ impl Render for CreateKeyDialog {
                         .flex_col()
                         .gap_1p5()
                         .child(div().leading_xs().font_weight(FontWeight::MEDIUM).child(tr(cx, "common:backups.itemTitle")))
-                        .child(div().id("backup-op-title").child(Input::new(&self.title).small().disabled(busy)).test_support()),
+                        .child(div().id("backup-op-title").child(Input::new(&self.title).disabled(busy)).test_support()),
                 )
                 .into_any_element(),
         };

@@ -242,7 +242,7 @@ impl TokensView {
         div().flex().flex_wrap().gap_1().children(options.iter().map(|(value, label)| {
             let value: &'static str = value;
             Button::new(SharedString::from(format!("{id}-{value}")))
-                .xsmall()
+                .small()
                 .when(chosen == value, |chip| chip.primary())
                 .when(chosen != value, |chip| chip.outline())
                 .label(*label)
@@ -258,7 +258,7 @@ impl TokensView {
     }
 
     fn field(id: &'static str, key: &str, input: &Entity<InputState>, cx: &App) -> Div {
-        div().flex_1().min_w_0().flex().flex_col().gap_1p5().child(Self::label(key, cx)).child(div().id(id).child(Input::new(input).small()).test_support())
+        div().flex_1().min_w_0().flex().flex_col().gap_1p5().child(Self::label(key, cx)).child(div().id(id).child(Input::new(input)).test_support())
     }
 
     fn jwt(&mut self, cx: &mut Context<Self>) -> Div {
@@ -436,7 +436,7 @@ impl TokensView {
                             .flex()
                             .items_end()
                             .gap_2()
-                            .child(div().flex_1().flex().flex_col().gap_1p5().child(div().text_xs().text_color(muted).child(tr(cx, "common:devtools.tokens.verifyAgainst"))).child(div().id("tokens-verify-hash").child(Input::new(&self.verify_hash).small()).test_support()))
+                            .child(div().flex_1().flex().flex_col().gap_1p5().child(div().text_xs().text_color(muted).child(tr(cx, "common:devtools.tokens.verifyAgainst"))).child(div().id("tokens-verify-hash").child(Input::new(&self.verify_hash)).test_support()))
                             .child(Button::new("tokens-verify").outline().small().label(tr(cx, "common:devtools.tokens.verify")).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.password_hash(true, cx)))),
                     )
                     .children(verified),
@@ -473,7 +473,7 @@ impl Render for TokensView {
             let section = *section;
             let chosen = self.section == section;
             Button::new(*id)
-                .xsmall()
+                .small()
                 .rounded_full()
                 .when(chosen, |chip| chip.primary())
                 .when(!chosen, |chip| chip.ghost())

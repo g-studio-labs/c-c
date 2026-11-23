@@ -146,8 +146,8 @@ impl Render for TemplateDialog {
                 div()
                     .flex()
                     .gap_3()
-                    .child(div().flex_1().flex().flex_col().gap_1().child(tr(cx, "common:serverConfig.templateName")).child(div().id("template-name").child(Input::new(&self.name).small()).test_support()))
-                    .child(div().flex_1().flex().flex_col().gap_1().child(tr(cx, "common:serverConfig.templateDescription")).child(div().id("template-description").child(Input::new(&self.description).small()).test_support())),
+                    .child(div().flex_1().flex().flex_col().gap_1().child(tr(cx, "common:serverConfig.templateName")).child(div().id("template-name").child(Input::new(&self.name)).test_support()))
+                    .child(div().flex_1().flex().flex_col().gap_1().child(tr(cx, "common:serverConfig.templateDescription")).child(div().id("template-description").child(Input::new(&self.description)).test_support())),
             );
         }
         let manifest = self.manifest.clone();
@@ -198,7 +198,7 @@ impl Render for TemplateDialog {
                         .flex_col()
                         .gap_0p5()
                         .child(div().font_family(mono.clone()).text_xs().child(name.clone()))
-                        .child(Input::new(input).small())
+                        .child(Input::new(input))
                         .when(!description.is_empty(), |column| column.child(div().text_xs().text_color(muted).child(description)))
                         .test_support()
                 });
@@ -250,7 +250,7 @@ impl Render for TemplateDialog {
         let name_ok = !creating || !self.name.read(cx).value().trim().is_empty();
         let can_save = !self.busy && manifest.is_some() && !self.draft.playbooks.is_empty() && name_ok;
         body = body
-            .child(div().flex().flex_col().gap_1().child(tr(cx, "common:serverConfig.note")).child(div().id("template-note").child(Input::new(&self.note).small()).test_support()))
+            .child(div().flex().flex_col().gap_1().child(tr(cx, "common:serverConfig.note")).child(div().id("template-note").child(Input::new(&self.note)).test_support()))
             .children(self.problem.clone().map(|problem| div().id("template-problem").text_xs().text_color(danger).child(problem).test_support()));
         let card = div()
             .id("template-dialog")

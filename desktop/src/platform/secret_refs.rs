@@ -436,8 +436,8 @@ impl SecretRefsView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().id(SharedString::from(format!("secret-name-{n}"))).w(px(180.)).flex_none().child(Input::new(&row.name).small().disabled(!can_edit)).test_support())
-                    .child(div().id(SharedString::from(format!("secret-ref-{n}"))).flex_1().min_w_0().child(Input::new(&row.op_ref).small().disabled(!can_edit)).test_support())
+                    .child(div().id(SharedString::from(format!("secret-name-{n}"))).w(px(180.)).flex_none().child(Input::new(&row.name).disabled(!can_edit)).test_support())
+                    .child(div().id(SharedString::from(format!("secret-ref-{n}"))).flex_1().min_w_0().child(Input::new(&row.op_ref).disabled(!can_edit)).test_support())
                     .child(
                         Button::new(SharedString::from(format!("secret-usage-{n}")))
                             .outline()
@@ -557,7 +557,7 @@ impl SecretRefsView {
                         .flex()
                         .items_end()
                         .gap_2()
-                        .child(div().flex_1().flex().flex_col().gap_1().child(div().text_xs().child(tr(cx, "common:secrets.importItem"))).child(div().id("secrets-item").child(Input::new(&self.item).small()).test_support()))
+                        .child(div().flex_1().flex().flex_col().gap_1().child(div().text_xs().child(tr(cx, "common:secrets.importItem"))).child(div().id("secrets-item").child(Input::new(&self.item)).test_support()))
                         .child(Button::new("secrets-import").outline().xsmall().label(tr(cx, "common:secrets.import")).disabled(self.busy.is_some() || self.item.read(cx).value().trim().is_empty()).on_click(cx.listener(|this, _, window, cx| this.import_item(window, cx)))),
                 )
                 .child(
@@ -571,8 +571,8 @@ impl SecretRefsView {
                                 .flex()
                                 .items_end()
                                 .gap_2()
-                                .child(div().flex_1().flex().flex_col().gap_1().child(div().text_xs().child(tr(cx, "common:secrets.captureVault"))).child(Input::new(&self.vault).small()))
-                                .child(div().flex_1().flex().flex_col().gap_1().child(div().text_xs().child(tr(cx, "common:secrets.captureItem"))).child(Input::new(&self.title).small()))
+                                .child(div().flex_1().flex().flex_col().gap_1().child(div().text_xs().child(tr(cx, "common:secrets.captureVault"))).child(Input::new(&self.vault)))
+                                .child(div().flex_1().flex().flex_col().gap_1().child(div().text_xs().child(tr(cx, "common:secrets.captureItem"))).child(Input::new(&self.title)))
                                 .child(Button::new("secrets-capture").outline().xsmall().label(tr(cx, "common:secrets.capture")).disabled(self.busy.is_some()).on_click(cx.listener(move |this, _, window, cx| this.capture(&capture_deployable, &capture_server, window, cx)))),
                         ),
                 )
@@ -603,7 +603,7 @@ impl SecretRefsView {
                         .child(div().text_xs().child(tr(cx, "common:secrets.rotateCommand")))
                         .child(div().text_xs().text_color(muted).child(tr(cx, "common:secrets.rotateCommandLead")))
                         .child(
-                            div().flex().gap_2().child(div().id("secrets-rotate-command").flex_1().child(Input::new(&self.rotate_command).small()).test_support()).child(
+                            div().flex().gap_2().child(div().id("secrets-rotate-command").flex_1().child(Input::new(&self.rotate_command)).test_support()).child(
                                 Button::new("secrets-rotate-command-save").outline().xsmall().label(tr(cx, "common:secrets.rotateCommandSave")).disabled(self.busy.is_some() || !command_dirty).on_click(cx.listener(move |this, _, _, cx| {
                                     let mut settings = command_target.settings();
                                     settings.rotate_command = this.rotate_command.read(cx).value().trim().to_string();

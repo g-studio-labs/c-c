@@ -377,9 +377,9 @@ impl RequestsPanel {
             .when(request.risk == Risk::Destructive, |column| {
                 column
                     .child(div().text_xs().child(cac_core::text_with(locale(cx), "common:provisionRequests.typeServer", &[("name", &server.name)])))
-                    .child(div().id(SharedString::from(format!("request-typed-{id}"))).child(Input::new(&decision.typed).small()).test_support())
+                    .child(div().id(SharedString::from(format!("request-typed-{id}"))).child(Input::new(&decision.typed)).test_support())
             })
-            .child(div().id(SharedString::from(format!("request-note-{id}"))).child(Input::new(&decision.note).small()).test_support())
+            .child(div().id(SharedString::from(format!("request-note-{id}"))).child(Input::new(&decision.note)).test_support())
             .child(
                 div()
                     .flex()
