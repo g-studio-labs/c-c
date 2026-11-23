@@ -49,11 +49,12 @@ pub struct ServersView {
     /// uno salían en el siguiente.
     views_of: Option<String>,
     diagnostics: Option<Entity<super::diagnostics::DiagnosticsView>>,
+    users: Option<Entity<super::users::UsersView>>,
 }
 
 impl ServersView {
     pub fn new() -> Self {
-        ServersView { dialog: None, ssh_key: None, problem: None, agent_line: None, services: None, stats: None, k8s: None, deploy: None, secrets: None, provision: None, backups: None, views_of: None, diagnostics: None }
+        ServersView { dialog: None, ssh_key: None, problem: None, agent_line: None, services: None, stats: None, k8s: None, deploy: None, secrets: None, provision: None, backups: None, views_of: None, diagnostics: None, users: None }
     }
 
     fn open_dialog(&mut self, editing: Option<Server>, window: &mut Window, cx: &mut Context<Self>) {
@@ -306,7 +307,8 @@ impl Render for ServersView {
         match state.section {
             cac_core::PlatformSection::Activity => return super::activity::page(cx),
             cac_core::PlatformSection::Diagnostics => return self.diagnostics.get_or_insert_with(|| cx.new(|cx| super::diagnostics::DiagnosticsView::new(window, cx))).clone().into_any_element(),
-            _ => {}
+            cac_core::PlatformSection::Users => return self.users.get_or_insert_with(|| cx.new(|_| super::users::UsersView::new())).clone().into_any_element(),
+            cac_core::PlatformSection::Servers | cac_core::PlatformSection::DevTools => {}
         }
         let open = state.open_server.as_ref().and_then(|id| state.servers.iter().find(|server| &server.id == id));
         if let Some(server) = open {

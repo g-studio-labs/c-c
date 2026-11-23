@@ -146,6 +146,24 @@ async fn a_deployment_event_hangs_on_its_run() {
     assert_eq!((hung.deployment.status, hung.deployable_name.as_str()), (cac_core::DeployStatus::Succeeded, "web"));
 }
 
+// ─── Usuarios ────────────────────────────────────────────────────────────────
+
+/// Quien no es superadmin no abre Usuarios aunque lo pida, ni se le pide la
+/// lista al servidor.
+///
+/// Rotura que atrapa: que la puerta sea sólo esconder la fila del panel y la
+/// sección se pueda abrir igual.
+#[tokio::test]
+async fn users_does_not_open_for_who_is_not_a_superadmin() {
+    let rig = rig(false).await;
+    get("/api/v1/users/").respond_with(ok(json!([]))).mount(&rig.server).await;
+    assert!(!rig.core.platform().show_section(PlatformSection::Users));
+    rig.core.platform().load_users().await;
+    assert_ne!(rig.core.platform().state().section, PlatformSection::Users);
+    assert!(rig.core.platform().state().users.is_none());
+    assert!(hits(&rig, "/api/v1/users/").await.is_empty(), "pidió la lista de usuarios sin ser superadmin");
+}
+
 // ─── Diagnóstico ─────────────────────────────────────────────────────────────
 
 /// Elegir un dispositivo trae su ficha y su timeline; filtrar por gravedad

@@ -20,6 +20,7 @@ pub mod provision_run;
 pub mod servers;
 pub mod services;
 pub mod swarm;
+pub mod users;
 
 use serde::{Deserialize, Serialize};
 
@@ -105,6 +106,8 @@ pub struct PlatformState {
     pub backups: Option<BackupsState>,
     /// Actividad, desde que se abrió.
     pub activity: Option<activity::ActivityState>,
+    /// Usuarios, desde que se abrió (sólo superadmin).
+    pub users: Option<users::UsersState>,
     /// Diagnóstico, desde que se abrió.
     pub diagnostics: Option<diagnostics::DiagnosticsState>,
 }
@@ -147,6 +150,7 @@ pub(crate) struct PlatformData {
     provision_output: Option<provision_run::OutputData>,
     backups: Option<BackupsState>,
     activity: Option<activity::ActivityState>,
+    users: Option<users::UsersState>,
     diagnostics: Option<diagnostics::DiagnosticsState>,
 }
 
@@ -204,6 +208,7 @@ impl Platform {
             provision_output: data.provision_output.as_ref().map(|out| out.output.clone()),
             backups: data.backups.clone(),
             activity: data.activity.clone(),
+            users: data.users.clone().filter(|_| self.superadmin()),
             diagnostics: data.diagnostics.clone(),
         }
     }

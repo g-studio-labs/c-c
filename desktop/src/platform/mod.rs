@@ -27,6 +27,7 @@ pub mod provision_template;
 pub mod services;
 pub mod stats;
 pub mod ssh_key;
+pub mod users;
 
 use cac_core::ServerHealth;
 use gpui_kit::component::ActiveTheme;
