@@ -747,7 +747,6 @@ impl ChatView {
             )
         });
         let flashed = self.flash.as_deref() == Some(id.as_str());
-        let hover = muted.opacity(0.4);
         // Las acciones, en la esquina del mensaje al pasar por él (el hueco
         // de `pr-12` es para esto).
         let can_write = Backend::snapshot(cx).read(cx).thread.can_write;
@@ -757,7 +756,7 @@ impl ChatView {
         let editing = editor.is_some();
         // `relative rounded-md py-1 pl-2 pr-12` (`pr-7` en una línea de
         // cac); lo propio, `max-w-[75%] rounded-tr-sm border
-        // border-primary/25 bg-primary/10`, y lo demás a todo el ancho.
+        // border-primary/25 bg-primary/10`; lo demás, su espejo con borde neutro.
         let bubble = div()
             .id(SharedString::from(format!("thread-bubble-{id}")))
             .relative()
@@ -771,7 +770,14 @@ impl ChatView {
                 if line.mine {
                     this.max_w(relative(0.75)).rounded_tr(px(6.)).border_1().border_color(primary.opacity(0.25)).bg(primary.opacity(if flashed { 0.25 } else { 0.1 }))
                 } else {
-                    this.w_full().when(flashed, |this| this.bg(primary.opacity(0.15))).when(!flashed, |this| this.hover(move |style| style.bg(hover)))
+                    // Lo de los demás, también en su burbuja (como en
+                    // cualquier app de mensajes), con el borde neutro.
+                    this.max_w(relative(0.75))
+                        .rounded_tl(px(6.))
+                        .border_1()
+                        .border_color(border)
+                        .bg(if flashed { primary.opacity(0.15) } else { muted.opacity(0.35) })
+                        .when(!flashed, |this| this.hover(move |style| style.bg(muted.opacity(0.55))))
                 }
             })
             .aria_label(body.parts.text.clone())
