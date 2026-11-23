@@ -103,3 +103,31 @@ impl LogBox {
             .into_any_element()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // Sin `super::*`: gpui_kit trae su propio `test` y taparía el de std.
+    use super::BACKGROUND;
+    use cac_core::AnsiColor;
+
+    fn luminance(hex: u32) -> f32 {
+        let channel = |shift: u32| {
+            let value = ((hex >> shift) & 0xFF) as f32 / 255.;
+            if value <= 0.03928 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    }
+
+    /// Rotura que atrapa: un color de los dieciséis que no se lee sobre el
+    /// fondo del log (el azul de `ansi-to-html` daba 1,1; WCAG pide 4,5).
+    #[test]
+    fn every_basic_color_reads_on_the_log_background() {
+        let background = luminance(BACKGROUND);
+        for index in 0..16u8 {
+            let c = AnsiColor::indexed(index);
+            let fg = luminance(((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32);
+            let ratio = (fg.max(background) + 0.05) / (fg.min(background) + 0.05);
+            assert!(ratio >= 4.5, "el color {index} da {ratio:.2} sobre el fondo del log");
+        }
+    }
+}

@@ -16,24 +16,25 @@ pub struct AnsiColor {
     pub b: u8,
 }
 
-/// Los dieciséis de `ansi-to-html`, para que un log se vea como en la app de
-/// Tauri.
+/// Los dieciséis, para el fondo oscuro del log. Los de `ansi-to-html` (los
+/// de Tauri) son para fondo claro: el azul `0000AA` sobre `27272A` tenía un
+/// contraste de 1,1 y no se leía (jose, 22-nov). Todos pasan de 4,5.
 const BASIC: [(u8, u8, u8); 16] = [
-    (0x00, 0x00, 0x00),
-    (0xAA, 0x00, 0x00),
-    (0x00, 0xAA, 0x00),
-    (0xAA, 0x55, 0x00),
-    (0x00, 0x00, 0xAA),
-    (0xAA, 0x00, 0xAA),
-    (0x00, 0xAA, 0xAA),
-    (0xAA, 0xAA, 0xAA),
-    (0x55, 0x55, 0x55),
-    (0xFF, 0x55, 0x55),
-    (0x55, 0xFF, 0x55),
-    (0xFF, 0xFF, 0x55),
-    (0x55, 0x55, 0xFF),
-    (0xFF, 0x55, 0xFF),
-    (0x55, 0xFF, 0xFF),
+    (0x92, 0x92, 0x99),
+    (0xF8, 0x71, 0x71),
+    (0x4A, 0xDE, 0x80),
+    (0xFA, 0xCC, 0x15),
+    (0x60, 0xA5, 0xFA),
+    (0xE8, 0x79, 0xF9),
+    (0x22, 0xD3, 0xEE),
+    (0xD4, 0xD4, 0xD8),
+    (0xA1, 0xA1, 0xAA),
+    (0xFC, 0xA5, 0xA5),
+    (0x86, 0xEF, 0xAC),
+    (0xFD, 0xE0, 0x47),
+    (0x93, 0xC5, 0xFD),
+    (0xF0, 0xAB, 0xFC),
+    (0x67, 0xE8, 0xF9),
     (0xFF, 0xFF, 0xFF),
 ];
 
@@ -195,7 +196,7 @@ mod tests {
         let line = "\u{1b}]0;title\u{7}\u{1b}[2K\u{1b}[1;32mINFO\u{1b}[0m listo \u{1b}[38;5;208mnaranja\u{1b}[39m\r";
         let spans = ansi_spans(line);
         assert_eq!(plain(&spans), "INFO listo naranja");
-        let green = AnsiColor { r: 0, g: 0xAA, b: 0 };
+        let green = AnsiColor::indexed(2);
         assert_eq!(spans[0], AnsiSpan { text: "INFO".into(), fg: Some(green), bold: true, ..Default::default() }, "el borrado de línea (2K) no es «atenuado» (2)");
         assert!(spans.iter().all(|span| !span.text.contains('\u{1b}') && !span.text.contains('[')));
     }
@@ -205,10 +206,10 @@ mod tests {
     #[test]
     fn each_span_carries_its_color() {
         let spans = ansi_spans("\u{1b}[1;31merror\u{1b}[0m: \u{1b}[92mok\u{1b}[38;2;1;2;3mrgb\u{1b}[48;5;21;39mfondo");
-        let red = AnsiColor { r: 0xAA, g: 0, b: 0 };
+        let red = AnsiColor::indexed(1);
         assert_eq!(spans[0], AnsiSpan { text: "error".into(), fg: Some(red), bold: true, ..Default::default() });
         assert_eq!(spans[1], AnsiSpan { text: ": ".into(), ..Default::default() });
-        assert_eq!(spans[2].fg, Some(AnsiColor { r: 0x55, g: 0xFF, b: 0x55 }));
+        assert_eq!(spans[2].fg, Some(AnsiColor::indexed(10)));
         assert_eq!(spans[3].fg, Some(AnsiColor { r: 1, g: 2, b: 3 }));
         assert_eq!(ansi_spans("\u{1b}[38;2;1;2mx")[0].fg, None, "un RGB a medias no se completa con ceros");
         assert_eq!((spans[4].fg, spans[4].bg), (None, Some(AnsiColor { r: 0, g: 0, b: 255 })));
