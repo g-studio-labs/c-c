@@ -261,7 +261,9 @@ impl RequestsPanel {
                     cx.notify();
                 }))
             };
-            let block = |id: String, text: &str| div().id(SharedString::from(id)).p_2().rounded(px(4.)).bg(theme.muted).font_family(mono.clone()).text_xs().children(text.lines().map(|line| div().whitespace_nowrap().child(line.to_string())).collect::<Vec<_>>()).test_support();
+            // Las líneas de Ansible son anchas (los `****` del TASK): se desliza en
+            // horizontal dentro de la tarjeta en vez de salirse (jose, 23-nov).
+            let block = |id: String, text: &str| div().id(SharedString::from(id)).w_full().min_w_0().overflow_x_scroll().p_2().rounded(px(4.)).bg(theme.muted).font_family(mono.clone()).text_xs().children(text.lines().map(|line| div().whitespace_nowrap().child(line.to_string())).collect::<Vec<_>>()).test_support();
             column = column
                 .child(div().id(SharedString::from(format!("request-check-{id}"))).text_xs().text_color(muted).child(summary).test_support())
                 .child(div().flex().flex_col().gap_1().children(failures.collect::<Vec<_>>()))
