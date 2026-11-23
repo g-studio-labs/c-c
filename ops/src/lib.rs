@@ -1,8 +1,8 @@
 //! Lo que Plataforma hace en la máquina local: hablar por SSH con los
 //! servidores, guardar en el llavero del sistema lo que es de cada uno, y
 //! llevar los secretos de 1Password a los servicios y a GitHub, y bajar un
-//! backup a un fichero. Y las utilidades de tokens de las DevTools, que tampoco
-//! tocan ningún servidor.
+//! backup a un fichero. Y las DevTools, que tampoco tocan ningún servidor:
+//! comprimir imágenes y las utilidades de tokens.
 //!
 //! Sale de la app de Tauri (`app/src-tauri/src/lib.rs`) para que la app nativa
 //! use lo mismo: es código sensible —llaves, tokens, qué viaja como argumento y
@@ -17,6 +17,7 @@ pub mod agent_install;
 pub mod crypto;
 pub mod download;
 pub mod github;
+pub mod image_tool;
 pub mod keychain;
 pub mod op;
 pub mod op_env;

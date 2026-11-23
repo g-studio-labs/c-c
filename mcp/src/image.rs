@@ -87,6 +87,16 @@ pub fn compress(raw: &[u8], opts: &CompressOptions) -> Result<CompressResult, St
 fn encode(img: &DynamicImage, format: &OutputFormat, quality: u8) -> Result<Vec<u8>, String> {
     match format {
         OutputFormat::Webp => {
+            // El codificador sólo acepta RGB y RGBA: una PNG en escala de
+            // grises fallaba con «Unimplemented». Guardián:
+            // `cac_ops::image_tool::tests::the_compressor_never_enlarges_an_image`.
+            let converted;
+            let img = if matches!(img, DynamicImage::ImageRgb8(_) | DynamicImage::ImageRgba8(_)) {
+                img
+            } else {
+                converted = DynamicImage::ImageRgba8(img.to_rgba8());
+                &converted
+            };
             let encoder =
                 webp::Encoder::from_image(img).map_err(|e| format!("WebP encoder: {e}"))?;
             Ok(encoder.encode(quality as f32).to_vec())

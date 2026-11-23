@@ -12,7 +12,7 @@ use gpui_kit::*;
 use crate::backend::Backend;
 use crate::lang::tr;
 use crate::theme::Leading as _;
-use crate::workspace::{Workspace, INDENT, PANEL_ROW_HEIGHT};
+use crate::workspace::{INDENT, PANEL_ROW_HEIGHT};
 
 pub(crate) fn panel(cx: &App) -> AnyElement {
     let snapshot = Backend::snapshot(cx).read(cx);
@@ -47,9 +47,6 @@ pub(crate) fn panel(cx: &App) -> AnyElement {
                 PlatformSection::Users => ("platform-users", Lucide::Users),
                 PlatformSection::DevTools => ("platform-devtools", Lucide::Wrench),
             };
-            if section == PlatformSection::DevTools {
-                return Some(Workspace::pending_panel_row(id, icon, section.label_key(), cx).into_any_element());
-            }
             let row = row(id, Icon::new(icon), tr(cx, section.label_key()), state.section == section, 0., cx).on_click(move |_, _, cx| open_section(section, cx));
             Some(row.test_support().into_any_element())
         }))
@@ -62,7 +59,9 @@ fn open_section(section: PlatformSection, cx: &mut App) {
         PlatformSection::Activity => Backend::run(cx, |core| async move { core.platform().open_activity(ActivityFilter::default()).await }),
         PlatformSection::Diagnostics => Backend::run(cx, |core| async move { core.platform().open_diagnostics().await }),
         PlatformSection::Users => Backend::run(cx, |core| async move { core.platform().open_users().await }),
-        PlatformSection::DevTools => {}
+        PlatformSection::DevTools => {
+            Backend::core(cx).platform().show_section(PlatformSection::DevTools);
+        }
     }
 }
 

@@ -14,11 +14,11 @@ use gpui_kit::{img, AnyElement, AssetSource, IntoElement, Pixels, Result, Shared
 
 // Los de Lucide que la app nombra y los componentes no traen. Al usar uno
 // nuevo, se añade aquí y a `USED`. Guardián: `tests::every_icon_can_be_loaded`.
-gpui_kit::assets::icon_assets!(Extra, [WifiOff, RefreshCw, LogOut, X, Paperclip, Image, Download, Trash, Pencil, Folder, ListChecks, FileText, ChevronsUpDown, Building2, Moon, Languages, PanelLeftClose, PanelLeftOpen, UserRound, KeyRound, Briefcase, MessagesSquare, Server, NotebookPen, Lock, List, SquareKanban, CalendarDays, PanelLeft, ChevronLeft, GripVertical, Plus, Eye, EyeOff, CircleAlert, Flag, Tag, Users, Calendar, FolderInput, Link2, Bot, Gavel, Send, Copy, Share2, ListTree, SquareCheck, Bold, Italic, Code, Heading2, ListOrdered, Quote, Table, GitPullRequest, Activity, FolderPlus, House, Puzzle, ClipboardList, RotateCcwClock, Clock, CircleCheck, BellRing, Pin, Megaphone, Hash, UserPlus, Check, CheckCheck, MessageSquare, CornerUpLeft, ExternalLink, ChevronRight, HeartPlus, Bell, BellOff, AtSign, Zap, CalendarClock, Workflow, Rocket, Archive, Info, Volume2, VolumeX, Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Minimize2, SlidersHorizontal, Phone, AudioLines, RotateCcw, Maximize2, Video, MonitorUp, VideoOff, Monitor, AppWindow, Wrench, Terminal, SquareTerminal, ArrowUpDown, ShieldCheck, ShieldAlert, Boxes, Database, LayoutGrid, Undo2, ArrowLeft, FolderOpen, Play, Square, FlaskConical, GitBranch, Smartphone, ZapOff, TriangleAlert]);
+gpui_kit::assets::icon_assets!(Extra, [WifiOff, RefreshCw, LogOut, X, Paperclip, Image, Download, Trash, Pencil, Folder, ListChecks, FileText, ChevronsUpDown, Building2, Moon, Languages, PanelLeftClose, PanelLeftOpen, UserRound, KeyRound, Briefcase, MessagesSquare, Server, NotebookPen, Lock, List, SquareKanban, CalendarDays, PanelLeft, ChevronLeft, GripVertical, Plus, Eye, EyeOff, CircleAlert, Flag, Tag, Users, Calendar, FolderInput, Link2, Bot, Gavel, Send, Copy, Share2, ListTree, SquareCheck, Bold, Italic, Code, Heading2, ListOrdered, Quote, Table, GitPullRequest, Activity, FolderPlus, House, Puzzle, ClipboardList, RotateCcwClock, Clock, CircleCheck, BellRing, Pin, Megaphone, Hash, UserPlus, Check, CheckCheck, MessageSquare, CornerUpLeft, ExternalLink, ChevronRight, HeartPlus, Bell, BellOff, AtSign, Zap, CalendarClock, Workflow, Rocket, Archive, Info, Volume2, VolumeX, Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Minimize2, SlidersHorizontal, Phone, AudioLines, RotateCcw, Maximize2, Video, MonitorUp, VideoOff, Monitor, AppWindow, Wrench, Terminal, SquareTerminal, ArrowUpDown, ShieldCheck, ShieldAlert, Boxes, Database, LayoutGrid, Undo2, ArrowLeft, FolderOpen, Play, Square, FlaskConical, GitBranch, Smartphone, ZapOff, TriangleAlert, ImageDown, Upload, ShieldX, ArrowRight]);
 
 /// Los mismos, para la prueba que comprueba que se cargan.
 #[cfg(test)]
-const USED: [Lucide; 118] = [
+const USED: [Lucide; 122] = [
     Lucide::WifiOff,
     Lucide::RefreshCw,
     Lucide::LogOut,
@@ -137,6 +137,10 @@ const USED: [Lucide; 118] = [
     Lucide::Smartphone,
     Lucide::ZapOff,
     Lucide::TriangleAlert,
+    Lucide::ImageDown,
+    Lucide::Upload,
+    Lucide::ShieldX,
+    Lucide::ArrowRight,
 ];
 
 pub struct Assets;

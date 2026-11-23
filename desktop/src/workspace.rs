@@ -4703,4 +4703,7 @@ mod tests {
 
     // Actividad, Diagnóstico y Usuarios, en su fichero.
     include!("platform/tools_tests.rs");
+
+    // Las DevTools, en su fichero.
+    include!("platform/devtools_tests.rs");
 }
