@@ -227,6 +227,7 @@
     "readyOf": "{{ready}}/{{total}} listos",
     "readingCluster": "Leyendo el clúster…",
     "filterServices": "Filtra por nombre, imagen o stack…",
+    "copied": "Copiado",
     "clearFilter": "Limpiar el filtro",
     "noServices": "No se encontró ningún servicio.",
     "noNodes": "No se encontró ningún nodo.",

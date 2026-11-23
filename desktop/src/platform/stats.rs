@@ -17,7 +17,7 @@ use crate::backend::Backend;
 use crate::lang::{locale, tr};
 use crate::theme::Leading as _;
 
-use super::services::{empty, pill};
+use super::services::{copyable, empty, pill, CopiesCells};
 
 /// Las columnas: la etiqueta, por qué se ordena (el nodo no se ordena, como
 /// en Tauri), el ancho y si los números van a la derecha.
@@ -43,6 +43,13 @@ pub struct StatsPanel {
     _filter_changed: Subscription,
     show_stopped: bool,
     sort: StatsSort,
+    copied: Option<String>,
+}
+
+impl CopiesCells for StatsPanel {
+    fn copied_cell(&mut self) -> &mut Option<String> {
+        &mut self.copied
+    }
 }
 
 impl StatsPanel {
@@ -54,7 +61,7 @@ impl StatsPanel {
                 cx.notify();
             }
         });
-        StatsPanel { filter, _filter_changed: filter_changed, show_stopped: false, sort: StatsSort::default() }
+        StatsPanel { filter, _filter_changed: filter_changed, show_stopped: false, sort: StatsSort::default(), copied: None }
     }
 
     fn toolbar(&self, state: &PlatformState, cx: &mut Context<Self>) -> impl IntoElement {
@@ -138,6 +145,7 @@ impl StatsPanel {
     fn stats_row(&self, stats: &ContainerStats, node_names: &HashMap<String, String>, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (border, muted, danger, mono) = (theme.border, theme.muted_foreground, theme.danger, theme.mono_font_family.clone());
+        let (secondary_bg, secondary_fg) = (theme.secondary, theme.secondary_foreground);
         let state_colors = match stats.state.as_str() {
             "running" => (theme.primary.opacity(0.15), theme.primary),
             "exited" | "dead" => (danger.opacity(0.15), danger),
@@ -156,9 +164,14 @@ impl StatsPanel {
             .child(stats.short_id().to_string());
         let node = node_names.get(&stats.node_id).cloned().unwrap_or_else(|| stats.node_id.chars().take(8).collect());
         row(vec![
-            container.into_any_element(),
-            if stats.service_name.is_empty() { dash() } else { div().text_xs().leading_xs().truncate().child(stats.service_name.clone()).into_any_element() },
-            if stats.stack.is_empty() { dash() } else { pill(stats.stack.clone(), theme.secondary, theme.secondary_foreground).into_any_element() },
+            // Se ve el id corto y se copia el entero, que es el que pide `docker`.
+            copyable(format!("stats-container-{}", stats.container_id), &stats.container_id, self.copied.as_deref(), |_| container, cx),
+            if stats.service_name.is_empty() {
+                dash()
+            } else {
+                copyable(format!("stats-service-{}", stats.container_id), &stats.service_name, self.copied.as_deref(), |text| div().text_xs().leading_xs().truncate().child(text), cx)
+            },
+            if stats.stack.is_empty() { dash() } else { copyable(format!("stats-stack-{}", stats.container_id), &stats.stack, self.copied.as_deref(), |text| pill(text, secondary_bg, secondary_fg), cx) },
             div()
                 .id(SharedString::from(format!("stats-node-{}", stats.container_id)))
                 .aria_label(node.clone())
@@ -215,7 +228,7 @@ impl Render for StatsPanel {
             );
         let filled = !filter_text.is_empty();
         let filter = div().id("stats-filter").child(
-            Input::new(&self.filter).small().prefix(Icon::new(Lucide::Search).size_4().text_color(muted)).when(filled, |input| {
+            Input::new(&self.filter).prefix(Icon::new(Lucide::Search).size_4().text_color(muted)).when(filled, |input| {
                 input.suffix(
                     Button::new("stats-filter-clear")
                         .ghost()

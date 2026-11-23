@@ -5,6 +5,7 @@ use cac_core::{filter_services, server_edit_phrase, PlatformState, ServiceHealth
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -39,6 +40,13 @@ pub struct ServicesView {
     logs: LogBox,
     /// Cómo acabó el último reinicio: la frase y si falló.
     restart_line: Option<(String, bool)>,
+    copied: Option<String>,
+}
+
+impl CopiesCells for ServicesView {
+    fn copied_cell(&mut self) -> &mut Option<String> {
+        &mut self.copied
+    }
 }
 
 impl ServicesView {
@@ -50,7 +58,7 @@ impl ServicesView {
                 cx.notify();
             }
         });
-        ServicesView { filter, _filter_changed: filter_changed, logs: LogBox::new(), restart_line: None }
+        ServicesView { filter, _filter_changed: filter_changed, logs: LogBox::new(), restart_line: None, copied: None }
     }
 
     fn restart(&mut self, service: SwarmService, cx: &mut Context<Self>) {
@@ -168,12 +176,12 @@ impl ServicesView {
             });
         row(
             vec![
-                div().font_weight(FontWeight::MEDIUM).truncate().child(service.name.clone()).into_any_element(),
-                div().font_family(mono.clone()).leading_xs().text_color(muted).truncate().child(service.image.clone()).into_any_element(),
+                copyable(format!("service-name-{}", service.id), &service.name, self.copied.as_deref(), |text| div().font_weight(FontWeight::MEDIUM).truncate().child(text), cx),
+                copyable(format!("service-image-{}", service.id), &service.image, self.copied.as_deref(), |text| div().font_family(mono.clone()).leading_xs().text_color(muted).truncate().child(text), cx),
                 if service.stack.is_empty() {
                     div().text_color(muted).child("—").into_any_element()
                 } else {
-                    pill(service.stack.clone(), secondary_bg, secondary_fg).into_any_element()
+                    copyable(format!("service-stack-{}", service.id), &service.stack, self.copied.as_deref(), |text| pill(text, secondary_bg, secondary_fg), cx)
                 },
                 div().font_family(mono).text_color(replicas_color).child(format!("{}/{}", service.replicas.running, service.replicas.desired)).into_any_element(),
                 pill(health.label().to_string(), badge_color.opacity(0.15), badge_color).into_any_element(),
@@ -256,7 +264,7 @@ impl Render for ServicesView {
         let filter = div()
             .id("services-filter")
             .child(
-                Input::new(&self.filter).small().prefix(Icon::new(Lucide::Search).size_4().text_color(muted)).when(filled, |input| {
+                Input::new(&self.filter).prefix(Icon::new(Lucide::Search).size_4().text_color(muted)).when(filled, |input| {
                     input.suffix(
                         Button::new("services-filter-clear")
                             .ghost()
@@ -318,4 +326,40 @@ fn row(cells: Vec<AnyElement>, actions: AnyElement) -> Div {
 /// Como el `Badge` de Tauri: el stack y el estado se leen de un vistazo.
 pub(crate) fn pill(text: String, background: Hsla, color: Hsla) -> Div {
     div().flex().child(div().px_1p5().rounded(px(4.)).bg(background).text_color(color).text_xs().leading_xs().font_weight(FontWeight::MEDIUM).truncate().child(text))
+}
+
+/// Una tabla recorta lo que no cabe; quien lo necesita entero lo lee al
+/// pasar por encima y lo copia de un clic (jose, 22-nov).
+pub(crate) trait CopiesCells: Sized + 'static {
+    fn copied_cell(&mut self) -> &mut Option<String>;
+}
+
+/// `render` pinta el texto con el estilo de su columna.
+pub(crate) fn copyable<V: CopiesCells>(id: String, text: &str, copied: Option<&str>, render: impl FnOnce(String) -> Div, cx: &mut Context<V>) -> AnyElement {
+    let hint = if copied == Some(id.as_str()) { tr(cx, "common:servers.copied") } else { text.to_string() };
+    let (cell, value) = (id.clone(), text.to_string());
+    render(text.to_string())
+        .id(SharedString::from(id))
+        .cursor_pointer()
+        .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+        .on_click(cx.listener(move |this, _, _, cx| copy_cell(this, cell.clone(), value.clone(), cx)))
+        .test_support()
+        .into_any_element()
+}
+
+fn copy_cell<V: CopiesCells>(this: &mut V, id: String, text: String, cx: &mut Context<V>) {
+    cx.write_to_clipboard(ClipboardItem::new_string(text));
+    *this.copied_cell() = Some(id.clone());
+    cx.notify();
+    cx.spawn(async move |this, cx| {
+        cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+        this.update(cx, |this, cx| {
+            if this.copied_cell().as_deref() == Some(id.as_str()) {
+                *this.copied_cell() = None;
+                cx.notify();
+            }
+        })
+        .ok();
+    })
+    .detach();
 }

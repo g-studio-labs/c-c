@@ -3910,6 +3910,32 @@ mod tests {
         wait_until(cx, "se nota la pausa", |cx| label(window, "stats-status", cx).starts_with("En pausa"));
     }
 
+    /// Lo que una tabla recorta se copia entero de un clic: el nombre y la
+    /// imagen de un servicio, y el id completo de un contenedor aunque se vea
+    /// el corto.
+    ///
+    /// Roturas que atrapa: que un clic no copie; que copie lo que se ve
+    /// recortado o el id corto; que copie la celda de otra fila.
+    #[gpui_kit::test]
+    fn a_clipped_cell_copies_its_whole_text(cx: &mut TestAppContext) {
+        let (server, window) = services_as("viewer", cx);
+        click(window, "service-image-svc1", cx);
+        assert_eq!(copied(cx).as_deref(), Some("ghcr.io/o/web:v3"));
+        click(window, "service-name-svc1", cx);
+        assert_eq!(copied(cx).as_deref(), Some("shop_web"));
+
+        let full = "0123456789abcdef0123456789abcdef";
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/stats")).respond_with(ok(json!([
+            { "containerId": full, "nodeId": "n1", "serviceName": "shop_web", "stack": "shop", "state": "running", "cpuPercent": 1., "onlineCpus": 2, "memUsage": 1, "memLimit": 10 }
+        ]))));
+        click(window, "server-tab-stats", cx);
+        let cell = format!("stats-container-{full}");
+        wait_until(cx, "llega el contenedor", |cx| on_screen(window, &cell, cx));
+        click(window, &cell, cx);
+        assert_eq!(copied(cx).as_deref(), Some(full));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
     /// La pestaña de servicios: filtrar, reiniciar y seguir el log, que
     /// llega con sus colores y sin códigos crudos.
     ///
