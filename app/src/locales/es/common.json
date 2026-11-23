@@ -1489,6 +1489,7 @@
       "change": "Cambio",
       "actions": "Acciones",
       "download": "Descargar",
+      "openFolder": "Abrir carpeta",
       "remove": "Quitar",
       "saveFailed": "No se pudo guardar {{name}}: {{error}}"
     },

@@ -31,6 +31,9 @@ struct Item {
     /// formato (AVIF).
     preview: Option<Arc<Image>>,
     saving: Saving,
+    /// La carpeta del original: ahí se propone guardar y ahí lleva el botón
+    /// de la carpeta hasta que se guarda en otra.
+    folder: PathBuf,
 }
 
 pub struct ImageToolView {
@@ -80,7 +83,9 @@ impl ImageToolView {
         self.processing = true;
         self.error = None;
         cx.notify();
-        let work = cx.background_executor().spawn(async move { paths.iter().map(|path| compress_file(path, format, quality, max_width)).collect::<Vec<_>>() });
+        let work = cx.background_executor().spawn(async move {
+            paths.iter().map(|path| compress_file(path, format, quality, max_width).map(|result| (result, path.parent().map(PathBuf::from).unwrap_or_default()))).collect::<Vec<_>>()
+        });
         cx.spawn(async move |this, cx| {
             let results = work.await;
             this.update(cx, |this, cx| {
@@ -88,10 +93,10 @@ impl ImageToolView {
                 let mut fresh = Vec::new();
                 for result in results {
                     match result {
-                        Ok(result) => {
+                        Ok((result, folder)) => {
                             let preview = ImageFormat::from_mime_type(&result.mime).filter(|_| result.format != "avif").map(|format| Arc::new(Image::from_bytes(format, result.data.clone())));
                             this.next_id += 1;
-                            fresh.push(Item { id: this.next_id, result, preview, saving: Saving::Idle });
+                            fresh.push(Item { id: this.next_id, result, preview, saving: Saving::Idle, folder });
                         }
                         Err(error) => this.error = Some(error),
                     }
@@ -111,17 +116,23 @@ impl ImageToolView {
         item.saving = Saving::Busy;
         let (name, data) = (item.result.name.clone(), item.result.data.clone());
         cx.notify();
-        let home = std::env::home_dir().unwrap_or_else(std::env::temp_dir);
-        let chosen = cx.prompt_for_new_path(&home, Some(&name));
+        let start = if item.folder.is_dir() { item.folder.clone() } else { std::env::home_dir().unwrap_or_else(std::env::temp_dir) };
+        let chosen = cx.prompt_for_new_path(&start, Some(&name));
         cx.spawn(async move |this, cx| {
             let outcome = match chosen.await {
-                Ok(Ok(Some(target))) => Some(cx.background_executor().spawn(async move { std::fs::write(target, data).map_err(|error| error.to_string()) }).await),
+                Ok(Ok(Some(target))) => {
+                    let folder = target.parent().map(PathBuf::from);
+                    Some(cx.background_executor().spawn(async move { std::fs::write(target, data).map_err(|error| error.to_string()) }).await.map(|_| folder))
+                }
                 _ => None,
             };
             this.update(cx, |this, cx| {
                 let language = locale(cx);
                 if let Some(item) = this.items.iter_mut().find(|item| item.id == id) {
-                    item.saving = if matches!(outcome, Some(Ok(()))) { Saving::Done } else { Saving::Idle };
+                    item.saving = if matches!(outcome, Some(Ok(_))) { Saving::Done } else { Saving::Idle };
+                    if let Some(Ok(Some(folder))) = &outcome {
+                        item.folder = folder.clone();
+                    }
                 }
                 if let Some(Err(error)) = outcome {
                     this.error = Some(cac_core::text_with(language, "common:devtools.image.saveFailed", &[("name", &name), ("error", &error)]));
@@ -156,7 +167,10 @@ impl ImageToolView {
             };
             let written = cx
                 .background_executor()
-                .spawn(async move { files.into_iter().map(|(id, name, data)| (id, name.clone(), std::fs::write(folder.join(&name), data).map_err(|error| error.to_string()))).collect::<Vec<_>>() })
+                .spawn({
+                let folder = folder.clone();
+                async move { files.into_iter().map(|(id, name, data)| (id, name.clone(), std::fs::write(folder.join(&name), data).map_err(|error| error.to_string()))).collect::<Vec<_>>() }
+            })
                 .await;
             this.update(cx, |this, cx| {
                 let language = locale(cx);
@@ -166,6 +180,9 @@ impl ImageToolView {
                     any |= ok;
                     if let Some(item) = this.items.iter_mut().find(|item| item.id == id) {
                         item.saving = if ok { Saving::Done } else { Saving::Idle };
+                        if ok {
+                            item.folder = folder.clone();
+                        }
                     }
                     if let Err(error) = result {
                         this.error = Some(cac_core::text_with(language, "common:devtools.image.saveFailed", &[("name", &name), ("error", &error)]));
@@ -269,6 +286,7 @@ impl ImageToolView {
                 };
                 let id = item.id;
                 let saving = item.saving;
+                let folder = item.folder.clone();
                 let actions = div()
                     .flex()
                     .justify_end()
@@ -281,6 +299,14 @@ impl ImageToolView {
                             .tooltip(tr(cx, "common:devtools.image.download"))
                             .disabled(saving == Saving::Busy)
                             .on_click(cx.listener(move |this, _, _, cx| this.save(id, cx))),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("image-folder-{id}")))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(Lucide::FolderOpen))
+                            .tooltip(tr(cx, "common:devtools.image.openFolder"))
+                            .on_click(move |_, _, cx| crate::files::open_with_system(&folder, cx)),
                     )
                     .child(
                         Button::new(SharedString::from(format!("image-remove-{id}")))
@@ -324,7 +350,7 @@ impl Render for ImageToolView {
             let chosen = self.format == *value;
             let value: &'static str = value;
             Button::new(SharedString::from(format!("image-format-{value}")))
-                .xsmall()
+                .small()
                 .rounded_full()
                 .when(chosen, |chip| chip.primary())
                 .when(!chosen, |chip| chip.ghost())
@@ -344,7 +370,7 @@ impl Render for ImageToolView {
                     cac_core::text_with(language, "common:devtools.image.quality", &[("value", &self.quality.to_string())]),
                     div().h(px(36.)).flex().items_center().child(Slider::new(&self.quality_slider)).into_any_element(),
                 ))
-                .child(field(tr(cx, "common:devtools.image.maxWidth"), div().id("image-max-width").child(Input::new(&self.max_width).small()).into_any_element())),
+                .child(field(tr(cx, "common:devtools.image.maxWidth"), div().id("image-max-width").child(Input::new(&self.max_width)).into_any_element())),
         );
         let drop = Self::card("image-drop-card", cx).child(
             div()

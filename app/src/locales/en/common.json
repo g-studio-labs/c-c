@@ -1489,6 +1489,7 @@
       "change": "Change",
       "actions": "Actions",
       "download": "Download",
+      "openFolder": "Open folder",
       "remove": "Remove",
       "saveFailed": "Could not save {{name}}: {{error}}"
     },

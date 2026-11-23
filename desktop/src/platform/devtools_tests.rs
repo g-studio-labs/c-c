@@ -33,3 +33,39 @@ fn a_token_with_another_secret_says_its_signature_is_invalid(cx: &mut TestAppCon
     wait_until(cx, "la firma pasa", |cx| label(window, "tokens-jwt-signature", cx) == "Firma válida");
     cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
 }
+
+/// La carpeta de una imagen comprimida es la del original: ahí se propone
+/// guardar, y el botón de la fila la abre.
+///
+/// Rotura que atrapa: un botón que abre otra carpeta (la de inicio, la
+/// temporal) o que no abre nada.
+#[gpui_kit::test]
+fn the_folder_button_opens_where_the_original_was(cx: &mut TestAppContext) {
+    use gpui_kit::{ExternalPaths, FileDropEvent, PlatformInput};
+    let (_server, window) = platform_as("member", cx);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<std::path::PathBuf>::new()));
+    let opened = seen.clone();
+    cx.update(|cx| cx.set_global(crate::files::Opener(std::sync::Arc::new(move |path| opened.lock().unwrap().push(path.to_path_buf())))));
+    let dir = std::env::temp_dir().join(format!("cac-image-folder-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let photo = dir.join("foto.png");
+    image::RgbaImage::new(4, 4).save(&photo).unwrap();
+
+    click(window, "platform-devtools", cx);
+    wait_until(cx, "se abren las DevTools", |cx| on_screen(window, "devtools-rail", cx));
+    click(window, "devtools-image", cx);
+    wait_until(cx, "sale el compresor", |cx| on_screen(window, "image-drop", cx));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let position = window.find("image-drop").bounds().center();
+        window.dispatch_event(PlatformInput::MouseMove(gpui_kit::MouseMoveEvent { position, pressed_button: None, modifiers: Default::default() }), cx);
+        window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Entered { position, paths: ExternalPaths(vec![photo.clone()].into()) }), cx);
+        window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Submit { position }), cx);
+    })
+    .unwrap();
+    wait_until(cx, "sale la fila", |cx| on_screen(window, "image-folder-1", cx));
+    click(window, "image-folder-1", cx);
+    assert_eq!(*seen.lock().unwrap(), [dir.clone()]);
+    let _ = std::fs::remove_dir_all(&dir);
+    cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+}
