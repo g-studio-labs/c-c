@@ -10,6 +10,7 @@ pub mod agent;
 pub mod backups;
 pub mod deploys;
 pub mod detail;
+pub mod diagnostics;
 pub mod edit;
 pub mod install;
 pub mod k8s;
@@ -104,6 +105,8 @@ pub struct PlatformState {
     pub backups: Option<BackupsState>,
     /// Actividad, desde que se abrió.
     pub activity: Option<activity::ActivityState>,
+    /// Diagnóstico, desde que se abrió.
+    pub diagnostics: Option<diagnostics::DiagnosticsState>,
 }
 
 #[derive(Default)]
@@ -144,6 +147,7 @@ pub(crate) struct PlatformData {
     provision_output: Option<provision_run::OutputData>,
     backups: Option<BackupsState>,
     activity: Option<activity::ActivityState>,
+    diagnostics: Option<diagnostics::DiagnosticsState>,
 }
 
 /// Plataforma en este core.
@@ -200,6 +204,7 @@ impl Platform {
             provision_output: data.provision_output.as_ref().map(|out| out.output.clone()),
             backups: data.backups.clone(),
             activity: data.activity.clone(),
+            diagnostics: data.diagnostics.clone(),
         }
     }
 

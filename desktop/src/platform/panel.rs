@@ -1,5 +1,5 @@
 //! El panel de Plataforma: «Servidores» con una fila por servidor y su punto
-//! de estado, y debajo Actividad y lo que todavía no está en esta app
+//! de estado, y debajo Actividad, Diagnóstico y lo que todavía no está en esta app
 //! (`app/src/components/sidebar/panels/PlatformPanel.tsx`).
 
 use cac_core::{ActivityFilter, PlatformSection, PlatformState, Server, ServerKind, platform_sections};
@@ -47,7 +47,7 @@ pub(crate) fn panel(cx: &App) -> AnyElement {
                 PlatformSection::Users => ("platform-users", Lucide::Users),
                 PlatformSection::DevTools => ("platform-devtools", Lucide::Wrench),
             };
-            if matches!(section, PlatformSection::DevTools | PlatformSection::Diagnostics | PlatformSection::Users) {
+            if matches!(section, PlatformSection::DevTools | PlatformSection::Users) {
                 return Some(Workspace::pending_panel_row(id, icon, section.label_key(), cx).into_any_element());
             }
             let row = row(id, Icon::new(icon), tr(cx, section.label_key()), state.section == section, 0., cx).on_click(move |_, _, cx| open_section(section, cx));
@@ -60,6 +60,7 @@ fn open_section(section: PlatformSection, cx: &mut App) {
     match section {
         PlatformSection::Servers => Backend::core(cx).platform().close_server(),
         PlatformSection::Activity => Backend::run(cx, |core| async move { core.platform().open_activity(ActivityFilter::default()).await }),
+        PlatformSection::Diagnostics => Backend::run(cx, |core| async move { core.platform().open_diagnostics().await }),
         _ => {}
     }
 }

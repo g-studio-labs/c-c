@@ -145,3 +145,46 @@ async fn a_deployment_event_hangs_on_its_run() {
     let hung = &state.entries.iter().find(|entry| entry.is_run()).unwrap().deployments[0];
     assert_eq!((hung.deployment.status, hung.deployable_name.as_str()), (cac_core::DeployStatus::Succeeded, "web"));
 }
+
+// ─── Diagnóstico ─────────────────────────────────────────────────────────────
+
+/// Elegir un dispositivo trae su ficha y su timeline; filtrar por gravedad
+/// vuelve a pedir con el filtro, y buscar texto en los eventos no.
+///
+/// Roturas que atrapa: pedir la ficha de otro dispositivo (sólo por id, sin
+/// el proyecto); no volver a pedir al cambiar la gravedad; ir al servidor por
+/// cada letra del texto, que se filtra en pantalla.
+#[tokio::test]
+async fn picking_a_device_brings_its_sheet_and_its_timeline() {
+    let rig = rig(false).await;
+    let device = json!({ "deviceId": "dev-1", "projectId": "p1", "projectName": "Rastreo", "label": "moto g54", "platform": "android", "appVersion": "2.3.0",
+                         "batches": 3, "reqCount": 10, "errorCount": 1, "warnCount": 0, "lastSeen": "2026-11-20T10:00:00Z", "alerts": null });
+    get("/api/v1/telemetry/devices").respond_with(ok(json!([device]))).mount(&rig.server).await;
+    let mut detail = device.clone();
+    detail["firstSeen"] = json!("2026-11-01T10:00:00Z");
+    detail["device"] = json!({ "battery": { "level": 4 } });
+    detail["heartbeats"] = json!(["2026-11-20T09:00:00Z"]);
+    detail["gaps"] = json!(null);
+    get("/api/v1/telemetry/devices/p1/dev-1").respond_with(ok(detail)).mount(&rig.server).await;
+    let batch = json!({ "id": "b1", "sessionId": "s1", "receivedAt": "2026-11-20T10:00:00Z", "breadcrumbs": [{ "type": "error", "message": "boom" }], "severities": ["error"] });
+    get("/api/v1/telemetry/timeline").respond_with(ok(json!([batch]))).mount(&rig.server).await;
+
+    rig.core.platform().open_diagnostics().await;
+    let state = rig.core.platform().state();
+    assert_eq!(state.section, PlatformSection::Diagnostics);
+    let devices = state.diagnostics.unwrap().devices;
+    assert_eq!(devices[0].title(), "moto g54");
+
+    rig.core.platform().select_device(devices[0].reference()).await;
+    let state = rig.core.platform().state().diagnostics.unwrap();
+    assert_eq!(state.detail.as_ref().unwrap().device, r#"{"battery":{"level":4}}"#);
+    assert_eq!(state.timeline.len(), 1);
+
+    let mut filters = state.filters.clone();
+    filters.text = "boo".into();
+    rig.core.platform().set_timeline_filters(filters.clone()).await;
+    filters.min_severity = "error".into();
+    rig.core.platform().set_timeline_filters(filters).await;
+    let queries: Vec<String> = hits(&rig, "/api/v1/telemetry/timeline").await.iter().map(|r| r.url.query().unwrap_or_default().to_string()).collect();
+    assert_eq!(queries, ["deviceId=dev-1&projectId=p1&limit=100", "deviceId=dev-1&projectId=p1&limit=100&minSeverity=error"]);
+}

@@ -10,6 +10,7 @@ pub mod backup_local;
 pub mod backups;
 pub mod deploy;
 pub mod deploy_settings;
+pub mod diagnostics;
 pub mod secret_refs;
 pub mod stack_secrets;
 pub mod panel;

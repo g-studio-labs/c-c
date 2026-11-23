@@ -33,3 +33,35 @@ fn a_new_ci_run_enters_activity_without_reloading(cx: &mut TestAppContext) {
     assert_eq!(server.queries("/api/v1/organizations/o1/activity/").len(), 1, "volvió a pedir la página");
     cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
 }
+
+/// La ficha de un dispositivo pinta en su tira de latidos los huecos que
+/// dice el backend, y el que sigue abierto aparte.
+///
+/// Roturas que atrapa: una tira sin huecos (sólo puntos); no pintar la
+/// ficha al elegir el dispositivo.
+#[gpui_kit::test]
+fn the_heartbeat_strip_paints_the_gaps(cx: &mut TestAppContext) {
+    let (server, window) = platform_as("member", cx);
+    let device = json!({ "deviceId": "dev-1", "projectId": "p1", "projectName": "Rastreo", "label": "moto g54", "platform": "android", "appVersion": "2.3.0",
+                         "batches": 3, "reqCount": 10, "errorCount": 0, "warnCount": 0, "lastSeen": "2026-11-20T10:00:00Z", "alerts": [] });
+    let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+    server.mount(get("/api/v1/telemetry/devices").respond_with(ok(json!([device.clone()]))));
+    let now = chrono::Utc::now();
+    let ago = |minutes: i64| (now - chrono::Duration::minutes(minutes)).to_rfc3339();
+    let mut detail = device;
+    detail["firstSeen"] = json!(ago(600));
+    detail["device"] = json!({ "battery": { "level": 80 } });
+    detail["heartbeat"] = json!({ "intervalSeconds": 300, "graceSeconds": 60 });
+    detail["heartbeats"] = json!([ago(240), ago(235), ago(120), ago(115)]);
+    detail["gaps"] = json!([{ "from": ago(235), "to": ago(120), "seconds": 6900 }, { "from": ago(115), "to": ago(0), "seconds": 6900, "open": true }]);
+    server.mount(get("/api/v1/telemetry/devices/p1/dev-1").respond_with(ok(detail)));
+    server.mount(get("/api/v1/telemetry/timeline").respond_with(ok(json!([]))));
+
+    click(window, "platform-diagnostics", cx);
+    wait_until(cx, "llega el dispositivo", |cx| on_screen(window, "diag-device-p1-dev-1", cx));
+    click(window, "diag-device-p1-dev-1", cx);
+    wait_until(cx, "sale la tira", |cx| on_screen(window, "diag-strip", cx));
+    assert!(on_screen(window, "diag-strip-gap-0", cx) && on_screen(window, "diag-strip-gap-1", cx), "la tira no marca los huecos");
+    assert!(on_screen(window, "diag-strip-beat-2", cx));
+    cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+}
