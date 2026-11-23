@@ -104,7 +104,7 @@ pub use platform::provision_run::*;
 pub use platform::{detect_databases, is_age_public_key, Backup, BackupEngine, BackupKind, BackupRecipient, BackupStatus, BackupTarget, BackupTargetForm, BackupsState, BackupsStatus, DetectedDatabase, DEFAULT_BACKUP_TIMEZONE};
 pub use ansi::{ansi_spans, AnsiColor, AnsiSpan};
 pub use prose::prose_for_painting;
-pub use prefs::{first_spoken, folds_panel, is_dark, shortcut_text, KeysHeld, ThemePreference, WorkLayout};
+pub use prefs::{first_spoken, folds_panel, is_dark, rail_slot, shortcut_text, KeysHeld, ThemePreference, WorkLayout};
 pub use session::Session;
 pub use tree::{
     can_edit_tree, clean_node_name, delete_notice, find_list, node_menu, tree_edit_phrase, DeleteNotice, NodeAction, TreeEditError, MAX_NODE_NAME,

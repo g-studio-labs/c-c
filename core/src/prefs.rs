@@ -46,6 +46,16 @@ pub fn folds_panel(key: &str, held: KeysHeld) -> bool {
     held.secondary && !held.shift && !held.alt && key.eq_ignore_ascii_case(PANEL_SHORTCUT_KEY)
 }
 
+/// A qué puesto del riel lleva esa pulsación: ⌘1–⌘9 (Ctrl fuera del Mac),
+/// sin nada más, como `AppRail.tsx`. El puesto, contado desde 1, no el
+/// módulo. Con Alt o Mayúsculas no: el editor usa ⌘⌥1 para los títulos.
+pub fn rail_slot(key: &str, held: KeysHeld) -> Option<usize> {
+    if !held.secondary || held.shift || held.alt {
+        return None;
+    }
+    key.parse::<usize>().ok().filter(|slot| (1..=9).contains(slot))
+}
+
 /// Un texto del catálogo que anuncia un atajo, dicho para este sistema.
 ///
 /// Los catálogos los escriben como en un Mac («Plegar el panel (⌘B)»), que
@@ -171,5 +181,24 @@ impl Core {
         // Vacío es un valor, no una ausencia: es como se dice «el del sistema».
         let body = serde_json::json!({ "locale": preference.map(Locale::tag).unwrap_or("") });
         self.call_ok("PATCH", "/api/v1/auth/locale", Some(body)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Roturas que atrapa: que Ctrl+Alt+1 (el título del editor) o un 1 sin
+    /// Ctrl cambien de módulo, o que el 0 lleve a algún sitio.
+    #[test]
+    fn only_a_bare_secondary_digit_picks_a_rail_slot() {
+        let ctrl = KeysHeld { secondary: true, shift: false, alt: false };
+        assert_eq!(rail_slot("1", ctrl), Some(1));
+        assert_eq!(rail_slot("9", ctrl), Some(9));
+        assert_eq!(rail_slot("0", ctrl), None);
+        assert_eq!(rail_slot("b", ctrl), None);
+        assert_eq!(rail_slot("1", KeysHeld { alt: true, ..ctrl }), None);
+        assert_eq!(rail_slot("1", KeysHeld { shift: true, ..ctrl }), None);
+        assert_eq!(rail_slot("1", KeysHeld { secondary: false, ..ctrl }), None);
     }
 }

@@ -27,6 +27,11 @@ use crate::task::TaskView;
 
 /// Las medidas de la app de siempre: el riel y el panel.
 const RAIL_WIDTH: f32 = 48.;
+/// El puesto de cada módulo en el riel, para ⌘1–⌘9 (`AppRail.tsx`): el
+/// 2 es Docs, que aún no está en esta app.
+const RAIL_WORK: usize = 1;
+const RAIL_COMMS: usize = 3;
+const RAIL_PLATFORM: usize = 4;
 const PANEL_WIDTH: f32 = 256.;
 const ROW_HEIGHT: f32 = 28.;
 /// Una fila del panel (`PanelRow.tsx`: `text-sm` con `py-1.5`).
@@ -751,6 +756,15 @@ impl Workspace {
     /// Un botón del riel, con las medidas de `RailButton` en `AppRail.tsx`:
     /// el activo lleva fondo, el color de acento y una raya a su izquierda.
     fn rail_button(id: &'static str, icon: Lucide, label: String, active: bool, cx: &App) -> Stateful<Div> {
+        Self::rail_button_keyed(id, icon, label, None, active, cx)
+    }
+
+    /// Con su puesto en el riel, el tooltip dice el atajo que lo pulsa.
+    fn rail_button_keyed(id: &'static str, icon: Lucide, label: String, slot: Option<usize>, active: bool, cx: &App) -> Stateful<Div> {
+        let label = match slot {
+            Some(slot) => cac_core::shortcut_text(&cac_core::text_with(locale(cx), "nav:rail.shortcut", &[("name", &label), ("keys", &format!("⌘{slot}"))]), cx.platform_info().is_mac()),
+            None => label,
+        };
         let theme = cx.theme();
         let (accent, primary, muted, foreground) = (theme.sidebar_accent, theme.sidebar_primary, theme.muted_foreground, theme.foreground);
         div()
@@ -960,6 +974,42 @@ impl Workspace {
             .test_support()
     }
 
+    /// Pulsar el puesto `slot` del riel, con el ratón o con ⌘N: el módulo
+    /// en el que se está fija el panel o lo suelta; otro lleva a él.
+    fn press_rail(&mut self, slot: usize, cx: &mut Context<Self>) {
+        let (on_comms, on_platform) = {
+            let snapshot = Backend::snapshot(cx).read(cx);
+            (snapshot.comms.on_screen, snapshot.platform.on_screen)
+        };
+        let here = match slot {
+            RAIL_WORK => !on_comms && !on_platform,
+            RAIL_COMMS => on_comms,
+            RAIL_PLATFORM => on_platform,
+            _ => return,
+        };
+        if here {
+            self.toggle_panel(cx);
+            return;
+        }
+        let core = Backend::core(cx);
+        match slot {
+            RAIL_WORK => {
+                core.comms().leave();
+                core.platform().leave();
+            }
+            RAIL_COMMS => core.comms().enter(),
+            _ => {
+                core.platform().enter();
+                // Salir paró el sondeo de recursos; si se vuelve a esa
+                // pestaña, sigue.
+                Backend::run(cx, |core| async move {
+                    core.platform().start_stats();
+                    core.platform().refresh().await
+                });
+            }
+        }
+    }
+
     fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (sidebar, border) = (theme.sidebar, theme.sidebar_border);
@@ -993,48 +1043,28 @@ impl Workspace {
             // Pulsar el módulo en el que se está fija el panel o lo suelta;
             // pulsar otro lleva a él, con su panel.
             .child(
-                Self::rail_button("rail-work", Lucide::Briefcase, tr(cx, "nav:module.work"), on_work, cx)
+                Self::rail_button_keyed("rail-work", Lucide::Briefcase, tr(cx, "nav:module.work"), Some(RAIL_WORK), on_work, cx)
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if on_work {
-                            this.toggle_panel(cx);
-                        } else {
-                            let core = Backend::core(cx);
-                            core.comms().leave();
-                            core.platform().leave();
-                        }
-                    }))
+                    .on_click(cx.listener(|this, _, _, cx| this.press_rail(RAIL_WORK, cx)))
                     .test_support(),
             )
             .child(Self::pending_module("rail-docs", Lucide::BookOpen, "nav:module.docs", None, cx))
             // Con lo que tiene sin leer, en su esquina y en lo que dice.
             .child(
-                Self::rail_button("rail-comms", Lucide::MessagesSquare, comms_label.clone(), on_comms, cx)
+                Self::rail_button_keyed("rail-comms", Lucide::MessagesSquare, comms_label.clone(), Some(RAIL_COMMS), on_comms, cx)
                     .aria_label(comms_label)
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| if on_comms { this.toggle_panel(cx) } else { Backend::core(cx).comms().enter() }))
+                    .on_click(cx.listener(|this, _, _, cx| this.press_rail(RAIL_COMMS, cx)))
                     .children(Self::rail_badge(comms, cx))
                     .test_support(),
             )
             // Con los servidores que no están en línea, en ámbar. Entrar los
             // vuelve a pedir: su estado no llega por evento.
             .child(
-                Self::rail_button("rail-platform", Lucide::Server, platform_label.clone(), on_platform, cx)
+                Self::rail_button_keyed("rail-platform", Lucide::Server, platform_label.clone(), Some(RAIL_PLATFORM), on_platform, cx)
                     .aria_label(platform_label)
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if on_platform {
-                            this.toggle_panel(cx);
-                        } else {
-                            Backend::core(cx).platform().enter();
-                            // Salir paró el sondeo de recursos; si se vuelve
-                            // a esa pestaña, sigue.
-                            Backend::run(cx, |core| async move {
-                                core.platform().start_stats();
-                                core.platform().refresh().await
-                            });
-                        }
-                    }))
+                    .on_click(cx.listener(|this, _, _, cx| this.press_rail(RAIL_PLATFORM, cx)))
                     .children(Self::rail_badge(servers, cx))
                     .test_support(),
             )
@@ -1604,6 +1634,9 @@ impl Render for Workspace {
                 let held = cac_core::KeysHeld { secondary: held.secondary(cx), shift: held.shift, alt: held.alt };
                 if cac_core::folds_panel(&event.keystroke.key, held) {
                     this.toggle_panel(cx);
+                    cx.stop_propagation();
+                } else if let Some(slot) = cac_core::rail_slot(&event.keystroke.key, held) {
+                    this.press_rail(slot, cx);
                     cx.stop_propagation();
                 }
             }))
@@ -3459,6 +3492,28 @@ mod tests {
         click(window, "rail-work", cx);
         wait_until(cx, "«Trabajo» devuelve el árbol", |cx| on_screen(window, "tree-l-a", cx));
         assert!(!on_screen(window, "platform-server-s1", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// ⌘N (Ctrl fuera del Mac) pulsa el icono del riel de ese puesto, como
+    /// en `AppRail.tsx`, y el tooltip lo dice.
+    ///
+    /// Roturas que atrapa: un atajo que no lleva al módulo, o que cuenta los
+    /// puestos por módulo con pantalla y no por icono (Docs es el 2).
+    #[gpui_kit::test]
+    fn ctrl_and_a_number_presses_that_rail_icon(cx: &mut TestAppContext) {
+        let server = server();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/servers/")).respond_with(ok(json!([platform_server("s1", "o1", "pixel-vps", "online")]))));
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-l-a", cx));
+
+        press(window, "secondary-4", cx);
+        wait_until(cx, "llega Plataforma", |cx| on_screen(window, "platform-server-s1", cx));
+        press(window, "secondary-1", cx);
+        wait_until(cx, "vuelve el árbol", |cx| on_screen(window, "tree-l-a", cx));
+        press(window, "secondary-3", cx);
+        wait_until(cx, "⌘3 lleva a Comunicación", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).comms.on_screen));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
