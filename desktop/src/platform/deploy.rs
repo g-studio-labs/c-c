@@ -578,7 +578,7 @@ impl DeployView {
     }
 }
 
-fn who(deployment: &Deployment, cx: &App) -> String {
+pub(crate) fn who(deployment: &Deployment, cx: &App) -> String {
     match deployment.requested_by.as_str() {
         "ci" => tr(cx, "common:deploy.byCI"),
         "github" => tr(cx, "common:deploy.byGitHub"),
@@ -586,7 +586,7 @@ fn who(deployment: &Deployment, cx: &App) -> String {
     }
 }
 
-fn status_colors(status: DeployStatus, cx: &App) -> (Hsla, Hsla) {
+pub(crate) fn status_colors(status: DeployStatus, cx: &App) -> (Hsla, Hsla) {
     let theme = cx.theme();
     match status {
         DeployStatus::Succeeded => (theme.success.opacity(0.15), theme.success),

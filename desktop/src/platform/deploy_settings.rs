@@ -402,7 +402,16 @@ impl DeploySettingsView {
             .child(div().text_xs().text_color(muted).child(tr(cx, "common:deploy.ci.githubLead")))
             .children(saved)
             .children(shown_key)
-            .child(div().text_xs().font_weight(FontWeight::MEDIUM).child(tr(cx, "common:deploy.ci.builds")))
+            .child({
+                // Todos los runs del CI de este servicio están en Actividad.
+                let filter = cac_core::ActivityFilter { deployable_id: deployable.id.clone(), ..Default::default() };
+                div().flex().items_center().justify_between().child(div().text_xs().font_weight(FontWeight::MEDIUM).child(tr(cx, "common:deploy.ci.builds"))).child(
+                    Button::new("deploy-ci-all-runs").link().xsmall().label(tr(cx, "common:deploy.ci.allRuns")).on_click(move |_, _, cx| {
+                        let filter = filter.clone();
+                        Backend::run(cx, move |core| async move { core.platform().open_activity(filter).await });
+                    }),
+                )
+            })
             .child(builds_list)
     }
 

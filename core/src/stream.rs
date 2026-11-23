@@ -350,6 +350,7 @@ impl Stream {
         self.core.voice().server_event(&event);
         self.core.platform().deploy_event(&event);
         self.core.platform().backup_event(&event);
+        self.core.platform().activity_event(&event);
         self.core.inner.listener.server_event(event);
     }
 }

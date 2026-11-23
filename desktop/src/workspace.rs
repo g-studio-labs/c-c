@@ -4700,4 +4700,7 @@ mod tests {
 
     // La pestaña de backups, en su fichero (ver su cabecera).
     include!("platform/backups_tests.rs");
+
+    // Actividad, Diagnóstico y Usuarios, en su fichero.
+    include!("platform/tools_tests.rs");
 }

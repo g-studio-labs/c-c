@@ -134,9 +134,10 @@ pub fn servers_of(all: &[Server], org_id: Option<&str>) -> Vec<Server> {
 }
 
 /// Una fila del panel de Plataforma.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PlatformSection {
+    #[default]
     Servers,
     Activity,
     Diagnostics,

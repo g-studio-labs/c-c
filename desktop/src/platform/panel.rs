@@ -1,8 +1,8 @@
 //! El panel de Plataforma: «Servidores» con una fila por servidor y su punto
-//! de estado, y debajo lo que todavía no está en esta app
+//! de estado, y debajo Actividad y lo que todavía no está en esta app
 //! (`app/src/components/sidebar/panels/PlatformPanel.tsx`).
 
-use cac_core::{PlatformSection, PlatformState, Server, ServerKind, platform_sections};
+use cac_core::{ActivityFilter, PlatformSection, PlatformState, Server, ServerKind, platform_sections};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon};
@@ -20,12 +20,13 @@ pub(crate) fn panel(cx: &App) -> AnyElement {
     let superadmin = snapshot.session.as_ref().is_some_and(|session| session.superadmin);
     let theme = cx.theme();
     let muted = theme.muted_foreground;
-    let on_list = state.open_server.is_none();
+    let on_servers = state.section == PlatformSection::Servers;
+    let on_list = on_servers && state.open_server.is_none();
 
     let servers: Vec<AnyElement> = if state.loaded && state.servers.is_empty() {
         vec![div().id("platform-no-servers").px_4().pb_1().leading_xs().text_color(muted).child(tr(cx, "nav:panel.noServers")).test_support().into_any_element()]
     } else {
-        state.servers.iter().map(|server| server_row(server, &state, state.open_server.as_deref() == Some(&server.id), cx)).collect()
+        state.servers.iter().map(|server| server_row(server, &state, on_servers && state.open_server.as_deref() == Some(&server.id), cx)).collect()
     };
 
     div()
@@ -46,9 +47,21 @@ pub(crate) fn panel(cx: &App) -> AnyElement {
                 PlatformSection::Users => ("platform-users", Lucide::Users),
                 PlatformSection::DevTools => ("platform-devtools", Lucide::Wrench),
             };
-            Some(Workspace::pending_panel_row(id, icon, section.label_key(), cx))
+            if matches!(section, PlatformSection::DevTools | PlatformSection::Diagnostics | PlatformSection::Users) {
+                return Some(Workspace::pending_panel_row(id, icon, section.label_key(), cx).into_any_element());
+            }
+            let row = row(id, Icon::new(icon), tr(cx, section.label_key()), state.section == section, 0., cx).on_click(move |_, _, cx| open_section(section, cx));
+            Some(row.test_support().into_any_element())
         }))
         .into_any_element()
+}
+
+fn open_section(section: PlatformSection, cx: &mut App) {
+    match section {
+        PlatformSection::Servers => Backend::core(cx).platform().close_server(),
+        PlatformSection::Activity => Backend::run(cx, |core| async move { core.platform().open_activity(ActivityFilter::default()).await }),
+        _ => {}
+    }
 }
 
 fn server_row(server: &Server, state: &PlatformState, active: bool, cx: &App) -> AnyElement {

@@ -301,6 +301,11 @@ impl ServersView {
 impl Render for ServersView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = Backend::snapshot(cx).read(cx).platform.clone();
+        // Las otras filas del panel son páginas de toda la organización.
+        match state.section {
+            cac_core::PlatformSection::Activity => return super::activity::page(cx),
+            _ => {}
+        }
         let open = state.open_server.as_ref().and_then(|id| state.servers.iter().find(|server| &server.id == id));
         if let Some(server) = open {
             if self.views_of.as_ref() != Some(&server.id) {

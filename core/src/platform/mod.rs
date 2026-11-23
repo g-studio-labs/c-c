@@ -5,6 +5,7 @@
 //! en `desktop/src/platform/`. El diseño, en cac: «Diseño · Plataforma en la
 //! app nativa». Cada fase añade su fichero junto a éstos.
 
+pub mod activity;
 pub mod agent;
 pub mod backups;
 pub mod deploys;
@@ -23,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::stream::ServerEvent;
 use crate::Core;
+pub use activity::{activity_path, deploy_tone, group_attempts, matches_filter, upsert_entry, ActivityDeployment, ActivityEntry, ActivityFilter, ActivityRow, ActivityState, ActivityTone, WorkflowRun, ACTIVITY_PAGE};
 pub use agent::{agent_base, Agent, AgentStream, AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT};
 pub use backups::{detect_databases, is_age_public_key, Backup, BackupEngine, BackupKind, BackupRecipient, BackupStatus, BackupTarget, BackupTargetForm, BackupsState, BackupsStatus, DetectedDatabase, DEFAULT_BACKUP_TIMEZONE};
 pub use deploys::{commit_pick, infer_owner_repo, repo_of_deployable, CommitPick, CommitRow, ci_notice_step, guess_environment, is_sha, repo_from_image, runs_commit, short_ref, short_service_name, uses_short_sha, CiKey, CiNotify, DeployStatus, Deployable, DeployableSettings, Deployment, DeploysState, ImageBuild, NewDeployable, RepoCommit, AGENT_VERSION_BUILDS, AGENT_VERSION_MIGRATES, LIST_PREVIEW, SECRETS_ENTRYPOINT_SNIPPET};
@@ -44,6 +46,8 @@ pub use swarm::{cpu_load, format_bytes, mem_load, stats_view, ContainerStats, Lo
 pub struct PlatformState {
     /// Se está en Plataforma: el panel son sus filas y la vista, sus páginas.
     pub on_screen: bool,
+    /// Qué fila del panel está en pantalla.
+    pub section: PlatformSection,
     /// De qué organización son los servidores de abajo.
     pub org_id: Option<String>,
     /// Los servidores de esa organización, en el orden del backend.
@@ -98,11 +102,14 @@ pub struct PlatformState {
     pub provision_output: Option<ProvisionOutput>,
     /// Los backups del servidor abierto, desde que se miró su pestaña.
     pub backups: Option<BackupsState>,
+    /// Actividad, desde que se abrió.
+    pub activity: Option<activity::ActivityState>,
 }
 
 #[derive(Default)]
 pub(crate) struct PlatformData {
     on_screen: bool,
+    section: PlatformSection,
     /// Los de todas las organizaciones de la persona, como llegan.
     all: Option<Vec<Server>>,
     loading: bool,
@@ -136,6 +143,7 @@ pub(crate) struct PlatformData {
     provision: Option<ProvisionState>,
     provision_output: Option<provision_run::OutputData>,
     backups: Option<BackupsState>,
+    activity: Option<activity::ActivityState>,
 }
 
 /// Plataforma en este core.
@@ -153,8 +161,11 @@ impl Platform {
     pub fn state(&self) -> PlatformState {
         let org_id = self.core.orgs().state().current_org_id;
         let data = self.data();
+        // Una sesión que deja de ser superadmin no se queda mirando Usuarios.
+        let section = if data.section == PlatformSection::Users && !self.superadmin() { PlatformSection::Servers } else { data.section };
         PlatformState {
             on_screen: data.on_screen,
+            section,
             servers: data.all.as_deref().map(|all| servers_of(all, org_id.as_deref())).unwrap_or_default(),
             org_id,
             loaded: data.all.is_some(),
@@ -188,6 +199,7 @@ impl Platform {
             }),
             provision_output: data.provision_output.as_ref().map(|out| out.output.clone()),
             backups: data.backups.clone(),
+            activity: data.activity.clone(),
         }
     }
 
@@ -412,6 +424,7 @@ impl Platform {
         }
         self.change(|data| {
             close(data);
+            data.section = PlatformSection::Servers;
             data.open_server = Some(server_id.to_string());
         });
         true
@@ -523,7 +536,10 @@ impl Platform {
 
     /// Vuelve a la lista de servidores.
     pub fn close_server(&self) {
-        self.change(close);
+        self.change(|data| {
+            close(data);
+            data.section = PlatformSection::Servers;
+        });
     }
 
     /// Cambia de pestaña. Una que ese servidor no tiene no se elige. El log
@@ -863,7 +879,18 @@ impl Platform {
     /// Se cambió de organización: la lista es la misma respuesta, filtrada
     /// por otra; el servidor abierto era de la anterior.
     pub(crate) fn org_changed(&self) {
-        self.change(close);
+        let reload = {
+            let data = self.data();
+            data.on_screen && data.section == PlatformSection::Activity
+        };
+        self.change(|data| {
+            close(data);
+            data.activity = None;
+        });
+        if reload {
+            let platform = self.core.platform();
+            tokio::spawn(async move { platform.load_activity().await });
+        }
     }
 
     /// Al salir: los servidores y los pases de una persona no son de la
@@ -937,7 +964,7 @@ impl Platform {
     }
 }
 
-fn close(data: &mut PlatformData) {
+pub(super) fn close(data: &mut PlatformData) {
     data.open_server = None;
     data.tab = ServerTab::Overview;
     data.overview = None;

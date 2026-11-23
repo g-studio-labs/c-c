@@ -263,7 +263,7 @@ fn may_leave_a_gap(held: &[ThreadMessage], fresh: &[ThreadMessage]) -> bool {
 /// `encodeURIComponent`: todo lo que no es letra, cifra o `-_.~` va escapado.
 /// El `+` de una zona horaria sin escapar llegaría como un espacio, el
 /// servidor no entendería el cursor y contestaría con la primera página.
-fn query_escaped(value: &str) -> String {
+pub(crate) fn query_escaped(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 8);
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
