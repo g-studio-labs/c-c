@@ -93,7 +93,9 @@ pub struct ConfigPanel {
 impl ConfigPanel {
     pub fn new(server_id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let vars = cx.new(|cx| TextareaState::new(window, cx).auto_grow(4, 16));
-        let note = cx.new(|cx| InputState::new(window, cx));
+        // Sin el texto de ayuda era una caja vacía encima de «Guardar» que no decía para qué era.
+        let placeholder = tr(cx, "common:serverConfig.notePlaceholder");
+        let note = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         let subscriptions = vec![cx.subscribe_in(&vars, window, |this, _, event: &InputEvent, window, cx| {
             if matches!(event, InputEvent::Change) {
                 this.json_typed(window, cx);
@@ -685,7 +687,17 @@ impl Render for ConfigPanel {
             .child(secrets)
             .children(problem)
             .when(editable, |column| {
-                column.child(div().id("provision-config-note").child(Input::new(&self.note).small()).test_support()).child(
+                column.child(
+                    div()
+                        .id("provision-config-note")
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .mt_2()
+                        .child(div().leading_xs().child(tr(cx, "common:serverConfig.noteLabel")))
+                        .child(Input::new(&self.note))
+                        .test_support(),
+                ).child(
                     Button::new("provision-config-save")
                         .primary()
                         .small()

@@ -1081,6 +1081,8 @@
     "check": "Check",
     "remove": "Remove",
     "note": "Note for this version (why)",
+    "notePlaceholder": "Why it changes: “new SSH port”, “test from the native app”…",
+    "noteLabel": "Note for this version",
     "saveVersion": "Save as a new version",
     "saved": "Config saved as a new version",
     "basedOn": "Base it on another server…",

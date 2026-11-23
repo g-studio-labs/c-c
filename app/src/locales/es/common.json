@@ -1081,6 +1081,8 @@
     "check": "Probar",
     "remove": "Quitar",
     "note": "Nota de esta versión (por qué)",
+    "notePlaceholder": "Por qué cambia: «puerto SSH nuevo», «prueba desde la app nativa»…",
+    "noteLabel": "Nota de esta versión",
     "saveVersion": "Guardar como versión nueva",
     "saved": "Config guardada como versión nueva",
     "basedOn": "Basar en otro servidor…",
