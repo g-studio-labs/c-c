@@ -29,7 +29,7 @@ pub use deploys::{commit_pick, infer_owner_repo, repo_of_deployable, CommitPick,
 pub use secret_refs::{append_rows, label_to_name, merge_build_args, ref_problems, valid_secret_name, valid_secret_ref, RefProblem, SecretRefRow, SecretRotation, SecretUsage, SecretsState};
 pub use detail::{server_tabs, AgentNote, DeployableSummary, IncidentServerRef, IncidentSummary, ProvisioningRun, ServerOverview, ServerTab, AGENT_VERSION_DEPLOYS};
 pub use edit::{server_edit_phrase, server_permissions, ServerEditError, ServerField, ServerForm, ServerPermissions, MAX_SERVER_NAME};
-pub use install::{agent_update_outcome, AgentIdentity, AgentInstallOutcome, AgentInstallPhase, AgentJob, AgentWait, AGENT_VERSION_LATEST};
+pub use install::{agent_update_outcome, AgentAction, AgentIdentity, AgentInstallOutcome, AgentInstallPhase, AgentJob, AgentWait, AGENT_VERSION_LATEST};
 pub use servers::{platform_sections, servers_of, PlatformSection, Server, ServerHealth, ServerKind};
 pub use services::{filter_services, LogLine, LogStatus, ServiceHealth, ServiceLogs, ServiceReplicas, SwarmService, LOG_LINES_KEPT};
 pub use k8s::{cert_warns, cluster_status, days_until, route_links, workloads_failing_first, ClusterBadge, ClusterStatus, Integration, K8sCert, K8sDatastore, K8sGateway, K8sHealth, K8sHub, K8sNode, K8sRoute, K8sRoutes, K8sWorkload, CERT_WARN_DAYS};

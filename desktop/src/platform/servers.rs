@@ -1,7 +1,7 @@
 //! La lista de servidores (la tabla de `app/src/pages/Dashboard.tsx`): darlos
 //! de alta, editarlos y borrarlos, según el papel de quien mira.
 
-use cac_core::{server_edit_phrase, AgentInstallPhase, PlatformState, Server};
+use cac_core::{server_edit_phrase, AgentAction, AgentInstallPhase, PlatformState, Server, AGENT_VERSION_LATEST};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable};
@@ -105,8 +105,18 @@ impl ServersView {
         self.agent_line = None;
         cx.notify();
         let language = locale(cx);
-        let title = cac_core::text_with(language, "common:servers.agentUpdate.confirmTitle", &[("name", &server.name)]);
-        let (body, confirm, cancel) = (tr(cx, "common:servers.agentUpdate.confirmBody"), tr(cx, "common:servers.agentUpdate.confirm"), tr(cx, "common:servers.cancel"));
+        let latest = AGENT_VERSION_LATEST.to_string();
+        let (title_key, confirm_key) = match AgentAction::of(&server) {
+            AgentAction::Install => ("common:servers.agentUpdate.confirmTitle", "common:servers.agentUpdate.confirm"),
+            AgentAction::Update => ("common:servers.agentUpdate.confirmTitleUpdate", "common:servers.agentUpdate.confirmUpdate"),
+            AgentAction::Reinstall => ("common:servers.agentUpdate.confirmTitleReinstall", "common:servers.agentUpdate.confirmReinstall"),
+        };
+        let title = cac_core::text_with(language, title_key, &[("name", &server.name), ("latest", &latest)]);
+        let mut body = tr(cx, "common:servers.agentUpdate.confirmBody");
+        if AgentAction::of(&server) == AgentAction::Reinstall {
+            body = format!("{} {body}", cac_core::text_with(language, "common:servers.agentUpdate.reinstallNote", &[("latest", &latest)]));
+        }
+        let (confirm, cancel) = (tr(cx, confirm_key), tr(cx, "common:servers.cancel"));
         let answer = window.prompt(PromptLevel::Warning, &title, Some(&body), &[confirm.as_str(), cancel.as_str()], cx);
         let (installer, keys) = (installer(cx), super::ssh_key::local(cx));
         cx.spawn_in(window, async move |this, cx| {
@@ -158,8 +168,11 @@ impl ServersView {
         let label = match job.filter(|job| job.server_id == server.id).map(|job| job.phase) {
             Some(AgentInstallPhase::Waiting) => tr(cx, "common:servers.agentUpdate.waiting"),
             Some(AgentInstallPhase::Installing) => tr(cx, "common:admin.updating"),
-            None if server.has_agent_token => tr(cx, "common:admin.updateAgent"),
-            None => tr(cx, "common:admin.deployAgent"),
+            None => match AgentAction::of(server) {
+                AgentAction::Install => tr(cx, "common:admin.deployAgent"),
+                AgentAction::Update => tr(cx, "common:admin.updateAgent"),
+                AgentAction::Reinstall => tr(cx, "common:servers.agentUpdate.reinstall"),
+            },
         };
         let theme = cx.theme();
         let (muted, warning_color) = (theme.muted_foreground, theme.warning);

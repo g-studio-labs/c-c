@@ -359,6 +359,8 @@
     "secretsService": "Service",
     "secretsPickService": "Pick a service…",
     "overview": {
+      "agentUpToDate": "up to date",
+      "agentBehind": "v{{latest}} available",
       "agent": "Agent",
       "agentVersion": "version {{version}}",
       "agentSeen": "checked in {{when}}",
@@ -375,6 +377,12 @@
       "provisioningStart": "Apply a playbook"
     },
     "agentUpdate": {
+      "reinstall": "Reinstall the agent",
+      "confirmTitleUpdate": "Update {{name}}'s agent to v{{latest}}?",
+      "confirmUpdate": "Update",
+      "confirmTitleReinstall": "Reinstall {{name}}'s agent?",
+      "confirmReinstall": "Reinstall",
+      "reinstallNote": "It already has the latest version (v{{latest}}): reinstalling is only needed if something broke.",
       "changed": "{{name}}: agent v{{from}} → v{{to}}, online",
       "same": "{{name}}: agent reinstalled, still v{{version}} and online",
       "silent": "{{name}}: the new agent hasn't checked in after 90 s",

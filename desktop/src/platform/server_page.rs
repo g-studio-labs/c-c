@@ -3,7 +3,7 @@
 //! las siguientes partes de la fase 1 y con las fases 2–4; mientras, dicen que
 //! todavía no están.
 
-use cac_core::{server_tabs, time_ago, AgentNote, PlatformState, Server, ServerKind, ServerOverview, ServerTab};
+use cac_core::{server_tabs, time_ago, AgentAction, AgentNote, AGENT_VERSION_LATEST, PlatformState, Server, ServerKind, ServerOverview, ServerTab};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
@@ -229,6 +229,10 @@ fn agent(server: &Server, actions: Option<AnyElement>, cx: &App) -> AnyElement {
     let mut facts = vec![tr(cx, server.status.label_key())];
     if server.has_agent_token && server.agent_version > 0 {
         facts.push(cac_core::text_with(locale, "common:servers.overview.agentVersion", &[("version", &server.agent_version.to_string())]));
+        facts.push(match AgentAction::of(server) {
+            AgentAction::Reinstall => tr(cx, "common:servers.overview.agentUpToDate"),
+            _ => cac_core::text_with(locale, "common:servers.overview.agentBehind", &[("latest", &AGENT_VERSION_LATEST.to_string())]),
+        });
     }
     if let Some(seen) = &server.agent_seen_at {
         let when = time_ago(seen, &chrono::Local::now(), locale);
@@ -243,7 +247,10 @@ fn agent(server: &Server, actions: Option<AnyElement>, cx: &App) -> AnyElement {
         .flex_col()
         .gap_1()
         .leading_sm()
-        .child(div().flex().items_center().gap_1p5().child(div().size_2().rounded_full().bg(super::health_color(server.status, cx))).child(facts.join(" · ")))
+        .child({
+            let facts = facts.join(" · ");
+            div().id("server-agent-facts").aria_label(facts.clone()).flex().items_center().gap_1p5().child(div().size_2().rounded_full().bg(super::health_color(server.status, cx))).child(facts).test_support()
+        })
         .children(note.map(|note| div().id("server-agent-note").text_color(muted).child(note).test_support()))
         .children(actions)
         .into_any_element()

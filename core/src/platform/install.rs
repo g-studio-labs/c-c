@@ -40,6 +40,32 @@ pub enum AgentInstallPhase {
     Waiting,
 }
 
+/// Qué ofrece el botón del agente. Sin esto, uno al día seguía invitando a
+/// «actualizar» y la pregunta decía «instalar» (jose, 22-nov): no había forma
+/// de saber que ya tenía la última.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum AgentAction {
+    /// Sin identidad: el agente no está, o no habla con cac.
+    Install,
+    /// Con identidad, de una versión anterior a la que instala esta app.
+    Update,
+    /// Ya en la que instala esta app: sólo sirve si algo se rompió.
+    Reinstall,
+}
+
+impl AgentAction {
+    pub fn of(server: &Server) -> AgentAction {
+        if !server.has_agent_token {
+            AgentAction::Install
+        } else if server.agent_version < AGENT_VERSION_LATEST {
+            AgentAction::Update
+        } else {
+            AgentAction::Reinstall
+        }
+    }
+}
+
 /// Una instalación en curso.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -124,6 +150,17 @@ mod tests {
     fn the_latest_version_is_the_one_published() {
         let version: i64 = include_str!("../../../swarm-manage/VERSION").trim().parse().expect("VERSION");
         assert_eq!(AGENT_VERSION_LATEST, version);
+    }
+
+    /// Rotura que atrapa: ofrecer «actualizar» a un agente que ya está en la
+    /// última, o «reinstalar» a uno atrasado o sin identidad.
+    #[test]
+    fn the_button_says_what_the_agent_needs() {
+        let server = |token: bool, version| Server { has_agent_token: token, agent_version: version, ..Server::default() };
+        assert_eq!(AgentAction::of(&server(false, AGENT_VERSION_LATEST)), AgentAction::Install);
+        assert_eq!(AgentAction::of(&server(true, AGENT_VERSION_LATEST - 1)), AgentAction::Update);
+        assert_eq!(AgentAction::of(&server(true, AGENT_VERSION_LATEST)), AgentAction::Reinstall);
+        assert_eq!(AgentAction::of(&server(true, AGENT_VERSION_LATEST + 1)), AgentAction::Reinstall);
     }
 
     /// Rotura que atrapa: que un `{:?}` de la identidad suelte el token.

@@ -359,6 +359,8 @@
     "secretsService": "Servicio",
     "secretsPickService": "Elige un servicio…",
     "overview": {
+      "agentUpToDate": "al día",
+      "agentBehind": "hay v{{latest}}",
       "agent": "Agente",
       "agentVersion": "versión {{version}}",
       "agentSeen": "latió {{when}}",
@@ -375,6 +377,12 @@
       "provisioningStart": "Aplicar un playbook"
     },
     "agentUpdate": {
+      "reinstall": "Reinstalar el agente",
+      "confirmTitleUpdate": "¿Actualizar el agente de {{name}} a la v{{latest}}?",
+      "confirmUpdate": "Actualizar",
+      "confirmTitleReinstall": "¿Reinstalar el agente de {{name}}?",
+      "confirmReinstall": "Reinstalar",
+      "reinstallNote": "Ya tiene la última versión (v{{latest}}): reinstalar sólo hace falta si algo se rompió.",
       "changed": "{{name}}: agente v{{from}} → v{{to}}, en línea",
       "same": "{{name}}: agente reinstalado, sigue en v{{version}} y en línea",
       "silent": "{{name}}: el agente nuevo no ha dado señales en 90 s",

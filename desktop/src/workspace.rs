@@ -4557,7 +4557,7 @@ mod tests {
         wait_until(cx, "sale el botón", |cx| on_screen(window, "server-agent-install", cx));
         click(window, "server-agent-install", cx);
         let (title, body) = cx.pending_prompt().expect("instaló sin preguntar");
-        assert_eq!(title, "¿Instalar el agente en pixel-vps?");
+        assert_eq!(title, "¿Actualizar el agente de pixel-vps a la v14?", "uno con identidad en la v2 se actualiza, no se instala");
         assert!(body.contains("deja de valer"), "{body}");
         cx.simulate_prompt_answer("Cancelar");
         cx.run_until_parked();
@@ -4565,7 +4565,7 @@ mod tests {
         assert!(server_writes(&server).is_empty(), "reacuñó al cancelar");
 
         click(window, "server-agent-install", cx);
-        cx.simulate_prompt_answer("Instalar");
+        cx.simulate_prompt_answer("Actualizar");
         wait_until(cx, "dice cómo volvió", |cx| on_screen(window, "server-agent-result", cx));
         assert_eq!(label(window, "server-agent-result", cx), "pixel-vps: agente v2 → v14, en línea");
         let backend = cx.update(|cx| Backend::core(cx).base_url().to_string());
@@ -4573,6 +4573,50 @@ mod tests {
             *installer.carried.lock().unwrap(),
             [("s1".to_string(), "cac_agent_NEW".to_string(), Some("ssh-ed25519 AAAA pixel".to_string()), backend)]
         );
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Un agente en la versión que instala esta app dice «al día» y su botón
+    /// ofrece reinstalar, avisando de que ya tiene la última; uno atrasado
+    /// dice cuál hay (boaty en la v14, 22-nov).
+    ///
+    /// Roturas que atrapan: no decir nunca que está al día; seguir invitando
+    /// a actualizar o preguntar «instalar» a uno que ya tiene la última.
+    #[gpui_kit::test]
+    fn an_agent_on_the_latest_says_so_and_only_offers_a_reinstall(cx: &mut TestAppContext) {
+        let server = FakeServer::start();
+        let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+        let mut mine = org("o1", "G Studio");
+        mine["role"] = json!("admin");
+        server.mount(get("/api/v1/organizations/").respond_with(ok(json!([mine]))));
+        server.mount(get("/api/v1/task-spaces/").respond_with(ok(json!([space("a", "Producto")]))));
+        server.mount(get("/api/v1/docs/").respond_with(ok(json!({}))));
+        server.mount(get("/api/v1/tasks/").respond_with(ok(json!([]))));
+        let mut latest = platform_server("s1", "o1", "boaty", "online");
+        latest["agentVersion"] = json!(cac_core::AGENT_VERSION_LATEST);
+        let old = platform_server("s2", "o1", "tds", "online");
+        server.mount(get("/api/v1/servers/").respond_with(ok(json!([latest, old]))));
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-l-a", cx));
+        click(window, "rail-platform", cx);
+        wait_until(cx, "sale la tabla", |cx| on_screen(window, "platform-open-s1", cx));
+
+        click(window, "platform-open-s1", cx);
+        wait_until(cx, "sale el agente", |cx| on_screen(window, "server-agent-facts", cx));
+        assert!(label(window, "server-agent-facts", cx).contains("versión 14 · al día"), "{}", label(window, "server-agent-facts", cx));
+        click(window, "server-agent-install", cx);
+        let (title, body) = cx.pending_prompt().expect("reinstaló sin preguntar");
+        assert_eq!(title, "¿Reinstalar el agente de boaty?");
+        assert!(body.starts_with("Ya tiene la última versión (v14)"), "{body}");
+        cx.simulate_prompt_answer("Cancelar");
+        cx.run_until_parked();
+
+        click(window, "server-back", cx);
+        wait_until(cx, "vuelve la tabla", |cx| on_screen(window, "platform-open-s2", cx));
+        click(window, "platform-open-s2", cx);
+        wait_until(cx, "sale el agente atrasado", |cx| on_screen(window, "server-agent-facts", cx) && label(window, "server-agent-facts", cx).contains("versión 2"));
+        assert!(label(window, "server-agent-facts", cx).contains("hay v14"), "{}", label(window, "server-agent-facts", cx));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
@@ -4593,7 +4637,7 @@ mod tests {
         click(window, "platform-open-s1", cx);
         wait_until(cx, "sale el botón", |cx| on_screen(window, "server-agent-install", cx));
         click(window, "server-agent-install", cx);
-        cx.simulate_prompt_answer("Instalar");
+        cx.simulate_prompt_answer("Actualizar");
         wait_until(cx, "dice por qué no", |cx| on_screen(window, "server-agent-result", cx));
         assert!(label(window, "server-agent-result", cx).contains("llavero"), "{}", label(window, "server-agent-result", cx));
         assert!(server_writes(&server).is_empty(), "reacuñó con el llavero bloqueado");
