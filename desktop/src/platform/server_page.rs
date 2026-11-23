@@ -283,10 +283,12 @@ fn deploys(overview: &ServerOverview, cx: &App) -> AnyElement {
                 .items_center()
                 .gap_2()
                 .leading_sm()
-                .child(div().font_weight(FontWeight::MEDIUM).child(deployable.name.clone()))
-                .when(!deployable.environment.is_empty(), |row| row.child(div().leading_xs().text_color(muted).child(deployable.environment.clone())))
+                // Lo que no cabe se recorta en el nombre y la imagen; el
+                // entorno y el modo no, que son cortos y van al borde.
+                .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(deployable.name.clone()))
+                .when(!deployable.environment.is_empty(), |row| row.child(div().flex_none().leading_xs().text_color(muted).child(deployable.environment.clone())))
                 .child(div().flex_1().min_w_0().truncate().text_right().font_family(mono.clone()).leading_xs().text_color(muted).child(image))
-                .child(div().leading_xs().text_color(muted).child(mode))
+                .child(div().id(SharedString::from(format!("server-deployable-mode-{}", deployable.id))).flex_none().leading_xs().text_color(muted).child(mode).test_support())
                 .test_support()
         }))
         .into_any_element()

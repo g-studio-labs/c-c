@@ -3593,6 +3593,34 @@ mod tests {
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
+    /// Un desplegable de nombre largo se recorta dentro de la tarjeta del
+    /// resumen en vez de empujar su modo fuera (boaty, 22-nov).
+    ///
+    /// Rotura que atrapa: que el nombre o el entorno no se dejen recortar y
+    /// «Apuntar» se pinte por fuera del borde de la tarjeta.
+    #[gpui_kit::test]
+    fn a_long_deployable_stays_inside_its_card(cx: &mut TestAppContext) {
+        let (server, window) = platform_as("member", cx);
+        let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+        server.mount(get("/api/v1/servers/s1/incidents").respond_with(ok(json!({ "incidents": [] }))));
+        server.mount(get("/api/v1/servers/s1/deployables").respond_with(ok(json!([{
+            "id": "d1",
+            "name": "web boaty sync-worker prod (postgres) with a name that goes on and on",
+            "environment": "production",
+            "currentImage": "ghcr.io/o/sync-worker:4f1c2a9e0b7d",
+            "onCINotify": "record"
+        }]))));
+        server.mount(get("/api/v1/servers/s1/provisioning-runs").respond_with(ok(json!([]))));
+
+        click(window, "platform-open-s1", cx);
+        wait_until(cx, "llega el desplegable", |cx| on_screen(window, "server-deployable-mode-d1", cx));
+        let (card_x, _, card_width) = place_on_screen(window, "server-deploys", cx);
+        let (mode_x, _, mode_width) = place_on_screen(window, "server-deployable-mode-d1", cx);
+        assert!(mode_width > 0.0, "el modo no se pinta");
+        assert!(mode_x + mode_width <= card_x + card_width, "el modo se sale de la tarjeta: {} > {}", mode_x + mode_width, card_x + card_width);
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
     /// Abrir un servidor desde la tabla enseña su página: cabecera,
     /// pestañas y el resumen con lo que ha mordido, sus despliegues y cómo se
     /// llega a él; una pestaña que aún no está lo dice; volver deja la tabla.
