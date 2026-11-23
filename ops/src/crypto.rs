@@ -1,9 +1,16 @@
+//! Las utilidades de la pantalla de tokens: leer y verificar un JWT, generar
+//! ids, hashes y HMAC, hashes de contraseña y codificar o descodificar.
+//!
+//! Salen de la app de Tauri (`crypto_tools.rs`) para que la nativa use lo
+//! mismo: decir «firma válida» de un token que no lo es no puede depender de
+//! en qué app se pegó. Todo corre en la máquina; nada viaja.
+
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::Serialize;
 
 // ─── JWT ─────────────────────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JwtDecoded {
     pub header: String,
     pub payload: String,
@@ -66,7 +73,44 @@ pub fn jwt_decode(token: &str, secret: Option<&str>, algorithm: Option<&str>) ->
     }
 }
 
+/// Una de las tres fechas de un JWT, dicha (`iat`, `nbf`, `exp`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TimeClaim {
+    /// `iat`, `nbf` o `exp`.
+    pub key: String,
+    /// Segundos desde 1970, como dice la especificación (no milisegundos).
+    pub at: i64,
+    /// `exp` ya pasó.
+    pub expired: bool,
+    /// `nbf` todavía no llegó.
+    pub not_yet: bool,
+}
+
+/// Las fechas de un JWT, para decir en palabras si caducó: `exp: 1755640800`
+/// es el campo a por el que se viene, y el que una persona no sabe leer.
+/// Un payload que no es JSON no tiene nada que explicar.
+pub fn time_claims(payload: &str, now: i64) -> Vec<TimeClaim> {
+    let Ok(serde_json::Value::Object(claims)) = serde_json::from_str::<serde_json::Value>(payload) else { return Vec::new() };
+    ["iat", "nbf", "exp"]
+        .into_iter()
+        .filter_map(|key| {
+            let at = claims.get(key)?.as_f64()? as i64;
+            Some(TimeClaim { key: key.to_string(), at, expired: key == "exp" && at < now, not_yet: key == "nbf" && at > now })
+        })
+        .collect()
+}
+
 // ─── UUID / CUID2 ────────────────────────────────────────────────────────────
+
+/// `uuid-v4`, `uuid-v7` o `cuid2`.
+pub fn generate_id(kind: &str) -> Result<String, String> {
+    match kind {
+        "uuid-v4" => Ok(generate_uuid_v4()),
+        "uuid-v7" => Ok(generate_uuid_v7()),
+        "cuid2" => Ok(generate_cuid2()),
+        _ => Err(format!("Unknown id kind: {kind}")),
+    }
+}
 
 pub fn generate_uuid_v4() -> String {
     uuid::Uuid::new_v4().to_string()
@@ -82,7 +126,7 @@ pub fn generate_cuid2() -> String {
 
 // ─── Hash ────────────────────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HashResult {
     pub hash: String,
     pub algorithm: String,
@@ -175,6 +219,19 @@ pub fn argon2_verify(input: &str, hash: &str) -> Result<bool, String> {
 
 // ─── Base64 encode / decode ──────────────────────────────────────────────────
 
+/// `codec` es `base64`, `url` o `hex`; `direction`, `encode` o `decode`.
+pub fn encode_decode(input: &str, codec: &str, direction: &str) -> Result<String, String> {
+    match (codec, direction) {
+        ("base64", "encode") => Ok(base64_encode(input)),
+        ("base64", "decode") => base64_decode(input),
+        ("url", "encode") => Ok(url_encode(input)),
+        ("url", "decode") => url_decode(input),
+        ("hex", "encode") => Ok(hex_encode(input)),
+        ("hex", "decode") => hex_decode(input),
+        _ => Err(format!("Unknown codec/direction: {codec}/{direction}")),
+    }
+}
+
 pub fn base64_encode(input: &str) -> String {
     B64.encode(input.as_bytes())
 }
@@ -249,4 +306,78 @@ pub fn hex_encode(input: &str) -> String {
 pub fn hex_decode(input: &str) -> Result<String, String> {
     let bytes = hex::decode(input).map_err(|e| format!("Hex decode: {e}"))?;
     String::from_utf8(bytes).map_err(|e| format!("UTF-8 decode: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// El de jwt.io, firmado con `your-256-bit-secret`.
+    const TOKEN: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+
+    /// Rotura que atrapa: dar por buena la firma de un token con otro
+    /// secreto, con la firma retocada, o con otro algoritmo que el suyo; o no
+    /// dar por buena la que sí lo es.
+    #[test]
+    fn a_jwt_with_a_bad_signature_is_invalid() {
+        assert_eq!(jwt_decode(TOKEN, Some("your-256-bit-secret"), Some("HS256")).signature_valid, Some(true));
+        assert_eq!(jwt_decode(TOKEN, Some("otro-secreto"), Some("HS256")).signature_valid, Some(false));
+        let tampered = format!("{}x", &TOKEN[..TOKEN.len() - 1]);
+        assert_eq!(jwt_decode(&tampered, Some("your-256-bit-secret"), Some("HS256")).signature_valid, Some(false));
+        assert_eq!(jwt_decode(TOKEN, Some("your-256-bit-secret"), Some("HS512")).signature_valid, Some(false));
+        let read = jwt_decode(TOKEN, None, None);
+        assert_eq!(read.signature_valid, None, "sin secreto no se puede decir nada de la firma");
+        assert!(read.payload.contains("John Doe"));
+        assert!(jwt_decode("no.es", None, None).error.is_some());
+    }
+
+    /// Rotura que atrapa: un hash o un HMAC que no es el del algoritmo que
+    /// dice (vectores de FIPS 180 y de la RFC 4231).
+    #[test]
+    fn the_hash_matches_a_known_vector() {
+        assert_eq!(hash_text("abc", "md5").unwrap().hash, "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(hash_text("abc", "sha256").unwrap().hash, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(hash_text("abc", "sha384").unwrap().hash, "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7");
+        assert_eq!(
+            hash_text("abc", "sha512").unwrap().hash,
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+        );
+        assert_eq!(hmac_sign("what do ya want for nothing?", "Jefe", "hmac-sha256").unwrap().hash, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+        assert!(hash_text("abc", "sha1").is_err());
+    }
+
+    /// Rotura que atrapa: un hash de contraseña que no se verifica con la
+    /// suya, o que se verifica con otra.
+    #[test]
+    fn a_password_hash_verifies_only_its_password() {
+        let bcrypt = bcrypt_hash("hunter22", 4).unwrap();
+        assert!(bcrypt_verify("hunter22", &bcrypt).unwrap());
+        assert!(!bcrypt_verify("hunter23", &bcrypt).unwrap());
+        let argon = argon2_hash("hunter22").unwrap();
+        assert!(argon2_verify("hunter22", &argon).unwrap());
+        assert!(!argon2_verify("hunter23", &argon).unwrap());
+    }
+
+    /// Rotura que atrapa: leer `exp` en milisegundos (todo token caducó en
+    /// 1970) o decir caducado lo que vence mañana.
+    #[test]
+    fn the_time_claims_say_if_it_expired() {
+        let claims = time_claims(r#"{"iat":1000,"nbf":3000,"exp":1500}"#, 2000);
+        assert_eq!(claims.iter().map(|claim| (claim.key.as_str(), claim.at, claim.expired, claim.not_yet)).collect::<Vec<_>>(), [("iat", 1000, false, false), ("nbf", 3000, false, true), ("exp", 1500, true, false)]);
+        assert!(!time_claims(r#"{"exp":2500}"#, 2000)[0].expired);
+        assert!(time_claims("no es json", 0).is_empty());
+    }
+
+    /// Rotura que atrapa: escapar de más o de menos en una URL, o no volver
+    /// de lo codificado a lo escrito.
+    #[test]
+    fn encoding_goes_and_comes_back() {
+        assert_eq!(encode_decode("a b/ñ", "url", "encode").unwrap(), "a%20b%2F%C3%B1");
+        assert_eq!(encode_decode("a+b%20c", "url", "decode").unwrap(), "a b c");
+        for codec in ["base64", "url", "hex"] {
+            let there = encode_decode("hola, ñandú", codec, "encode").unwrap();
+            assert_eq!(encode_decode(&there, codec, "decode").unwrap(), "hola, ñandú", "{codec}");
+        }
+        assert!(encode_decode("zz", "hex", "decode").is_err());
+    }
 }

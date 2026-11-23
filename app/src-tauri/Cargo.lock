@@ -739,18 +739,25 @@ dependencies = [
 name = "cac-ops"
 version = "0.1.0"
 dependencies = [
+ "argon2",
  "base64 0.22.1",
+ "bcrypt",
  "bech32",
  "blake2",
  "cac-mcp",
  "crypto_box",
+ "cuid2",
  "hex",
+ "hmac",
+ "jsonwebtoken 9.3.1",
  "keyring",
+ "md-5",
  "rand 0.8.5",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2",
+ "uuid",
  "x25519-dalek",
 ]
 

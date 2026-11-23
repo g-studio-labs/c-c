@@ -49,6 +49,15 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 crypto_box = "0.9"
 blake2 = "0.10"
 base64 = "0.22"
+# Las utilidades de tokens de las DevTools (`crypto`), las mismas versiones
+# que tenía la app de Tauri cuando vivían allí.
+jsonwebtoken = "9"
+uuid = { version = "1", features = ["v4", "v7"] }
+cuid2 = "0.1"
+bcrypt = "0.16"
+argon2 = "0.5"
+md-5 = "0.10"
+hmac = "0.12"
 
 [dev-dependencies]
 # Las pruebas de la descarga corren su cliente async; el runtime lo pone

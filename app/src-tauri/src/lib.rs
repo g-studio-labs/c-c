@@ -6,7 +6,6 @@ mod op_env;
 mod paste_guard;
 mod api_client;
 mod core_bridge;
-mod crypto_tools;
 mod download;
 mod http_client;
 mod notify;
@@ -245,7 +244,9 @@ async fn compress_image(
         .map_err(|e| e.to_string())?
 }
 
-// ─── Crypto tools ────────────────────────────────────────────────────────────
+// ─── Crypto tools (`cac_ops::crypto`) ────────────────────────────────────────
+
+use cac_ops::crypto as crypto_tools;
 
 #[tauri::command]
 fn jwt_decode(
@@ -258,12 +259,7 @@ fn jwt_decode(
 
 #[tauri::command]
 fn generate_id(kind: String) -> Result<String, String> {
-    match kind.as_str() {
-        "uuid-v4" => Ok(crypto_tools::generate_uuid_v4()),
-        "uuid-v7" => Ok(crypto_tools::generate_uuid_v7()),
-        "cuid2" => Ok(crypto_tools::generate_cuid2()),
-        _ => Err(format!("Unknown id kind: {kind}")),
-    }
+    crypto_tools::generate_id(&kind)
 }
 
 #[tauri::command]
@@ -302,15 +298,7 @@ fn argon2_verify(input: String, hash: String) -> Result<bool, String> {
 
 #[tauri::command]
 fn encode_decode(input: String, codec: String, direction: String) -> Result<String, String> {
-    match (codec.as_str(), direction.as_str()) {
-        ("base64", "encode") => Ok(crypto_tools::base64_encode(&input)),
-        ("base64", "decode") => crypto_tools::base64_decode(&input),
-        ("url", "encode") => Ok(crypto_tools::url_encode(&input)),
-        ("url", "decode") => crypto_tools::url_decode(&input),
-        ("hex", "encode") => Ok(crypto_tools::hex_encode(&input)),
-        ("hex", "decode") => crypto_tools::hex_decode(&input),
-        _ => Err(format!("Unknown codec/direction: {codec}/{direction}")),
-    }
+    crypto_tools::encode_decode(&input, &codec, &direction)
 }
 
 // ─── HTTP ────────────────────────────────────────────────────────────────────
