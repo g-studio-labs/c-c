@@ -401,31 +401,6 @@ impl Render for CommsView {
     }
 }
 
-/// Una pestaña de un canal (`TabButton` en `ChannelView.tsx`): `rounded-md
-/// px-2 py-1 text-xs`, con su icono a `size-3`. La de la conversación es la
-/// que se lee; las otras están en su sitio y todavía no se abren aquí.
-fn channel_tab(id: &'static str, icon: Lucide, label: String, active: bool, cx: &App) -> Stateful<Div> {
-    let theme = cx.theme();
-    let (muted, primary) = (theme.muted_foreground, theme.primary);
-    let hint = tr(cx, "common:misc.notInThisApp");
-    div()
-        .id(id)
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap_1()
-        .rounded(px(8.))
-        .px_2()
-        .py_1()
-        .leading_xs()
-        .map(|this| if active { this.font_weight(FontWeight::MEDIUM).text_color(primary).bg(primary.opacity(0.1)) } else { this.text_color(muted) })
-        .when(!active, |this| this.tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx)))
-        .aria_label(label.clone())
-        .aria_selected(active)
-        .child(Icon::new(icon).size_3().flex_none())
-        .child(label)
-}
-
 /// Seguir o silenciar el canal que se tiene delante (`ChannelView.tsx`).
 /// Vive en la cabecera y no en preferencias porque es una decisión por
 /// canal: los que importan se saben estando dentro. Silenciado, aquí sólo
@@ -474,10 +449,40 @@ fn follow_button(space_id: String, on: bool, thread: Entity<crate::chat::ChatVie
         .test_support()
 }
 
+/// «Llamar con invitados» (`ChannelView.tsx`: `h-8 rounded-lg border px-2.5
+/// text-[13px] font-semibold`).
+fn guest_button(tabs: Entity<crate::channel_tabs::ChannelTabsView>, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let (muted, border, hover, foreground) = (theme.muted_foreground, theme.border, theme.accent, theme.foreground);
+    let (label, hint) = (tr(cx, "calls:inviteButton"), tr(cx, "calls:dialogTitle"));
+    div()
+        .id("conversation-guest-call")
+        .h_8()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap_1p5()
+        .rounded(px(8.))
+        .border_1()
+        .border_color(border)
+        .px(px(10.))
+        .text_size(px(13.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(muted)
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover).text_color(foreground))
+        .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+        .aria_label(label.clone())
+        .on_click(move |_, window, cx| tabs.update(cx, |tabs, cx| tabs.open_guest(window, cx)))
+        .child(Icon::new(Lucide::UserPlus).size_3p5().flex_none())
+        .child(label)
+        .test_support()
+}
+
 /// La conversación que se tiene delante: su cabecera —el nombre del canal
 /// con quién anda por aquí, o el de la persona— y, debajo, sus mensajes
 /// (`chat.rs`).
-pub fn conversation(thread: &Entity<crate::chat::ChatView>, cx: &App) -> AnyElement {
+pub fn conversation(thread: &Entity<crate::chat::ChatView>, tabs: &Entity<crate::channel_tabs::ChannelTabsView>, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let (border, muted, success) = (theme.border, theme.muted_foreground, theme.success);
     let now = chrono::Utc::now();
@@ -542,6 +547,7 @@ pub fn conversation(thread: &Entity<crate::chat::ChatView>, cx: &App) -> AnyElem
                 .test_support(),
         )
     });
+    let guest = (!direct && Backend::snapshot(cx).read(cx).comms.org_id.is_some()).then(|| guest_button(tabs.clone(), cx));
     let header = div()
         .id("conversation-header")
         .h(px(HEADER_HEIGHT))
@@ -571,29 +577,17 @@ pub fn conversation(thread: &Entity<crate::chat::ChatView>, cx: &App) -> AnyElem
             Some(Conversation::Channel { space_id }) => Some(space_id.clone()),
             _ => None,
         }, |this, space_id| this.child(crate::voice::voice_bar(&space_id, cx)))
+        // Una reunión aparte para gente de fuera, al lado de la voz del canal
+        // y no dentro de ella: son dos salas distintas.
+        .children(guest)
         .children(follow)
         // `ml-auto text-xs text-muted-foreground` (`DMThread.tsx`).
         .when(direct, |this| this.child(div().id("conversation-private").ml_auto().flex_none().leading_xs().text_color(muted).child(tr(cx, "chat:private")).test_support()))
         .test_support();
-    // Las pestañas de un canal, en su fila (`relative flex items-center
-    // gap-1 border-b px-2 py-1`). Un directo no las tiene.
-    let tabs = (!direct).then(|| {
-        div()
-            .id("conversation-tabs")
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap_1()
-            .border_b_1()
-            .border_color(border)
-            .px_2()
-            .py_1()
-            .child(channel_tab("conversation-tab-thread", Lucide::MessageSquare, tr(cx, "chat:tabConversation"), true, cx).test_support())
-            .child(channel_tab("conversation-tab-media", Lucide::Image, tr(cx, "chat:tabMedia"), false, cx).test_support())
-            .child(channel_tab("conversation-tab-links", Lucide::Link2, tr(cx, "chat:tabLinks"), false, cx).test_support())
-            .test_support()
-    });
-    div().id("conversation").size_full().flex().flex_col().child(header).children(tabs).child(thread.clone()).test_support().into_any_element()
+    // Un canal lleva sus pestañas, con la conversación dentro; un directo,
+    // sólo la conversación.
+    let body: AnyElement = if direct { thread.clone().into_any_element() } else { tabs.clone().into_any_element() };
+    div().id("conversation").size_full().flex().flex_col().child(header).child(div().flex_1().min_h_0().child(body)).test_support().into_any_element()
 }
 
 /// «Nueva conversación» se cerró: quien la tiene la quita.

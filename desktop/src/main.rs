@@ -18,6 +18,7 @@ mod backend;
 mod board;
 mod brand;
 mod calendar;
+mod channel_tabs;
 mod chat;
 mod composer;
 mod comms;

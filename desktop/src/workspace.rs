@@ -154,6 +154,9 @@ pub struct Workspace {
     pub(crate) ring: crate::voice_ring::RingUi,
     /// El foco del selector de pantalla, que se le da al abrirse.
     picker_focus: FocusHandle,
+    /// Las pestañas del canal que se mira, con la conversación dentro.
+    pub(crate) channel_tabs: Entity<crate::channel_tabs::ChannelTabsView>,
+    _on_channel_tabs: Subscription,
     was_picking: bool,
 }
 
@@ -175,6 +178,9 @@ impl Workspace {
         // cerrarse hay que repintar.
         let on_comms = cx.observe(&comms, |_, _, cx| cx.notify());
         let chat = cx.new(|cx| ChatView::new(window, cx));
+        let channel_tabs = cx.new(|cx| crate::channel_tabs::ChannelTabsView::new(chat.clone(), window, cx));
+        // «Llamar con invitados» se pinta aquí, encima de todo.
+        let on_channel_tabs = cx.observe(&channel_tabs, |_, _, cx| cx.notify());
         let on_connect = [
             // Lo que sabe cambia desde otro hilo (mirar la máquina, instalar):
             // el punto del menú se repinta con ello.
@@ -193,6 +199,8 @@ impl Workspace {
             servers: cx.new(|_| crate::platform::servers::ServersView::new()),
             _on_comms: on_comms,
             chat,
+            channel_tabs,
+            _on_channel_tabs: on_channel_tabs,
             tree_filter: cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)),
             // Como se dejó en esta máquina la última vez.
             panel_pinned: Backend::core(cx).panel_pinned(),
@@ -1598,7 +1606,7 @@ impl Render for Workspace {
         let main: AnyElement = if let Some(stage) = stage {
             stage
         } else if snapshot.comms.on_screen {
-            crate::comms::conversation(&self.chat, cx)
+            crate::comms::conversation(&self.chat, &self.channel_tabs, cx)
         } else if snapshot.platform.on_screen {
             self.servers.clone().into_any_element()
         } else if snapshot.docs.target.is_some() {
@@ -1608,6 +1616,7 @@ impl Render for Workspace {
         };
         // «Nueva conversación», abierta desde la lista de comunicación.
         let picker = self.comms.read(cx).picker.clone();
+        let guest = snapshot.comms.on_screen.then(|| self.channel_tabs.read(cx).guest.clone()).flatten();
         // La tarea abierta, sobre lo que se estuviera mirando.
         let task = snapshot.task.task_id.is_some().then(|| self.task.clone());
         let pinned = self.panel_pinned;
@@ -1702,6 +1711,7 @@ impl Render for Workspace {
                     // «Conectar Claude Code», encima de todo lo demás.
                     .children(self.connect_open.then(|| div().id("connect-over").absolute().inset_0().child(self.connect.clone())))
                     .children(picker.map(|picker| div().id("new-conversation-over").absolute().inset_0().child(picker)))
+                    .children(guest.map(|guest| div().id("guest-call-over").absolute().inset_0().child(guest)))
                     // Quien te llama, encima de todo, estés donde estés.
                     .children(incoming),
             )
