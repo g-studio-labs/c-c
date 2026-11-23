@@ -13,6 +13,15 @@ tablero: **App** `ca0bfd49-0909-43eb-8135-bc8ecd0f282c` y **Backend**
 
 ## 🟢 Al día
 
+**23-nov, las pestañas de un canal en la app nativa** (command-and-control-489,
+subtareas 490–494), en la rama `wt-comms` (worktree `cac-wt-comms`), sin
+fusionar. Multimedia, Grabaciones (sólo si el servidor graba), Enlaces y
+«Buscar en #canal» funcionan; «Llamar con invitados» crea la llamada y copia
+el enlace web —los invitados siguen entrando por la web, decisión de jose—.
+Ver una grabación la abre en el navegador con un pase de adjuntos; descargarla
+la guarda donde se elija. Lógica en `core/src/channel_tabs.rs`, pantalla en
+`desktop/src/channel_tabs.rs`.
+
 **20-nov, Plataforma entra en la app nativa: fase 0, los cimientos**
 (command-and-control-450, de la 444), en la rama `wt-platform` (worktree
 `cac-wt-platform`), sin fusionar. Diseño en cac: «Diseño · Plataforma en la
