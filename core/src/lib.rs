@@ -10,6 +10,7 @@ uniffi::setup_scaffolding!();
 
 pub mod account;
 pub mod ansi;
+pub mod channel_tabs;
 pub mod chat;
 pub mod comms;
 pub mod comms_text;
@@ -54,6 +55,10 @@ pub use account::{check_new_password, check_sign_in, gate, FormCheck, Gate, MIN_
 pub use chat::{
     apply_reaction, around_label, enter_sends, file_token, mention_token, message_body, message_to_send, picture_step, thread_lines, thread_pictures, thread_splice, BodyFile, Chat, ComposerToken, MessageBody,
     ThreadLine, ThreadLink, ThreadMessage, ThreadPicture, ThreadQuote, ThreadSplice, ThreadState, MESSAGE_MAX_CHARS, THREAD_PAGE,
+};
+pub use channel_tabs::{
+    call_title, channel_tabs, guest_link, local_moment, recording_duration, row_meta, recording_file_name, search_page, search_path, tab_path, CallInvite, CallOccupant, ChannelTab, ChannelTabs,
+    ChatLinkItem, ChatMediaItem, PagedTab, Recording, RecordingPolicy, TabItem, TabPage, TabShows, CALL_TITLE_MAX, GUEST_TTLS, SEARCH_PAGE,
 };
 pub use comms::{
     comms_panel, conversation_title, people_matching, resolve_conversation, Channel, Comms, CommsPanel, CommsRow, CommsRows, CommsSection, CommsState,
