@@ -1064,6 +1064,27 @@ async fn leaving_platform_pauses_the_polling_until_you_come_back() {
     assert!(stats_hits(&rig).await > left_at, "no volvió a preguntar al regresar");
 }
 
+/// Rotura que atrapa: que volver a arrancar el sondeo con una lectura a
+/// medias (entrar en Plataforma directo a Recursos lo arranca dos veces) la
+/// deje marcada como en curso para siempre, y la pestaña en «Cargando…» sin
+/// volver a preguntar.
+#[tokio::test]
+async fn restarting_the_polling_mid_read_does_not_stall_it() {
+    let rig = rig_as_member_with_open("s").await;
+    Mock::given(method("POST")).and(path("/api/v1/servers/s/agent-session")).respond_with(pass("p", 600)).mount(&rig.server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/stats"))
+        .respond_with(ok(json!([container("abc", 12.5)])).set_delay(Duration::from_millis(150)))
+        .mount(&rig.server)
+        .await;
+    Mock::given(method("GET")).and(path("/api/v1/nodes")).respond_with(ok(json!([]))).mount(&rig.server).await;
+    rig.core.platform().open_tab(ServerTab::Stats).await;
+    until(&rig, |state| state.stats_loading).await;
+    rig.core.platform().start_stats();
+    let state = until(&rig, |state| state.stats.is_some()).await;
+    assert_eq!(state.stats.unwrap()[0].cpu_percent, 12.5);
+}
+
 /// Rotura que atrapa: enseñar un error ante un swarm sin servicios, nodos
 /// o contenedores: el agente omite el `data` vacío.
 #[tokio::test]

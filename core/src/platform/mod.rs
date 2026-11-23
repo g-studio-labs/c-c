@@ -972,6 +972,9 @@ fn set_badge(data: &mut PlatformData, badge: ClusterBadge) {
 fn stop_stats(data: &mut PlatformData) {
     if let Some(task) = data.stats_task.take() {
         task.abort();
+        // Abortar a mitad de una lectura se salta el `stats_loading = false`
+        // de `load_stats`, y las siguientes se creerían otra en curso.
+        data.stats_loading = false;
     }
 }
 
