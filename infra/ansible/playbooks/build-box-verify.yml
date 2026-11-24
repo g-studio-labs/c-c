@@ -19,6 +19,14 @@
       check_mode: false
       failed_when: box.rc != 0 or box.stdout != 'build-low false '
 
+    - name: Los huérfanos los recoge el pause del pod, no un sleep
+      ansible.builtin.shell:
+        cmd: kubectl -n build get statefulset rust-box -o jsonpath='{.spec.template.spec.shareProcessNamespace}'
+      register: reaper
+      changed_when: false
+      check_mode: false
+      failed_when: reaper.rc != 0 or reaper.stdout != 'true'
+
     - name: La prioridad es negativa y no desaloja
       ansible.builtin.shell:
         cmd: kubectl get priorityclass build-low -o jsonpath='{.value} {.preemptionPolicy}'

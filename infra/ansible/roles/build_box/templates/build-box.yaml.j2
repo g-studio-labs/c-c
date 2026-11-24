@@ -186,6 +186,12 @@ spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
       terminationGracePeriodSeconds: 10
+      # El PID 1 pasa a ser el `pause` del pod, que recoge a los huérfanos:
+      # con `sleep` de PID 1 nadie los recogía y cada prueba cortada dejaba
+      # zombis hasta el apagado (cientos el 23-nov-2026). Y `sleep`, ya sin
+      # ser PID 1, muere con el SIGTERM en vez de esperar los 10 s de gracia.
+      # Hay un solo contenedor: compartir procesos no enseña nada a nadie.
+      shareProcessNamespace: true
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
