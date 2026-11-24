@@ -1967,7 +1967,11 @@ mod tests {
 
     /// Un servidor que guarda lo que se sube a ese canal y contesta como el
     /// de verdad: con su ruta relativa y su nombre. Tarda eso.
-    fn mount_uploads(server: &FakeServer, delay: Duration) {
+    /// Las subidas al canal `a`, cada una retenida por `landed` hasta que la
+    /// prueba la suelta: con un plazo, en una máquina cargada la subida
+    /// acababa antes de lo que la prueba quería hacer a medio subir.
+    fn mount_uploads(server: &FakeServer, landed: &Gate) {
+        let landed = landed.clone();
         server.mount(
             Mock::given(method("POST"))
                 .and(path(UPLOAD_A))
@@ -1975,7 +1979,7 @@ mod tests {
                     let body = String::from_utf8_lossy(&request.body);
                     let (id, name, kind) = if body.contains("notas.txt") { ("f2", "notas.txt", "text/plain") } else { ("f1", "pasted.png", "image/png") };
                     let file = json!({ "id": id, "spaceId": "a", "url": format!("{UPLOAD_A}/{id}/raw"), "fileName": name, "contentType": kind });
-                    ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": file })).set_delay(delay)
+                    landed.hold(ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": file })))
                 })
                 .with_priority(1),
         );
@@ -2004,7 +2008,8 @@ mod tests {
         let talk = history(vec![line("m1", "u2", "Luis Mora", "hola", 5, 1)]);
         mount_history(&server, CHAT_A, &talk, Duration::ZERO);
         mount_writes(&server, CHAT_A, &talk);
-        mount_uploads(&server, Duration::from_millis(400));
+        let landed = Gate::default();
+        mount_uploads(&server, &landed);
         let (window, view) = open(&server, cx);
         enter(window, channel("a"), cx);
         wait_until(cx, "se pinta", |cx| on_screen(window, "thread-line-m1", cx));
@@ -2015,7 +2020,9 @@ mod tests {
         // A medio subir no se manda, ni con el botón ni con Enter.
         click(window, "thread-send", cx);
         press(window, "enter", cx);
+        wait_until(cx, "se sube", |_| landed.held() == 1);
         assert!(sent(&server, CHAT_A).is_empty(), "se mandó con un fichero a medio subir");
+        landed.open();
         wait_until(cx, "la imagen queda como ficha", |cx| on_screen(window, "composer-token-file-f1", cx));
         assert_eq!(label(window, "composer-token-file-f1", cx), "pasted.png");
         assert!(!on_screen(window, "thread-uploading-1", cx));
@@ -2060,7 +2067,8 @@ mod tests {
         let server = server();
         mount_history(&server, CHAT_A, &history(vec![line("a1", "u2", "Luis Mora", "de A", 5, 1)]), Duration::ZERO);
         mount_history(&server, CHAT_B, &history(vec![line("b1", "u3", "Bea Soto", "de B", 5, 1)]), Duration::ZERO);
-        mount_uploads(&server, Duration::from_millis(500));
+        let landed = Gate::default();
+        mount_uploads(&server, &landed);
         let (window, view) = open(&server, cx);
         enter(window, channel("a"), cx);
         wait_until(cx, "se pinta A", |cx| on_screen(window, "thread-line-a1", cx));
@@ -2068,9 +2076,8 @@ mod tests {
         paste_picture(window, cx);
         click(window, "comms-channel-b", cx);
         wait_until(cx, "se pinta B", |cx| on_screen(window, "thread-line-b1", cx));
-        wait_until(cx, "termina de subir", |cx| cx.update(|cx| view.read(cx).composer.field.read(cx).value().is_empty()) && server.hits(UPLOAD_A) == 1);
-        std::thread::sleep(Duration::from_millis(700));
-        cx.run_until_parked();
+        landed.open();
+        wait_until(cx, "termina de subir", |cx| cx.update(|cx| !view.read(cx).composer.is_uploading()));
         assert_eq!(written(&view, cx), "", "la captura de A se citó en B");
 
         click(window, "comms-channel-a", cx);

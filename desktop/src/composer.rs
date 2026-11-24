@@ -128,6 +128,12 @@ pub struct Composer {
 }
 
 impl Composer {
+    /// Si queda algún fichero subiendo, de cualquier conversación.
+    #[cfg(test)]
+    pub(crate) fn is_uploading(&self) -> bool {
+        !self.uploading.is_empty()
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<ChatView>) -> Self {
         let field = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, MAX_LINES));
         // Lo escrito mueve la lista de menciones y el botón de mandar.
