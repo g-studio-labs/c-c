@@ -253,8 +253,10 @@ scripts/remote.sh --off                          # la apaga; si no, sola a las 2
 - Corre en la misma subcarpeta desde la que se llama, sobre una copia del árbol
   con lo no commiteado. Lo que el comando cambie allí (las roturas de `/mutar`)
   no vuelve.
-- Una sola corrida a la vez por worktree. Entre worktrees comparten `target/`
-  y cargo las pone en fila.
+- Una sola corrida a la vez por worktree, y lo hace cumplir: una corrida nueva
+  corta lo que quede vivo de otra del mismo worktree (todo proceso que trabaje
+  en su copia), y `--kill` lo corta sin lanzar nada. Entre worktrees comparten
+  `target/` y cargo las pone en fila.
 - La caja es unas **3× más lenta por hilo**. Dos pruebas del escritorio que
   dependen del reloj fallan ahí por tiempo, no por tu cambio:
   `a_picture_comes_with_the_session…` y `the_follow_button_mutes…`
