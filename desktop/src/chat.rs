@@ -364,8 +364,7 @@ impl ChatView {
     /// que lo entiende. Su dirección pide sesión: lo baja el core.
     pub(crate) fn open_file(&mut self, path: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
         let answer = Backend::ask(cx, move |core| async move {
-            let bytes = core.chat().file_bytes(&path).await.map_err(Some)?;
-            files::write_for_opening(&std::env::temp_dir(), &name, &bytes).map_err(|_| None::<cac_core::ApiError>)
+            files::fetch_for_opening(&std::env::temp_dir(), &name, |target| async move { core.chat().save_file(&path, &target).await }).await
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(result) = answer.await else { return };
@@ -389,19 +388,13 @@ impl ChatView {
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(target))) = chosen.await else { return };
             let Ok(answer) = this.update(cx, |_, cx| {
-                Backend::ask(cx, move |core| async move {
-                    let bytes = core.chat().file_bytes(&path).await.map_err(Some)?;
-                    files::write_copy(&target, &bytes).map_err(|_| None::<cac_core::ApiError>)
-                })
+                Backend::ask(cx, move |core| async move { core.chat().save_file(&path, &target).await })
             }) else {
                 return;
             };
             let Ok(Err(error)) = answer.await else { return };
             this.update(cx, |this, cx| {
-                let text = match error {
-                    Some(error) => error_text(cx, &error, "common:misc.errSave"),
-                    None => tr(cx, "common:misc.errSave"),
-                };
+                let text = error_text(cx, &error, "common:misc.errSave");
                 this.say(text, cx);
             })
             .ok();

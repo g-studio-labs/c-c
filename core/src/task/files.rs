@@ -238,10 +238,23 @@ impl Tasks {
     /// Se pide por su id y no por una dirección: lo que se baja es siempre
     /// algo que la tarea abierta tiene.
     pub async fn attachment_bytes(&self, attachment_id: &str) -> Result<Vec<u8>, ApiError> {
+        let path = self.attachment_route(attachment_id)?;
+        self.core.download(&path).await
+    }
+
+    /// Guarda en `target` un adjunto de la tarea abierta. Va a disco según
+    /// llega y sólo toma el nombre al terminar entero; lo que hay que tener
+    /// en memoria para pintarlo va por [`Self::attachment_bytes`].
+    pub async fn save_attachment(&self, attachment_id: &str, target: &std::path::Path) -> Result<(), ApiError> {
+        let path = self.attachment_route(attachment_id)?;
+        self.core.download_to(&path, target).await
+    }
+
+    fn attachment_route(&self, attachment_id: &str) -> Result<String, ApiError> {
         let file = self.attachment(attachment_id)?;
-        let path = attachment_path(&file.url)
-            .ok_or_else(|| super::refused("not-an-attachment", "That file does not live in this server"))?;
-        self.core.download(path).await
+        attachment_path(&file.url)
+            .map(str::to_string)
+            .ok_or_else(|| super::refused("not-an-attachment", "That file does not live in this server"))
     }
 
     /// Una imagen de la tarea abierta, para enseñarla. Viene por donde

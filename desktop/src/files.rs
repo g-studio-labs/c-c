@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use cac_core::ApiError;
 use gpui_kit::{App, Global};
 
 /// Con qué se abre un fichero. Existe para las pruebas: sin él se le pide
@@ -26,13 +27,20 @@ pub fn open_with_system(path: &Path, cx: &App) {
 
 static TURN: AtomicU64 = AtomicU64::new(0);
 
-/// Deja un fichero bajado donde el sistema pueda abrirlo, y dice dónde.
+/// Baja un fichero con `save` a donde el sistema pueda abrirlo, y dice
+/// dónde. `save` lo escribe según llega (`download_to` del core), así que no
+/// pasa entero por la memoria.
 ///
 /// Cada uno en su carpeta nueva, para que conserve su nombre (es lo que
 /// enseña el programa que lo abre) sin pisar a otro que se llame igual. La
 /// carpeta es sólo de quien usa la app: el fichero puede ser de un cliente,
-/// y la carpeta temporal la comparte toda la máquina.
-pub fn write_for_opening(base: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+/// y la carpeta temporal la comparte toda la máquina. Si no llega, la
+/// carpeta se va con él.
+pub async fn fetch_for_opening<F, Fut>(base: &Path, name: &str, save: F) -> Result<PathBuf, Option<ApiError>>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: std::future::Future<Output = Result<(), ApiError>>,
+{
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|at| at.as_nanos()).unwrap_or(0);
     let turn = TURN.fetch_add(1, Ordering::Relaxed);
     let dir = base.join(format!("cac-{}-{nanos:x}-{turn}", std::process::id()));
@@ -41,28 +49,19 @@ pub fn write_for_opening(base: &Path, name: &str, bytes: &[u8]) -> std::io::Resu
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     // Sin `recursive`: si ya existe falla, y no se escribe en la carpeta
     // que otro dejó preparada con ese nombre.
-    builder.create(&dir)?;
+    builder.create(&dir).map_err(|_| None)?;
     let path = dir.join(cac_core::safe_file_name(name));
-    std::fs::write(&path, bytes)?;
-    Ok(path)
-}
-
-/// Escribe una copia donde se eligió. Primero a un `.part` y al final se
-/// renombra: un corte a mitad no deja algo que parece el fichero y no lo es.
-pub fn write_copy(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut partial = target.as_os_str().to_owned();
-    partial.push(".part");
-    let partial = PathBuf::from(partial);
-    let written = std::fs::write(&partial, bytes).and_then(|_| std::fs::rename(&partial, target));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&partial);
+    if let Err(error) = save(path.clone()).await {
+        let _ = std::fs::remove_dir(&dir);
+        return Err(Some(error));
     }
-    written
+    Ok(path)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{write_copy, write_for_opening};
+    use super::fetch_for_opening;
+    use cac_core::ApiError;
 
     /// Una carpeta vacía para esta prueba.
     fn scratch(name: &str) -> std::path::PathBuf {
@@ -70,6 +69,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn fetch(base: &std::path::Path, name: &str, bytes: &'static [u8]) -> Result<std::path::PathBuf, Option<ApiError>> {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        runtime.block_on(fetch_for_opening(base, name, |target| async move { std::fs::write(target, bytes).map_err(|e| ApiError::Storage(e.to_string())) }))
     }
 
     /// Un fichero bajado queda dentro de su carpeta, con su nombre, entero, y
@@ -81,8 +85,8 @@ mod tests {
     #[test]
     fn a_downloaded_file_lands_in_its_own_folder() {
         let base = scratch("opening");
-        let first = write_for_opening(&base, "../../captura.png", b"uno").unwrap();
-        let second = write_for_opening(&base, "../../captura.png", b"dos").unwrap();
+        let first = fetch(&base, "../../captura.png", b"uno").unwrap();
+        let second = fetch(&base, "../../captura.png", b"dos").unwrap();
 
         assert_eq!(first.file_name().unwrap(), "captura.png");
         assert_eq!(std::fs::read(&first).unwrap(), b"uno");
@@ -100,25 +104,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Una copia queda entera en su sitio y sin restos; si no se puede
-    /// escribir, no queda nada a medias.
+    /// Un fichero que no llega no deja su carpeta vacía en la temporal, y el
+    /// fallo vuelve con lo que dijo quien bajaba.
     ///
-    /// Roturas que atrapa: dejar el `.part` al lado de la copia; un `.part`
-    /// huérfano tras un fallo.
+    /// Roturas que atrapa: una carpeta huérfana por cada fichero que no se
+    /// pudo abrir; dar por bajado uno que no llegó; perder por qué falló.
     #[test]
-    fn a_copy_is_whole_or_is_not_there() {
-        let base = scratch("copy");
-        let target = base.join("plan.pdf");
-        write_copy(&target, b"%PDF").unwrap();
-        assert_eq!(std::fs::read(&target).unwrap(), b"%PDF");
-        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 1, "quedó el .part");
+    fn a_file_that_does_not_arrive_leaves_no_folder() {
+        let base = scratch("failed");
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let failed = runtime.block_on(fetch_for_opening(&base, "plan.pdf", |_| async { Err(ApiError::Network("cut".into())) }));
 
-        // El destino es una carpeta: renombrar encima falla.
-        let blocked = base.join("ocupado");
-        std::fs::create_dir(&blocked).unwrap();
-        std::fs::write(blocked.join("x"), b"x").unwrap();
-        assert!(write_copy(&blocked, b"%PDF").is_err());
-        assert!(!base.join("ocupado.part").exists(), "quedó un .part huérfano");
+        assert!(matches!(failed, Err(Some(ApiError::Network(_)))), "{failed:?}");
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0, "se quedó la carpeta");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

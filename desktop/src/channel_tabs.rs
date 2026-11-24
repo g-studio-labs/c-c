@@ -356,8 +356,7 @@ impl ChannelTabsView {
     /// Baja un fichero de Multimedia y lo abre con el programa del sistema.
     fn open_media(&mut self, url: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
         let answer = Backend::ask(cx, move |core| async move {
-            let bytes = core.chat().file_bytes(&url).await.map_err(Some)?;
-            files::write_for_opening(&std::env::temp_dir(), &name, &bytes).map_err(|_| None::<ApiError>)
+            files::fetch_for_opening(&std::env::temp_dir(), &name, |target| async move { core.chat().save_file(&url, &target).await }).await
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(result) = answer.await else { return };

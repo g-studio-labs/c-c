@@ -928,8 +928,15 @@ impl Chat {
     /// Los bytes de un fichero citado en un mensaje. Sólo de este servidor,
     /// y con la sesión en la cabecera: su dirección la pide.
     pub async fn file_bytes(&self, path: &str) -> Result<Vec<u8>, ApiError> {
-        let path = attachment_path(path).ok_or_else(|| ApiError::Server { status: 400, code: "not-an-attachment".into(), message: "That file does not live in this server".into() })?;
-        self.core.download(path).await
+        self.core.download(served_path(path)?).await
+    }
+
+    /// Guarda en `target` un fichero citado en un mensaje. Va a disco según
+    /// llega y sólo toma el nombre al terminar entero: un vídeo de cientos
+    /// de megas no tiene por qué pasar por la memoria. Lo que hay que tener
+    /// en memoria para pintarlo (una miniatura) va por [`Self::file_bytes`].
+    pub async fn save_file(&self, path: &str, target: &std::path::Path) -> Result<(), ApiError> {
+        self.core.download_to(served_path(path)?, target).await
     }
 
     /// Una imagen citada en un mensaje, para enseñarla. Lo que llega y no es
@@ -939,6 +946,12 @@ impl Chat {
         let mime = image_type(&bytes).ok_or_else(|| ApiError::Server { status: 400, code: "not-an-image".into(), message: "That file is not an image".into() })?;
         Ok(Picture { mime: mime.to_string(), bytes })
     }
+}
+
+/// La ruta de un fichero de la conversación, si es de este servidor: la
+/// sesión sólo viaja ahí.
+fn served_path(path: &str) -> Result<&str, ApiError> {
+    attachment_path(path).ok_or_else(|| ApiError::Server { status: 400, code: "not-an-attachment".into(), message: "That file does not live in this server".into() })
 }
 
 // ── Las imágenes de la conversación ─────────────────────────────────────

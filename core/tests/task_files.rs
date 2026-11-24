@@ -13,6 +13,9 @@ use serde_json::{json, Value};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[path = "support/by_hand.rs"]
+mod by_hand;
+
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, String>>);
 
@@ -204,6 +207,54 @@ async fn a_file_comes_whole_and_asked_with_the_session() {
     assert_eq!(core.tasks().attachment_bytes("a-comment").await.unwrap(), png);
 }
 
+/// Guardar un adjunto lo escribe según llega, a un `.part` al lado, y sólo
+/// le pone su nombre al terminar entero; lo pide con la sesión, por la ruta
+/// de ese adjunto.
+///
+/// Roturas que atrapa: juntar el fichero entero en memoria antes de
+/// escribirlo; escribirlo con el nombre final a medias; dejar el `.part`;
+/// pedirlo sin la sesión, u otro adjunto.
+#[tokio::test]
+async fn saving_a_file_writes_it_as_it_arrives() {
+    let envelope = |data: Value| json!({ "success": true, "data": data }).to_string();
+    let files = json!([attachment("a1", RAW, Value::Null)]);
+    let canned = vec![("/api/v1/tasks/t1".to_string(), envelope(detail(files))), ("/api/v1/task-lists/l1/statuses".to_string(), envelope(json!([])))];
+    let server = by_hand::serve(RAW, canned).await;
+    let core = Core::new(Config::new(server.base.clone()), Arc::new(MemoryStorage::default()), Arc::new(NoListener)).unwrap();
+    let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana" })).unwrap();
+    core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
+    core.tasks().open("t1").await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("plano.pdf");
+    let half = 1_000_000;
+    let whole: Vec<u8> = (0..2 * half).map(|at| (at % 251) as u8).collect();
+    let mut first = format!("HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: {}\r\n\r\n", whole.len()).into_bytes();
+    first.extend_from_slice(&whole[..half]);
+    server.send.send(first).unwrap();
+    let saving = tokio::spawn({
+        let (core, target) = (core.clone(), target.clone());
+        async move { core.tasks().save_attachment("a1", &target).await }
+    });
+
+    let partial = by_hand::part_of(&target);
+    let mut waited = 0;
+    while std::fs::metadata(&partial).map(|meta| meta.len()).unwrap_or(0) < half as u64 {
+        assert!(waited < 500, "la primera mitad no llegó a disco mientras faltaba la otra");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        waited += 1;
+    }
+    assert!(!target.exists(), "a medias ya lleva el nombre final");
+
+    server.send.send(whole[half..].to_vec()).unwrap();
+    drop(server.send);
+    saving.await.unwrap().unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), whole);
+    assert!(!partial.exists(), "se quedó el .part");
+    let head = server.asked.await.unwrap().to_lowercase();
+    assert!(head.contains("authorization: bearer access"), "{head}");
+}
+
 /// Lo que no es de la tarea abierta, o no vive en este servidor, no se pide.
 ///
 /// Roturas que atrapa: bajar con la sesión un fichero cualquiera dando su
@@ -215,6 +266,10 @@ async fn what_is_not_this_tasks_or_this_servers_is_not_asked_for() {
 
     assert_eq!(code(core.tasks().attachment_bytes("a-otra-tarea").await.unwrap_err()), "attachment-not-found");
     assert_eq!(code(core.tasks().attachment_bytes("a-old").await.unwrap_err()), "not-an-attachment");
+    let target = std::env::temp_dir().join(format!("cac-test-{}-no.png", std::process::id()));
+    assert_eq!(code(core.tasks().save_attachment("a-otra-tarea", &target).await.unwrap_err()), "attachment-not-found");
+    assert_eq!(code(core.tasks().save_attachment("a-old", &target).await.unwrap_err()), "not-an-attachment");
+    assert!(!target.exists());
     assert_eq!(code(core.tasks().remove_attachment("a-otra-tarea").await.unwrap_err()), "attachment-not-found");
 
     assert_eq!(server.received_requests().await.unwrap().len(), before, "pidió algo");

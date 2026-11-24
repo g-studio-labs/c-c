@@ -17,6 +17,9 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 mod gated;
 use gated::{Gate, GatedProxy};
 
+#[path = "support/by_hand.rs"]
+mod by_hand;
+
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, String>>);
 
@@ -755,6 +758,59 @@ async fn a_picture_in_a_message_is_fetched_with_the_session_and_only_from_here()
         assert!(rig.core.chat().file_bytes(foreign).await.is_err(), "{foreign}");
     }
     assert_eq!(rig.server.received_requests().await.unwrap().len(), asked, "se pidió algo que no es un adjunto de este servidor");
+}
+
+/// Guardar un fichero de un mensaje lo escribe según llega, a un `.part`
+/// al lado, y sólo le pone su nombre al terminar entero; con la sesión, y
+/// sólo si es de este servidor.
+///
+/// Roturas que atrapa: juntar el fichero entero en memoria antes de
+/// escribirlo; escribirlo con el nombre final a medias; dejar el `.part`;
+/// pedirlo sin la sesión; pedir con la sesión una dirección que no es un
+/// adjunto de este servidor.
+#[tokio::test]
+async fn saving_a_file_of_a_message_writes_it_as_it_arrives() {
+    let file = "/api/v1/task-spaces/a/chat/attachments/a1/raw";
+    let server = by_hand::serve(file, Vec::new()).await;
+    let core = Core::new(Config::new(server.base.clone()), Arc::new(MemoryStorage::default()), Arc::new(Recorder::default())).unwrap();
+    let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana", "name": "Ana Ruiz" })).unwrap();
+    core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+
+    let foreign = dir.path().join("fuera.bin");
+    for href in ["https://otro.example/api/v1/x/attachments/a/raw", "/api/v1/../admin"] {
+        assert!(core.chat().save_file(href, &foreign).await.is_err(), "{href}");
+    }
+    assert!(!foreign.exists() && !by_hand::part_of(&foreign).exists());
+    assert!(server.routes.lock().unwrap().is_empty(), "se pidió algo que no es un adjunto de este servidor: {:?}", server.routes.lock().unwrap());
+
+    let target = dir.path().join("video.mp4");
+    let half = 1_000_000;
+    let whole: Vec<u8> = (0..2 * half).map(|at| (at % 251) as u8).collect();
+    let mut first = format!("HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\n\r\n", whole.len()).into_bytes();
+    first.extend_from_slice(&whole[..half]);
+    server.send.send(first).unwrap();
+    let saving = tokio::spawn({
+        let (core, target) = (core.clone(), target.clone());
+        async move { core.chat().save_file(file, &target).await }
+    });
+
+    let partial = by_hand::part_of(&target);
+    let mut waited = 0;
+    while std::fs::metadata(&partial).map(|meta| meta.len()).unwrap_or(0) < half as u64 {
+        assert!(waited < 500, "la primera mitad no llegó a disco mientras faltaba la otra");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        waited += 1;
+    }
+    assert!(!target.exists(), "a medias ya lleva el nombre final");
+
+    server.send.send(whole[half..].to_vec()).unwrap();
+    drop(server.send);
+    saving.await.unwrap().unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), whole);
+    assert!(!partial.exists(), "se quedó el .part");
+    let head = server.asked.await.unwrap().to_lowercase();
+    assert!(head.contains("authorization: bearer access"), "{head}");
 }
 
 /// Un enlace de un mensaje va a donde apunta: una tarea se abre en su
