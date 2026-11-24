@@ -8261,13 +8261,29 @@ mod tests {
     }
 
     /// Rotura que detecta: no leer el remote de la carpeta (el agente tendría
-    /// que preguntar en qué espacio está). Usa este mismo repo.
+    /// que preguntar en qué espacio está), tampoco desde una subcarpeta del
+    /// repo, que es desde donde suele arrancar. El repo lo monta la prueba: la
+    /// copia del árbol en la caja de compilación no trae `.git`, y una prueba
+    /// no puede depender de dónde corre.
     #[test]
     fn the_remote_of_this_checkout_is_read() {
-        let here = env!("CARGO_MANIFEST_DIR");
-        let url = git_remote(here).expect("este checkout tiene remote");
-        assert!(github_repo_from_remote(&url).is_some(), "{url}");
-        assert!(git_remote("/").is_err());
+        let d = std::env::temp_dir().join(format!("cac-checkout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let sub = d.join("repo").join("mcp");
+        std::fs::create_dir_all(&sub).unwrap();
+        let bare = d.join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        let git = |args: &[&str]| {
+            let repo = d.join("repo");
+            assert!(std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap().status.success());
+        };
+        git(&["init", "-q"]);
+        git(&["remote", "add", "origin", "https://github.com/guz-studio/cac.git"]);
+
+        let url = git_remote(sub.to_str().unwrap()).expect("el checkout tiene remote");
+        assert_eq!(github_repo_from_remote(&url).as_deref(), Some("guz-studio/cac"), "{url}");
+        assert!(git_remote(bare.to_str().unwrap()).is_err(), "una carpeta sin repo no tiene remote");
+        let _ = std::fs::remove_dir_all(d);
     }
 
     /// `APPIMAGE` y `OWD` sólo hablan de este programa cuando lo sirve la app.
