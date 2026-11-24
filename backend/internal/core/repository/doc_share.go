@@ -50,11 +50,13 @@ func (r *DocShareRepository) Revoke(id string, now time.Time) error {
 
 // sharedTreeCTE: la raíz y sus descendientes vivos. El `deleted_at IS NULL` va
 // en cada paso y no sólo al final: una hija viva de una página tirada a la
-// papelera tampoco se ve, igual que en la app.
+// papelera tampoco se ve, igual que en la app. `UNION` y no `UNION ALL`: con
+// un ciclo de madres en los datos la recursión no termina nunca, y un enlace
+// público no puede colgar la base; `UNION` deja de bajar al repetir un id.
 const sharedTreeCTE = `
 	WITH RECURSIVE sub AS (
 		SELECT id FROM doc_pages WHERE id = ? AND doc_id = ? AND deleted_at IS NULL
-		UNION ALL
+		UNION
 		SELECT p.id FROM doc_pages p JOIN sub ON p.parent_id = sub.id
 		WHERE p.deleted_at IS NULL AND p.doc_id = ?
 	)`
