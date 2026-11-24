@@ -1079,12 +1079,13 @@ mod tests {
         let history = history.clone();
         server.mount(get(route).respond_with(move |request: &Request| {
             let before = request.url.query_pairs().find(|(name, _)| name == "before").map(|(_, value)| value.to_string());
-            if let (Some(gate), Some(_)) = (&older, &before) {
-                gate.wait();
-            }
             let all = history.lock().unwrap().clone();
             let visible: Vec<Value> = all.into_iter().filter(|message| before.as_deref().is_none_or(|before| message["createdAt"].as_str().unwrap() < before)).collect();
-            ok(json!(visible[visible.len().saturating_sub(50)..].to_vec())).set_delay(delay)
+            let answer = ok(json!(visible[visible.len().saturating_sub(50)..].to_vec())).set_delay(delay);
+            match (&older, &before) {
+                (Some(gate), Some(_)) => gate.hold(answer),
+                _ => answer,
+            }
         }));
     }
 
@@ -2265,16 +2266,7 @@ mod tests {
         first["reactions"] = json!([{ "emoji": "👍", "count": 1, "mine": true, "names": ["Ana Ruiz"] }]);
         mount_history(&server, CHAT_A, &history(vec![first]), Duration::ZERO);
         let answer = Gate::default();
-        let held = answer.clone();
-        server.mount(
-            Mock::given(method("POST"))
-                .and(path("/api/v1/task-spaces/a/chat/m1/reactions"))
-                .respond_with(move |_: &Request| {
-                    held.wait();
-                    ok(json!(null))
-                })
-                .with_priority(1),
-        );
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/task-spaces/a/chat/m1/reactions")).respond_with(answer.hold(ok(json!(null)))).with_priority(1));
         let (window, _) = open(&server, cx);
         enter(window, channel("a"), cx);
         wait_until(cx, "se pinta", |cx| on_screen(window, "thread-line-m1", cx));

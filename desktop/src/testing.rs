@@ -2,7 +2,7 @@
 //! almacén en memoria y cómo esperar a lo que viene de otro hilo.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cac_core::{Config, Storage};
@@ -11,6 +11,13 @@ use wiremock::{Mock, MockServer, Request};
 
 use crate::backend::Backend;
 use crate::lang::SystemLanguage;
+
+#[path = "../../core/tests/support/gated.rs"]
+mod gated;
+/// Retiene una respuesta hasta que la prueba la suelta (`gate.hold(…)` al
+/// montarla, `gate.open()` para soltarla), sin parar al servidor: lo demás
+/// sigue contestando.
+pub use gated::Gate;
 
 #[derive(Default)]
 pub struct MemoryStorage(Mutex<HashMap<String, String>>);
@@ -33,13 +40,17 @@ impl Storage for MemoryStorage {
 pub struct FakeServer {
     runtime: tokio::runtime::Runtime,
     server: MockServer,
+    /// Por donde habla la app: deja pasar todo y retiene lo que una prueba
+    /// ate a una [`Gate`].
+    proxy: gated::GatedProxy,
 }
 
 impl FakeServer {
     pub fn start() -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
         let server = runtime.block_on(MockServer::start());
-        Self { runtime, server }
+        let proxy = gated::GatedProxy::start(server.uri());
+        Self { runtime, server, proxy }
     }
 
     pub fn mount(&self, mock: Mock) {
@@ -54,7 +65,7 @@ impl FakeServer {
     /// El puerto donde escucha: un servidor de la lista que apunte aquí
     /// tiene aquí también su agente.
     pub fn port(&self) -> u16 {
-        self.server.address().port()
+        self.proxy.port()
     }
 
     /// Cuántas peticiones llegaron a esa ruta.
@@ -69,7 +80,7 @@ impl FakeServer {
 
     /// Lo mismo, retocando la configuración (las esperas del stream).
     pub fn install_with(&self, cx: &mut TestAppContext, edit: impl FnOnce(&mut Config)) {
-        let mut config = Config::new(self.server.uri());
+        let mut config = Config::new(self.proxy.uri());
         config.client = Some("desktop".into());
         config.stream_backoff = Duration::from_millis(20);
         edit(&mut config);
@@ -155,22 +166,3 @@ impl FakeServer {
     }
 }
 
-/// Retiene una respuesta hasta que la prueba la suelta. Con un plazo de
-/// llegada, en un CI lento la respuesta se adelantaba a lo que la prueba
-/// quería mirar antes, o la prueba no llegaba a mirarlo a tiempo. El servidor tiene un solo hilo: mientras retiene,
-/// no contesta nada más.
-#[derive(Clone, Default)]
-pub struct Gate(Arc<(Mutex<bool>, Condvar)>);
-
-impl Gate {
-    pub fn open(&self) {
-        *self.0.0.lock().unwrap() = true;
-        self.0.1.notify_all();
-    }
-
-    pub fn wait(&self) {
-        let (open, opened) = &*self.0;
-        // Una prueba que se rompe antes de soltarla no se queda colgada.
-        let _ = opened.wait_timeout_while(open.lock().unwrap(), Duration::from_secs(10), |open| !*open).unwrap();
-    }
-}

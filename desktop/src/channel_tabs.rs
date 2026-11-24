@@ -1482,22 +1482,13 @@ mod tests {
         let server = server();
         let id = "0f3c1a2b-4d5e-4f70-8192-a3b4c5d6e7f8";
         let gate = crate::testing::Gate::default();
-        let asked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (held, seen) = (gate.clone(), asked.clone());
-        // Se retiene la de «Producto», no la de la sala que abre la ventana:
-        // el servidor contesta de una en una, y retener durante la apertura
-        // dejaba en cola lo que la apertura espera.
         server.mount(get("/api/v1/task-spaces/g/recordings/policy").respond_with(ok(json!({ "enabled": false, "active": null }))));
-        server.mount(get("/api/v1/task-spaces/a/recordings/policy").respond_with(move |_: &wiremock::Request| {
-            seen.store(true, std::sync::atomic::Ordering::SeqCst);
-            held.wait();
-            ok(json!({ "enabled": true, "active": null }))
-        }));
+        server.mount(get("/api/v1/task-spaces/a/recordings/policy").respond_with(gate.hold(ok(json!({ "enabled": true, "active": null })))));
         server.mount(get("/api/v1/task-spaces/a/recordings").respond_with(ok(json!([recording(id, "ready")]))));
         server.install(cx);
         let window = open(cx);
         click(window, "comms-channel-a", cx);
-        wait_until(cx, "se pregunta si el canal graba", |_| asked.load(std::sync::atomic::Ordering::SeqCst));
+        wait_until(cx, "se pregunta si el canal graba", |_| gate.held() == 1);
 
         cx.update_window(window, |root, window, cx| {
             let root = root.downcast::<gpui_kit::base::Root>().unwrap();

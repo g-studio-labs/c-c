@@ -950,6 +950,7 @@ dependencies = [
 name = "cac-desktop"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "cac-core",
  "cac-mcp",
  "cac-ops",
@@ -957,8 +958,12 @@ dependencies = [
  "chrono",
  "cpal",
  "gpui-kit",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "image",
  "log",
+ "reqwest",
  "serde_json",
  "sys-locale",
  "tokio",
