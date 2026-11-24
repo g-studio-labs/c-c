@@ -359,8 +359,10 @@ impl Comms {
         answer
     }
 
-    /// Los canales que se siguen, si se sabe.
-    pub(crate) fn following(&self) -> Option<HashSet<String>> {
+    /// Los canales que se siguen, si se sabe. La carga de `load` los pone
+    /// después de las últimas líneas: con esto ya puesto, los avisos saben
+    /// qué es avanzar.
+    pub fn following(&self) -> Option<HashSet<String>> {
         self.data().following.clone()
     }
 

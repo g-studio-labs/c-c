@@ -1045,6 +1045,21 @@ mod tests {
         stop(cx);
     }
 
+    /// Un stream que entrega ese evento cuando la prueba suelta la puerta
+    /// que devuelve; luego, el de siempre del servidor de mentira, abierto
+    /// sin decir nada.
+    fn held_event(server: &FakeServer, frame: &str) -> Gate {
+        let said = Gate::default();
+        server.mount(get("/api/v1/events").respond_with(said.hold(ResponseTemplate::new(200).set_body_raw(frame.as_bytes().to_vec(), "text/event-stream"))).up_to_n_times(1));
+        said
+    }
+
+    /// Si ya llegó la primera carga de la lista (las últimas líneas y, tras
+    /// ellas, lo que se sigue): antes, el core no sabe si un mensaje es nuevo.
+    fn loaded(cx: &mut TestAppContext) -> bool {
+        cx.update(|cx| Backend::core(cx).comms().following().is_some())
+    }
+
     /// Un mensaje que llega mueve su fila en pantalla, sin tocar nada.
     ///
     /// Roturas que atrapa: los avisos del core sobre la lista que no cruzan
@@ -1054,22 +1069,17 @@ mod tests {
     fn a_message_that_arrives_moves_its_row_on_screen(cx: &mut TestAppContext) {
         let server = server();
         let frame = "event: chat:message\ndata: {\"spaceId\":\"b\",\"messageId\":\"m9\",\"actorId\":\"u2\",\"kind\":\"user\",\"authorName\":\"Luis Mora\",\"preview\":\"ya está subido\",\"mentions\":null,\"repliedTo\":\"\",\"edited\":false}\n\n";
-        server.mount(
-            get("/api/v1/events")
-                .respond_with(ResponseTemplate::new(200).set_body_raw(frame.as_bytes().to_vec(), "text/event-stream").set_delay(Duration::from_millis(600)))
-                .up_to_n_times(1),
-        );
+        let said = held_event(&server, frame);
         // Como el servidor de verdad: desde que se dijo, las últimas líneas
         // lo traen. Tras el evento la lista las vuelve a pedir; si el
         // servidor de mentira contestara siempre lo de antes, esa relectura
-        // borraba la fila nueva, y con la máquina lenta del CI la prueba
-        // miraba después y fallaba.
-        let said_at = std::time::Instant::now() + Duration::from_millis(600);
+        // borraba la fila nueva.
+        let told = said.clone();
         server.mount(
             get("/api/v1/chat/latest")
                 .respond_with(move |_: &wiremock::Request| {
                     let mut lines = vec![latest("a", "u2", "Luis Mora", "user", "¿sale **hoy**?"), latest("g", "u1", "Ana Ruiz", "system", "Grabación lista")];
-                    if std::time::Instant::now() >= said_at {
+                    if told.is_open() {
                         lines.push(latest("b", "u2", "Luis Mora", "user", "ya está subido"));
                     }
                     ok(json!(lines))
@@ -1079,6 +1089,9 @@ mod tests {
         server.install(cx);
         let window = open(cx);
         enter(window, cx);
+        wait_until(cx, "la lista ha cargado", |cx| label(window, "comms-channel-a-preview", cx) == "Luis Mora: ¿sale hoy?");
+        assert_ne!(label(window, "comms-channel-b-preview", cx), "Luis Mora: ya está subido");
+        said.open();
 
         wait_until(cx, "la fila enseña el mensaje que llegó", |cx| label(window, "comms-channel-b-preview", cx) == "Luis Mora: ya está subido");
         assert_eq!(label(window, "comms-channel-a-preview", cx), "Luis Mora: ¿sale hoy?");
@@ -1101,18 +1114,16 @@ mod tests {
         let server = server();
         server.mount(get("/api/v1/chat/following").respond_with(ok(json!(["a", "b", "g", "z"]))).with_priority(1));
         let frame = "event: chat:message\ndata: {\"spaceId\":\"z\",\"messageId\":\"m9\",\"actorId\":\"u9\",\"kind\":\"user\",\"spaceName\":\"Soporte\",\"authorName\":\"Zoe\",\"preview\":\"¿alguien?\",\"mentions\":null,\"repliedTo\":\"\",\"edited\":false}\n\n";
-        server.mount(
-            get("/api/v1/events")
-                .respond_with(ResponseTemplate::new(200).set_body_raw(frame.as_bytes().to_vec(), "text/event-stream").set_delay(Duration::from_millis(600)))
-                .up_to_n_times(1),
-        );
+        let said = held_event(&server, frame);
         // Desde que se dice, la última línea de `z` es más nueva: es lo que
-        // le dice al core que el mensaje es nuevo y no una corrección.
-        let said_at = std::time::Instant::now() + Duration::from_millis(600);
+        // le dice al core que el mensaje es nuevo y no una corrección. Con un
+        // plazo de reloj, en una máquina cargada la primera carga llegaba ya
+        // con la línea nueva y el mensaje pasaba por corregido.
+        let told = said.clone();
         server.mount(
             get("/api/v1/chat/latest")
                 .respond_with(move |_: &wiremock::Request| {
-                    let at = if std::time::Instant::now() >= said_at { "2026-01-05T16:00:00Z" } else { "2026-01-05T15:00:00Z" };
+                    let at = if told.is_open() { "2026-01-05T16:00:00Z" } else { "2026-01-05T15:00:00Z" };
                     ok(json!([{ "spaceId": "z", "authorUserId": "u9", "authorName": "Zoe", "kind": "user", "body": "…", "createdAt": at }]))
                 })
                 .with_priority(1),
@@ -1120,6 +1131,8 @@ mod tests {
         server.install(cx);
         let window = open(cx);
         wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        wait_until(cx, "la lista ha cargado", loaded);
+        said.open();
 
         wait_until(cx, "sale el aviso", |cx| !cx.shown_system_notifications().is_empty());
         let shown = cx.shown_system_notifications();
