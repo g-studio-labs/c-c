@@ -3175,7 +3175,7 @@ fn tool_defs() -> Value {
                 "properties": {
                     "title": { "type": "string", "description": "What they need to know, in one line (max 120): \"Stopped: should v1.7.2 go out now?\"" },
                     "body": { "type": "string", "description": "Optional detail (max 1000)." },
-                    "link": { "type": "string", "description": "Optional path inside cac to open when they click it, e.g. /tasks?item=<id>. External URLs are refused." },
+                    "link": { "type": "string", "description": "Optional: what to open when they click it — a cac link another tool gave you, or a path inside cac such as /tasks?item=<id>. Links outside cac are refused." },
                     "orgId": { "type": "string", "description": "Which organization's bell. Optional when they belong to only one; if they belong to several and you leave it out, the answer lists them." },
                     "dryRun": { "type": "boolean" }
                 },
@@ -3803,6 +3803,53 @@ fn resolve_task_refs(cfg: &Cfg, tool: &str, args: &Value) -> Result<Value, Strin
 }
 
 fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
+    let mut out = run_tool(cfg, name, args)?;
+    absolute_links(&cfg.base, &mut out);
+    Ok(out)
+}
+
+/// Toda liga que devuelve el MCP sale entera y bajo `/app`, que es donde vive
+/// la web. El servidor y los ayudantes de aquí las arman como rutas de la app
+/// (`/tasks?…`), y un agente las pegaba sobre el dominio: `cac…/tasks?…` no
+/// abre (command-and-control-508). Un solo sitio, para que ninguna herramienta
+/// nueva se lo salte.
+fn absolute_links(base: &str, v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m.iter_mut() {
+                if k == "link" {
+                    if let Some(path) = x.as_str().filter(|p| p.starts_with('/') && !p.starts_with("//")) {
+                        *x = json!(app_url(base, path));
+                        continue;
+                    }
+                }
+                absolute_links(base, x);
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| absolute_links(base, x)),
+        _ => {}
+    }
+}
+
+/// Lo contrario de `app_url`: de una liga entera de cac, la ruta de la app.
+fn app_path(base: &str, link: &str) -> String {
+    let app = format!("{}/app", base.trim_end_matches('/'));
+    match link.strip_prefix(&app) {
+        Some(rest) if rest.starts_with('/') || rest.starts_with('?') => rest.to_string(),
+        _ => link.to_string(),
+    }
+}
+
+fn app_url(base: &str, path: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if path == "/app" || path.starts_with("/app/") || path.starts_with("/app?") {
+        format!("{base}{path}")
+    } else {
+        format!("{base}/app{path}")
+    }
+}
+
+fn run_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
     let resolved = resolve_task_refs(cfg, name, args)?;
     let args = &resolved;
     match name {
@@ -5421,10 +5468,14 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                 return dry_run(cfg, "notify:me", api_get(cfg, "/api/v1/auth/me"));
             }
             let mut body = json!({ "title": title });
-            for key in ["body", "link", "orgId"] {
+            for key in ["body", "orgId"] {
                 if let Some(v) = arg_str(args, key) {
                     body[key] = json!(v);
                 }
+            }
+            // Las ligas que da este MCP salen enteras; la campana guarda la ruta.
+            if let Some(l) = arg_str(args, "link") {
+                body["link"] = json!(app_path(&cfg.base, &l));
             }
             api_post(cfg, "/api/v1/notifications/self", body)
         }
@@ -9214,6 +9265,31 @@ mod tests {
         let out = call_tool(&cfg, "read_messages", &json!({ "person": "nadie" })).unwrap();
         assert_eq!(out["messages"].as_array().unwrap().len(), 0);
         assert!(out["note"].as_str().unwrap().contains("no direct conversation"), "{out}");
+    }
+
+    /// Roturas que detecta: devolver la ruta suelta (`/tasks?…`, que pegada
+    /// sobre el dominio da error), olvidar el `/app`, ponerlo dos veces, o
+    /// dejar sin arreglar una liga anidada (la de un resultado de búsqueda).
+    #[test]
+    fn every_link_comes_back_as_a_full_url_under_app() {
+        let (cfg, _) = fake_cac(|_, _, _| json!({
+            "tasks": [{ "id": "t1", "link": "/tasks?task=t1" }],
+            "docs": [{ "link": "/tasks?doc=space:s1&page=p1", "children": [{ "link": "/app/notes/n1" }] }],
+            "notes": [{ "link": "https://example.com/x" }]
+        }));
+        let out = call_tool(&cfg, "search", &json!({ "query": "egress" })).unwrap();
+        let base = cfg.base.trim_end_matches('/').to_string();
+        assert_eq!(out["tasks"][0]["link"], format!("{base}/app/tasks?task=t1"));
+        assert_eq!(out["docs"][0]["link"], format!("{base}/app/tasks?doc=space:s1&page=p1"));
+        assert_eq!(out["docs"][0]["children"][0]["link"], format!("{base}/app/notes/n1"), "sin /app/app");
+        assert_eq!(out["notes"][0]["link"], "https://example.com/x", "una URL entera no se toca");
+
+        // Y la liga entera que dio vuelve a la campana como la ruta que guarda.
+        let (cfg, log) = fake_cac(|_, _, _| json!({ "id": "n1" }));
+        let link = format!("{}/app/tasks?task=t1", cfg.base.trim_end_matches('/'));
+        call_tool(&cfg, "notify_me", &json!({ "title": "listo", "link": link })).unwrap();
+        let sent = log.lock().unwrap().iter().find(|(_, p, _)| p == "/api/v1/notifications/self").cloned().unwrap();
+        assert_eq!(sent.2["link"], "/tasks?task=t1");
     }
 
     /// Un cac falso con tres personas en una org, y una conversación con Diego.
