@@ -815,6 +815,17 @@ impl TaskView {
     /// guardarle con lo escrito para la anterior.
     fn save_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(saved) = Self::saved_title(cx) else { return };
+        // Lo que dice el campo es de la tarea cuyo título se le puso. El aviso
+        // de que perdió el foco puede llegar con otra tarea ya abierta y su
+        // título aún sin poner (pasaba cargando la máquina: lo escrito para
+        // una se guardaba en la otra); entonces no es de ninguna de las dos.
+        let state = &Backend::snapshot(cx).read(cx).task;
+        let open = state.task_id.as_deref();
+        let detail = state.detail.as_ref().map(|detail| detail.task.id.as_str());
+        let shown = self.title_shown.as_ref().map(|(id, _)| id.as_str());
+        if open != detail || shown != detail {
+            return;
+        }
         let typed = self.title_input.read(cx).value().to_string();
         match cac_core::retitled(&typed, &saved) {
             Some(title) => self.change(move |core| async move { core.tasks().set_title(&title).await }, window, cx),
@@ -3708,6 +3719,47 @@ mod tests {
         assert_eq!(written(&view, cx).0, "La otra tarea");
         assert_eq!(patches_to_other(&server), 0, "se guardó en la otra tarea lo escrito para la primera");
         assert!(patches(&server).is_empty(), "se guardó {:?} sin salir del campo", patches(&server));
+        stop(cx);
+    }
+
+    /// Lo mismo cuando el aviso de que el título perdió el foco llega con la
+    /// otra tarea ya delante y su título aún sin poner en el campo, que es el
+    /// orden en que llegaba con la máquina cargada. Aquí se provoca ese orden
+    /// en vez de esperar a que salga.
+    ///
+    /// Rotura que atrapa: guardar en la tarea abierta lo que el campo tenía
+    /// escrito para la anterior.
+    #[gpui_kit::test]
+    fn a_late_blur_does_not_save_one_tasks_title_into_another(cx: &mut TestAppContext) {
+        let server = server_with_choices();
+        let mut other = detail("t2");
+        other["task"]["title"] = json!("La otra tarea");
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/tasks/t2")).respond_with(ok(other.clone())));
+        server.mount(Mock::given(method("PATCH")).and(path("/api/v1/tasks/t2")).respond_with(ok(other)));
+        let (window, view) = open_with_view(&server, cx);
+        open_first_task(window, cx);
+        retitle(window, "A medias, para la primera", cx);
+
+        open_other_task(cx);
+        // El core la abre en su hilo; aquí no se mueve el ejecutor de la
+        // ventana, que pintaría el título de la otra.
+        let core = cx.update(|cx| Backend::core(cx));
+        for _ in 0..300 {
+            if core.tasks().state().detail.as_ref().is_some_and(|detail| detail.task.id == "t2") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(core.tasks().state().detail.is_some_and(|detail| detail.task.id == "t2"), "no llegó la otra");
+        // La pantalla ya sabe que es la otra; el campo, sin pintar, sigue con
+        // lo escrito para la primera. Y entonces llega el aviso del foco.
+        cx.update(|cx| Backend::snapshot(cx).update(cx, |snapshot, _| snapshot.task = core.tasks().state()));
+        assert_eq!(written(&view, cx).0, "A medias, para la primera");
+        with_view(window, &view, cx, |view, window, cx| view.save_title(window, cx));
+        settle(cx);
+
+        assert_eq!(patches_to_other(&server), 0, "se guardó en la otra tarea lo escrito para la primera");
+        assert!(patches(&server).is_empty(), "se guardó {:?}", patches(&server));
         stop(cx);
     }
 
