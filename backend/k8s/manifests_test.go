@@ -371,3 +371,26 @@ func TestEveryWebRouteWithoutAppLeadsToIt(t *testing.T) {
 		t.Error("nginx no manda lo que llega sin /app a /app con su consulta")
 	}
 }
+
+// Cada workflow que despliega corre de uno en uno por rama y cancela el viejo.
+// Sin eso, dos pushes seguidos terminaban a la vez y el del commit anterior
+// aplicaba su HTTPRoute y su imagen `:latest` después: producción con lo viejo
+// y todo en verde (24-nov-2026, `/shared` no llegó). Roturas que atrapa: quitar
+// `concurrency`, no cancelar, o un grupo que no lleve la rama (un PR cancelaría
+// el despliegue de main).
+func TestDeploysDoNotOverlap(t *testing.T) {
+	for _, wf := range []string{"backend", "web", "transcriber"} {
+		d := docs(t, "../../.github/workflows/"+wf+".yml")[0]
+		c, _ := d["concurrency"].(doc)
+		if c == nil {
+			t.Errorf("%s: sin concurrency, dos despliegues se pisan", wf)
+			continue
+		}
+		if c["cancel-in-progress"] != true {
+			t.Errorf("%s: no cancela el despliegue viejo", wf)
+		}
+		if g, _ := c["group"].(string); !strings.Contains(g, "github.ref") {
+			t.Errorf("%s: el grupo %q no separa ramas", wf, g)
+		}
+	}
+}

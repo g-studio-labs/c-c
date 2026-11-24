@@ -23,6 +23,15 @@ on:
       - ".github/workflows/transcriber.yml"
   workflow_dispatch:
 
+# Un despliegue a la vez por rama, y el más nuevo gana: dos pushes seguidos a
+# main terminaban juntos y el del commit viejo aplicaba lo suyo después, así
+# que producción se quedaba con la versión anterior y el CI en verde (24-nov:
+# `/shared` no llegó al Gateway). Cancelar el viejo no pierde nada: el nuevo
+# lleva lo suyo.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
