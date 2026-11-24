@@ -594,7 +594,7 @@ pub mod fake {
     use std::collections::HashMap;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
 
     use super::Source;
 
@@ -603,6 +603,8 @@ pub mod fake {
         pub base: String,
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
         asked: Arc<Mutex<Vec<String>>>,
+        /// Mientras está puesto, lo que se pide se apunta y no se contesta.
+        paused: Arc<(Mutex<bool>, Condvar)>,
     }
 
     impl FakeReleases {
@@ -611,7 +613,8 @@ pub mod fake {
             let base = format!("http://{}", listener.local_addr().unwrap());
             let files: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::default();
             let asked: Arc<Mutex<Vec<String>>> = Arc::default();
-            let (served, seen) = (files.clone(), asked.clone());
+            let paused: Arc<(Mutex<bool>, Condvar)> = Arc::default();
+            let (served, seen, held) = (files.clone(), asked.clone(), paused.clone());
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(mut stream) = stream else { continue };
@@ -627,6 +630,8 @@ pub mod fake {
                     }
                     let path = first.split_whitespace().nth(1).unwrap_or("/").to_string();
                     seen.lock().unwrap().push(path.clone());
+                    let (lock, resumed) = &*held;
+                    drop(resumed.wait_while(lock.lock().unwrap(), |paused| *paused).unwrap());
                     let body = served.lock().unwrap().get(&path).cloned();
                     let (status, body) = match body {
                         Some(body) => ("200 OK", body),
@@ -636,7 +641,19 @@ pub mod fake {
                     let _ = stream.write_all(&body);
                 }
             });
-            FakeReleases { base, files, asked }
+            FakeReleases { base, files, asked, paused }
+        }
+
+        /// Deja de contestar hasta `resume`: quien pregunta espera, como con
+        /// una red lenta, pero lo que va antes y lo que va después lo decide
+        /// la prueba y no el reloj.
+        pub fn pause(&self) {
+            *self.paused.0.lock().unwrap() = true;
+        }
+
+        pub fn resume(&self) {
+            *self.paused.0.lock().unwrap() = false;
+            self.paused.1.notify_all();
         }
 
         pub fn source(&self) -> Source {
