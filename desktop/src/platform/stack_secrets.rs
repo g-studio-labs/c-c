@@ -284,9 +284,13 @@ impl StackSecretsView {
     fn pat_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (border, muted, success, warning) = (theme.border, theme.muted_foreground, theme.success, theme.warning);
+        // Mientras se mira en el llavero no se sabe: decir «sin configurar»
+        // entonces era decir algo que quizá no es, y con los botones aún
+        // apagados (un «Guardar» pulsado ahí no hacía nada).
         let status = match self.configured {
-            Some(true) => div().id("github-pat-status").aria_label(tr(cx, "common:servers.configured")).text_xs().text_color(success).child(tr(cx, "common:servers.configured")).test_support(),
-            _ => div().id("github-pat-status").aria_label(tr(cx, "common:servers.notConfigured")).text_xs().text_color(warning).child(tr(cx, "common:servers.notConfigured")).test_support(),
+            Some(true) => Some(div().id("github-pat-status").aria_label(tr(cx, "common:servers.configured")).text_xs().text_color(success).child(tr(cx, "common:servers.configured")).test_support()),
+            Some(false) => Some(div().id("github-pat-status").aria_label(tr(cx, "common:servers.notConfigured")).text_xs().text_color(warning).child(tr(cx, "common:servers.notConfigured")).test_support()),
+            None => None,
         };
         let has_reference = !Self::text(&self.op_reference, cx).is_empty();
         let configured = self.configured == Some(true);
@@ -299,7 +303,7 @@ impl StackSecretsView {
             .rounded(px(8.))
             .border_1()
             .border_color(border)
-            .child(div().flex().items_center().gap_2().child(Icon::new(Lucide::KeyRound).size_4()).child(div().flex_1().font_weight(FontWeight::MEDIUM).child(tr(cx, "common:servers.githubPat"))).child(status))
+            .child(div().flex().items_center().gap_2().child(Icon::new(Lucide::KeyRound).size_4()).child(div().flex_1().font_weight(FontWeight::MEDIUM).child(tr(cx, "common:servers.githubPat"))).children(status))
             .child(
                 div()
                     .flex()
