@@ -37,3 +37,9 @@ uniffi = ["dep:uniffi"]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util"] }
 wiremock = "0.6"
+# El proxy que retiene respuestas hasta que la prueba lo dice
+# (`tests/support/gated.rs`). Los mismos que ya trae wiremock.
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
