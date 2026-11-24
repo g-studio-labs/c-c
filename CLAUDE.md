@@ -243,13 +243,21 @@ jose:** satura la CPU y la memoria (29 GB de `target/` el escritorio solo). Se
 compila en la caja de gstd (`rust-box`, command-and-control-464):
 
 ```sh
+scripts/test-changed.sh                          # sólo las pruebas de lo cambiado
+scripts/test-changed.sh --since main --plan      # qué correría desde main
 scripts/remote.sh -- cargo test                  # desde desktop/ o core/
 scripts/remote.sh --out capturas -- ./pasada.sh  # trae lo que deje en $CAC_OUT
 scripts/remote.sh --off                          # la apaga; si no, sola a las 2 h
 ```
 
-- Desde un worktree cuya rama aún no lo tenga, se llama por la ruta de `main`:
-  `~/projects/personal/guz-studio/cac/scripts/remote.sh`.
+- Mientras se trabaja, `test-changed.sh`: corre las pruebas de los módulos
+  tocados y compila lo que depende de ellos (minuto y medio en vez de diez).
+  La suite entera la corre el CI en cada push (`desktop.yml` y compañía); un
+  rojo ahí se arregla igual que uno de aquí. Las reglas, en su cabecera, y sus
+  pruebas en `scripts/test_changed_plan_test.py`.
+- Desde un worktree cuya rama aún no los tenga, se llaman por la ruta de
+  `main`: `~/projects/personal/guz-studio/cac/scripts/remote.sh` (y
+  `test-changed.sh`).
 - Corre en la misma subcarpeta desde la que se llama, sobre una copia del árbol
   con lo no commiteado. Lo que el comando cambie allí (las roturas de `/mutar`)
   no vuelve.
