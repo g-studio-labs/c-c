@@ -220,6 +220,9 @@ pub(crate) struct NoticeData {
     /// Lo mismo para cada conversación privada.
     direct_marks: Option<HashMap<String, DateTime<Utc>>>,
     waiting: Vec<Waiting>,
+    /// Los que ya salieron de `waiting` como nuevos y aún no se han dado a
+    /// quien pinta (se le dan fuera del candado).
+    announcing: usize,
 }
 
 impl NoticeData {
@@ -263,6 +266,14 @@ impl Core {
 impl Notices {
     fn data(&self) -> std::sync::MutexGuard<'_, NoticeData> {
         self.core.inner.notices.lock().expect("notices lock")
+    }
+
+    /// Si ya sabe qué es avanzar en los canales y en los directos, y no le
+    /// queda ningún mensaje por decidir ni por avisar. Lo miran las pruebas,
+    /// que así esperan a que pase lo que tiene que pasar y no a un plazo.
+    pub fn is_settled(&self) -> bool {
+        let data = self.data();
+        data.channel_marks.is_some() && data.direct_marks.is_some() && data.waiting.is_empty() && data.announcing == 0
     }
 
     /// Un evento del servidor: un mensaje que puede avisarse se pone a
@@ -392,10 +403,12 @@ impl Notices {
                     },
                 }
             }
+            data.announcing += fresh.len();
             fresh
         };
         for announcement in fresh {
             self.core.inner.listener.announce(announcement);
+            self.data().announcing -= 1;
         }
     }
 

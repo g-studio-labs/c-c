@@ -7,10 +7,14 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cac_core::{Announcement, Config, Conversation, Core, Listener, Locale, NoticeKind, Session, Storage};
+use cac_core::{Announcement, Config, Conversation, Core, Listener, Locale, NoticeKind, ServerEvent, Session, Storage};
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+#[path = "support/gated.rs"]
+mod gated;
+use gated::{Gate, GatedProxy};
 
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, String>>);
@@ -31,12 +35,17 @@ impl Storage for MemoryStorage {
 #[derive(Default)]
 struct Recorder {
     announced: Mutex<Vec<Announcement>>,
+    /// Cuántos eventos (sin contar los pings) ya repartió el core.
+    events: Mutex<usize>,
 }
 
 impl Listener for Recorder {
     fn session_changed(&self, _session: Option<Session>) {}
     fn announce(&self, announcement: Announcement) {
         self.announced.lock().unwrap().push(announcement);
+    }
+    fn server_event(&self, _event: ServerEvent) {
+        *self.events.lock().unwrap() += 1;
     }
 }
 
@@ -48,19 +57,23 @@ impl Recorder {
 
 struct Rig {
     server: MockServer,
+    /// Por donde habla el core: deja pasar todo, y retiene lo que una
+    /// prueba ate a una [`Gate`].
+    _proxy: GatedProxy,
     core: Core,
     recorder: Arc<Recorder>,
 }
 
 async fn rig() -> Rig {
     let server = MockServer::start().await;
+    let proxy = GatedProxy::start(server.uri());
     let recorder = Arc::new(Recorder::default());
-    let mut config = Config::new(&server.uri());
+    let mut config = Config::new(&proxy.uri());
     config.stream_backoff = Duration::from_millis(40);
     let core = Core::new(config, Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
     let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana", "name": "Ana Ruiz" })).unwrap();
     core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
-    Rig { server, core, recorder }
+    Rig { server, _proxy: proxy, core, recorder }
 }
 
 fn ok(data: Value) -> ResponseTemplate {
@@ -86,16 +99,27 @@ async fn mount_org(server: &MockServer) {
 /// Así da igual cuántas veces se pregunte (cada vuelta del stream vuelve a
 /// pedirlo todo).
 #[derive(Clone)]
-struct Live(Arc<Mutex<Value>>, Duration);
+struct Live(Arc<Mutex<Value>>, Arc<Mutex<Held>>);
+
+/// Las preguntas que se retienen: la siguiente con su puerta, y las de
+/// después con otra.
+#[derive(Default)]
+struct Held {
+    next: Option<Gate>,
+    rest: Option<Gate>,
+}
 
 impl Live {
     fn new(value: Value) -> Self {
-        Live(Arc::new(Mutex::new(value)), Duration::ZERO)
+        Live(Arc::new(Mutex::new(value)), Arc::default())
     }
-    /// Uno que lee lo que hay al llegar la petición y contesta tarde: su
+    /// Desde ahora, lee lo que hay al llegar la petición y no contesta hasta
+    /// que se abre su puerta: la de la siguiente, o la de las demás. Su
     /// respuesta puede llegar después de que haya cambiado.
-    fn slow(value: Value, delay: Duration) -> Self {
-        Live(Arc::new(Mutex::new(value)), delay)
+    fn hold(&self) -> (Gate, Gate) {
+        let (next, rest) = (Gate::default(), Gate::default());
+        *self.1.lock().unwrap() = Held { next: Some(next.clone()), rest: Some(rest.clone()) };
+        (next, rest)
     }
     fn set(&self, value: Value) {
         *self.0.lock().unwrap() = value;
@@ -104,7 +128,15 @@ impl Live {
 
 impl Respond for Live {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
-        ok(self.0.lock().unwrap().clone()).set_delay(self.1)
+        let answer = ok(self.0.lock().unwrap().clone());
+        let mut held = self.1.lock().unwrap();
+        match held.next.take() {
+            Some(gate) => gate.hold(answer),
+            None => match &held.rest {
+                Some(gate) => gate.hold(answer),
+                None => answer,
+            },
+        }
     }
 }
 
@@ -121,9 +153,6 @@ struct Events(Arc<Mutex<VecDeque<(String, Vec<(Live, Value)>)>>>);
 impl Events {
     fn push(&self, frames: String, changes: Vec<(Live, Value)>) {
         self.0.lock().unwrap().push_back((frames, changes));
-    }
-    fn delivered(&self) -> bool {
-        self.0.lock().unwrap().is_empty()
     }
 }
 
@@ -211,18 +240,21 @@ async fn until(what: &str, mut done: impl FnMut() -> bool) {
 }
 
 /// Entrega unos eventos, con lo que cambia en el servidor a la vez, y espera
-/// a que se hayan leído y a que la recarga que provocan (400 ms después)
-/// haya contestado.
-async fn deliver(world: &World, frames: String, changes: Vec<(&Live, Value)>) {
+/// a que el core los haya repartido y a que la recarga que provocan haya
+/// decidido de cada mensaje si era nuevo. Con un plazo fijo, en una máquina
+/// cargada la recarga no había contestado todavía.
+async fn deliver(rig: &Rig, world: &World, frames: String, changes: Vec<(&Live, Value)>) {
+    let sent = frames.matches("event: ").count();
+    let before = *rig.recorder.events.lock().unwrap();
     world.events.push(frames, changes.into_iter().map(|(live, value)| (live.clone(), value)).collect());
-    until("se entregan los eventos", || world.events.delivered()).await;
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    until("se reparten los eventos", || *rig.recorder.events.lock().unwrap() >= before + sent).await;
+    until("se decide cada mensaje", || rig.core.notices().is_settled()).await;
 }
 
 /// Entra y espera a que la primera carga haya sembrado las horas.
 async fn enter(rig: &Rig) {
     rig.core.open_workspace().await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    until("la primera carga siembra las horas", || rig.core.notices().is_settled()).await;
 }
 
 const T0: &str = "2026-11-18T10:00:00Z";
@@ -243,7 +275,7 @@ async fn a_new_message_is_announced_and_an_edit_is_not() {
     let world = world(&rig.server, json!([line("a", T0)]), json!([])).await;
     enter(&rig).await;
 
-    deliver(&world, chat_message("a", "m5", "u2", json!({})), vec![(&world.latest, json!([line("a", T1)]))]).await;
+    deliver(&rig, &world, chat_message("a", "m5", "u2", json!({})), vec![(&world.latest, json!([line("a", T1)]))]).await;
     let announced = rig.recorder.announced();
     assert_eq!(announced.len(), 1, "se avisa el mensaje nuevo");
     let said = &announced[0];
@@ -252,7 +284,7 @@ async fn a_new_message_is_announced_and_an_edit_is_not() {
     assert_eq!(said.target.org_id.as_deref(), Some("o1"));
     assert_eq!((said.title(Locale::Es), said.body(Locale::Es)), ("#Producto".to_string(), "Luis Mora: ¿sale hoy?".to_string()));
 
-    deliver(&world, chat_message("a", "m1", "u2", json!({ "preview": "corregido" })), vec![]).await;
+    deliver(&rig, &world, chat_message("a", "m1", "u2", json!({ "preview": "corregido" })), vec![]).await;
     assert_eq!(rig.recorder.announced().len(), 1, "la corrección no se avisa");
     rig.core.stream().stop();
 }
@@ -269,9 +301,9 @@ async fn a_message_seen_this_session_is_not_announced_again() {
     let world = world(&rig.server, json!([line("a", T0)]), json!([])).await;
     enter(&rig).await;
 
-    deliver(&world, chat_message("a", "m5", "u2", json!({})), vec![(&world.latest, json!([line("a", T1)]))]).await;
+    deliver(&rig, &world, chat_message("a", "m5", "u2", json!({})), vec![(&world.latest, json!([line("a", T1)]))]).await;
     assert_eq!(rig.recorder.announced().len(), 1);
-    deliver(&world, chat_message("a", "m5", "u2", json!({ "preview": "corregido" })), vec![(&world.latest, json!([line("a", T2)]))]).await;
+    deliver(&rig, &world, chat_message("a", "m5", "u2", json!({ "preview": "corregido" })), vec![(&world.latest, json!([line("a", T2)]))]).await;
     assert_eq!(rig.recorder.announced().len(), 1, "el mismo id, otra vez, no");
     rig.core.stream().stop();
 }
@@ -291,9 +323,9 @@ async fn withdrawing_the_last_message_is_silent_and_the_next_one_is_not() {
     let world = world(&rig.server, json!([line("a", T2)]), json!([])).await;
     enter(&rig).await;
 
-    deliver(&world, chat_message("a", "m9", "u2", json!({ "preview": "" })), vec![(&world.latest, json!([line("a", T0)]))]).await;
+    deliver(&rig, &world, chat_message("a", "m9", "u2", json!({ "preview": "" })), vec![(&world.latest, json!([line("a", T0)]))]).await;
     assert!(rig.recorder.announced().is_empty(), "el retiro no se avisa");
-    deliver(&world, chat_message("a", "m10", "u2", json!({})), vec![(&world.latest, json!([line("a", T1)]))]).await;
+    deliver(&rig, &world, chat_message("a", "m10", "u2", json!({})), vec![(&world.latest, json!([line("a", T1)]))]).await;
     assert_eq!(rig.recorder.announced().len(), 1, "el siguiente, sí");
     rig.core.stream().stop();
 }
@@ -313,15 +345,15 @@ async fn own_lines_are_silent_and_a_mention_gets_through_the_open_channel() {
     assert!(rig.core.comms().select(Conversation::Channel { space_id: "a".into() }));
 
     let system = json!({ "kind": "system", "authorName": "", "preview": "Grabación lista" });
-    deliver(&world, chat_message("b", "m1", "u1", json!({})) + &chat_message("b", "m2", "u2", system), vec![(&world.latest, json!([line("a", T0), line("b", T1)]))]).await;
+    deliver(&rig, &world, chat_message("b", "m1", "u1", json!({})) + &chat_message("b", "m2", "u2", system), vec![(&world.latest, json!([line("a", T0), line("b", T1)]))]).await;
     let announced = rig.recorder.announced();
     assert_eq!(announced.len(), 1);
     assert_eq!((announced[0].tag.as_str(), announced[0].body(Locale::Es)), ("chat:b", "Grabación lista".to_string()), "la del sistema, y no lo mío");
 
-    deliver(&world, chat_message("a", "m3", "u2", json!({})), vec![(&world.latest, json!([line("a", T1), line("b", T1)]))]).await;
+    deliver(&rig, &world, chat_message("a", "m3", "u2", json!({})), vec![(&world.latest, json!([line("a", T1), line("b", T1)]))]).await;
     assert_eq!(rig.recorder.announced().len(), 1, "lo normal en el canal que se tiene delante, no");
 
-    deliver(&world, chat_message("a", "m4", "u2", json!({ "mentions": ["u1"], "preview": "@ana mira" })), vec![(&world.latest, json!([line("a", T2), line("b", T1)]))]).await;
+    deliver(&rig, &world, chat_message("a", "m4", "u2", json!({ "mentions": ["u1"], "preview": "@ana mira" })), vec![(&world.latest, json!([line("a", T2), line("b", T1)]))]).await;
     let announced = rig.recorder.announced();
     assert_eq!(announced.len(), 2, "la mención, sí");
     assert_eq!((announced[1].kind, announced[1].title(Locale::Es)), (NoticeKind::Mention, "Te mencionaron en #Producto".to_string()));
@@ -342,7 +374,7 @@ async fn a_burst_is_one_notice_and_the_mention_wins() {
     let burst = chat_message("b", "m1", "u2", json!({}))
         + &chat_message("b", "m2", "u3", json!({ "mentions": ["u1"], "authorName": "Bea Soto", "preview": "@ana ¿lo ves?" }))
         + &chat_message("b", "m3", "u2", json!({ "preview": "y otra cosa" }));
-    deliver(&world, burst, vec![(&world.latest, json!([line("b", T1)]))]).await;
+    deliver(&rig, &world, burst, vec![(&world.latest, json!([line("b", T1)]))]).await;
     let announced = rig.recorder.announced();
     assert_eq!(announced.len(), 1, "un aviso por la ráfaga");
     assert_eq!((announced[0].kind, announced[0].body(Locale::Es)), (NoticeKind::Mention, "Bea Soto: @ana ¿lo ves?".to_string()));
@@ -370,7 +402,7 @@ async fn a_direct_is_announced_without_its_text_and_an_edit_is_not() {
     let world = world(&rig.server, json!([]), json!([direct(T0, "u2")])).await;
     enter(&rig).await;
 
-    deliver(&world, dm_message("d5"), vec![(&world.dms, json!([direct(T1, "u2")]))]).await;
+    deliver(&rig, &world, dm_message("d5"), vec![(&world.dms, json!([direct(T1, "u2")]))]).await;
     let announced = rig.recorder.announced();
     assert_eq!(announced.len(), 1, "se avisa el directo");
     let said = &announced[0];
@@ -378,10 +410,10 @@ async fn a_direct_is_announced_without_its_text_and_an_edit_is_not() {
     assert_eq!(said.target.org_id.as_deref(), Some("o1"));
     assert!(!format!("{said:?}").contains("secreto"), "nada del texto viaja en el aviso");
 
-    deliver(&world, dm_message("d1"), vec![]).await;
+    deliver(&rig, &world, dm_message("d1"), vec![]).await;
     assert_eq!(rig.recorder.announced().len(), 1, "la corrección no se avisa");
 
-    deliver(&world, dm_message("d6"), vec![(&world.dms, json!([direct(T2, "u1")]))]).await;
+    deliver(&rig, &world, dm_message("d6"), vec![(&world.dms, json!([direct(T2, "u1")]))]).await;
     assert_eq!(rig.recorder.announced().len(), 1, "si lo último ya es mío, no");
     rig.core.stream().stop();
 }
@@ -396,11 +428,25 @@ async fn a_direct_is_announced_without_its_text_and_an_edit_is_not() {
 #[tokio::test]
 async fn a_load_that_left_before_the_message_does_not_decide_it() {
     let rig = rig().await;
-    let world = world_with(&rig.server, Live::slow(json!([line("a", T0)]), Duration::from_millis(300)), json!([])).await;
+    let world = world(&rig.server, json!([line("a", T0)]), json!([])).await;
     enter(&rig).await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
 
+    // Una carga sale (cada vuelta del stream recarga) y se queda en camino,
+    // con lo de antes; con ella fuera llega el mensaje. Las cargas de
+    // después, que ya lo traen, esperan a que la vieja haya vuelto: si no,
+    // daba igual lo que se hiciera con la vieja.
+    let (old, later) = world.latest.hold();
+    until("sale una carga", || old.held() == 1).await;
     world.events.push(chat_message("a", "m5", "u2", json!({})), vec![(world.latest.clone(), json!([line("a", T1)]))]);
+    until("llega el mensaje", || *rig.recorder.events.lock().unwrap() >= 1).await;
+    let last_at = |core: &Core| {
+        let state = core.comms().state();
+        state.channels.iter().find(|channel| channel.space_id == "a").and_then(|channel| channel.last.as_ref().map(|last| last.created_at.clone()))
+    };
+    assert_ne!(last_at(&rig.core).as_deref(), Some(T0), "la fila no enseña el mensaje que llegó");
+    old.open();
+    until("vuelve la carga vieja, sin él", || last_at(&rig.core).as_deref() == Some(T0)).await;
+    later.open();
     until("se avisa aunque una carga vieja vuelva sin él", || rig.recorder.announced().len() == 1).await;
     rig.core.stream().stop();
 }
@@ -420,7 +466,7 @@ async fn opening_a_notice_goes_to_its_organization_and_its_conversation() {
     let world = world(&rig.server, json!([line("z", T0)]), json!([direct(T0, "u2")])).await;
     enter(&rig).await;
 
-    deliver(&world, chat_message("z", "m5", "u2", json!({})), vec![(&world.latest, json!([line("z", T1)]))]).await;
+    deliver(&rig, &world, chat_message("z", "m5", "u2", json!({})), vec![(&world.latest, json!([line("z", T1)]))]).await;
     let announced = rig.recorder.announced();
     assert_eq!(announced.len(), 1, "se avisa lo de la otra organización");
     assert_eq!(announced[0].title(Locale::Es), "#Soporte");
@@ -433,7 +479,7 @@ async fn opening_a_notice_goes_to_its_organization_and_its_conversation() {
 
     // Y de vuelta, por un directo de la primera.
     rig.core.comms().leave();
-    deliver(&world, dm_message("d5"), vec![(&world.dms, json!([direct(T1, "u2")]))]).await;
+    deliver(&rig, &world, dm_message("d5"), vec![(&world.dms, json!([direct(T1, "u2")]))]).await;
     let direct = rig.recorder.announced()[1].clone();
     assert!(rig.core.notices().open(direct.target).await);
     assert_eq!(rig.core.orgs().state().current_org_id.as_deref(), Some("o1"));
@@ -457,15 +503,15 @@ async fn a_muted_channel_is_silent_but_a_mention_gets_through() {
 
     rig.core.comms().set_following("b", false).await.unwrap();
     assert_eq!(*world.following.0.lock().unwrap(), json!(["a", "z"]), "se le pide al servidor");
-    deliver(&world, chat_message("b", "m1", "u2", json!({})), vec![(&world.latest, json!([line("b", T1)]))]).await;
+    deliver(&rig, &world, chat_message("b", "m1", "u2", json!({})), vec![(&world.latest, json!([line("b", T1)]))]).await;
     assert!(rig.recorder.announced().is_empty(), "silenciado, lo corriente no avisa");
 
-    deliver(&world, chat_message("b", "m2", "u2", json!({ "mentions": ["u1"] })), vec![(&world.latest, json!([line("b", T2)]))]).await;
+    deliver(&rig, &world, chat_message("b", "m2", "u2", json!({ "mentions": ["u1"] })), vec![(&world.latest, json!([line("b", T2)]))]).await;
     assert_eq!(rig.recorder.announced().len(), 1, "la mención, sí");
     assert_eq!(rig.recorder.announced()[0].kind, NoticeKind::Mention);
 
     rig.core.comms().set_following("b", true).await.unwrap();
-    deliver(&world, chat_message("b", "m3", "u2", json!({})), vec![(&world.latest, json!([line("b", "2026-11-18T10:07:00Z")]))]).await;
+    deliver(&rig, &world, chat_message("b", "m3", "u2", json!({})), vec![(&world.latest, json!([line("b", "2026-11-18T10:07:00Z")]))]).await;
     assert_eq!(rig.recorder.announced().len(), 2, "seguido otra vez, avisa");
     rig.core.stream().stop();
 }
@@ -480,9 +526,10 @@ async fn a_muted_channel_is_silent_but_a_mention_gets_through() {
 #[tokio::test]
 async fn following_changes_at_once_and_goes_back_if_the_server_says_no() {
     let rig = rig().await;
+    let refusal = Gate::default();
     Mock::given(method("DELETE"))
         .and(path("/api/v1/task-spaces/a/chat/follow"))
-        .respond_with(ResponseTemplate::new(500).set_body_json(json!({ "success": false, "error": "boom" })).set_delay(Duration::from_millis(300)))
+        .respond_with(refusal.hold(ResponseTemplate::new(500).set_body_json(json!({ "success": false, "error": "boom" }))))
         .with_priority(1)
         .mount(&rig.server)
         .await;
@@ -495,8 +542,9 @@ async fn following_changes_at_once_and_goes_back_if_the_server_says_no() {
 
     let core = rig.core.clone();
     let asked = tokio::spawn(async move { core.comms().set_following("a", false).await });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    until("se le pide al servidor", || refusal.held() == 1).await;
     assert_eq!(rig.core.comms().state().selected_followed, Some(false), "cambia en el acto");
+    refusal.open();
     assert!(asked.await.unwrap().is_err(), "el fallo se dice");
     assert_eq!(rig.core.comms().state().selected_followed, Some(true), "y vuelve a como estaba");
 
