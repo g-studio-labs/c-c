@@ -510,6 +510,14 @@ impl Chat {
         }
     }
 
+    /// Si la apertura en curso ya sabe que, al acabar, tiene que releer: algo
+    /// cambió con su primera página en camino. Sólo lo mira una prueba, que
+    /// no tiene otra forma de saber que el aviso llegó antes que la página
+    /// sin cronometrar la espera.
+    pub fn reread_pending(&self) -> bool {
+        self.data().open.as_ref().is_some_and(|open| open.loading && open.reread)
+    }
+
     /// Vuelve a intentar una conversación que no se pudo leer.
     pub async fn retry(&self) {
         let target = self.data().open.as_ref().filter(|open| open.failed && !open.loading).map(|open| open.conversation.clone());

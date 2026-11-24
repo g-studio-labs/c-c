@@ -13,6 +13,10 @@ use serde_json::{json, Value};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+#[path = "support/gated.rs"]
+mod gated;
+use gated::{Gate, GatedProxy};
+
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, String>>);
 
@@ -56,12 +60,18 @@ type History = Arc<Mutex<Vec<Value>>>;
 
 struct Rig {
     server: MockServer,
+    /// Por donde habla el core: deja pasar todo, y retiene lo que una
+    /// prueba ate a una [`Gate`].
+    _proxy: GatedProxy,
     core: Core,
     recorder: Arc<Recorder>,
     /// Lo que el servidor cuenta sin leer en el canal `a`: tres, hasta que
     /// se marca leído. Y si ya se marcó leído el directo `c1`.
     unread_a: Arc<AtomicI64>,
     read_c1: Arc<AtomicBool>,
+    /// Si la hay, la cuenta de sin leer se calcula al pedirla y no sale
+    /// hasta que se abre esta puerta.
+    held_counts: Arc<Mutex<Option<Gate>>>,
 }
 
 fn ok(data: Value) -> ResponseTemplate {
@@ -89,20 +99,15 @@ fn space(id: &str, org_id: &str, name: &str, kind: Option<&str>) -> Value {
 /// con Zoe (`c9`). El canal `a` tiene tres sin leer y el directo `c1` dos,
 /// hasta que se marcan leídos.
 async fn rig() -> Rig {
-    rig_counting_slowly(Duration::ZERO).await
-}
-
-/// Lo mismo, con un servidor que tarda eso en contestar cuánto hay sin leer
-/// en los canales: lo cuenta al recibir la pregunta y lo dice después.
-async fn rig_counting_slowly(unread_delay: Duration) -> Rig {
-    rig_with(unread_delay, "member").await
+    rig_with("member").await
 }
 
 /// Lo mismo, con ese papel en las dos organizaciones.
-async fn rig_with(unread_delay: Duration, role: &str) -> Rig {
+async fn rig_with(role: &str) -> Rig {
     let server = MockServer::start().await;
+    let proxy = GatedProxy::start(server.uri());
     let recorder = Arc::new(Recorder::default());
-    let mut config = Config::new(server.uri());
+    let mut config = Config::new(proxy.uri());
     config.stream_backoff = Duration::from_millis(40);
     let core = Core::new(config, Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
     let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana", "name": "Ana Ruiz" })).unwrap();
@@ -115,9 +120,16 @@ async fn rig_with(unread_delay: Duration, role: &str) -> Rig {
     get("/api/v1/chat/latest").respond_with(ok(json!([]))).mount(&server).await;
 
     let (unread_a, read_c1) = (Arc::new(AtomicI64::new(3)), Arc::new(AtomicBool::new(false)));
-    let unread = unread_a.clone();
+    let (unread, held_counts) = (unread_a.clone(), Arc::new(Mutex::new(None::<Gate>)));
+    let held = held_counts.clone();
     get("/api/v1/chat/unread")
-        .respond_with(move |_: &Request| ok(json!([{ "spaceId": "a", "count": unread.load(Ordering::SeqCst) }, { "spaceId": "z", "count": 70 }])).set_delay(unread_delay))
+        .respond_with(move |_: &Request| {
+            let count = ok(json!([{ "spaceId": "a", "count": unread.load(Ordering::SeqCst) }, { "spaceId": "z", "count": 70 }]));
+            match held.lock().unwrap().as_ref() {
+                Some(gate) => gate.hold(count),
+                None => count,
+            }
+        })
         .mount(&server)
         .await;
     let read = read_c1.clone();
@@ -148,7 +160,7 @@ async fn rig_with(unread_delay: Duration, role: &str) -> Rig {
         .mount(&server)
         .await;
     post("/api/v1/task-spaces/b/chat/read").respond_with(ok(json!(null))).mount(&server).await;
-    Rig { server, core, recorder, unread_a, read_c1 }
+    Rig { server, _proxy: proxy, core, recorder, unread_a, read_c1, held_counts }
 }
 
 fn at(second: i64) -> DateTime<FixedOffset> {
@@ -182,25 +194,42 @@ fn instant(message: &Value) -> DateTime<FixedOffset> {
 /// Sirve esa conversación en esa ruta, como el servidor de verdad.
 async fn mount_history(server: &MockServer, route: &str, history: &History, delay: Duration) {
     let history = history.clone();
-    get(route)
-        .respond_with(move |request: &Request| {
-            let before = request.url.query_pairs().find(|(name, _)| name == "before").and_then(|(_, value)| DateTime::parse_from_rfc3339(&value).ok());
-            let all = history.lock().unwrap().clone();
-            let visible: Vec<Value> = all.into_iter().filter(|message| before.is_none_or(|before| instant(message) < before)).collect();
-            let page = visible[visible.len().saturating_sub(50)..].to_vec();
-            ok(json!(page)).set_delay(delay)
-        })
-        .mount(server)
-        .await;
+    get(route).respond_with(move |request: &Request| ok(json!(page_of(&history, request))).set_delay(delay)).mount(server).await;
 }
 
-/// Un stream que entrega esos eventos una vez, tras `delay`, y se acaba.
-async fn mount_events(server: &MockServer, frames: &str, delay: Duration) {
+/// La página que contesta el servidor a esa petición.
+fn page_of(history: &History, request: &Request) -> Vec<Value> {
+    let before = request.url.query_pairs().find(|(name, _)| name == "before").and_then(|(_, value)| DateTime::parse_from_rfc3339(&value).ok());
+    let all = history.lock().unwrap().clone();
+    let visible: Vec<Value> = all.into_iter().filter(|message| before.is_none_or(|before| instant(message) < before)).collect();
+    visible[visible.len().saturating_sub(50)..].to_vec()
+}
+
+/// Lo mismo, con cada respuesta calculada al llegar la petición y retenida
+/// por esa puerta.
+async fn mount_history_held(server: &MockServer, route: &str, history: &History, gate: &Gate) {
+    let (history, gate) = (history.clone(), gate.clone());
+    get(route).respond_with(move |request: &Request| gate.hold(ok(json!(page_of(&history, request))))).mount(server).await;
+}
+
+/// Un stream que entrega esos eventos una vez, cuando la prueba abre la
+/// puerta que devuelve, y se acaba. Con un plazo de llegada, en una máquina
+/// cargada los eventos llegaban antes de lo que la prueba preparaba para
+/// ellos.
+async fn mount_events(server: &MockServer, frames: &str) -> Gate {
+    let said = Gate::default();
     get("/api/v1/events")
-        .respond_with(ResponseTemplate::new(200).set_body_raw(frames.as_bytes().to_vec(), "text/event-stream").set_delay(delay))
+        .respond_with(said.hold(ResponseTemplate::new(200).set_body_raw(frames.as_bytes().to_vec(), "text/event-stream")))
         .up_to_n_times(1)
         .mount(server)
         .await;
+    said
+}
+
+/// Un stream que se queda abierto sin decir nada: ninguna vuelta de un corte
+/// relee por su cuenta.
+async fn mount_quiet_stream(server: &MockServer) {
+    get("/api/v1/events").respond_with(Gate::default().hold(ResponseTemplate::new(200).set_body_raw(Vec::new(), "text/event-stream"))).mount(server).await;
 }
 
 async fn until(what: &str, mut done: impl FnMut() -> bool) {
@@ -314,7 +343,7 @@ async fn a_direct_is_read_by_its_own_routes_and_follows_its_events() {
         "event: dm:read\ndata: {\"conversationId\":\"c1\",\"userId\":\"u2\",\"at\":\"2026-10-15T10:00:01Z\"}\n\n",
         "event: dm:message\ndata: {\"conversationId\":\"c1\",\"messageId\":\"d3\",\"actorId\":\"u2\",\"authorName\":\"Luis\"}\n\n",
     );
-    mount_events(&rig.server, frames, Duration::from_millis(500)).await;
+    let said = mount_events(&rig.server, frames).await;
     rig.core.open_workspace().await;
     assert_eq!(rig.core.comms().state().directs[0].unread, 2);
 
@@ -330,6 +359,7 @@ async fn a_direct_is_read_by_its_own_routes_and_follows_its_events() {
 
     // El otro escribe y lee: el mensaje llega y las palomitas se mueven.
     talk.lock().unwrap().push(private_line("d3", "u2", "ya estoy", 3));
+    said.open();
     until("se avisa de hasta dónde leyó el otro", || rig.recorder.ever(|state| state.other_read_at.as_deref() == Some("2026-10-15T10:00:01Z") && state.messages.len() == 2)).await;
     until("llega lo que escribió", || ids(&rig.core.chat().state()) == ["d1", "d2", "d3"]).await;
     assert_eq!(rig.core.chat().state().arrivals, 1);
@@ -350,7 +380,8 @@ async fn another_conversation_never_shows_the_previous_ones_messages() {
     let rig = rig().await;
     // El canal `a` contesta rápido la primera vez y muy tarde la segunda.
     get(CHAT_A).respond_with(ok(json!([line("a1", "u2", "de A", 1)]))).up_to_n_times(1).mount(&rig.server).await;
-    get(CHAT_A).respond_with(ok(json!([line("a1", "u2", "de A", 1), line("a2", "u2", "de A, tarde", 2)])).set_delay(Duration::from_millis(500))).mount(&rig.server).await;
+    let late = Gate::default();
+    get(CHAT_A).respond_with(late.hold(ok(json!([line("a1", "u2", "de A", 1), line("a2", "u2", "de A, tarde", 2)])))).mount(&rig.server).await;
     mount_history(&rig.server, CHAT_B, &history(vec![line("b1", "u3", "de B", 1)]), Duration::from_millis(200)).await;
     rig.core.open_workspace().await;
     open(&rig, channel("a")).await;
@@ -369,11 +400,11 @@ async fn another_conversation_never_shows_the_previous_ones_messages() {
         let core = rig.core.clone();
         async move { core.chat().follow().await }
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    until("A va en camino", || late.held() == 1).await;
     assert!(rig.core.comms().select(channel("b")));
     rig.core.chat().follow().await;
+    late.open();
     slow.await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let state = rig.core.chat().state();
     assert_eq!((state.conversation.clone(), ids(&state)), (Some(channel("b")), vec!["b1".to_string()]));
@@ -491,15 +522,11 @@ async fn what_arrives_is_read_at_once_and_what_is_withdrawn_is_not_news() {
     let talk = history(numbered("m", 0..60));
     mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
     let said = |message: &str| format!("event: chat:message\ndata: {{\"spaceId\":\"a\",\"messageId\":\"{message}\",\"actorId\":\"u2\",\"kind\":\"user\",\"preview\":\"x\",\"mentions\":null,\"repliedTo\":\"\",\"edited\":false}}\n\n");
-    // Una ráfaga de cinco, a los 600 ms.
-    mount_events(&rig.server, &said("m060").repeat(5), Duration::from_millis(600)).await;
+    // Una ráfaga de cinco.
+    let burst = mount_events(&rig.server, &said("m060").repeat(5)).await;
     // Y luego, una retirada (el mismo evento, sin `edited`) y una reacción.
     let later = format!("{}event: chat:reaction\ndata: {{\"spaceId\":\"a\",\"messageId\":\"m058\",\"actorId\":\"u2\"}}\n\n", said("m059"));
-    get("/api/v1/events")
-        .respond_with(ResponseTemplate::new(200).set_body_raw(later.into_bytes(), "text/event-stream").set_delay(Duration::from_millis(1500)))
-        .up_to_n_times(1)
-        .mount(&rig.server)
-        .await;
+    let then = mount_events(&rig.server, &later).await;
     rig.core.open_workspace().await;
     open(&rig, channel("a")).await;
     rig.core.chat().load_older().await;
@@ -507,6 +534,7 @@ async fn what_arrives_is_read_at_once_and_what_is_withdrawn_is_not_news() {
     let asked = hits(&rig.server, "GET", CHAT_A).await;
 
     talk.lock().unwrap().push(line("m060", "u2", "recién llegado", 60));
+    burst.open();
     until("llega el mensaje nuevo", || rig.core.chat().state().messages.last().is_some_and(|message| message.id == "m060")).await;
     let state = rig.core.chat().state();
     assert_eq!((state.messages.len(), state.arrivals), (61, 1));
@@ -525,6 +553,7 @@ async fn what_arrives_is_read_at_once_and_what_is_withdrawn_is_not_news() {
         let reacted = talk.iter_mut().find(|message| message["id"] == "m058").unwrap();
         reacted["reactions"] = json!([{ "emoji": "👍", "count": 1, "mine": false, "names": ["Luis Mora"] }]);
     }
+    then.open();
     until("el retirado desaparece", || !ids(&rig.core.chat().state()).contains(&"m059".to_string())).await;
     let state = rig.core.chat().state();
     assert_eq!((state.messages.len(), state.arrivals), (60, 1), "un mensaje retirado se anunció como nuevo");
@@ -547,14 +576,14 @@ async fn an_event_of_another_conversation_reads_nothing() {
         "event: chat:reaction\ndata: {\"spaceId\":\"g\",\"messageId\":\"y\",\"actorId\":\"u2\"}\n\n",
     );
     // El stream se queda abierto tras entregarlos: sin vuelta que relea.
-    get("/api/v1/events")
-        .respond_with(ResponseTemplate::new(200).set_body_raw(frames.as_bytes().to_vec(), "text/event-stream").set_delay(Duration::from_millis(300)))
-        .up_to_n_times(1)
-        .mount(&rig.server)
-        .await;
-    get("/api/v1/events").respond_with(ResponseTemplate::new(200).set_body_raw(Vec::new(), "text/event-stream").set_delay(Duration::from_secs(30))).mount(&rig.server).await;
+    let said = mount_events(&rig.server, frames).await;
+    mount_quiet_stream(&rig.server).await;
     rig.core.open_workspace().await;
     open(&rig, channel("a")).await;
+    said.open();
+    until("los eventos salen", || said.passed() == 1).await;
+    // Lo que se mira es que no pase nada: se le da tiempo de sobra a la
+    // relectura que no debe salir.
     tokio::time::sleep(Duration::from_millis(1200)).await;
     let asked = hits(&rig.server, "GET", CHAT_A).await;
     assert_eq!(asked, 1, "se releyó por eventos de otras conversaciones");
@@ -574,15 +603,16 @@ async fn after_a_cut_what_is_in_front_is_read_again_without_a_gap() {
     let rig = rig().await;
     let talk = history(numbered("h", 0..3));
     mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
-    // Un stream que se acaba, y otro que vuelve al rato.
-    mount_events(&rig.server, ": hola\n\n", Duration::from_millis(400)).await;
-    get("/api/v1/events").respond_with(ResponseTemplate::new(200).set_body_raw(b": de vuelta\n\n".to_vec(), "text/event-stream").set_delay(Duration::from_millis(50))).mount(&rig.server).await;
+    // Un stream que se acaba, y otro que vuelve.
+    let cut = mount_events(&rig.server, ": hola\n\n").await;
+    get("/api/v1/events").respond_with(ResponseTemplate::new(200).set_body_raw(b": de vuelta\n\n".to_vec(), "text/event-stream")).mount(&rig.server).await;
     rig.core.open_workspace().await;
     open(&rig, channel("a")).await;
     assert_eq!(ids(&rig.core.chat().state()), ["h000", "h001", "h002"]);
 
     // Durante el corte se dicen ciento veinte cosas.
     talk.lock().unwrap().extend(numbered("n", 100..220));
+    cut.open();
     until("se relee al volver", || rig.core.chat().state().messages.len() > 3).await;
     let state = rig.core.chat().state();
     let expected: Vec<String> = (0..3).map(|index| format!("h{index:03}")).chain((100..220).map(|index| format!("n{index:03}"))).collect();
@@ -603,7 +633,8 @@ async fn a_direct_of_another_organization_is_not_shown_nor_marked() {
     let rig = rig().await;
     let talk = history(vec![private_line("d1", "u2", "esto es privado", 1)]);
     get(DM_C1).respond_with(ok(json!([private_line("d1", "u2", "esto es privado", 1)]))).up_to_n_times(1).mount(&rig.server).await;
-    mount_history(&rig.server, DM_C1, &talk, Duration::from_millis(400)).await;
+    let late = Gate::default();
+    mount_history_held(&rig.server, DM_C1, &talk, &late).await;
     mount_history(&rig.server, "/api/v1/task-spaces/z/chat", &history(Vec::new()), Duration::ZERO).await;
     rig.core.open_workspace().await;
     open(&rig, direct("c1")).await;
@@ -616,13 +647,13 @@ async fn a_direct_of_another_organization_is_not_shown_nor_marked() {
         let core = rig.core.clone();
         async move { core.chat().refresh().await }
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    until("la relectura va en camino", || late.held() == 1).await;
     assert!(rig.core.switch_org("o2").await);
     let state = rig.core.chat().state();
     assert_ne!(state.conversation, Some(direct("c1")));
     assert!(state.messages.is_empty(), "quedó el directo de la otra organización");
+    late.open();
     slow.await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     assert!(rig.core.chat().state().messages.is_empty());
     assert!(!rig.core.comms().select(direct("c1")), "se eligió un directo de otra organización");
@@ -644,14 +675,14 @@ async fn a_direct_of_another_organization_is_not_shown_nor_marked() {
 async fn out_of_communication_nothing_is_read_or_marked_until_coming_back() {
     let rig = rig().await;
     let talk = history(vec![line("m1", "u2", "hola", 1)]);
-    mount_history(&rig.server, CHAT_A, &talk, Duration::from_millis(250)).await;
+    // La primera página, retenida hasta que ya se salió.
+    let first = Gate::default();
+    let held = (talk.clone(), first.clone());
+    get(CHAT_A).respond_with(move |request: &Request| held.1.hold(ok(json!(page_of(&held.0, request))))).up_to_n_times(1).mount(&rig.server).await;
+    mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
     let frame = "event: chat:message\ndata: {\"spaceId\":\"a\",\"messageId\":\"m2\",\"actorId\":\"u2\",\"kind\":\"user\",\"edited\":false}\n\n";
-    get("/api/v1/events")
-        .respond_with(ResponseTemplate::new(200).set_body_raw(frame.as_bytes().to_vec(), "text/event-stream").set_delay(Duration::from_millis(700)))
-        .up_to_n_times(1)
-        .mount(&rig.server)
-        .await;
-    get("/api/v1/events").respond_with(ResponseTemplate::new(200).set_body_raw(Vec::new(), "text/event-stream").set_delay(Duration::from_secs(30))).mount(&rig.server).await;
+    let said = mount_events(&rig.server, frame).await;
+    mount_quiet_stream(&rig.server).await;
     rig.core.open_workspace().await;
 
     // Se entra, y antes de que llegue la página se sale.
@@ -661,9 +692,10 @@ async fn out_of_communication_nothing_is_read_or_marked_until_coming_back() {
         let core = rig.core.clone();
         async move { core.chat().follow().await }
     });
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    until("la primera página va en camino", || first.held() == 1).await;
     rig.core.comms().leave();
     rig.core.chat().follow().await;
+    first.open();
     opening.await.unwrap();
     assert_eq!(hits(&rig.server, "POST", READ_A).await, 0, "se marcó leída una conversación que no se llegó a mirar");
 
@@ -680,6 +712,10 @@ async fn out_of_communication_nothing_is_read_or_marked_until_coming_back() {
     rig.core.chat().follow().await;
     talk.lock().unwrap().push(line("m2", "u2", "¿estás?", 2));
     let asked = hits(&rig.server, "GET", CHAT_A).await;
+    said.open();
+    until("el evento sale", || said.passed() == 1).await;
+    // Lo que se mira es que no pase nada: se le da tiempo de sobra a la
+    // relectura que no debe salir.
     tokio::time::sleep(Duration::from_millis(1500)).await;
     // Ni por el evento, ni por la vuelta de un corte (que llama a esto).
     rig.core.chat().refresh().await;
@@ -792,7 +828,8 @@ async fn a_reading_asked_earlier_does_not_bring_back_what_was_withdrawn() {
     let both = json!([line("m1", "u2", "hola", 1), line("m2", "u2", "esto se retira", 2)]);
     get(CHAT_A).respond_with(ok(both.clone())).up_to_n_times(1).mount(&rig.server).await;
     // La lectura lenta vio los dos; la rápida, pedida después, ya sólo uno.
-    get(CHAT_A).respond_with(ok(both).set_delay(Duration::from_millis(500))).up_to_n_times(1).mount(&rig.server).await;
+    let late = Gate::default();
+    get(CHAT_A).respond_with(late.hold(ok(both))).up_to_n_times(1).mount(&rig.server).await;
     get(CHAT_A).respond_with(ok(json!([line("m1", "u2", "hola", 1)]))).mount(&rig.server).await;
     rig.core.open_workspace().await;
     open(&rig, channel("a")).await;
@@ -802,9 +839,10 @@ async fn a_reading_asked_earlier_does_not_bring_back_what_was_withdrawn() {
         let core = rig.core.clone();
         async move { core.chat().refresh().await }
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    until("la lectura lenta va en camino", || late.held() == 1).await;
     rig.core.chat().refresh().await;
     assert_eq!(ids(&rig.core.chat().state()), ["m1"]);
+    late.open();
     slow.await.unwrap();
     assert_eq!(ids(&rig.core.chat().state()), ["m1"], "una lectura vieja devolvió el mensaje retirado");
     rig.core.stream().stop();
@@ -817,26 +855,31 @@ async fn a_reading_asked_earlier_does_not_bring_back_what_was_withdrawn() {
 /// con el mensaje ya leído, hasta que alguien escribe otra vez.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_count_asked_before_marking_does_not_bring_the_badge_back() {
-    let rig = rig_counting_slowly(Duration::from_millis(350)).await;
+    let rig = rig().await;
     let talk = history(vec![line("m1", "u2", "hola", 1)]);
     mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
     let frame = "event: chat:message\ndata: {\"spaceId\":\"a\",\"messageId\":\"m2\",\"actorId\":\"u2\",\"kind\":\"user\",\"edited\":false}\n\n";
-    get("/api/v1/events")
-        .respond_with(ResponseTemplate::new(200).set_body_raw(frame.as_bytes().to_vec(), "text/event-stream").set_delay(Duration::from_millis(1300)))
-        .up_to_n_times(1)
-        .mount(&rig.server)
-        .await;
-    get("/api/v1/events").respond_with(ResponseTemplate::new(200).set_body_raw(Vec::new(), "text/event-stream").set_delay(Duration::from_secs(30))).mount(&rig.server).await;
+    let said = mount_events(&rig.server, frame).await;
+    mount_quiet_stream(&rig.server).await;
     rig.core.open_workspace().await;
     open(&rig, channel("a")).await;
-    tokio::time::sleep(Duration::from_millis(900)).await;
-    assert_eq!(unread_of(&rig.core, "a"), 0);
+    until("abrir lo deja en cero", || unread_of(&rig.core, "a") == 0).await;
 
-    // Llega uno: el servidor lo cuenta sin leer hasta que se marque.
+    // Llega uno: el servidor lo cuenta sin leer hasta que se marque, y la
+    // cuenta que se pide ahora no contesta hasta después de marcarlo.
+    let counts = Gate::default();
+    *rig.held_counts.lock().unwrap() = Some(counts.clone());
     talk.lock().unwrap().push(line("m2", "u2", "¿sale hoy?", 2));
     rig.unread_a.store(1, Ordering::SeqCst);
+    said.open();
+    until("se pide la cuenta", || counts.held() >= 1).await;
     until_hits(&rig.server, "POST", READ_A, 2).await;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let asked = counts.held();
+    counts.open();
+    until("contesta la cuenta de antes de marcar", || counts.passed() >= asked).await;
+    // Lo que se mira es que el contador no vuelva: se le da tiempo a
+    // ponerse a la cuenta que ya salió.
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(ids(&rig.core.chat().state()), ["m1", "m2"]);
     assert_eq!(unread_of(&rig.core, "a"), 0, "el contador volvió con una cuenta de antes de marcar");
     rig.core.stream().stop();
@@ -892,9 +935,10 @@ async fn an_older_page_for_a_list_that_was_replaced_is_dropped() {
     let rig = rig().await;
     let talk = history(numbered("m", 0..60));
     // La primera página anterior que se pida tarda, y trae lo viejo.
+    let late = Gate::default();
     get(CHAT_A)
         .and(|request: &Request| request.url.query_pairs().any(|(name, _)| name == "before"))
-        .respond_with(ok(json!(numbered("m", 0..10))).set_delay(Duration::from_millis(600)))
+        .respond_with(late.hold(ok(json!(numbered("m", 0..10)))))
         .up_to_n_times(1)
         .mount(&rig.server)
         .await;
@@ -907,12 +951,13 @@ async fn an_older_page_for_a_list_that_was_replaced_is_dropped() {
         let core = rig.core.clone();
         async move { core.chat().load_older().await }
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    until("la página anterior va en camino", || late.held() == 1).await;
     // Mientras sube, se retira todo y se dicen sesenta cosas: el refresco
     // ya no puede unir y se queda con lo de ahora.
     *talk.lock().unwrap() = numbered("n", 100..160);
     rig.core.chat().refresh().await;
     assert_eq!(rig.core.chat().state().messages[0].id, "n100");
+    late.open();
     older.await.unwrap();
 
     let state = rig.core.chat().state();
@@ -932,15 +977,14 @@ async fn an_older_page_for_a_list_that_was_replaced_is_dropped() {
 async fn what_arrives_while_opening_is_not_lost() {
     let rig = rig().await;
     let talk = history(vec![line("m1", "u2", "hola", 1)]);
-    // La primera página se calcula al pedirla y llega mucho después.
-    mount_history(&rig.server, CHAT_A, &talk, Duration::from_millis(1200)).await;
-    let frame = "event: chat:message\ndata: {\"spaceId\":\"a\",\"messageId\":\"m2\",\"actorId\":\"u2\",\"kind\":\"user\",\"edited\":false}\n\n";
-    get("/api/v1/events")
-        .respond_with(ResponseTemplate::new(200).set_body_raw(frame.as_bytes().to_vec(), "text/event-stream").set_delay(Duration::from_millis(300)))
-        .up_to_n_times(1)
-        .mount(&rig.server)
-        .await;
-    get("/api/v1/events").respond_with(ResponseTemplate::new(200).set_body_raw(Vec::new(), "text/event-stream").set_delay(Duration::from_secs(30))).mount(&rig.server).await;
+    // La primera página se calcula al pedirla y no sale hasta que la prueba
+    // la suelta. Con un plazo de llegada, en una máquina cargada el aviso
+    // llegaba antes de empezar a abrir (y se ignoraba, con razón) o la página
+    // salía antes que el aviso.
+    let page = Gate::default();
+    mount_history_held(&rig.server, CHAT_A, &talk, &page).await;
+    // El stream no entrega nada por su cuenta: el aviso lo entrega la prueba.
+    mount_quiet_stream(&rig.server).await;
     rig.core.open_workspace().await;
 
     rig.core.comms().enter();
@@ -949,11 +993,14 @@ async fn what_arrives_while_opening_is_not_lost() {
         let core = rig.core.clone();
         async move { core.chat().follow().await }
     });
+    until("la primera página va en camino", || page.held() == 1).await;
     // Con la página en camino, se escribe y llega el evento.
-    tokio::time::sleep(Duration::from_millis(50)).await;
     talk.lock().unwrap().push(line("m2", "u2", "¿estás?", 2));
+    rig.core.stream().deliver(cac_core::ServerEvent { event: "chat:message".into(), data: json!({ "spaceId": "a", "messageId": "m2", "actorId": "u2", "kind": "user", "edited": false }).to_string() });
+    until("la apertura sabe que tiene que releer", || rig.core.chat().reread_pending()).await;
+    page.open();
     opening.await.unwrap();
-    until("llega lo que se escribió a media apertura", || ids(&rig.core.chat().state()) == ["m1", "m2"]).await;
+    assert_eq!(ids(&rig.core.chat().state()), ["m1", "m2"], "lo que se escribió a media apertura no se releyó al abrir");
     rig.core.stream().stop();
 }
 
@@ -963,16 +1010,13 @@ async fn one_event_alone_is_read(conversation: Conversation, route: &str, frame:
     let rig = rig().await;
     let talk = history(vec![before]);
     mount_history(&rig.server, route, &talk, Duration::ZERO).await;
-    get("/api/v1/events")
-        .respond_with(ResponseTemplate::new(200).set_body_raw(frame.as_bytes().to_vec(), "text/event-stream").set_delay(Duration::from_millis(400)))
-        .up_to_n_times(1)
-        .mount(&rig.server)
-        .await;
+    let said = mount_events(&rig.server, frame).await;
     // Y el stream no vuelve: ninguna vuelta de un corte relee por su cuenta.
-    get("/api/v1/events").respond_with(ResponseTemplate::new(200).set_body_raw(Vec::new(), "text/event-stream").set_delay(Duration::from_secs(30))).mount(&rig.server).await;
+    mount_quiet_stream(&rig.server).await;
     rig.core.open_workspace().await;
     open(&rig, conversation).await;
     *talk.lock().unwrap() = vec![after];
+    said.open();
     until("se ve lo que cambió", || seen(&rig.core.chat().state())).await;
     let arrivals = rig.core.chat().state().arrivals;
     rig.core.stream().stop();
@@ -1061,8 +1105,8 @@ async fn what_arrives_while_reading_above_is_marked_only_on_reaching_the_end() {
 /// Un servidor que, al recibir un mensaje en esa ruta, lo guarda en la
 /// conversación (como hace el de verdad) y contesta con el mensaje en bruto:
 /// sin el nombre de quien escribe ni la cita.
-async fn mount_writes(server: &MockServer, route: &str, talk: &History, delay: Duration) {
-    let talk = talk.clone();
+async fn mount_writes(server: &MockServer, route: &str, talk: &History, held: Option<&Gate>) {
+    let (talk, held) = (talk.clone(), held.cloned());
     let direct = route.starts_with("/api/v1/dm/");
     post(route)
         .respond_with(move |request: &Request| {
@@ -1073,7 +1117,11 @@ async fn mount_writes(server: &MockServer, route: &str, talk: &History, delay: D
             written["authorName"] = json!("Ana Ruiz");
             talk.push(written.clone());
             let raw = json!({ "id": written["id"], "body": written["body"], "authorUserId": "u1", "createdAt": written["createdAt"], "updatedAt": written["updatedAt"], "replyToId": sent.get("replyToId") });
-            ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": raw })).set_delay(delay)
+            let answer = ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": raw }));
+            match &held {
+                Some(gate) => gate.hold(answer),
+                None => answer,
+            }
         })
         .mount(server)
         .await;
@@ -1096,7 +1144,7 @@ async fn writing_in_a_channel_sends_the_text_and_the_reply_and_shows_it() {
     let rig = rig().await;
     let talk = history(vec![line("m1", "u2", "¿sale hoy?", 1)]);
     mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
-    mount_writes(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
+    mount_writes(&rig.server, CHAT_A, &talk, None).await;
     rig.core.open_workspace().await;
     open(&rig, channel("a")).await;
     assert!(rig.core.chat().state().can_write && rig.core.chat().state().mentions_allowed);
@@ -1129,7 +1177,7 @@ async fn writing_in_a_direct_goes_by_its_route_and_shows_without_an_event() {
     let rig = rig().await;
     let talk = history(vec![private_line("d1", "u2", "¿vienes?", 1)]);
     mount_history(&rig.server, DM_C1, &talk, Duration::ZERO).await;
-    mount_writes(&rig.server, DM_C1, &talk, Duration::ZERO).await;
+    mount_writes(&rig.server, DM_C1, &talk, None).await;
     rig.core.open_workspace().await;
     open(&rig, direct("c1")).await;
     let state = rig.core.chat().state();
@@ -1155,7 +1203,7 @@ async fn what_cannot_be_sent_is_not_asked_for() {
     let rig = rig().await;
     let talk = history(Vec::new());
     mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
-    mount_writes(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
+    mount_writes(&rig.server, CHAT_A, &talk, None).await;
     rig.core.open_workspace().await;
     open(&rig, channel("a")).await;
 
@@ -1184,8 +1232,9 @@ async fn a_message_on_its_way_is_not_sent_twice() {
     let rig = rig().await;
     let talk = history(Vec::new());
     mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
-    mount_writes(&rig.server, CHAT_A, &talk, Duration::from_millis(400)).await;
-    mount_writes(&rig.server, CHAT_B, &history(Vec::new()), Duration::ZERO).await;
+    let on_its_way = Gate::default();
+    mount_writes(&rig.server, CHAT_A, &talk, Some(&on_its_way)).await;
+    mount_writes(&rig.server, CHAT_B, &history(Vec::new()), None).await;
     rig.core.open_workspace().await;
     open(&rig, channel("a")).await;
 
@@ -1197,6 +1246,7 @@ async fn a_message_on_its_way_is_not_sent_twice() {
     let again = rig.core.chat().send(channel("a"), "hola".into(), None).await;
     assert!(matches!(again, Err(cac_core::ApiError::Server { ref code, .. }) if code == "already-sending"), "{again:?}");
     rig.core.chat().send(channel("b"), "en otro canal".into(), None).await.unwrap();
+    on_its_way.open();
     first.await.unwrap().unwrap();
     assert_eq!(hits(&rig.server, "POST", CHAT_A).await, 1);
     assert!(!rig.core.chat().state().sending);
@@ -1234,11 +1284,11 @@ async fn a_failed_send_says_why_and_leaves_the_conversation_alone() {
 /// enviar; cerrarle también los directos.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_viewer_writes_in_a_direct_but_not_in_a_channel() {
-    let rig = rig_with(Duration::ZERO, "viewer").await;
+    let rig = rig_with("viewer").await;
     mount_history(&rig.server, CHAT_A, &history(Vec::new()), Duration::ZERO).await;
     let talk = history(Vec::new());
     mount_history(&rig.server, DM_C1, &talk, Duration::ZERO).await;
-    mount_writes(&rig.server, DM_C1, &talk, Duration::ZERO).await;
+    mount_writes(&rig.server, DM_C1, &talk, None).await;
     rig.core.open_workspace().await;
     open(&rig, channel("a")).await;
     assert!(!rig.core.chat().state().can_write);
@@ -1429,13 +1479,14 @@ async fn a_reaction_is_seen_at_once_and_undone_if_refused() {
     first["reactions"] = json!([{ "emoji": "👍", "count": 1, "mine": false, "names": ["Luis Mora"] }]);
     let talk = history(vec![first]);
     mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
-    let reacted = talk.clone();
+    let (reacted, answer) = (talk.clone(), Gate::default());
+    let held = answer.clone();
     Mock::given(method("POST"))
         .and(path("/api/v1/task-spaces/a/chat/m1/reactions"))
         .and(|request: &Request| String::from_utf8_lossy(&request.body).contains("👍"))
         .respond_with(move |_: &Request| {
             reacted.lock().unwrap()[0]["reactions"] = json!([{ "emoji": "👍", "count": 2, "mine": true, "names": ["Luis Mora", "Ana Ruiz"] }]);
-            ok(json!(null)).set_delay(Duration::from_millis(400))
+            held.hold(ok(json!(null)))
         })
         .mount(&rig.server)
         .await;
@@ -1453,6 +1504,7 @@ async fn a_reaction_is_seen_at_once_and_undone_if_refused() {
     });
     until("la reacción se ve en el acto", || rig.core.chat().state().messages[0].reactions.first().is_some_and(|reaction| reaction.count == 2 && reaction.mine)).await;
     assert_eq!(hits(&rig.server, "GET", CHAT_A).await, 1, "se esperó a releer para pintarla");
+    answer.open();
     reacting.await.unwrap().unwrap();
     let sent = sent_bodies(&requests(&rig.server, "POST", "/api/v1/task-spaces/a/chat/m1/reactions").await);
     assert_eq!(sent, [json!({ "emoji": "👍", "on": true })]);
