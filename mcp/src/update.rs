@@ -49,6 +49,10 @@ pub const ENV_VERSION_URL: &str = "CAC_MCP_VERSION_URL";
 pub const ENV_DOWNLOAD_BASE: &str = "CAC_MCP_DOWNLOAD_BASE";
 /// Otra carpeta para lo que este programa recuerda entre arranques.
 pub const ENV_STATE_DIR: &str = "CAC_MCP_STATE_DIR";
+/// Otro plazo, en segundos, para preguntar por la última versión. Lo usan las
+/// pruebas: con un plazo que no se acaba, esperar a la red es colgarse, y eso
+/// se distingue de ir lento sin cronometrar nada.
+pub const ENV_CHECK_TIMEOUT: &str = "CAC_MCP_VERSION_TIMEOUT";
 
 /// Cada cuánto se vuelve a preguntar si la última vez contestaron.
 const CHECK_EVERY: u64 = 24 * 60 * 60;
@@ -458,7 +462,14 @@ pub fn latest_known_within(source: &Source, dir: &Path, now: u64, max_age: u64) 
         return checked.and_then(|checked| checked.latest);
     }
     let before = checked.and_then(|checked| checked.latest);
-    check_now(source, Some(dir), Duration::from_secs(8)).ok().or(before)
+    check_now(source, Some(dir), check_timeout()).ok().or(before)
+}
+
+/// El plazo de preguntar por la última versión: ocho segundos, salvo lo que
+/// diga el entorno.
+fn check_timeout() -> Duration {
+    let secs = std::env::var(ENV_CHECK_TIMEOUT).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(8);
+    Duration::from_secs(secs)
 }
 
 /// Si se pidió no preguntar por versiones nuevas.

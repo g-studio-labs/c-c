@@ -115,9 +115,11 @@ fn a_newer_version_is_told_once_and_asked_for_once_a_day() {
     let at_start = first.instructions();
     assert!(!at_start.contains(NEWER), "en el primer arranque todavía no se sabe: {at_start}");
     wait_for("el hilo de fondo apunta lo que le contestaron", || dir.join("state").join("update.json").exists());
-    // El fichero se escribe un instante antes de que el servidor lo sepa.
+    // El fichero se escribe un instante antes de que el servidor lo sepa, y
+    // no hay más señal que preguntarle: se pregunta hasta que lo dice.
     let mut told = String::new();
-    for _ in 0..50 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
         told = first.call();
         if told.contains(NEWER) {
             break;
@@ -185,13 +187,22 @@ fn a_server_that_never_answers_delays_nothing() {
     let hung = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/VERSION", hung.local_addr().unwrap());
     let dir = scratch("hung");
-    let started = Instant::now();
-    let mut session = Session::open(binary_at(Path::new(env!("CARGO_BIN_EXE_cac-mcp")), &dir, &url, "http://127.0.0.1:9"));
-    assert!(session.instructions().contains("get_context"));
-    assert!(session.call().contains("CAC_TOKEN is not set"));
-    session.close();
-    let took = started.elapsed();
-    assert!(took < Duration::from_secs(4), "la sesión esperó a la red: {took:?}");
+    // Con un plazo que no se acaba, una sesión que esperara a la red no
+    // terminaría nunca: terminar es no haberla esperado. Medir cuánto tardaba
+    // dependía de lo cargada que estuviera la máquina.
+    let mut cmd = binary_at(Path::new(env!("CARGO_BIN_EXE_cac-mcp")), &dir, &url, "http://127.0.0.1:9");
+    cmd.env("CAC_MCP_VERSION_TIMEOUT", "86400");
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut session = Session::open(cmd);
+        let said = (session.instructions(), session.call());
+        session.close();
+        let _ = done.send(said);
+    });
+    // Sólo para que una rotura no cuelgue la prueba un día entero.
+    let (instructions, called) = finished.recv_timeout(Duration::from_secs(120)).expect("la sesión esperó a la red");
+    assert!(instructions.contains("get_context"));
+    assert!(called.contains("CAC_TOKEN is not set"));
     // Y sí que lo intentó: hay una conexión esperando en la cola.
     hung.set_nonblocking(true).unwrap();
     assert!(hung.accept().is_ok(), "no llegó a preguntar: la prueba no mide nada");
