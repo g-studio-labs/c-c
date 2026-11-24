@@ -122,7 +122,12 @@ trap 'rm -f "$ignored"' EXIT
 git -C "$root" ls-files --others --ignored --exclude-standard --directory | sed 's|^|/|' >"$ignored"
 say_swept "$(sweep)"
 kube exec "$POD" -- mkdir -p "$src" "$remote_out"
-rsync -a --delete --exclude=/.git --exclude-from="$ignored" -e "$0 --rsh" "$root/" "pod:$src/"
+# Por contenido y sin copiar fechas: con `-a` un fichero que se rompió allí y
+# se devuelve desde aquí llegaba con su fecha de aquí, más vieja que la del
+# último build, y cargo daba por bueno el binario con la rotura dentro (24-nov,
+# un rojo falso en core y otro en el MCP). Así sólo lo que cambió de contenido
+# se reescribe, con la hora de ahora, y cargo lo recompila.
+rsync -a --no-times --checksum --delete --exclude=/.git --exclude-from="$ignored" -e "$0 --rsh" "$root/" "pod:$src/"
 
 $sync_only && exit 0
 
