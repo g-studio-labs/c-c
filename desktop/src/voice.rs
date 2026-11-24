@@ -1390,8 +1390,11 @@ mod tests {
         assert!(!on_screen(window, "voice-invite-u1", cx), "ni tú");
         click(window, "voice-invite-u3", cx);
         wait_until(cx, "llamando", |cx| label(window, "voice-ring-title", cx) == "Llamando a Eva Paz");
-        assert!(label(window, "voice-ring-detail", cx).starts_with("Llamando · 0:0"));
-        assert_eq!(requests(&server, "POST", "/api/v1/task-spaces/a/voice/ring"), 1);
+        // Lo que dura la llamada, en minutos y segundos: en una máquina
+        // cargada ya podían ser más de nueve segundos.
+        assert!(label(window, "voice-ring-detail", cx).starts_with("Llamando · 0:"));
+        // La fila sale en el acto; el timbre lo pide el core en su hilo.
+        wait_until(cx, "se le pide al servidor", |_| requests(&server, "POST", "/api/v1/task-spaces/a/voice/ring") == 1);
         assert_eq!(played.1.lock().unwrap().last().copied().flatten(), Some(cac_core::RingTone::Outgoing));
 
         click(window, "voice-ring-cancel", cx);
