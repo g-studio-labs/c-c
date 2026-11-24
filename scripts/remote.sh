@@ -6,11 +6,16 @@
 #   scripts/remote.sh -- cargo test                 # desde desktop/, core/…
 #   scripts/remote.sh --out capturas -- ./pasada.sh # trae lo que deje en $CAC_OUT
 #   scripts/remote.sh --sync-only
+#   scripts/remote.sh --kill                        # corta lo que corra de este worktree
 #   scripts/remote.sh --off                         # apaga la caja ya
 #
 # El comando corre en la misma subcarpeta desde la que se llama. La copia de
 # allí es de usar y tirar: lo que el comando cambie en ella (las roturas de
 # `/mutar`) no vuelve, y la siguiente sincronización lo pisa.
+#
+# Una corrida nueva corta antes lo que quede de otra del mismo worktree: dos
+# sobre la misma copia se pisan las roturas, y una que se dejó colgada seguía
+# horas comiendo CPU (23-nov-2026: una prueba colgada, 4 h viva).
 #
 # Todo entra por el SSH de siempre (`ssh gstd`) y sólo toca el namespace
 # `build`.
@@ -43,14 +48,15 @@ if [[ "${1:-}" == --rsh ]]; then
   exit
 fi
 
-usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
-out="" sync_only=false off=false
+out="" sync_only=false off=false kill_only=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --out) out="$2"; shift 2 ;;
     --sync-only) sync_only=true; shift ;;
     --off) off=true; shift ;;
+    --kill) kill_only=true; shift ;;
     -h | --help) usage ;;
     --) shift; break ;;
     *) echo "remote.sh: no entiendo «$1»" >&2; usage 2 >&2 ;;
@@ -61,7 +67,7 @@ if $off; then
   kube scale statefulset "$BOX" --replicas=0
   exit
 fi
-if ! $sync_only && [[ $# -eq 0 ]]; then
+if ! $sync_only && ! $kill_only && [[ $# -eq 0 ]]; then
   echo "remote.sh: falta el comando, después de «--»" >&2
   exit 2
 fi
@@ -74,6 +80,30 @@ src="/work/src/$name"
 remote_out="/work/out/$name"
 
 touch_box() { kube annotate statefulset "$BOX" "cac.build/last-used=$(date +%s)" --overwrite >/dev/null; }
+
+# Lo de este worktree es todo proceso que trabaja dentro de su copia: así se
+# alcanza también lo que se salió de su grupo o quedó de una corrida cuyo
+# `remote.sh` murió sin avisar (un SIGKILL aquí no deja hacer nada). Dice
+# cuántos cortó.
+sweep() {
+  kube exec "$POD" -- sh -c "n=0
+    for d in /proc/[0-9]*; do
+      case \"\$(readlink \$d/cwd 2>/dev/null)\" in
+        $src | $src/*) kill -KILL \${d#/proc/} 2>/dev/null && n=\$((n + 1)) ;;
+      esac
+    done
+    echo \$n"
+}
+say_swept() {
+  [[ "${1:-0}" -gt 0 ]] && echo "remote.sh: corté $1 procesos que seguían corriendo de $name" >&2
+  return 0
+}
+
+if $kill_only; then
+  [[ "$(kube get statefulset "$BOX" -o 'jsonpath={.status.readyReplicas}')" == 1 ]] || exit 0
+  say_swept "$(sweep)"
+  exit 0
+fi
 
 # Apuntar el uso ANTES de encender: el apagado corre cada 15 minutos y una
 # caja recién encendida sin apuntar es, para él, una que no usa nadie.
@@ -90,6 +120,7 @@ fi
 ignored="$(mktemp)"
 trap 'rm -f "$ignored"' EXIT
 git -C "$root" ls-files --others --ignored --exclude-standard --directory | sed 's|^|/|' >"$ignored"
+say_swept "$(sweep)"
 kube exec "$POD" -- mkdir -p "$src" "$remote_out"
 rsync -a --delete --exclude=/.git --exclude-from="$ignored" -e "$0 --rsh" "$root/" "pod:$src/"
 
@@ -109,6 +140,7 @@ run="run-$$-$(date +%s)"
 # («Illegal number»), falla callado y deja el comando vivo allá.
 stop() {
   kube exec "$POD" -- sh -c "kill -TERM -\$(cat /work/tmp/$run.pid) 2>/dev/null; rm -f /work/tmp/$run.pid" || true
+  sweep >/dev/null || true
 }
 finish() {
   # El `sleep` del latido primero: huérfano, seguiría vivo cinco minutos.
