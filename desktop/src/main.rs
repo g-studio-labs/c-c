@@ -24,6 +24,7 @@ mod composer;
 mod comms;
 mod connect;
 mod docs;
+mod docs_module;
 mod editor;
 mod files;
 mod identity;

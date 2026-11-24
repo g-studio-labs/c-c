@@ -173,6 +173,17 @@ pub struct DocsState {
     pub jump: Option<DocJump>,
     /// El último enlace que no se pudo abrir, hasta que se quite el aviso.
     pub link_failed: Option<DocLinkFailure>,
+    /// Si se está en el módulo Documentación (su panel y su tabla), y no
+    /// leyendo la documentación de un nodo desde Trabajo. Abrir o cerrar un
+    /// documento no lo cambia: es de dónde se está, no de qué se lee.
+    pub in_module: bool,
+    /// Los nodos del árbol de Documentación plegados o desplegados a mano,
+    /// por su clave (`doc_key`). Tampoco cambian al abrir otro documento,
+    /// salvo su camino (`docs_panel::reveal`).
+    pub node_folds: HashMap<String, bool>,
+    /// Las páginas de otros documentos, pedidas al desplegar su nodo en el
+    /// árbol, por la clave del nodo.
+    pub peeked: HashMap<String, Vec<DocPageItem>>,
 }
 
 impl Default for DocsState {
@@ -197,6 +208,22 @@ impl Default for DocsState {
             edit: None,
             jump: None,
             link_failed: None,
+            in_module: false,
+            node_folds: HashMap::new(),
+            peeked: HashMap::new(),
+        }
+    }
+}
+
+impl DocsState {
+    /// Un estado sin documento que conserva lo que es del módulo y no de lo
+    /// que se lee: dónde se está y cómo va el árbol.
+    fn emptied(&mut self) -> DocsState {
+        DocsState {
+            in_module: self.in_module,
+            node_folds: std::mem::take(&mut self.node_folds),
+            peeked: std::mem::take(&mut self.peeked),
+            ..DocsState::default()
         }
     }
 }
@@ -395,6 +422,7 @@ impl Core {
             return;
         }
         self.docs().close_now();
+        self.docs().leave_module();
         self.tree().click(&target.id, Looking::Tasks);
     }
 
@@ -404,6 +432,7 @@ impl Core {
             return;
         }
         self.docs().close_now();
+        self.docs().leave_module();
         self.my_work().set_scope(None);
     }
 }
@@ -451,6 +480,7 @@ impl Docs {
         // Quién puede escribir aquí: quien puede cambiar el árbol de la
         // organización que se mira (`can_edit_tree`). Un `viewer` lee.
         let can_edit = self.core.tree().can_edit();
+        let spaces = self.core.tree().state().spaces;
         self.update(|state| {
             // El documento de otro nodo no se enseña mientras llega éste:
             // se leería bajo un nombre que no es el suyo.
@@ -461,7 +491,8 @@ impl Docs {
                 let edit = state.edit.take();
                 // El aviso de un enlace que no se abrió no es del documento.
                 let link_failed = state.link_failed.take();
-                *state = DocsState { target: Some(target), edit, link_failed, ..DocsState::default() };
+                crate::docs_panel::reveal(state, &spaces, target.kind, &target.id);
+                *state = DocsState { target: Some(target.clone()), edit, link_failed, ..state.emptied() };
             }
             if let Some(tab) = tab.filter(|tab| DOC_TABS.contains(tab)) {
                 state.tab = tab.to_string();
@@ -502,6 +533,7 @@ impl Docs {
                 self.load_page(&page_id).await;
             }
         }
+        self.peek_path(kind, id).await;
     }
 
     /// Pone en el estado un documento que acaba de llegar.
@@ -583,7 +615,7 @@ impl Docs {
     /// nodo del que era ya no existe.
     pub(crate) fn close_now(&self) {
         if self.state().target.is_some() {
-            self.update(|state| *state = DocsState::default());
+            self.update(|state| *state = state.emptied());
         }
     }
 

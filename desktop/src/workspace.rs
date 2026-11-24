@@ -27,9 +27,9 @@ use crate::task::TaskView;
 
 /// Las medidas de la app de siempre: el riel y el panel.
 const RAIL_WIDTH: f32 = 48.;
-/// El puesto de cada módulo en el riel, para ⌘1–⌘9 (`AppRail.tsx`): el
-/// 2 es Docs, que aún no está en esta app.
+/// El puesto de cada módulo en el riel, para ⌘1–⌘9 (`AppRail.tsx`).
 const RAIL_WORK: usize = 1;
+const RAIL_DOCS: usize = 2;
 const RAIL_COMMS: usize = 3;
 const RAIL_PLATFORM: usize = 4;
 const PANEL_WIDTH: f32 = 256.;
@@ -97,6 +97,11 @@ struct NameField {
 pub struct Workspace {
     pub(crate) my_work: Entity<MyWorkView>,
     docs: Entity<DocsView>,
+    /// La tabla de toda la documentación: la pantalla de Documentación
+    /// cuando no se lee nada.
+    doc_index: Entity<crate::docs_module::DocIndexView>,
+    /// Lo escrito para filtrar el árbol de Documentación.
+    docs_filter: Entity<InputState>,
     pub(crate) task: Entity<TaskView>,
     /// La lista de comunicación: lo que el panel enseña mientras se está en
     /// ese módulo.
@@ -194,6 +199,8 @@ impl Workspace {
         Self {
             my_work: cx.new(|cx| MyWorkView::new(window, cx)),
             docs: cx.new(DocsView::new),
+            doc_index: cx.new(|cx| crate::docs_module::DocIndexView::new(window, cx)),
+            docs_filter: cx.new(|cx| InputState::new(window, cx).placeholder(tr(cx, "nav:panel.filter"))),
             task: cx.new(|cx| TaskView::new(window, cx)),
             comms,
             servers: cx.new(|_| crate::platform::servers::ServersView::new()),
@@ -985,12 +992,10 @@ impl Workspace {
     /// Pulsar el puesto `slot` del riel, con el ratón o con ⌘N: el módulo
     /// en el que se está fija el panel o lo suelta; otro lleva a él.
     fn press_rail(&mut self, slot: usize, cx: &mut Context<Self>) {
-        let (on_comms, on_platform) = {
-            let snapshot = Backend::snapshot(cx).read(cx);
-            (snapshot.comms.on_screen, snapshot.platform.on_screen)
-        };
+        let (on_comms, on_platform, on_docs) = Self::modules(cx);
         let here = match slot {
-            RAIL_WORK => !on_comms && !on_platform,
+            RAIL_WORK => !on_comms && !on_platform && !on_docs,
+            RAIL_DOCS => on_docs,
             RAIL_COMMS => on_comms,
             RAIL_PLATFORM => on_platform,
             _ => return,
@@ -1004,6 +1009,23 @@ impl Workspace {
             RAIL_WORK => {
                 core.comms().leave();
                 core.platform().leave();
+                // Lo que se leía en Documentación es de allí: «Trabajo» es
+                // «Mi trabajo», como en la app de siempre. Con texto sin
+                // guardar, pregunta antes.
+                if core.docs().state().in_module {
+                    core.docs().leave_module();
+                    core.docs().close();
+                }
+            }
+            RAIL_DOCS => {
+                core.docs().enter_module();
+                // Quién responde de cada documento y cuándo se revisó, al
+                // día para la tabla.
+                Backend::run(cx, |core| async move {
+                    if let Some(org) = core.tree().state().org_id {
+                        core.tree().load_doc_marks(&org).await;
+                    }
+                });
             }
             RAIL_COMMS => core.comms().enter(),
             _ => {
@@ -1018,6 +1040,15 @@ impl Workspace {
         }
     }
 
+    /// En qué módulo con pantalla propia se está: comunicación, Plataforma o
+    /// Documentación (las dos primeras se pintan por delante). Si en
+    /// ninguno, en «Trabajo». Lo dice el core.
+    fn modules(cx: &App) -> (bool, bool, bool) {
+        let snapshot = Backend::snapshot(cx).read(cx);
+        let (on_comms, on_platform) = (snapshot.comms.on_screen, snapshot.platform.on_screen);
+        (on_comms, on_platform, snapshot.docs.in_module && !on_comms && !on_platform)
+    }
+
     fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (sidebar, border) = (theme.sidebar, theme.sidebar_border);
@@ -1028,11 +1059,8 @@ impl Workspace {
         let servers = RailCount { id: "rail-platform-count", count: counters.servers, warning: true };
         let invitations = RailCount { id: "rail-organization-count", count: counters.invitations, warning: false };
         // En cuál de los módulos con pantalla se está lo dice el core.
-        let (on_comms, on_platform) = {
-            let snapshot = Backend::snapshot(cx).read(cx);
-            (snapshot.comms.on_screen, snapshot.platform.on_screen)
-        };
-        let on_work = !on_comms && !on_platform;
+        let (on_comms, on_platform, on_docs) = Self::modules(cx);
+        let on_work = !on_comms && !on_platform && !on_docs;
         let platform_label = counted_label(&tr(cx, "nav:module.platform"), servers.count);
         let comms_label = counted_label(&tr(cx, "nav:module.comms"), comms.count);
         div()
@@ -1056,7 +1084,12 @@ impl Workspace {
                     .on_click(cx.listener(|this, _, _, cx| this.press_rail(RAIL_WORK, cx)))
                     .test_support(),
             )
-            .child(Self::pending_module("rail-docs", Lucide::BookOpen, "nav:module.docs", None, cx))
+            .child(
+                Self::rail_button_keyed("rail-docs", Lucide::BookOpen, tr(cx, "nav:module.docs"), Some(RAIL_DOCS), on_docs, cx)
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| this.press_rail(RAIL_DOCS, cx)))
+                    .test_support(),
+            )
             // Con lo que tiene sin leer, en su esquina y en lo que dice.
             .child(
                 Self::rail_button_keyed("rail-comms", Lucide::MessagesSquare, comms_label.clone(), Some(RAIL_COMMS), on_comms, cx)
@@ -1325,8 +1358,7 @@ impl Workspace {
         let on_my_work = snapshot.docs.target.is_none();
         // En comunicación el panel es su lista, y en Plataforma sus filas:
         // misma cabecera, otro cuerpo.
-        let on_comms = snapshot.comms.on_screen;
-        let on_platform = snapshot.platform.on_screen;
+        let (on_comms, on_platform, on_docs) = Self::modules(cx);
         let pinned = self.panel_pinned;
         // El catálogo anuncia el atajo como en un Mac («⌘B»): se dice con
         // la tecla de este sistema.
@@ -1407,7 +1439,25 @@ impl Workspace {
                     .leading_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(muted)
-                    .child(div().flex_1().child(tr(cx, if on_comms { "nav:module.comms" } else if on_platform { "nav:module.platform" } else { "nav:module.work" }).to_uppercase()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(
+                                tr(
+                                    cx,
+                                    if on_comms {
+                                        "nav:module.comms"
+                                    } else if on_platform {
+                                        "nav:module.platform"
+                                    } else if on_docs {
+                                        "nav:module.docs"
+                                    } else {
+                                        "nav:module.work"
+                                    },
+                                )
+                                .to_uppercase(),
+                            ),
+                    )
                     .child(
                         Button::new("panel-toggle")
                             .ghost()
@@ -1428,6 +1478,9 @@ impl Workspace {
                 .child(div().id("platform-panel").flex_1().min_h_0().overflow_y_scroll().child(crate::platform::panel::panel(cx)))
                 .children(crate::voice::mini(cx))
                 .into_any_element();
+        }
+        if on_docs {
+            return panel.child(crate::docs_module::panel(&self.docs_filter, cx)).children(crate::voice::mini(cx)).into_any_element();
         }
         panel
             .child(
@@ -1606,6 +1659,8 @@ impl Render for Workspace {
             crate::comms::conversation(&self.chat, &self.channel_tabs, cx)
         } else if snapshot.platform.on_screen {
             self.servers.clone().into_any_element()
+        } else if snapshot.docs.in_module && snapshot.docs.target.is_none() {
+            self.doc_index.clone().into_any_element()
         } else if snapshot.docs.target.is_some() {
             self.docs.clone().into_any_element()
         } else {
@@ -1733,6 +1788,12 @@ mod tests {
     mod provision {
         use super::*;
         include!("platform/provision_tests.rs");
+    }
+
+    /// El módulo Documentación, igual.
+    mod docs_module {
+        use super::*;
+        include!("docs_module_tests.rs");
     }
 
     fn org(id: &str, name: &str) -> serde_json::Value {
@@ -3521,6 +3582,9 @@ mod tests {
         wait_until(cx, "vuelve el árbol", |cx| on_screen(window, "tree-l-a", cx));
         press(window, "secondary-3", cx);
         wait_until(cx, "⌘3 lleva a Comunicación", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).comms.on_screen));
+        press(window, "secondary-2", cx);
+        wait_until(cx, "⌘2 lleva a Documentación", |cx| on_screen(window, "doc-index", cx));
+        assert!(cx.update(|cx| !Backend::snapshot(cx).read(cx).comms.on_screen), "Documentación con comunicación delante");
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 

@@ -421,10 +421,18 @@ impl Docs {
 
     /// Pliega o despliega una página del árbol. Lo que se hace a mano manda
     /// sobre lo que va abierto por llevar a la página que se lee.
+    ///
+    /// Una página de otro documento (de las que se ven en el árbol de
+    /// Documentación) va plegada mientras nadie la despliegue.
     pub fn toggle_page(&self, page_id: &str) {
-        let Some(row) = self.state().page_rows(Locale::En).into_iter().find(|row| row.id == page_id) else { return };
+        let state = self.state();
+        let open = match state.page_rows(Locale::En).into_iter().find(|row| row.id == page_id) {
+            Some(row) => row.open,
+            None if state.peeked.values().flatten().any(|page| page.id == page_id) => state.page_folds.get(page_id).copied().unwrap_or(false),
+            None => return,
+        };
         self.update(|state| {
-            state.page_folds.insert(page_id.to_string(), !row.open);
+            state.page_folds.insert(page_id.to_string(), !open);
         });
     }
 }
