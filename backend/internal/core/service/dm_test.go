@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm/logger"
 
 	"github.com/guz-studio/cac/backend/internal/core/domain"
+	"github.com/guz-studio/cac/backend/internal/core/events"
 	"github.com/guz-studio/cac/backend/internal/core/repository"
 )
 
@@ -304,5 +305,57 @@ func TestCreatingAnOrganizationBringsTheSuperadminsIn(t *testing.T) {
 		Pluck("role", &ownerRoles)
 	if len(ownerRoles) != 1 {
 		t.Error("the person who created it must be a member too")
+	}
+}
+
+// Corregir o retirar en un directo no es volver a escribir: al otro le llega
+// el evento, marcado como edición, para verlo cambiar, pero no otra fila de
+// «te escribió» en la campana (command-and-control-418).
+//
+// Roturas que atrapa: avisar en la campana al corregir o al retirar; mandar el
+// evento sin `edited`; dejar de mandarlo; dejar de avisar de lo nuevo.
+func TestCorrectingADirectDoesNotRingAgain(t *testing.T) {
+	db, cleanup := dmDB(t)
+	defer cleanup()
+	repo := repository.NewDMRepository(db)
+	hub := events.NewHub()
+	hears, closeHub := hub.Subscribe("u-bea", []string{"org-1"})
+	defer closeHub()
+	spy := &notificadorEspia{}
+	svc := NewDMService(repo, hub).WithNotifier(spy)
+
+	c, _ := repo.OpenWith("org-1", "u-ana", "u-bea")
+	m, err := svc.Post(c.ID, "u-ana", "¿vienes?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := spy.paraQuien("dm:message"); len(got) != 1 || got[0] != "u-bea" {
+		t.Fatalf("lo nuevo avisa a bea, si no la prueba no mide nada: %v", got)
+	}
+	if err := svc.Edit(c.ID, m.ID, "u-ana", false, "¿vienes hoy?"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Withdraw(c.ID, m.ID, "u-ana", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := spy.paraQuien("dm:message"); len(got) != 1 {
+		t.Errorf("corregir y retirar no vuelven a avisar; avisos: %v", got)
+	}
+
+	var marks []any
+	for len(marks) < 3 {
+		select {
+		case e := <-hears:
+			if e.Type != "dm:message" {
+				continue
+			}
+			data, _ := e.Data.(map[string]any)
+			marks = append(marks, data["edited"])
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("faltan eventos del directo; llegaron %v", marks)
+		}
+	}
+	if marks[0] != false || marks[1] != true || marks[2] != true {
+		t.Errorf("lo nuevo sin marca, corregir y retirar marcados; fue %v", marks)
 	}
 }

@@ -323,23 +323,57 @@ actualiza quien lo pide.
 ## La puerta de verificación
 
 Entera, antes de dar algo por hecho. Desde la raíz del repo, o sólo lo que
-puede romper lo que tocaste con `scripts/test-changed.sh` (mira el diff
-contra la rama de arriba y corre esas suites enteras; `--plan` dice cuáles,
-`--quick` acota el escritorio a los módulos tocados para una primera pasada).
-Lo que depende de qué está escrito en el script y guardado en
-`app/src/lib/test-changed.test.ts`:
+puede romper lo que tocaste con `scripts/test-changed.sh`: la app nativa en la
+caja, por módulo, y la app de Tauri, el backend y los hooks aquí, por suite
+(`--plan` dice qué correría). Lo que depende de qué está en
+`scripts/test_changed_plan.py` y guardado en `scripts/test_changed_plan_test.py`.
+Las de la app nativa, en la caja (ver abajo):
 
 ```sh
 (cd app           && npx tsc --noEmit)                            # tipos
 (cd app           && bun run test)                                # eslint + vitest
-(cd core          && cargo test && cargo check --features uniffi) # el core compartido
-(cd mcp           && cargo test && cargo build --release)         # el MCP, su binario y los scripts de instalar
-(cd voice         && cargo test --locked)                         # el motor de llamadas (LiveKit), sin audio ni red
-(cd desktop       && cargo test --locked)                         # la app nativa (usa mcp/ y, en Linux, voice/ por ruta)
+scripts/remote.sh -- bash -c 'cd core && cargo test && cargo check --features uniffi'  # el core compartido
+scripts/remote.sh -- bash -c 'cd mcp && cargo test && cargo build --release'           # el MCP y su binario
+scripts/remote.sh -- bash -c 'cd voice && cargo test --locked'                         # el motor de llamadas
+scripts/remote.sh -- bash -c 'cd desktop && cargo test --locked'                       # la app nativa
 (cd app/src-tauri && cargo check)                                 # el lado Rust
 (cd backend       && go build ./... && go vet ./... && go test ./...)
 python3 .claude/hooks/hooks_test.py                                 # los hooks de cac
 ```
+
+**La app nativa (`core/`, `desktop/`, `voice/`) no se compila en la máquina de
+jose:** satura la CPU y la memoria (29 GB de `target/` el escritorio solo). Se
+compila en la caja de gstd (`rust-box`, command-and-control-464):
+
+```sh
+scripts/test-changed.sh                          # sólo las pruebas de lo cambiado
+scripts/test-changed.sh --since main --plan      # qué correría desde main
+scripts/remote.sh -- cargo test                  # desde desktop/ o core/
+scripts/remote.sh --out capturas -- ./pasada.sh  # trae lo que deje en $CAC_OUT
+scripts/remote.sh --off                          # la apaga; si no, sola a las 2 h
+```
+
+- Mientras se trabaja, `test-changed.sh`: en la caja, las pruebas de los
+  módulos tocados y compila lo que depende de ellos (minuto y medio en vez de
+  diez); aquí, las suites de app, Tauri, backend y hooks que toque el cambio.
+  La suite entera la corre el CI en cada push (`desktop.yml` y compañía); un
+  rojo ahí se arregla igual que uno de aquí. Las reglas, en su cabecera, y sus
+  pruebas en `scripts/test_changed_plan_test.py`.
+- Desde un worktree cuya rama aún no los tenga, se llaman por la ruta de
+  `main`: `~/projects/personal/guz-studio/cac/scripts/remote.sh` (y
+  `test-changed.sh`).
+- Corre en la misma subcarpeta desde la que se llama, sobre una copia del árbol
+  con lo no commiteado. Lo que el comando cambie allí (las roturas de `/mutar`)
+  no vuelve.
+- Una sola corrida a la vez por worktree, y lo hace cumplir: una corrida nueva
+  corta lo que quede vivo de otra del mismo worktree (todo proceso que trabaje
+  en su copia), y `--kill` lo corta sin lanzar nada. Entre worktrees comparten
+  `target/` y cargo las pone en fila.
+- La caja es unas **3× más lenta por hilo**, y su carga cambia. **Una prueba
+  que falla ahí es un fallo, aunque pase sola**: no hay pruebas «flojas
+  conocidas» que se puedan dar por buenas. Se arregla sin cronometrar la pared
+  (una `Gate` que retiene la respuesta hasta que la prueba la suelta, ver
+  command-and-control-436); subir un plazo o reintentar no es arreglarla.
 
 **Los hooks de cac** (`.claude/hooks/`) corren en cada sesión de Claude Code:
 al arrancar meten en el contexto el espacio, lo que está en curso con su

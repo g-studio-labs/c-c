@@ -171,6 +171,8 @@ func DBConnection() {
 		&domain.CallSession{}, &domain.CallSessionParticipant{}, &domain.CallMessage{},
 		// Las páginas de documentación (ver domain/doc_page.go).
 		&domain.DocPage{}, &domain.DocPageVersion{}, &domain.DocSection{}, &domain.DecisionLink{},
+		// Los enlaces que comparten una página (ver domain/doc_share.go).
+		&domain.DocShare{},
 		// Lo que mordió, atado a servidores y áreas (command-and-control-289).
 		&domain.Incident{}, &domain.IncidentServer{}, &domain.IncidentArea{}, &domain.IncidentCommit{}, &domain.IncidentGuard{},
 		// Lo que GitHub tiene enlazado a cada tarea (ver domain/github.go).

@@ -34,6 +34,13 @@ export default function TimezoneSelect({
   const zones = useMemo(() => allZones(), []);
   const mine = myZone();
   const suggested = [...new Set([teamZone, mine].filter((z): z is string => !!z))];
+  // Cada etiqueta le pregunta el desfase a Intl: unas 400 por pintada, y el
+  // desplegable repinta con cada opción por la que pasa el ratón.
+  const suggestedKey = suggested.join("|");
+  const rest = useMemo(
+    () => zones.filter((z) => !suggestedKey.split("|").includes(z)).map((z) => ({ value: z, label: zoneLabel(z) })),
+    [zones, suggestedKey],
+  );
   // Una zona guardada que esta plataforma no lista sigue apareciendo: si no,
   // el desplegable enseñaría otra y guardar la cambiaría sin querer.
   const extra = value && !zones.includes(value) && !suggested.includes(value) ? [value] : [];
@@ -59,7 +66,7 @@ export default function TimezoneSelect({
         },
         {
           label: t("org:zoneAll"),
-          options: zones.filter((z) => !suggested.includes(z)).map((z) => ({ value: z, label: zoneLabel(z) })),
+          options: rest,
         },
       ]}
       className={className ?? "text-xs"}

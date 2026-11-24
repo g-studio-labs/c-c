@@ -1,0 +1,27 @@
+---
+# La caja de compilación de la app nativa, encima de un clúster hecho por
+# k8s-site: un namespace `build` con su cuota, una prioridad por debajo de
+# todo, una política de red que sólo le deja salir a internet, y un
+# StatefulSet `rust-box` con su caché en un volumen. Sin secretos y sin
+# permisos: lo único que habla con el API es el apagado, y sólo para escalar
+# la caja. Ver command-and-control-464.
+
+- name: Hay imagen de la caja
+  ansible.builtin.assert:
+    that: build_box_image | default('') | length > 0
+    fail_msg: >-
+      Falta build_box_image: la etiqueta que publicó el workflow `rust-box image`
+      (ghcr.io/g-studio-labs/cac-rust-box:<fecha>-<sha>).
+    quiet: true
+
+- name: Manifiesto de la caja
+  ansible.builtin.template:
+    src: build-box.yaml.j2
+    dest: /etc/cac/build-box.yaml
+    mode: "0600"
+
+- name: Aplicar la caja
+  ansible.builtin.command: kubectl apply --server-side --force-conflicts -f /etc/cac/build-box.yaml
+  register: build_box_apply
+  changed_when: "'serverside-applied' in build_box_apply.stdout and 'unchanged' not in build_box_apply.stdout"
+  when: not ansible_check_mode

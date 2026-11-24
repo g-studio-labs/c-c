@@ -64,6 +64,8 @@ const AccountLink = WEB ? lazy(() => import("@/pages/AccountLink")) : NotOnWeb;
 // Los instaladores de la app de escritorio: sólo en la web, que es donde está
 // quien todavía no la tiene.
 const Download = WEB ? lazy(() => import("@/pages/Download")) : NotOnWeb;
+// Una página de docs compartida con un enlace: la abre quien no tiene cuenta.
+const SharedDoc = WEB ? lazy(() => import("@/pages/SharedDoc")) : NotOnWeb;
 
 // Sends unknown paths to the right landing: the overview for signed-in users,
 // the on-device tools for returning guests, otherwise the login screen.
@@ -95,6 +97,7 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         {/* Fuera de `ProtectedRoute`: quien entra por aquí no tiene cuenta. */}
         {isWebBuild && <Route path="/join" element={<JoinCall />} />}
+        {isWebBuild && <Route path="/shared" element={<SharedDoc />} />}
         {isWebBuild && <Route path="/welcome" element={<AccountLink mode="welcome" />} />}
         {isWebBuild && <Route path="/reset-password" element={<AccountLink mode="reset" />} />}
         {isWebBuild && <Route path="/download" element={<Download />} />}

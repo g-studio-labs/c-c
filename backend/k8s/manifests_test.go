@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -319,6 +320,77 @@ func TestNoGstdJobRunsFromAPullRequest(t *testing.T) {
 		}
 		if gstd == 0 {
 			t.Errorf("%s no despliega en gstd", wf)
+		}
+	}
+}
+
+// Una liga a la web sin `/app` (`/tasks?doc=…`, como las daba el MCP y como
+// quedaron escritas en comentarios y mensajes) abre: el Gateway manda cada ruta
+// de primer nivel de `App.tsx` al nginx de la web, y éste la redirige bajo
+// `/app` con su consulta. Y ninguna de esas rutas le quita al backend las
+// suyas. Roturas que atrapa: una ruta nueva en `App.tsx` sin su regla; mandarla
+// al backend; quitar la redirección de nginx o perder la consulta; meter
+// `/api` en la lista (el backend dejaría de contestar).
+func TestEveryWebRouteWithoutAppLeadsToIt(t *testing.T) {
+	app, err := os.ReadFile("../../app/src/App.tsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := regexp.MustCompile(`<Route path="(/[a-z-]+)"`).FindAllStringSubmatch(string(app), -1)
+	if len(routes) < 10 {
+		t.Fatalf("sólo %d rutas en App.tsx: ¿cambió cómo se escriben?", len(routes))
+	}
+	served := map[string]bool{}
+	for _, rule := range m(find(t, docs(t, "../../app/web/k8s.yaml"), "HTTPRoute", "cac-web-route"), "spec", "rules").([]any) {
+		refs, _ := m(rule, "backendRefs").([]any)
+		if len(refs) != 1 || m(refs[0], "name") != "cac-web" {
+			continue
+		}
+		matches, _ := m(rule, "matches").([]any)
+		for _, match := range matches {
+			if m(match, "path", "type") == "PathPrefix" {
+				served[m(match, "path", "value").(string)] = true
+			}
+		}
+	}
+	for _, r := range routes {
+		if !served[r[1]] {
+			t.Errorf("%s no llega al nginx de la web: una liga sin /app da 404", r[1])
+		}
+	}
+	for _, backend := range []string{"/", "/api", "/webhooks", "/health"} {
+		if served[backend] {
+			t.Errorf("%s va a la web: es del backend", backend)
+		}
+	}
+	nginx, err := os.ReadFile("../../app/web/nginx.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`location / \{\s*return 302 /app\$request_uri;`).Match(nginx) {
+		t.Error("nginx no manda lo que llega sin /app a /app con su consulta")
+	}
+}
+
+// Cada workflow que despliega corre de uno en uno por rama y cancela el viejo.
+// Sin eso, dos pushes seguidos terminaban a la vez y el del commit anterior
+// aplicaba su HTTPRoute y su imagen `:latest` después: producción con lo viejo
+// y todo en verde (24-nov-2026, `/shared` no llegó). Roturas que atrapa: quitar
+// `concurrency`, no cancelar, o un grupo que no lleve la rama (un PR cancelaría
+// el despliegue de main).
+func TestDeploysDoNotOverlap(t *testing.T) {
+	for _, wf := range []string{"backend", "web", "transcriber"} {
+		d := docs(t, "../../.github/workflows/"+wf+".yml")[0]
+		c, _ := d["concurrency"].(doc)
+		if c == nil {
+			t.Errorf("%s: sin concurrency, dos despliegues se pisan", wf)
+			continue
+		}
+		if c["cancel-in-progress"] != true {
+			t.Errorf("%s: no cancela el despliegue viejo", wf)
+		}
+		if g, _ := c["group"].(string); !strings.Contains(g, "github.ref") {
+			t.Errorf("%s: el grupo %q no separa ramas", wf, g)
 		}
 	}
 }

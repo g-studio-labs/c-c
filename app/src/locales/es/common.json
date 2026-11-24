@@ -627,6 +627,8 @@
     "docsWriteDetail": "Sólo añade: escribe al final de una sección y registra decisiones, y nunca puede borrar lo que escribió otro. Seguro aunque alguien tenga el documento abierto.",
     "docsManage": "Reescribir la documentación",
     "docsManageDetail": "Reemplaza una sección entera y decide de quién es un documento. Un guardado que llega después del de otra persona se rechaza en vez de aplicarse, pero éste sigue siendo el permiso que puede pisar trabajo. No puede marcar un documento como revisado: eso dice que una persona lo confirmó, y sólo lo firma un superadmin.",
+    "docsShare": "Compartir páginas fuera de la organización",
+    "docsShareDetail": "Abre y revoca enlaces que dejan leer una página y sus subpáginas a <1>quien no tiene cuenta</1>, durante 1, 7 o 30 días. Aparte de escribir docs porque saca el texto fuera de la organización.",
     "deploysManage": "Configurar despliegues",
     "deploysManageDetail": "Dejar listo cómo despliega un servicio —repo, rama, build en el servidor, Dockerfile y sus secrets <1>por nombre</1>— y registrar uno nuevo. <1>Nunca</1> despliega, vuelve atrás, borra ni cambia el comando de migraciones, y ningún valor de un secret pasa por aquí.",
     "serversManage": "Configurar servidores",

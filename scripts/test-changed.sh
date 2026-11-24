@@ -1,164 +1,78 @@
 #!/usr/bin/env bash
-# Corre las pruebas de lo que se tocó, no las de todo el repo.
+# Corre sólo las pruebas de lo que cambió. La app nativa (`core/`, `desktop/`,
+# `mcp/`, `ops/`, `voice/`) en la caja de gstd, por módulo; la app de Tauri, el
+# backend y los hooks, aquí, por suite.
 #
-# Mira qué ficheros cambiaron respecto a la rama de arriba (lo commiteado que
-# falta por subir, lo que está sin commitear y lo nuevo sin añadir) y corre
-# las suites que pueden romperse por eso. Una suite se corre entera o no se
-# corre: dentro de un crate todo se compila junto, y una prueba de
-# `workspace.rs` puede caerse por un cambio en `chat.rs`.
+#   scripts/test-changed.sh               # lo no commiteado
+#   scripts/test-changed.sh --since main  # y lo commiteado desde main
+#   scripts/test-changed.sh --plan        # sólo dice qué correría
+#   scripts/test-changed.sh --all         # las suites enteras
 #
-# Lo que depende de qué (las rutas de los workflows dicen lo mismo para el
-# CI; si cambia una, cambia la otra):
-#   core/                → core, desktop y el lado Rust de la app (tauri)
-#   mcp/                 → mcp, ops (que lo usa por ruta), desktop y tauri
-#   ops/                 → ops, tauri y desktop, que lo enlazan
-#   desktop/             → desktop
-#   voice/               → voice (el motor de llamadas) y desktop, que lo enlaza
-#   app/src/locales/     → app, y además core y desktop: el core incrusta
-#                          los catálogos al compilar
-#   app/src-tauri/       → tauri y mcp
-#   app/ (lo demás)      → app
-#   backend/internal/core/domain/ → domain y core (los fixtures del contrato)
-#   backend/ (lo demás)  → backend
-#   .claude/hooks/       → hooks
-#   scripts/test-changed.sh → app (su prueba vive allí)
-# Lo demás (docs, STATUS.md) no corre nada.
+# La red entera la tiende el CI (`desktop.yml`, `mcp.yml`, `ops.yml`), que
+# corre todo en cada push en unos seis minutos. Aquí se trata de no esperar
+# diez minutos de caja por tocar una pantalla (jose, 24-nov-2026: «si solo
+# hicimos cambios en una sección no tiene caso correr toda la suite»).
 #
-# `--quick` acota además el escritorio a los módulos tocados (`chat.rs` →
-# `chat::`), si sólo se tocó el escritorio: es la suite lenta. Es una primera
-# pasada, no la puerta: antes de subir, sin `--quick`.
-#
-# Uso:
-#   scripts/test-changed.sh [--quick] [--plan] [--base <ref>] [--files <ruta>...]
-#     --plan   sólo dice qué correría, sin correrlo.
-#     --base   contra qué comparar (por defecto, la rama de arriba).
-#     --files  estos ficheros en vez de los de git (para la prueba).
-# En esta máquina, con la carga repartida: `taskset -c 0-3 env CARGO_BUILD_JOBS=3 scripts/test-changed.sh`.
-# Guardián: `app/src/lib/test-changed.test.ts`.
+# Qué se corre por cada fichero cambiado:
+#   - `src/a/b.rs`            → las pruebas del módulo `a::b`;
+#   - un `*_tests.rs` que otro mete con `include!` → sus funciones de prueba,
+#     por nombre;
+#   - `tests/x.rs`            → ese fichero de pruebas;
+#   - `lib.rs`, `main.rs`, `testing.rs`, `Cargo.*`, `build.rs`, `tests/fixtures`
+#     → todo el crate: lo usan todas sus pruebas;
+#   - un módulo del core también corre `core/tests/<módulo>.rs` y el módulo
+#     del mismo nombre del escritorio, si existen;
+#   - los catálogos de textos → las pruebas de `texts` del core;
+#   - el dominio de Go (`backend/internal/core/domain/`) → los ficheros de
+#     prueba del core, que leen los fixtures del contrato que escribe.
+# Y aquí, por suite: `app/` (tipos y vitest), su lado Rust si cambió él o lo
+# que enlaza (`core`, `mcp`, `ops`), el backend entero y los hooks.
+# Y cada crate que depende de uno cambiado se compila con sus pruebas
+# (`cargo check --tests`): un cambio del core que rompe la firma que usa el
+# escritorio sale aquí, no en el CI.
 set -euo pipefail
 
-root=$(git rev-parse --show-toplevel)
-quick=0
-plan=0
-base=""
-files=()
-from_git=1
-while [[ $# -gt 0 ]]; do
+here="$(cd "$(dirname "$0")" && pwd)"
+root="$(git rev-parse --show-toplevel)"
+since=""
+mode=run
+while [ $# -gt 0 ]; do
   case "$1" in
-    --quick) quick=1 ;;
-    --plan) plan=1 ;;
-    --base) base="$2"; shift ;;
-    --files) from_git=0; shift; files=("$@"); break ;;
-    *) echo "no entiendo «$1»" >&2; exit 2 ;;
+    --since) since="$2"; shift 2 ;;
+    --plan) mode=plan; shift ;;
+    --all) mode=all; shift ;;
+    -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
+    *) echo "test-changed.sh: no entiendo «$1»" >&2; exit 2 ;;
   esac
-  shift
 done
 
-if [[ $from_git == 1 ]]; then
-  if [[ -z "$base" ]]; then
-    base=$(git merge-base HEAD '@{upstream}' 2>/dev/null || git rev-parse HEAD)
-  fi
-  mapfile -t files < <(
-    {
-      git diff --name-only "$base" HEAD
-      git diff --name-only HEAD
-      git ls-files --others --exclude-standard
-    } | sort -u
-  )
+if [ "$mode" = all ]; then
+  plan='for c in voice core mcp ops desktop; do [ -d "$c" ] && (echo "== $c" && cd "$c" && cargo test --quiet 2>&1 | grep -E "^test .* FAILED|panicked|test result|^error") || true; done'
+else
+  changed="$(
+    cd "$root"
+    { git diff --name-only ${since:+"$since"} HEAD 2>/dev/null; git diff --name-only; git diff --name-only --cached; git ls-files --others --exclude-standard; } | sort -u
+  )"
+  plan="$(cd "$root" && SINCE="$since" python3 -I "$here/test_changed_plan.py" <<<"$changed")"
+  local_steps="$(cd "$root" && python3 -I "$here/test_changed_plan.py" --local <<<"$changed")"
 fi
 
-declare -A suites=()
-desktop_modules=()
-only_desktop=1
-for file in "${files[@]}"; do
-  [[ -z "$file" ]] && continue
-  case "$file" in
-    desktop/*) suites[desktop]=1 ;;
-    *) ;;
-  esac
-  case "$file" in
-    desktop/src/*.rs)
-      module=$(basename "$file" .rs)
-      desktop_modules+=("$module")
-      ;;
-    desktop/*) desktop_modules+=("*") ;;
-    core/*) suites[core]=1; suites[desktop]=1; suites[tauri]=1; only_desktop=0 ;;
-    mcp/*) suites[mcp]=1; suites[ops]=1; suites[desktop]=1; suites[tauri]=1; only_desktop=0 ;;
-    ops/*) suites[ops]=1; suites[tauri]=1; suites[desktop]=1; only_desktop=0 ;;
-    voice/*) suites[voice]=1; suites[desktop]=1; only_desktop=0 ;;
-    app/src/locales/*) suites[app]=1; suites[core]=1; suites[desktop]=1; only_desktop=0 ;;
-    app/src-tauri/*) suites[tauri]=1; suites[mcp]=1; only_desktop=0 ;;
-    app/*) suites[app]=1; only_desktop=0 ;;
-    backend/internal/core/domain/*) suites[domain]=1; suites[core]=1; only_desktop=0 ;;
-    backend/*) suites[backend]=1; only_desktop=0 ;;
-    .claude/hooks/*) suites[hooks]=1; only_desktop=0 ;;
-    scripts/test-changed.sh) suites[app]=1; only_desktop=0 ;;
-    *) only_desktop=0 ;;
-  esac
-done
-
-# El escritorio acotado: sólo con --quick, sólo si no se tocó nada de lo que
-# depende, y sólo si todo lo tocado son módulos (`main.rs` o un recurso
-# pueden mover cualquier pantalla).
-desktop_filter=()
-if [[ $quick == 1 && $only_desktop == 1 && ${#desktop_modules[@]} -gt 0 ]]; then
-  for module in "${desktop_modules[@]}"; do
-    if [[ "$module" == "*" || "$module" == "main" ]]; then
-      desktop_filter=()
-      break
-    fi
-    desktop_filter+=("$module::")
-  done
-fi
-
-# Del más rápido al más lento: lo que falla antes, se ve antes.
-order=(hooks domain core voice mcp ops app tauri backend desktop)
-commands=()
-for suite in "${order[@]}"; do
-  [[ -z "${suites[$suite]:-}" ]] && continue
-  case "$suite" in
-    hooks) commands+=("python3 .claude/hooks/hooks_test.py") ;;
-    domain) commands+=("cd backend && go test ./internal/core/domain/") ;;
-    core) commands+=("cd core && cargo test --locked && cargo check --locked --features uniffi") ;;
-    voice) commands+=("cd voice && cargo test --locked") ;;
-    mcp) commands+=("cd mcp && cargo test --locked") ;;
-    ops) commands+=("cd ops && cargo test --locked") ;;
-    app) commands+=("cd app && npx tsc --noEmit && bun run test") ;;
-    tauri) commands+=("cd app/src-tauri && cargo check --locked") ;;
-    backend) commands+=("cd backend && go build ./... && go vet ./... && go test ./...") ;;
-    desktop)
-      if [[ ${#desktop_filter[@]} -gt 0 ]]; then
-        commands+=("cd desktop && cargo test --locked -- ${desktop_filter[*]}")
-      else
-        commands+=("cd desktop && cargo test --locked")
-      fi
-      ;;
-  esac
-done
-
-if [[ ${#commands[@]} -eq 0 ]]; then
-  echo "nada que probar: lo tocado no es código" >&2
+[ -n "${local_steps:-}" ] && echo "$local_steps" | sed 's/^/  aquí: /' >&2
+[ -n "$plan" ] && echo "$plan" | sed 's/^/  caja: /' >&2
+if [ -z "$plan" ] && [ -z "${local_steps:-}" ]; then
+  echo "test-changed.sh: nada que probar"
   exit 0
 fi
+[ "$mode" = plan ] && exit 0
 
-if [[ $plan == 1 ]]; then
-  printf '%s\n' "${commands[@]}"
-  exit 0
+cd "$root"
+fail=0
+while IFS= read -r step; do
+  [ -z "$step" ] && continue
+  echo "== $step"
+  (cd "$root" && bash -c "$step") || fail=1
+done <<<"${local_steps:-}"
+if [ -n "$plan" ]; then
+  "$here/remote.sh" -- bash -c "$plan" || fail=1
 fi
-
-failed=()
-for command in "${commands[@]}"; do
-  echo "== $command" >&2
-  if ! (cd "$root" && bash -c "$command"); then
-    failed+=("$command")
-  fi
-done
-if [[ ${#desktop_filter[@]} -gt 0 ]]; then
-  echo "(escritorio acotado a ${desktop_filter[*]}: antes de subir, sin --quick)" >&2
-fi
-if [[ ${#failed[@]} -gt 0 ]]; then
-  echo "fallaron:" >&2
-  printf '  %s\n' "${failed[@]}" >&2
-  exit 1
-fi
-echo "todo en verde" >&2
+exit "$fail"

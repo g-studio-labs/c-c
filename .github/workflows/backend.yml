@@ -7,6 +7,15 @@ on:
       - "backend/**"
   workflow_dispatch:
 
+# Un despliegue a la vez por rama, y el más nuevo gana: dos pushes seguidos a
+# main terminaban juntos y el del commit viejo aplicaba lo suyo después, así
+# que producción se quedaba con la versión anterior y el CI en verde (24-nov:
+# `/shared` no llegó al Gateway). Cancelar el viejo no pierde nada: el nuevo
+# lleva lo suyo.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Las pruebas van **delante del despliegue**, y ésa es la única razón de que
   # este trabajo exista: este workflow empuja a producción solo, sin que nadie
@@ -54,7 +63,8 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: backend/go.mod
+          go-version: stable # go.mod's line is a minimum; setup-go would install exactly that patch
+          check-latest: true
           cache-dependency-path: backend/go.sum
 
       - name: Vet
@@ -96,6 +106,7 @@ jobs:
         with:
           context: ./backend
           push: true
+          pull: true
           tags: ghcr.io/g-studio-labs/c-c/backend:latest
 
   deploy:

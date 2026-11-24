@@ -80,3 +80,98 @@ spec:
               type: ReplaceFullPath
               replaceFullPath: /app/
             statusCode: 302
+    # Las rutas de la web sin `/app` (`/tasks?doc=…`) van al nginx de la web,
+    # que las manda a la misma bajo `/app` con su consulta (ver nginx.conf).
+    # Así eran las ligas antes de mover la web a /app, y así las daba el MCP
+    # hasta command-and-control-508: las ya escritas en comentarios, páginas y
+    # mensajes siguen abriendo. Una sola regla con muchas rutas y no una regla
+    # con su redirección por ruta: una HTTPRoute admite 16 reglas. La prueba
+    # `TestEveryWebRouteWithoutAppLeadsToIt` exige las de `App.tsx`.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /activity
+        - path:
+            type: PathPrefix
+            value: /call
+        - path:
+            type: PathPrefix
+            value: /chat
+        - path:
+            type: PathPrefix
+            value: /crypto
+        - path:
+            type: PathPrefix
+            value: /dashboard
+        - path:
+            type: PathPrefix
+            value: /devtools
+        - path:
+            type: PathPrefix
+            value: /diagnostics
+        - path:
+            type: PathPrefix
+            value: /dm
+        - path:
+            type: PathPrefix
+            value: /docs
+        - path:
+            type: PathPrefix
+            value: /download
+        - path:
+            type: PathPrefix
+            value: /feedback
+        - path:
+            type: PathPrefix
+            value: /image-tool
+        - path:
+            type: PathPrefix
+            value: /invitations
+        - path:
+            type: PathPrefix
+            value: /join
+        - path:
+            type: PathPrefix
+            value: /login
+        - path:
+            type: PathPrefix
+            value: /my-work
+        - path:
+            type: PathPrefix
+            value: /notes
+        - path:
+            type: PathPrefix
+            value: /organization
+        - path:
+            type: PathPrefix
+            value: /overview
+        - path:
+            type: PathPrefix
+            value: /profile
+        - path:
+            type: PathPrefix
+            value: /reports
+        - path:
+            type: PathPrefix
+            value: /requests
+        - path:
+            type: PathPrefix
+            value: /reset-password
+        - path:
+            type: PathPrefix
+            value: /servers
+        - path:
+            type: PathPrefix
+            value: /shared
+        - path:
+            type: PathPrefix
+            value: /tasks
+        - path:
+            type: PathPrefix
+            value: /users
+        - path:
+            type: PathPrefix
+            value: /welcome
+      backendRefs:
+        - name: cac-web
+          port: 80

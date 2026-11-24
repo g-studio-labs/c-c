@@ -106,7 +106,14 @@ func (s *ChatService) publish(b broadcast) {
 	if s.hub != nil {
 		s.publicarAlStream(b)
 	}
-	s.anotarAvisos(b)
+	// Corregir o retirar no es decir algo nuevo: se avisa por el bus, marcado
+	// como edición, para que quien tiene el canal delante lo vea cambiar, pero
+	// no deja fila en la campana ni push al teléfono. Hasta el 19-nov-2026 una
+	// corrección contaba como mensaje nuevo, y la app de Tauri lo anunciaba
+	// otra vez (command-and-control-418).
+	if !b.edited {
+		s.anotarAvisos(b)
+	}
 }
 
 // quienHabla: el rótulo del canal y el nombre con el que firmar, **si hay
@@ -408,9 +415,11 @@ func (s *ChatService) Edit(messageID, userID string, superadmin bool, body strin
 	}
 	// Same event as a new message: the receiver reloads the channel either way,
 	// and a second event type would be two things to handle for one outcome.
+	// Marked as an edit, so it is not announced as new nor rings the bell (see
+	// `publish`).
 	s.publish(broadcast{
 		orgID: m.OrgID, spaceID: m.SpaceID, messageID: m.ID, actorID: userID,
-		kind: m.Kind, body: body, mentions: s.mentioned(m.OrgID, body),
+		kind: m.Kind, body: body, mentions: s.mentioned(m.OrgID, body), edited: true,
 	})
 	return nil
 }
@@ -476,10 +485,11 @@ func (s *ChatService) Withdraw(messageID, userID string, superadmin bool) error 
 		return err
 	}
 	// A withdrawn message names nobody: pinging over something just retracted
-	// would be the opposite of retracting it.
+	// would be the opposite of retracting it. Marked as an edit for the same
+	// reason: the channel moves, nothing new was said.
 	s.publish(broadcast{
 		orgID: m.OrgID, spaceID: m.SpaceID, messageID: m.ID, actorID: userID,
-		kind: m.Kind,
+		kind: m.Kind, edited: true,
 	})
 	return nil
 }

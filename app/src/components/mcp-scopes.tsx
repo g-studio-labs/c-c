@@ -77,6 +77,11 @@ export const SCOPES: ScopeOption[] = [
     detailKey: "scopes.docsManageDetail",
   },
   {
+    id: "docs:share",
+    labelKey: "common:scopes.docsShare",
+    detailKey: "scopes.docsShareDetail",
+  },
+  {
     id: "collections:write",
     labelKey: "common:scopes.collectionsWrite",
     detailKey: "scopes.collectionsWriteDetail",

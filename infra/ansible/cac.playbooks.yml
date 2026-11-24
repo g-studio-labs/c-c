@@ -351,6 +351,41 @@ playbooks:
     vars:
       - { name: runner_scale_set_name, required: true }
 
+  - id: build-box
+    file: playbooks/build-box-site.yml
+    name: Caja de compilación (rust-box)
+    description: >-
+      Encima de k8s: un namespace `build` con cuota, prioridad por debajo de
+      todo y una política de red que sólo deja salir a internet, y la caja
+      `rust-box` donde se compila y se prueba la app nativa, con su caché en
+      un volumen. Sin secretos. No la enciende ni la apaga: eso es de
+      `scripts/remote.sh` y de su apagado por falta de uso. Idempotente.
+    hosts: k8s_control_plane
+    risk: change
+    verify: build-box-verify
+    # Quitarla es borrar el namespace y, con él, el volumen de la caché.
+    rollback: manual
+    become: true
+    become_password_from: OPS_PASSWORD
+    vars:
+      - { name: build_box_image, description: "Imagen de la caja (ghcr.io/g-studio-labs/cac-rust-box:<fecha>-<sha>, la publica el workflow `rust-box image`).", required: true }
+      - { name: build_box_cpu, description: "Núcleos de techo, y compilaciones a la vez. La reserva es de medio núcleo: si hay pelea, cede la caja.", default: 8 }
+      - { name: build_box_memory_gi, description: "GiB de memoria de techo.", default: 20 }
+      - { name: build_box_disk_gi, description: "GiB del volumen de la caché. local-path no deja ampliarlo después: se elige bien al principio.", default: 120 }
+      - { name: build_box_idle_minutes, description: "Minutos sin uso tras los que la caja se apaga sola.", default: 120 }
+
+  - id: build-box-verify
+    file: playbooks/build-box-verify.yml
+    name: Verificar la caja de compilación
+    description: >-
+      La caja cede ante todo y no lleva llave del API, el apagado sólo puede
+      escalarla, y un pod de prueba (se borra solo) no llega a Postgres, Valkey,
+      cac ni al API pero sí a internet. No enciende la caja. No cambia nada.
+    hosts: k8s_control_plane
+    risk: read
+    become: true
+    become_password_from: OPS_PASSWORD
+
   - id: runner-isolated
     file: playbooks/runner-isolated-site.yml
     name: Runner aislado para otra org

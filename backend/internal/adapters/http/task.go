@@ -231,6 +231,10 @@ func InitTaskRoutes(db *gorm.DB, r *chi.Mux, hub *events.Hub, calls *service.Cal
 		r.Post("/{id}/additions", incH.Add)
 		r.Patch("/{id}", incH.SetStatus)
 	})
+	// Compartir una página con quien no tiene cuenta (ver domain/doc_share.go).
+	shareH := handler.NewDocShareHandler(
+		service.NewDocShareService(repository.NewDocShareRepository(db), repository.NewDocRepository(db)),
+		docSvc, store)
 	r.Route("/api/v1/docs", func(r chi.Router) {
 		r.Use(middleware.AuthMiddleware)
 		r.Get("/", docH.Index) // ?orgId= — which nodes have a document
@@ -268,11 +272,13 @@ func InitTaskRoutes(db *gorm.DB, r *chi.Mux, hub *events.Hub, calls *service.Cal
 		r.Post("/{kind}/{ownerId}/pages/{pageId}/restore", docH.RestorePage)
 		r.Get("/{kind}/{ownerId}/pages/{pageId}/versions", docH.PageVersions)
 		r.Post("/{kind}/{ownerId}/pages/{pageId}/versions/{versionId}/restore", docH.RestorePageVersion)
+		mountDocShareMemberRoutes(r, shareH)
 		r.Post("/{id}/attachments", docH.UploadAttachment)
 		r.Delete("/{id}/attachments/{attachmentId}", docH.DeleteAttachment)
 	})
 	// Outside the JWT group: an <img> can't send the Authorization header.
 	r.Get("/api/v1/docs/{id}/attachments/{attachmentId}/raw", docH.RawAttachment)
+	mountDocShareRoutes(r, shareH)
 
 	r.Route("/api/v1/task-tags", func(r chi.Router) {
 		r.Use(middleware.AuthMiddleware)

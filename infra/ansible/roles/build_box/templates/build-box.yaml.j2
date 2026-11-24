@@ -1,0 +1,233 @@
+# {{ ansible_managed }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: build
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: baseline
+---
+# Negativa y sin desalojar a nadie: producción no tiene PriorityClass (va con
+# 0), así que la caja es siempre la última en la cola y la primera en irse.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: {name: build-low}
+value: -100
+preemptionPolicy: Never
+globalDefault: false
+description: Compilaciones de desarrollo. Ceden ante todo lo demás.
+---
+# Aquí sí sobre los topes: en este namespace vive una sola cosa grande y su
+# techo es lo acordado. El margen es para el apagado y los pods de prueba.
+apiVersion: v1
+kind: ResourceQuota
+metadata: {name: build, namespace: build}
+spec:
+  hard:
+    limits.cpu: "{{ build_box_cpu | int + 1 }}"
+    limits.memory: "{{ build_box_memory_gi | int + 2 }}Gi"
+    requests.cpu: "1"
+    requests.memory: 3Gi
+    persistentvolumeclaims: "2"
+---
+apiVersion: v1
+kind: LimitRange
+metadata: {name: build, namespace: build}
+spec:
+  limits:
+    - type: Container
+      defaultRequest: {cpu: 10m, memory: 32Mi}
+      default: {cpu: 200m, memory: 256Mi}
+---
+# Con una política que elige a un pod, lo que no se permite se niega. `world`
+# no incluye el nodo ni las IP de servicios del clúster: desde aquí no se ve
+# Postgres, Valkey ni cac. Las pruebas usan sus servidores de mentira en
+# 127.0.0.1, que no pasa por la política.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: build-isolated, namespace: build}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints: [{}]
+  egress:
+    - toEndpoints: [{}]
+    - toEntities: [world]
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - {port: "53", protocol: ANY}
+---
+# Sólo el apagado habla con el API, y sólo para leer y escalar la caja.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: build-idle-api, namespace: build}
+spec:
+  endpointSelector:
+    matchLabels: {app: rust-box-idle}
+  egress:
+    - toEntities: [kube-apiserver]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: rust-box-idle, namespace: build}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: rust-box-idle, namespace: build}
+rules:
+  - apiGroups: [apps]
+    resources: [statefulsets]
+    resourceNames: [rust-box]
+    verbs: [get]
+  - apiGroups: [apps]
+    resources: [statefulsets/scale]
+    resourceNames: [rust-box]
+    verbs: [patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: rust-box-idle, namespace: build}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: rust-box-idle}
+subjects:
+  - {kind: ServiceAccount, name: rust-box-idle, namespace: build}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: rust-box-idle, namespace: build}
+data:
+  idle.py: |
+    # Apaga la caja si nadie la usa. `remote.sh` apunta la hora en la
+    # anotación al empezar y cada pocos minutos mientras su comando corre; si
+    # la conexión se cae, deja de apuntar, y lo que quedara colgado se va con
+    # la caja. Sin anotación también se apaga: nadie dijo que la usa (así
+    # queda tras aplicar el playbook por primera vez).
+    import json, os, ssl, time, urllib.request
+
+    IDLE = int(os.environ["IDLE_MINUTES"]) * 60
+    API = "https://kubernetes.default.svc/apis/apps/v1/namespaces/build/statefulsets/rust-box"
+    SA = "/var/run/secrets/kubernetes.io/serviceaccount"
+    ctx = ssl.create_default_context(cafile=f"{SA}/ca.crt")
+    token = open(f"{SA}/token").read()
+
+    def call(url, method="GET", body=None, kind="application/json"):
+        req = urllib.request.Request(url, method=method, data=body)
+        req.add_header("Authorization", f"Bearer {token}")
+        if body:
+            req.add_header("Content-Type", kind)
+        return json.load(urllib.request.urlopen(req, context=ctx, timeout=20))
+
+    box = call(API)
+    last = box["metadata"].get("annotations", {}).get("cac.build/last-used")
+    replicas = box["spec"].get("replicas", 0)
+    idle = None if last is None else time.time() - int(last)
+    if replicas == 0:
+        print("ya está apagada")
+    elif idle is not None and idle < IDLE:
+        print(f"en uso hace {int(idle) // 60} min")
+    else:
+        call(f"{API}/scale", "PATCH", b'{"spec":{"replicas":0}}', "application/merge-patch+json")
+        print("apagada: " + ("nadie apuntó su uso" if idle is None else f"sin uso desde hace {int(idle) // 60} min"))
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: rust-box-idle, namespace: build}
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels: {app: rust-box-idle}
+        spec:
+          serviceAccountName: rust-box-idle
+          priorityClassName: build-low
+          restartPolicy: Never
+          securityContext: {runAsNonRoot: true, runAsUser: 1000, seccompProfile: {type: RuntimeDefault}}
+          containers:
+            - name: idle
+              # La misma imagen que la caja: ya está en el nodo y trae python3.
+              image: "{{ build_box_image }}"
+              command: [python3, /idle/idle.py]
+              env:
+                - {name: IDLE_MINUTES, value: "{{ build_box_idle_minutes }}"}
+              securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+              resources:
+                requests: {cpu: 10m, memory: 32Mi}
+                limits: {cpu: 200m, memory: 128Mi}
+              volumeMounts:
+                - {name: script, mountPath: /idle}
+          volumes:
+            - name: script
+              configMap: {name: rust-box-idle}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: rust-box, namespace: build}
+spec:
+  # Sin `replicas`: lo mueven `remote.sh` (a 1) y el apagado (a 0), y volver a
+  # aplicar el playbook no debe encender ni apagar la caja.
+  serviceName: rust-box
+  selector:
+    matchLabels: {app: rust-box}
+  template:
+    metadata:
+      labels: {app: rust-box}
+    spec:
+      priorityClassName: build-low
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 10
+      # El PID 1 pasa a ser el `pause` del pod, que recoge a los huérfanos:
+      # con `sleep` de PID 1 nadie los recogía y cada prueba cortada dejaba
+      # zombis hasta el apagado (cientos el 23-nov-2026). Y `sleep`, ya sin
+      # ser PID 1, muere con el SIGTERM en vez de esperar los 10 s de gracia.
+      # Hay un solo contenedor: compartir procesos no enseña nada a nadie.
+      shareProcessNamespace: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: box
+          image: "{{ build_box_image }}"
+          # El volumen nace vacío: sin estas carpetas, lo primero que use
+          # TMPDIR o HOME falla.
+          command: [sh, -c, "mkdir -p /work/home /work/tmp /work/src /work/out && exec sleep infinity"]
+          workingDir: /work
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          env:
+            - {name: HOME, value: /work/home}
+            - {name: CARGO_HOME, value: /work/cargo}
+            - {name: CARGO_TARGET_DIR, value: /work/target}
+            - {name: CARGO_BUILD_JOBS, value: "{{ build_box_cpu }}"}
+            # Sin esto `target/` crece al doble; las trazas siguen con línea.
+            - {name: CARGO_PROFILE_DEV_DEBUG, value: line-tables-only}
+            - {name: CARGO_PROFILE_TEST_DEBUG, value: line-tables-only}
+            # En el volumen, no en el disco efímero del contenedor.
+            - {name: TMPDIR, value: /work/tmp}
+          # Reserva baja y techo alto: si hay pelea por CPU o memoria, cede
+          # la caja antes que nada de producción.
+          resources:
+            requests: {cpu: 500m, memory: 2Gi}
+            limits: {cpu: "{{ build_box_cpu }}", memory: "{{ build_box_memory_gi }}Gi"}
+          volumeMounts:
+            - {name: work, mountPath: /work}
+  volumeClaimTemplates:
+    - metadata: {name: work}
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources:
+          requests: {storage: "{{ build_box_disk_gi }}Gi"}

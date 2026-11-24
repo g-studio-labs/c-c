@@ -24,6 +24,11 @@ Playbooks para dejar un servidor listo desde cero, por etapas:
    `baseline`, una política de Cilium que sólo le deja salir a internet, al DNS
    y al API, y una cuota. Su verify lanza un pod que tiene que llegar a internet
    y no a Postgres, Valkey ni cac.
+   Y la **caja de compilación** (`build-box`, sin secretos): un namespace
+   `build` con cuota y prioridad por debajo de todo, y un StatefulSet
+   `rust-box` donde se compila y se prueba la app nativa, con su caché en un
+   volumen. Se apaga sola si nadie la usa; la enciende `scripts/remote.sh`. Su
+   imagen es `infra/build-box/` (workflow `rust-box image`).
 
 Los dos emiten un certificado wildcard `*.<base_domain>` por reto DNS en
 Cloudflare, y dejan un `whoami.<base_domain>` como prueba de humo. En

@@ -614,5 +614,14 @@
     "recordedBy": "Lo apuntó {{who}} el {{when}}",
     "fromTask": "en {{ref}}",
     "serverTitle": "Lo que ha mordido aquí"
+  },
+  "sharedDoc": {
+    "loading": "Abriendo la página compartida…",
+    "goneTitle": "Este enlace no abre nada",
+    "goneBody": "Puede que haya caducado, que lo hayan revocado o que la página ya no exista. Pídele uno nuevo a quien te lo mandó.",
+    "failed": "No se pudo cargar la página. Vuelve a intentarlo en un momento.",
+    "expires": "Compartida hasta el {{when}}",
+    "pages": "Páginas",
+    "readOnly": "Sólo lectura"
   }
 }

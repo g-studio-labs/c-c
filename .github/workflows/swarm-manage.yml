@@ -21,7 +21,9 @@ jobs:
       # auth no puede llegar a publicarse. Ver TestNoAgentRouteWithoutAuth.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: swarm-manage/go.mod
+          go-version: stable # go.mod's line is a minimum; setup-go would install exactly that patch
+          check-latest: true
+          cache-dependency-path: swarm-manage/go.sum
       - name: Test
         working-directory: swarm-manage
         run: go test ./...
@@ -45,6 +47,7 @@ jobs:
         with:
           context: ./swarm-manage
           push: true
+          pull: true
           tags: |
             ghcr.io/g-studio-labs/c-c/swarm-manage:${{ steps.version.outputs.tag }}
             ghcr.io/g-studio-labs/c-c/swarm-manage:latest
