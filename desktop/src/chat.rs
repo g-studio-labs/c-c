@@ -1014,13 +1014,13 @@ mod tests {
     // Sin `use super::*`: ver la nota en `shell.rs`.
     use super::ChatView;
     use crate::backend::Backend;
-    use crate::testing::{ok, sign_in, wait_until, FakeServer};
+    use crate::testing::{ok, sign_in, wait_until, FakeServer, Gate};
     use crate::workspace::Workspace;
     use cac_core::Conversation;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{point, px, size, AnyWindowHandle, AppContext, Bounds, Entity, Pixels, Point, ScrollDelta, TestAppContext, WindowBounds, WindowOptions};
     use serde_json::{json, Value};
-    use std::sync::{Arc, Condvar, Mutex};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, Request, ResponseTemplate};
@@ -1072,26 +1072,6 @@ mod tests {
     /// últimos, o los cincuenta anteriores a `before`.
     fn mount_history(server: &FakeServer, route: &str, history: &History, delay: Duration) {
         mount_history_held(server, route, history, delay, None);
-    }
-
-    /// Retiene una respuesta hasta que la prueba la suelta. Con un plazo de
-    /// llegada, en un CI lento la respuesta se adelantaba a lo que la prueba
-    /// quería mirar antes, o la prueba no llegaba a mirarlo a tiempo. El servidor tiene un solo hilo: mientras retiene,
-    /// no contesta nada más.
-    #[derive(Clone, Default)]
-    struct Gate(Arc<(Mutex<bool>, Condvar)>);
-
-    impl Gate {
-        fn open(&self) {
-            *self.0.0.lock().unwrap() = true;
-            self.0.1.notify_all();
-        }
-
-        fn wait(&self) {
-            let (open, opened) = &*self.0;
-            // Una prueba que se rompe antes de soltarla no se queda colgada.
-            let _ = opened.wait_timeout_while(open.lock().unwrap(), Duration::from_secs(10), |open| !*open).unwrap();
-        }
     }
 
     /// Como `mount_history`, con la página anterior retenida por `older`.

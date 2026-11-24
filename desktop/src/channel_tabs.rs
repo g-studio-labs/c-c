@@ -60,6 +60,12 @@ pub struct ChannelTabsView {
     space_id: Option<String>,
     tab: ChannelTab,
     recordings_enabled: bool,
+    /// Ya contestó si el canal graba. Hasta entonces `recordings_enabled` es
+    /// un «aún no sé», no un «no».
+    policy_known: bool,
+    /// Un enlace a una grabación pulsado antes de saberlo: se sigue al llegar
+    /// la respuesta en vez de decir que no está.
+    waiting_link: Option<String>,
     search: Entity<InputState>,
     /// Lo buscado que ya se pidió. Una caja para las cuatro pestañas, que se
     /// vacía al cambiar: «factura» quiere decir otra cosa en Multimedia.
@@ -94,6 +100,8 @@ impl ChannelTabsView {
             space_id: None,
             tab: ChannelTab::Thread,
             recordings_enabled: false,
+            policy_known: false,
+            waiting_link: None,
             search,
             query: String::new(),
             media: PagedTab::default(),
@@ -134,6 +142,8 @@ impl ChannelTabsView {
         self.space_id = space_id.clone();
         self.tab = ChannelTab::Thread;
         self.recordings_enabled = false;
+        self.policy_known = false;
+        self.waiting_link = None;
         self.query.clear();
         self.media = PagedTab::default();
         self.links = PagedTab::default();
@@ -154,11 +164,15 @@ impl ChannelTabsView {
         let Some(space) = space_id else { return };
         let asked = space.clone();
         let enabled = Backend::ask(cx, move |core| async move { core.channel_tabs().recordings_enabled(&asked).await });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let Ok(enabled) = enabled.await else { return };
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 if this.space_id.as_deref() == Some(space.as_str()) {
                     this.recordings_enabled = enabled;
+                    this.policy_known = true;
+                    if let Some(id) = this.waiting_link.take() {
+                        this.show_recording(id, window, cx);
+                    }
                     cx.notify();
                 }
             })
@@ -181,6 +195,10 @@ impl ChannelTabsView {
     /// en cuanto llegue la lista (`onOpenRecordings` en `ChannelView.tsx`,
     /// que sólo cambia de pestaña).
     fn show_recording(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.policy_known {
+            self.waiting_link = Some(id);
+            return;
+        }
         if !self.recordings_enabled {
             self.say(tr(cx, "recordings:notInChannel"), cx);
             return;
@@ -1451,6 +1469,50 @@ mod tests {
         follow(format!("cac:recording/{}", id(99)), cx);
         wait_until(cx, "dice que no está", |cx| label(window, "channel-tabs-notice", cx) == tr_es("recordings:notInChannel"));
         assert_eq!(element(window, &last, cx).unwrap().selected(), Some(false));
+        stop(cx);
+    }
+
+    /// Un enlace pulsado antes de saber si el canal graba espera a saberlo,
+    /// en vez de decir que la grabación no está.
+    ///
+    /// Roturas que atrapa: contestar «no está» mientras la respuesta no ha
+    /// llegado; olvidar el enlace y no abrir Grabaciones al llegar.
+    #[gpui_kit::test]
+    fn a_recording_link_clicked_early_waits_for_the_channel_to_answer(cx: &mut TestAppContext) {
+        let server = server();
+        let id = "0f3c1a2b-4d5e-4f70-8192-a3b4c5d6e7f8";
+        let gate = crate::testing::Gate::default();
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (held, seen) = (gate.clone(), asked.clone());
+        // Se retiene la de «Producto», no la de la sala que abre la ventana:
+        // el servidor contesta de una en una, y retener durante la apertura
+        // dejaba en cola lo que la apertura espera.
+        server.mount(get("/api/v1/task-spaces/g/recordings/policy").respond_with(ok(json!({ "enabled": false, "active": null }))));
+        server.mount(get("/api/v1/task-spaces/a/recordings/policy").respond_with(move |_: &wiremock::Request| {
+            seen.store(true, std::sync::atomic::Ordering::SeqCst);
+            held.wait();
+            ok(json!({ "enabled": true, "active": null }))
+        }));
+        server.mount(get("/api/v1/task-spaces/a/recordings").respond_with(ok(json!([recording(id, "ready")]))));
+        server.install(cx);
+        let window = open(cx);
+        click(window, "comms-channel-a", cx);
+        wait_until(cx, "se pregunta si el canal graba", |_| asked.load(std::sync::atomic::Ordering::SeqCst));
+
+        cx.update_window(window, |root, window, cx| {
+            let root = root.downcast::<gpui_kit::base::Root>().unwrap();
+            let workspace = root.read(cx).view().clone().downcast::<Workspace>().unwrap();
+            let chat = workspace.read(cx).chat.clone();
+            chat.update(cx, |chat, cx| chat.follow_link(&format!("cac:recording/{id}"), window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(!on_screen(window, "channel-tabs-notice", cx), "dijo que no está sin saberlo");
+
+        gate.open();
+        let row = format!("recording-{id}");
+        wait_until(cx, "Grabaciones, con ésa marcada", |cx| element(window, &row, cx).is_some_and(|row| row.selected() == Some(true)));
+        assert!(!on_screen(window, "channel-tabs-notice", cx));
         stop(cx);
     }
 

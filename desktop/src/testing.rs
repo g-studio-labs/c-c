@@ -2,7 +2,7 @@
 //! almacén en memoria y cómo esperar a lo que viene de otro hilo.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use cac_core::{Config, Storage};
@@ -152,5 +152,25 @@ impl FakeServer {
             .filter(|request| request.url.path() == path)
             .map(|request| request.url.query().unwrap_or("").to_string())
             .collect()
+    }
+}
+
+/// Retiene una respuesta hasta que la prueba la suelta. Con un plazo de
+/// llegada, en un CI lento la respuesta se adelantaba a lo que la prueba
+/// quería mirar antes, o la prueba no llegaba a mirarlo a tiempo. El servidor tiene un solo hilo: mientras retiene,
+/// no contesta nada más.
+#[derive(Clone, Default)]
+pub struct Gate(Arc<(Mutex<bool>, Condvar)>);
+
+impl Gate {
+    pub fn open(&self) {
+        *self.0.0.lock().unwrap() = true;
+        self.0.1.notify_all();
+    }
+
+    pub fn wait(&self) {
+        let (open, opened) = &*self.0;
+        // Una prueba que se rompe antes de soltarla no se queda colgada.
+        let _ = opened.wait_timeout_while(open.lock().unwrap(), Duration::from_secs(10), |open| !*open).unwrap();
     }
 }
