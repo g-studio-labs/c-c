@@ -1847,20 +1847,178 @@ fn tag_pairs(data: &Value) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-/// `(username, userId)` de los miembros de una organización.
-fn member_pairs(data: &Value) -> Vec<(String, String)> {
+/// Una persona de una de tus organizaciones: una entrada por organización en
+/// la que está, porque un directo y una asignación son de una org.
+#[derive(Clone, Debug)]
+struct Person {
+    user_id: String,
+    username: String,
+    name: String,
+    org_id: String,
+    role: String,
+}
+
+/// Los miembros de una organización, como los devuelve `/members`.
+fn people_of(org_id: &str, data: &Value) -> Vec<Person> {
     data.as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|m| {
-                    Some((
-                        m.get("username")?.as_str()?.to_string(),
-                        m.get("userId")?.as_str()?.to_string(),
-                    ))
-                })
-                .collect()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            Some(Person {
+                user_id: m.get("userId")?.as_str()?.to_string(),
+                username: m.get("username")?.as_str()?.to_string(),
+                name: m.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string(),
+                org_id: org_id.to_string(),
+                role: m.get("role").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            })
         })
-        .unwrap_or_default()
+        .collect()
+}
+
+/// Para comparar nombres como los escribe cualquiera: «gutierrez» tiene que
+/// encontrar a «Gutiérrez».
+fn fold(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'á' | 'à' | 'ä' | 'â' | 'ã' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' | 'õ' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            'ç' => 'c',
+            c => c,
+        })
+        .collect()
+}
+
+fn person_label(p: &Person) -> String {
+    if p.name.is_empty() || fold(&p.name) == fold(&p.username) {
+        p.username.clone()
+    } else {
+        format!("{} ({})", p.username, p.name)
+    }
+}
+
+/// Una entrada por persona, por orden de usuario.
+fn distinct_users<'a>(it: impl IntoIterator<Item = &'a Person>) -> Vec<&'a Person> {
+    let mut out: Vec<&Person> = vec![];
+    for p in it {
+        if !out.iter().any(|q| q.user_id == p.user_id) {
+            out.push(p);
+        }
+    }
+    out.sort_by_key(|p| p.username.to_lowercase());
+    out
+}
+
+/// A quién nombra `wanted`: su usuario, o su nombre visible **entero**. Nada
+/// de coincidencias parciales —«diego» no es Diegotsx aunque sólo haya uno—:
+/// adivinar pondría a la persona equivocada en un directo sin que nadie lo
+/// notara. Lo parcial va a `close_people`, que sólo sugiere.
+fn person_matches<'a>(people: &'a [Person], wanted: &str) -> Vec<&'a Person> {
+    let u = wanted.trim().trim_start_matches('@');
+    let by_user: Vec<&Person> = people.iter().filter(|p| p.username.eq_ignore_ascii_case(u)).collect();
+    if !by_user.is_empty() {
+        return by_user;
+    }
+    let f = fold(u);
+    if f.is_empty() {
+        return vec![];
+    }
+    people.iter().filter(|p| !p.name.is_empty() && fold(&p.name) == f).collect()
+}
+
+/// Quienes se parecen a `wanted`: alguna de sus palabras está dentro del
+/// usuario o del nombre. Es lo que un agente con sólo el nombre de pila
+/// necesita ver para dar con el usuario.
+fn close_people<'a>(people: &'a [Person], wanted: &str) -> Vec<&'a Person> {
+    let words: Vec<String> = fold(wanted.trim().trim_start_matches('@'))
+        .split(' ')
+        .filter(|w| w.chars().count() >= 2)
+        .map(str::to_string)
+        .collect();
+    people
+        .iter()
+        .filter(|p| {
+            let hay = format!("{} {}", fold(&p.username), fold(&p.name));
+            words.iter().any(|w| hay.contains(w.as_str()))
+        })
+        .collect()
+}
+
+/// Cuántos se nombran en un «Available:»; más, en una org grande, sería ruido.
+const PEOPLE_LISTED: usize = 40;
+
+/// Un nombre que no es nadie falla diciendo quién se le parece y quién hay,
+/// con el nombre visible junto al usuario: sin eso, llegar al usuario de
+/// alguien de quien sólo se sabe el nombre costó ocho llamadas
+/// (command-and-control-506).
+fn no_such_person(people: &[Person], missing: &[String]) -> String {
+    let mut msg = format!("No such member: \"{}\".", missing.join("\", \""));
+    let close: Vec<String> = distinct_users(missing.iter().flat_map(|m| close_people(people, m)))
+        .iter()
+        .map(|p| person_label(p))
+        .collect();
+    if !close.is_empty() {
+        msg += &format!(" Closest: {}.", close.join(", "));
+    }
+    let all = distinct_users(people);
+    let shown: Vec<String> = all.iter().take(PEOPLE_LISTED).map(|p| person_label(p)).collect();
+    msg += &format!(" Available: {}", if shown.is_empty() { "none".to_string() } else { shown.join(", ") });
+    if all.len() > PEOPLE_LISTED {
+        msg += &format!(" and {} more (find_person searches by name)", all.len() - PEOPLE_LISTED);
+    }
+    msg
+}
+
+fn ambiguous_person(wanted: &str, users: &[&Person]) -> String {
+    format!(
+        "\"{}\" is the name of {} people: {}. Pass the username.",
+        wanted.trim(),
+        users.len(),
+        users.iter().map(|p| person_label(p)).collect::<Vec<_>>().join(", ")
+    )
+}
+
+/// La persona que nombra `wanted`, con una entrada por organización que
+/// compartes con ella.
+fn find_one_person<'a>(people: &'a [Person], wanted: &str) -> Result<Vec<&'a Person>, String> {
+    let hits = person_matches(people, wanted);
+    let users = distinct_users(hits.iter().copied());
+    match users.len() {
+        0 => Err(no_such_person(people, &[wanted.trim().trim_start_matches('@').to_string()])),
+        1 => Ok(hits),
+        _ => Err(ambiguous_person(wanted, &users)),
+    }
+}
+
+/// Responsables a ids: por usuario o por nombre visible, y los que no son
+/// nadie, todos juntos en un solo error que dice quién hay.
+fn resolve_members(wanted: &[String], people: &[Person]) -> Result<Vec<String>, String> {
+    let mut ids: Vec<String> = vec![];
+    let mut missing = vec![];
+    for w in wanted {
+        let hits = person_matches(people, w);
+        let users = distinct_users(hits.iter().copied());
+        match users.as_slice() {
+            [] => missing.push(w.trim().trim_start_matches('@').to_string()),
+            [p] => {
+                if !ids.contains(&p.user_id) {
+                    ids.push(p.user_id.clone());
+                }
+            }
+            _ => return Err(ambiguous_person(w, &users)),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(no_such_person(people, &missing));
+    }
+    Ok(ids)
 }
 
 /// Etiquetas, responsables y fechas de una tarea, ya resueltos a lo que espera
@@ -1886,7 +2044,7 @@ fn resolve_task_extras(
             cfg,
             &format!("/api/v1/organizations/{}/members", urlencode(org_id)),
         )?;
-        body["assigneeIds"] = json!(resolve_names(&names, &member_pairs(&members), "member")?);
+        body["assigneeIds"] = json!(resolve_members(&names, &people_of(org_id, &members))?);
     }
     // Sólo el vencimiento. `startAt` también existe en el backend, pero nada
     // dice que sea una fecha y no un instante, y convertirlo a medianoche UTC
@@ -2303,7 +2461,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "list_task_spaces",
-            "description": "The task navigator: spaces, folders and lists with their task counts. Use it to resolve a list name to the listId that get_board takes.",
+            "description": "The task navigator: spaces, folders and lists with their task counts. Use it to resolve a list name to the listId that get_board takes. A space's `people` is who has work assigned in it, not everyone: to find a person, find_person.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -2369,7 +2527,7 @@ fn tool_defs() -> Value {
                     },
                     "assignees": {
                         "type": "array", "items": { "type": "string" },
-                        "description": "Usernames of members of the task's organization. Replaces the whole set. An unknown one fails and lists who exists."
+                        "description": "Members of the task's organization: usernames, or a full display name when only one person has it (find_person finds them). Replaces the whole set. An unknown one fails, also with dryRun, and lists the closest and who exists."
                     },
                     "dueAt": {
                         "type": "string",
@@ -2408,7 +2566,7 @@ fn tool_defs() -> Value {
                     },
                     "assignees": {
                         "type": "array", "items": { "type": "string" },
-                        "description": "Usernames of members of the task's organization. Replaces the whole set. An unknown one fails and lists who exists."
+                        "description": "Members of the task's organization: usernames, or a full display name when only one person has it (find_person finds them). Replaces the whole set. An unknown one fails, also with dryRun, and lists the closest and who exists."
                     },
                     "dueAt": {
                         "type": "string",
@@ -2917,7 +3075,7 @@ fn tool_defs() -> Value {
                 "type": "object",
                 "properties": {
                     "channel": { "type": "string", "description": "The space whose chat to write in: its id, or its name as list_task_spaces shows it. Give this or `person`." },
-                    "person": { "type": "string", "description": "The username of the person to message directly (opens the conversation if there is none). Give this or `channel`." },
+                    "person": { "type": "string", "description": "The person to message directly: their username, or their full display name when only one person has it (opens the conversation if there is none). An unknown one fails and lists the closest and who exists. Give this or `channel`." },
                     "orgId": { "type": "string", "description": "Optional, for `person`: the organization of the conversation, when you share more than one with them." },
                     "text": { "type": "string", "description": "Markdown, up to 8000 characters." },
                     "replyToId": { "type": "string", "description": "Optional. A message id from read_messages, in the same channel or conversation, to answer it with a quote." },
@@ -2928,13 +3086,26 @@ fn tool_defs() -> Value {
         },
         {
             "name": "read_messages",
-            "description": "The latest messages of a channel or of your direct conversation with a person, oldest first: who wrote each, when, whether an agent wrote it (`viaAgent`), what it answers, and its id (for replyToId). Use it to read a reply to something you sent, or what was said before writing. Read-only.",
+            "description": "The latest messages of a channel or of your direct conversation with a person, oldest first, each with its whole text: who wrote each, when, whether an agent wrote it (`viaAgent`), what it answers, and its id (for replyToId). Texts are never cut: when there are older messages, or not all fit in one answer, it says `more: true` and gives `before` to pass for the next page. A person that does not exist fails and lists the closest and who exists; one with no conversation yet says so. Use it to read a reply to something you sent, or what was said before writing. Read-only.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "channel": { "type": "string", "description": "The space: its id, or its name. Give this or `person`." },
-                    "person": { "type": "string", "description": "The username of the other person in a direct conversation." },
-                    "limit": { "type": "integer", "description": "How many, 1–50. Default 20." }
+                    "person": { "type": "string", "description": "The other person in a direct conversation: their username, or their full display name when only one person has it." },
+                    "orgId": { "type": "string", "description": "Optional, for `person`: the organization of the conversation, when you have one with them in more than one." },
+                    "limit": { "type": "integer", "description": "How many, 1–50. Default 20." },
+                    "before": { "type": "string", "description": "Optional. The `before` of the previous answer: reads the page of messages older than that." }
+                }
+            }
+        },
+        {
+            "name": "find_person",
+            "description": "Find people in your organizations by first name, full name or username: each match's `username` (what send_message, read_messages, assignees and @mentions take), display `name`, `orgId`, role, and whether you already have a direct `conversation` with them. Exact username or full name first; otherwise every partial match. Without name, everyone. Use it when you know how someone is called but not their username. Read-only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Optional. A first name, a full name or a username; accents and case do not matter." },
+                    "orgId": { "type": "string", "description": "Optional. Only this organization." }
                 }
             }
         },
@@ -4312,11 +4483,62 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
         "read_messages" => {
             let limit = arg_i64(args, "limit").unwrap_or(20).clamp(1, 50);
             let (path, where_) = match chat_read_target(cfg, args)? {
-                Some((p, w)) => (p, w),
-                None => return Ok(json!({ "messages": [], "note": "There is no conversation with that person yet." })),
+                (Some(p), w) => (p, w),
+                (None, w) => {
+                    return Ok(json!({ "where": w, "messages": [],
+                        "note": format!("{w} exists, but you have no direct conversation with them yet: nothing to read. send_message opens it.") }))
+                }
             };
-            let data = api_get(cfg, &format!("{path}?limit={limit}"))?;
-            Ok(json!({ "where": where_, "messages": message_lines(&data) }))
+            let mut q = format!("{path}?limit={limit}");
+            if let Some(b) = arg_str(args, "before") {
+                q.push_str(&format!("&before={}", urlencode(&b)));
+            }
+            let data = api_get(cfg, &q)?;
+            let (messages, more) = message_page(&data, limit as usize);
+            let mut out = json!({ "where": where_, "messages": messages });
+            if more {
+                if let Some(oldest) = out["messages"].get(0).and_then(|m| m["at"].as_str()).map(str::to_string) {
+                    out["more"] = json!(true);
+                    out["before"] = json!(oldest);
+                }
+            }
+            Ok(out)
+        }
+
+        "find_person" => {
+            let tree = api_get(cfg, "/api/v1/task-spaces/")?;
+            let mut people = org_people(cfg, &tree);
+            if let Some(o) = arg_str(args, "orgId") {
+                people.retain(|p| p.org_id == o);
+            }
+            let (found, exact): (Vec<&Person>, bool) = match arg_str(args, "name") {
+                None => (people.iter().collect(), true),
+                Some(n) => {
+                    let hits = person_matches(&people, &n);
+                    if hits.is_empty() { (close_people(&people, &n), false) } else { (hits, true) }
+                }
+            };
+            let convs = api_get(cfg, "/api/v1/dm").unwrap_or(Value::Null);
+            let mut found = found;
+            found.sort_by_key(|p| (p.username.to_lowercase(), p.org_id.clone()));
+            let list: Vec<Value> = found
+                .iter()
+                .map(|p| {
+                    let conversation = convs.as_array().into_iter().flatten().any(|c| {
+                        c.get("userId").and_then(|v| v.as_str()) == Some(p.user_id.as_str())
+                            && c.get("orgId").and_then(|v| v.as_str()) == Some(p.org_id.as_str())
+                    });
+                    json!({ "username": p.username, "name": p.name, "orgId": p.org_id, "role": p.role, "conversation": conversation })
+                })
+                .collect();
+            let none = list.is_empty();
+            let mut out = json!({ "people": list });
+            if none {
+                out["note"] = json!("Nobody matches. Without name, find_person lists everyone.");
+            } else if !exact {
+                out["note"] = json!("Nobody is called exactly that; these are the closest. Use the username.");
+            }
+            Ok(out)
         }
 
         "record_incident" => {
@@ -4473,13 +4695,6 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
         "create_task" => {
             let list_id = arg_str(args, "listId").ok_or("listId is required")?;
             let title = arg_str(args, "title").ok_or("title is required")?;
-            if arg_bool(args, "dryRun") {
-                let target = api_get(
-                    cfg,
-                    &format!("/api/v1/task-lists/{}/board", urlencode(&list_id)),
-                );
-                return dry_run(cfg, "tasks:write", target);
-            }
             let mut body = json!({ "title": title });
             if let Some(d) = arg_str(args, "description") {
                 body["description"] = json!(d);
@@ -4519,6 +4734,15 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                     String::new()
                 };
                 resolve_task_extras(cfg, &org_id, args, &mut body)?;
+            }
+            // El ensayo, después de resolver los nombres: un responsable o una
+            // etiqueta que no existe falla igual que al crear.
+            if arg_bool(args, "dryRun") {
+                let target = api_get(
+                    cfg,
+                    &format!("/api/v1/task-lists/{}/board", urlencode(&list_id)),
+                );
+                return dry_run(cfg, "tasks:write", target);
             }
             // Crear no admite etiquetas: van en un PATCH justo después, con los
             // ids ya resueltos arriba.
@@ -4601,6 +4825,13 @@ fn call_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
             };
             if arg_bool(args, "dryRun") {
                 let target = api_get(cfg, &format!("/api/v1/tasks/{}", urlencode(&id)));
+                // El ensayo también resuelve los nombres: decía `wouldSucceed`
+                // a un responsable que no existe y fallaba al aplicarlo
+                // (command-and-control-506).
+                if let Ok(t) = &target {
+                    let org_id = t.get("task").and_then(|t| t.get("orgId")).and_then(|v| v.as_str()).unwrap_or("");
+                    resolve_task_extras(cfg, org_id, args, &mut json!({}))?;
+                }
                 return dry_run(cfg, "tasks:manage", target);
             }
             // Reclamar va antes que nada: es una operación del servidor (responsable
@@ -6324,7 +6555,7 @@ fn annotate(mut tools: Value) -> Value {
 
 fn is_read_only(name: &str) -> bool {
     name != "get_attachment"
-        && (name.starts_with("get_") || name.starts_with("list_") || name.starts_with("search") || name == "read_messages")
+        && (name.starts_with("get_") || name.starts_with("list_") || name.starts_with("search") || matches!(name, "read_messages" | "find_person"))
 }
 
 /// Lo que borra o reemplaza entero algo que otra persona pudo escribir.
@@ -6457,24 +6688,31 @@ fn org_ids(tree: &Value) -> Vec<String> {
     out
 }
 
-/// En qué organización está `username` con quien escribe: la dada, o la única
+/// En qué organización está la persona con quien escribe: la dada, o la única
 /// que comparten. Si son varias, se dice cuáles: un directo es de una org, y
 /// escoger por la persona la pondría en un contexto que no eligió.
-fn resolve_person(orgs: &[(String, Vec<(String, String)>)], username: &str, org: Option<&str>) -> Result<(String, String), String> {
-    let u = username.trim().trim_start_matches('@');
-    let found: Vec<(String, String)> = orgs
-        .iter()
-        .filter(|(o, _)| org.map(|x| x == o).unwrap_or(true))
-        .filter_map(|(o, members)| members.iter().find(|(n, _)| n.eq_ignore_ascii_case(u)).map(|(_, id)| (o.clone(), id.clone())))
-        .collect();
-    match found.len() {
-        1 => Ok((found[0].1.clone(), found[0].0.clone())),
-        0 => Err(format!("Nobody called {u} in {}.", if org.is_some() { "that organization" } else { "your organizations" })),
+fn resolve_person(people: &[Person], wanted: &str, org: Option<&str>) -> Result<Person, String> {
+    let scope: Vec<Person> = people.iter().filter(|p| org.map(|o| o == p.org_id).unwrap_or(true)).cloned().collect();
+    let hits = find_one_person(&scope, wanted)?;
+    match hits.as_slice() {
+        [p] => Ok((*p).clone()),
         _ => Err(format!(
-            "{u} is in several of your organizations ({}): pass orgId.",
-            found.iter().map(|(o, _)| o.as_str()).collect::<Vec<_>>().join(", ")
+            "{} is in several of your organizations ({}): pass orgId.",
+            hits[0].username,
+            hits.iter().map(|p| p.org_id.as_str()).collect::<Vec<_>>().join(", ")
         )),
     }
+}
+
+/// Todas las personas de tus organizaciones.
+fn org_people(cfg: &Cfg, tree: &Value) -> Vec<Person> {
+    org_ids(tree)
+        .into_iter()
+        .flat_map(|o| {
+            let m = api_get(cfg, &format!("/api/v1/organizations/{}/members", urlencode(&o))).unwrap_or(Value::Null);
+            people_of(&o, &m)
+        })
+        .collect()
 }
 
 fn chat_target(cfg: &Cfg, args: &Value) -> Result<ChatTarget, String> {
@@ -6485,57 +6723,72 @@ fn chat_target(cfg: &Cfg, args: &Value) -> Result<ChatTarget, String> {
             Ok(ChatTarget::Channel { id, name })
         }
         (None, Some(p)) => {
-            let orgs: Vec<(String, Vec<(String, String)>)> = org_ids(&tree)
-                .into_iter()
-                .map(|o| {
-                    let m = api_get(cfg, &format!("/api/v1/organizations/{}/members", urlencode(&o))).unwrap_or(Value::Null);
-                    (o, member_pairs(&m))
-                })
-                .collect();
-            let (user_id, org_id) = resolve_person(&orgs, &p, arg_str(args, "orgId").as_deref())?;
-            Ok(ChatTarget::Person { username: p.trim().trim_start_matches('@').to_string(), user_id, org_id })
+            let p = resolve_person(&org_people(cfg, &tree), &p, arg_str(args, "orgId").as_deref())?;
+            Ok(ChatTarget::Person { username: p.username, user_id: p.user_id, org_id: p.org_id })
         }
         _ => Err("Pass exactly one of channel or person.".into()),
     }
 }
 
 /// Dónde leer, sin abrir nada: un directo se busca en tus conversaciones (abrir
-/// uno es escribir). `None` si con esa persona no hay conversación.
-fn chat_read_target(cfg: &Cfg, args: &Value) -> Result<Option<(String, String)>, String> {
+/// uno es escribir). La ruta es `None` si la persona existe pero con ella no
+/// hay conversación; si no existe, es un error que dice quién hay, no un «no
+/// hay conversación» que parece que no ha escrito (command-and-control-506).
+fn chat_read_target(cfg: &Cfg, args: &Value) -> Result<(Option<String>, String), String> {
+    let tree = api_get(cfg, "/api/v1/task-spaces/")?;
     match (arg_str(args, "channel"), arg_str(args, "person")) {
         (Some(ch), None) => {
-            let tree = api_get(cfg, "/api/v1/task-spaces/")?;
             let (id, name) = resolve_channel(&tree, &ch)?;
-            Ok(Some((format!("/api/v1/task-spaces/{}/chat", urlencode(&id)), format!("#{name}"))))
+            Ok((Some(format!("/api/v1/task-spaces/{}/chat", urlencode(&id))), format!("#{name}")))
         }
         (None, Some(p)) => {
-            let u = p.trim().trim_start_matches('@').to_string();
+            let org = arg_str(args, "orgId");
+            let people: Vec<Person> = org_people(cfg, &tree)
+                .into_iter()
+                .filter(|x| org.as_deref().map(|o| o == x.org_id).unwrap_or(true))
+                .collect();
+            let hits = find_one_person(&people, &p)?;
+            let who = format!("@{}", hits[0].username);
             let convs = api_get(cfg, "/api/v1/dm")?;
-            let c = convs.as_array().into_iter().flatten().find(|c| {
-                c.get("username").and_then(|v| v.as_str()).map(|n| n.eq_ignore_ascii_case(&u)).unwrap_or(false)
-            });
-            Ok(c.and_then(|c| c.get("conversationId")).and_then(|v| v.as_str())
-                .map(|id| (format!("/api/v1/dm/{}/messages", urlencode(id)), format!("@{u}"))))
+            let found: Vec<&Value> = convs
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|c| {
+                    c.get("userId").and_then(|v| v.as_str()) == Some(hits[0].user_id.as_str())
+                        && hits.iter().any(|h| c.get("orgId").and_then(|v| v.as_str()) == Some(h.org_id.as_str()))
+                })
+                .collect();
+            match found.as_slice() {
+                [] => Ok((None, who)),
+                [c] => Ok((
+                    c.get("conversationId").and_then(|v| v.as_str()).map(|id| format!("/api/v1/dm/{}/messages", urlencode(id))),
+                    who,
+                )),
+                _ => Err(format!("You have a conversation with {who} in several organizations: pass orgId.")),
+            }
         }
         _ => Err("Pass exactly one of channel or person.".into()),
     }
 }
 
+/// Cuánto texto cabe en una página de read_messages. Un mensaje nunca se
+/// corta —un texto a medias se lee como entero y engaña—: si no caben, la
+/// página lleva menos mensajes y dice desde dónde seguir.
+const MESSAGES_PAGE_CHARS: usize = 60_000;
+
 /// Los mensajes como los lee un agente: lo más viejo primero, con autor,
-/// fecha, si lo escribió un agente y a qué contestan. El texto, recortado.
-fn message_lines(data: &Value) -> Vec<Value> {
-    let mut out: Vec<Value> = data
+/// fecha, si lo escribió un agente y a qué contestan, y cada texto entero.
+/// `more` dice si hay más atrás: los que no cupieron o los que no se pidieron.
+fn message_page(data: &Value, limit: usize) -> (Vec<Value>, bool) {
+    let mut all: Vec<Value> = data
         .as_array()
         .into_iter()
         .flatten()
         .map(|m| {
-            let body = m.get("body").and_then(|b| b.as_str()).unwrap_or("");
-            let mut text: String = body.chars().take(2000).collect();
-            if body.chars().count() > 2000 {
-                text.push('…');
-            }
             let mut e = json!({
-                "id": m.get("id"), "author": m.get("authorName"), "at": m.get("createdAt"), "text": text,
+                "id": m.get("id"), "author": m.get("authorName"), "at": m.get("createdAt"),
+                "text": m.get("body").and_then(|b| b.as_str()).unwrap_or(""),
                 "viaAgent": m.get("via").and_then(|v| v.as_str()) == Some("mcp"),
             });
             if m.get("kind").and_then(|k| k.as_str()) == Some("system") {
@@ -6547,8 +6800,22 @@ fn message_lines(data: &Value) -> Vec<Value> {
             e
         })
         .collect();
-    out.sort_by(|a, b| a["at"].as_str().unwrap_or("").cmp(b["at"].as_str().unwrap_or("")));
-    out
+    // Lo más nuevo primero para llenar la página: lo que se queda fuera es lo
+    // más viejo, que es lo que `before` va a buscar.
+    all.sort_by(|a, b| b["at"].as_str().unwrap_or("").cmp(a["at"].as_str().unwrap_or("")));
+    let mut out = vec![];
+    let mut size = 0;
+    for m in &all {
+        let len = m["text"].as_str().map(|t| t.chars().count()).unwrap_or(0);
+        if !out.is_empty() && size + len > MESSAGES_PAGE_CHARS {
+            break;
+        }
+        size += len;
+        out.push(m.clone());
+    }
+    let more = out.len() < all.len() || all.len() >= limit;
+    out.reverse();
+    (out, more)
 }
 
 /// La página «Notas de agentes» de un nodo: lo que un agente descubre y no es
@@ -8902,14 +9169,13 @@ mod tests {
         assert!(resolve_channel(&tree, "Nada").unwrap_err().contains("Proteus"), "dice cuáles hay");
         assert_eq!(org_ids(&tree), vec!["o-dwit", "o-gs"]);
 
-        let orgs = vec![
-            ("o-dwit".to_string(), vec![("diego".to_string(), "u-d".to_string()), ("jose".to_string(), "u-j".to_string())]),
-            ("o-gs".to_string(), vec![("jose".to_string(), "u-j".to_string())]),
-        ];
-        assert_eq!(resolve_person(&orgs, "@Diego", None).unwrap(), ("u-d".into(), "o-dwit".into()));
-        assert!(resolve_person(&orgs, "jose", None).unwrap_err().contains("pass orgId"), "en dos orgs no se escoge");
-        assert_eq!(resolve_person(&orgs, "jose", Some("o-gs")).unwrap(), ("u-j".into(), "o-gs".into()));
-        assert!(resolve_person(&orgs, "nadie", None).is_err());
+        let mut people = people_of("o-dwit", &json!([{ "username": "diego", "userId": "u-d" }, { "username": "jose", "userId": "u-j" }]));
+        people.extend(people_of("o-gs", &json!([{ "username": "jose", "userId": "u-j" }])));
+        let who = |w: &str, o: Option<&str>| resolve_person(&people, w, o).map(|p| (p.user_id, p.org_id));
+        assert_eq!(who("@Diego", None).unwrap(), ("u-d".into(), "o-dwit".into()));
+        assert!(who("jose", None).unwrap_err().contains("pass orgId"), "en dos orgs no se escoge");
+        assert_eq!(who("jose", Some("o-gs")).unwrap(), ("u-j".into(), "o-gs".into()));
+        assert!(who("nadie", None).is_err());
 
         // Un directo: se abre la conversación y se escribe en ella.
         let (cfg, log) = fake_cac(|m, p, _| match (m, p) {
@@ -8928,7 +9194,11 @@ mod tests {
         // Leer un directo no abre nada; sin conversación, lo dice.
         let (cfg, log) = fake_cac(|_, p, _| {
             if p == "/api/v1/dm" {
-                json!([{ "conversationId": "conv-1", "username": "diego" }])
+                json!([{ "conversationId": "conv-1", "username": "diego", "userId": "u-d", "orgId": "o-dwit" }])
+            } else if p == "/api/v1/task-spaces/" {
+                json!([{ "id": "s1", "name": "Proteus", "orgId": "o-dwit" }])
+            } else if p.ends_with("/members") {
+                json!([{ "username": "diego", "userId": "u-d" }, { "username": "nadie", "userId": "u-n" }])
             } else {
                 json!([
                     { "id": "m2", "authorName": "diego", "createdAt": "2026-10-22T10:00:00Z", "body": "gracias", "via": "" },
@@ -8943,6 +9213,115 @@ mod tests {
         assert!(log.lock().unwrap().iter().all(|(m, _, _)| m == "GET"), "leer no escribe");
         let out = call_tool(&cfg, "read_messages", &json!({ "person": "nadie" })).unwrap();
         assert_eq!(out["messages"].as_array().unwrap().len(), 0);
+        assert!(out["note"].as_str().unwrap().contains("no direct conversation"), "{out}");
+    }
+
+    /// Un cac falso con tres personas en una org, y una conversación con Diego.
+    fn people_cac() -> (Cfg, std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>) {
+        fake_cac(|_, p, _| {
+            if p == "/api/v1/task-spaces/" {
+                json!([{ "id": "s1", "name": "Proteus", "orgId": "o1", "lists": [{ "id": "l1" }] }])
+            } else if p.ends_with("/members") {
+                json!([
+                    { "username": "Diegotsx", "userId": "u-d", "name": "Diego Gutiérrez", "role": "member" },
+                    { "username": "joseg", "userId": "u-j", "name": "José García", "role": "admin" },
+                    { "username": "july", "userId": "u-y" }
+                ])
+            } else if p == "/api/v1/dm" {
+                json!([{ "conversationId": "conv-d", "userId": "u-d", "orgId": "o1", "username": "Diegotsx" }])
+            } else if p == "/api/v1/auth/me" {
+                json!({ "scopes": ["tasks:write", "tasks:manage", "chat:write"] })
+            } else if p.starts_with("/api/v1/tasks/") {
+                json!({ "task": { "id": "t1", "orgId": "o1" } })
+            } else {
+                json!([])
+            }
+        })
+    }
+
+    /// Roturas que detecta: que find_person no encuentre por nombre de pila
+    /// (sólo por usuario), que no diga el usuario o si ya hay conversación;
+    /// que read_messages con alguien que no existe conteste «no hay
+    /// conversación» en vez de fallar diciendo quién hay; que send_message no
+    /// sugiera al parecido; que el nombre visible entero no sirva, o que sirva
+    /// cuando lo tienen dos.
+    #[test]
+    fn a_first_name_reaches_the_person() {
+        let (cfg, log) = people_cac();
+        let out = call_tool(&cfg, "find_person", &json!({ "name": "diego" })).unwrap();
+        let ps = out["people"].as_array().unwrap();
+        assert_eq!(ps.len(), 1, "{out}");
+        assert_eq!((ps[0]["username"].as_str(), ps[0]["name"].as_str()), (Some("Diegotsx"), Some("Diego Gutiérrez")));
+        assert_eq!((ps[0]["orgId"].as_str(), ps[0]["conversation"].as_bool()), (Some("o1"), Some(true)));
+        let joses = call_tool(&cfg, "find_person", &json!({ "name": "jose garcia" })).unwrap();
+        assert_eq!(joses["people"][0]["conversation"], false);
+        assert!(joses.get("note").is_none(), "el nombre entero es exacto: {joses}");
+        assert_eq!(call_tool(&cfg, "find_person", &json!({})).unwrap()["people"].as_array().unwrap().len(), 3);
+
+        let e = call_tool(&cfg, "read_messages", &json!({ "person": "diego" })).unwrap_err();
+        assert!(e.contains("No such member") && e.contains("Closest: Diegotsx (Diego Gutiérrez)") && e.contains("july"), "{e}");
+        let e = call_tool(&cfg, "send_message", &json!({ "person": "diego", "text": "hola", "dryRun": true })).unwrap_err();
+        assert!(e.contains("Closest: Diegotsx (Diego Gutiérrez)"), "{e}");
+
+        call_tool(&cfg, "read_messages", &json!({ "person": "diego gutierrez" })).unwrap();
+        assert!(log.lock().unwrap().iter().any(|(_, p, _)| p.starts_with("/api/v1/dm/conv-d/messages")), "el nombre visible lleva a su directo");
+
+        let twins = [people_of("o1", &json!([
+            { "username": "ana1", "userId": "a1", "name": "Ana" },
+            { "username": "ana2", "userId": "a2", "name": "Ana" }
+        ]))].concat();
+        let e = resolve_person(&twins, "ana", None).unwrap_err();
+        assert!(e.contains("ana1 (Ana)") && e.contains("ana2 (Ana)") && e.contains("username"), "{e}");
+    }
+
+    /// Roturas que detecta: que el ensayo de update_task o de create_task
+    /// diga `wouldSucceed` a un responsable que no existe, o que no acepte
+    /// el nombre visible que sí aceptaría al aplicarlo.
+    #[test]
+    fn a_dry_run_checks_the_assignees() {
+        let (cfg, log) = people_cac();
+        let e = call_tool(&cfg, "update_task", &json!({ "id": "t1", "assignees": ["zz-no-such-user"], "dryRun": true })).unwrap_err();
+        assert!(e.contains("No such member: \"zz-no-such-user\"") && e.contains("Diegotsx"), "{e}");
+        let ok = call_tool(&cfg, "update_task", &json!({ "id": "t1", "assignees": ["Diego Gutiérrez"], "dryRun": true })).unwrap();
+        assert_eq!(ok["wouldSucceed"], true, "{ok}");
+        let e = call_tool(&cfg, "create_task", &json!({ "listId": "l1", "title": "x", "assignees": ["zz"], "dryRun": true })).unwrap_err();
+        assert!(e.contains("No such member: \"zz\""), "{e}");
+        assert!(log.lock().unwrap().iter().all(|(m, _, _)| m == "GET"), "ensayar no escribe");
+    }
+
+    /// Roturas que detecta: volver a recortar un mensaje largo (el agente leía
+    /// a media frase sin poder pedir el resto); llenar la página con más
+    /// texto del que cabe; o quedarse sin decir que hay más y desde dónde.
+    #[test]
+    fn a_long_message_comes_back_whole_and_the_page_says_where_to_go_on() {
+        let long = "palabra ".repeat(1000);
+        let (page, more) = message_page(&json!([{ "id": "m1", "createdAt": "2026-11-24T10:00:00Z", "body": long }]), 20);
+        assert_eq!(page[0]["text"].as_str(), Some(long.as_str()), "entero, sin «…»");
+        assert!(!more);
+
+        let big = "x".repeat(MESSAGES_PAGE_CHARS / 2 - 10);
+        let data = json!([
+            { "id": "m3", "createdAt": "2026-11-24T12:00:00Z", "body": big },
+            { "id": "m2", "createdAt": "2026-11-24T11:00:00Z", "body": big },
+            { "id": "m1", "createdAt": "2026-11-24T10:00:00Z", "body": big }
+        ]);
+        let (page, more) = message_page(&data, 20);
+        let ids: Vec<&str> = page.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["m2", "m3"], "lo más nuevo que cabe, lo más viejo primero");
+        assert!(more, "el que no cupo se dice");
+        assert!(message_page(&data, 3).0.iter().all(|m| m["text"].as_str().unwrap().len() == big.len()));
+        assert!(message_page(&json!([{ "id": "a", "createdAt": "1", "body": "" }]), 1).1, "una página llena puede tener más atrás");
+
+        let (cfg, log) = fake_cac(move |_, p, _| {
+            if p.starts_with("/api/v1/task-spaces/s1/chat") {
+                data.clone()
+            } else {
+                json!([{ "id": "s1", "name": "Proteus", "orgId": "o1" }])
+            }
+        });
+        let out = call_tool(&cfg, "read_messages", &json!({ "channel": "Proteus", "before": "2026-11-25T00:00:00Z" })).unwrap();
+        assert_eq!((out["more"].as_bool(), out["before"].as_str()), (Some(true), Some("2026-11-24T11:00:00Z")), "{out}");
+        assert!(log.lock().unwrap().iter().any(|(_, p, _)| p.contains("before=2026-11-25T00%3A00%3A00Z")), "before viaja al servidor");
     }
 
     /// Roturas que detecta: no resolver la referencia en las herramientas que
