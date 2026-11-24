@@ -9,7 +9,7 @@
 
 use std::future::Future;
 
-use cac_core::{ApiError, CallInvite, ChannelTab, ChatLinkItem, ChatMediaItem, ChatMessage, Conversation, Core, PagedTab, Recording, TabItem, TabPage, TabShows};
+use cac_core::{ApiError, CallInvite, ChannelTab, ChatLinkItem, ChatMediaItem, ChatMessage, Conversation, Core, PagedTab, Recording, RecordingPlace, TabItem, TabPage, TabShows};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -66,6 +66,9 @@ pub struct ChannelTabsView {
     /// Un enlace a una grabación pulsado antes de saberlo: se sigue al llegar
     /// la respuesta en vez de decir que no está.
     waiting_link: Option<String>,
+    /// Un enlace a una grabación de otro canal: se elige ese canal y, al
+    /// llegar a él, se sigue (canal, grabación).
+    arriving: Option<(String, String)>,
     search: Entity<InputState>,
     /// Lo buscado que ya se pidió. Una caja para las cuatro pestañas, que se
     /// vacía al cambiar: «factura» quiere decir otra cosa en Multimedia.
@@ -102,6 +105,7 @@ impl ChannelTabsView {
             recordings_enabled: false,
             policy_known: false,
             waiting_link: None,
+            arriving: None,
             search,
             query: String::new(),
             media: PagedTab::default(),
@@ -143,7 +147,8 @@ impl ChannelTabsView {
         self.tab = ChannelTab::Thread;
         self.recordings_enabled = false;
         self.policy_known = false;
-        self.waiting_link = None;
+        // Cambiar de canal lo olvida todo menos el enlace que llevó hasta él.
+        self.waiting_link = self.arriving.take().filter(|(space, _)| space_id.as_deref() == Some(space.as_str())).map(|(_, id)| id);
         self.query.clear();
         self.media = PagedTab::default();
         self.links = PagedTab::default();
@@ -171,7 +176,7 @@ impl ChannelTabsView {
                     this.recordings_enabled = enabled;
                     this.policy_known = true;
                     if let Some(id) = this.waiting_link.take() {
-                        this.show_recording(id, window, cx);
+                        this.point_at(id, window, cx);
                     }
                     cx.notify();
                 }
@@ -191,10 +196,49 @@ impl ChannelTabsView {
         cx.notify();
     }
 
-    /// Un enlace `cac:recording/…` del chat: a Grabaciones, con esa marcada
-    /// en cuanto llegue la lista (`onOpenRecordings` en `ChannelView.tsx`,
-    /// que sólo cambia de pestaña).
+    /// Un enlace `cac:recording/…` del chat: al canal donde se grabó, que
+    /// dice el servidor —el enlace pudo copiarse de otro canal, o pegarse en
+    /// un directo—, y ahí a su pestaña.
     fn show_recording(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let clicked_in = Backend::snapshot(cx).read(cx).comms.selected.clone();
+        let asked = id.clone();
+        let answer = Backend::ask(cx, move |core| async move { core.channel_tabs().recording_place(&asked).await });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(answer) = answer.await else { return };
+            this.update_in(cx, |this, window, cx| {
+                let snapshot = Backend::snapshot(cx).read(cx).comms.selected.clone();
+                // Quien se fue a otra conversación mientras se preguntaba ya
+                // no está donde pulsó: llevarle de vuelta le quitaría lo que
+                // tiene delante.
+                if snapshot != clicked_in {
+                    return;
+                }
+                match answer {
+                    Ok(RecordingPlace::Channel { space_id }) if snapshot == Some(Conversation::Channel { space_id: space_id.clone() }) => this.point_at(id, window, cx),
+                    Ok(RecordingPlace::Channel { space_id }) => {
+                        this.arriving = Some((space_id.clone(), id));
+                        if !Backend::core(cx).comms().select(Conversation::Channel { space_id }) {
+                            this.arriving = None;
+                            this.say(tr(cx, "recordings:channelHidden"), cx);
+                        }
+                    }
+                    Ok(RecordingPlace::Hidden) => this.say(tr(cx, "recordings:channelHidden"), cx),
+                    Err(ApiError::Server { status: 404, .. }) => this.say(tr(cx, "recordings:notFound"), cx),
+                    Err(error) => {
+                        let text = error_text(cx, &error, "recordings:notFound");
+                        this.say(text, cx);
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A Grabaciones del canal que se mira, con esa marcada en cuanto llegue
+    /// la lista (`onOpenRecordings` en `ChannelView.tsx`, que sólo cambia de
+    /// pestaña).
+    fn point_at(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if !self.policy_known {
             self.waiting_link = Some(id);
             return;
@@ -1447,6 +1491,10 @@ mod tests {
         let rows: Vec<Value> = (0..30).map(|at| recording(&id(at), "ready")).collect();
         server.mount(get("/api/v1/task-spaces/g/recordings/policy").respond_with(ok(json!({ "enabled": true, "active": null }))));
         server.mount(get("/api/v1/task-spaces/g/recordings").respond_with(ok(Value::Array(rows))));
+        // El servidor la pone en este canal, pero ya no está en su lista.
+        for at in [29, 99] {
+            server.mount(get(&format!("/api/v1/recordings/{}", id(at))).respond_with(ok(recording(&id(at), "ready"))));
+        }
         server.install(cx);
         let window = open(cx);
         wait_until(cx, "sale Grabaciones", |cx| on_screen(window, "conversation-tab-recordings", cx));
@@ -1484,7 +1532,8 @@ mod tests {
         let gate = crate::testing::Gate::default();
         server.mount(get("/api/v1/task-spaces/g/recordings/policy").respond_with(ok(json!({ "enabled": false, "active": null }))));
         server.mount(get("/api/v1/task-spaces/a/recordings/policy").respond_with(gate.hold(ok(json!({ "enabled": true, "active": null })))));
-        server.mount(get("/api/v1/task-spaces/a/recordings").respond_with(ok(json!([recording(id, "ready")]))));
+        server.mount(get("/api/v1/task-spaces/a/recordings").respond_with(ok(json!([recorded_in(id, "a")]))));
+        server.mount(get(&format!("/api/v1/recordings/{id}")).respond_with(ok(recorded_in(id, "a"))));
         server.install(cx);
         let window = open(cx);
         click(window, "comms-channel-a", cx);
@@ -1504,6 +1553,81 @@ mod tests {
         let row = format!("recording-{id}");
         wait_until(cx, "Grabaciones, con ésa marcada", |cx| element(window, &row, cx).is_some_and(|row| row.selected() == Some(true)));
         assert!(!on_screen(window, "channel-tabs-notice", cx));
+        stop(cx);
+    }
+
+    fn recorded_in(id: &str, space: &str) -> Value {
+        let mut row = recording(id, "ready");
+        row["spaceId"] = json!(space);
+        row
+    }
+
+    fn follow(window: AnyWindowHandle, href: &str, cx: &mut TestAppContext) {
+        cx.update_window(window, |root, window, cx| {
+            let root = root.downcast::<gpui_kit::base::Root>().unwrap();
+            let workspace = root.read(cx).view().clone().downcast::<Workspace>().unwrap();
+            let chat = workspace.read(cx).chat.clone();
+            chat.update(cx, |chat, cx| chat.follow_link(href, window, cx));
+        })
+        .unwrap()
+    }
+
+    fn selected(cx: &mut TestAppContext) -> Option<cac_core::Conversation> {
+        cx.update(|cx| Backend::snapshot(cx).read(cx).comms.selected.clone())
+    }
+
+    /// Un enlace a una grabación de otro canal lleva a ese canal, a su
+    /// pestaña y con ella marcada; uno a un canal que no está en la lista
+    /// lo dice y no se mueve; una que ya no está, también; y quien cambia de
+    /// conversación mientras se pregunta dónde está no es llevado a ningún
+    /// sitio.
+    ///
+    /// Roturas que atrapa: buscarla sólo en el canal que se mira (decía «no
+    /// está»); cambiar de canal y no abrir Grabaciones, o abrirla sin
+    /// marcar la grabación; perder el enlace al cambiar de canal; callar
+    /// ante un canal que no sale o una grabación borrada; seguir una
+    /// respuesta tardía cuando ya se está en otra conversación.
+    #[gpui_kit::test]
+    fn a_recording_link_from_another_channel_goes_there(cx: &mut TestAppContext) {
+        let server = server();
+        let (in_a, hidden, late) = ("0f3c1a2b-4d5e-4f70-8192-a3b4c5d6e7f8", "1f3c1a2b-4d5e-4f70-8192-a3b4c5d6e7f8", "2f3c1a2b-4d5e-4f70-8192-a3b4c5d6e7f8");
+        let gate = crate::testing::Gate::default();
+        for space in ["g", "a"] {
+            server.mount(get(&format!("/api/v1/task-spaces/{space}/recordings/policy")).respond_with(ok(json!({ "enabled": true, "active": null }))));
+        }
+        server.mount(get("/api/v1/task-spaces/g/recordings").respond_with(ok(json!([recording("r-g", "ready")]))));
+        server.mount(get("/api/v1/task-spaces/a/recordings").respond_with(ok(json!([recorded_in(in_a, "a"), recorded_in(late, "a")]))));
+        server.mount(get(&format!("/api/v1/recordings/{in_a}")).respond_with(ok(recorded_in(in_a, "a"))));
+        server.mount(get(&format!("/api/v1/recordings/{hidden}")).respond_with(ok(recorded_in(hidden, "otro"))));
+        server.mount(get(&format!("/api/v1/recordings/{late}")).respond_with(gate.hold(ok(recorded_in(late, "a")))));
+        server.install(cx);
+        let window = open(cx);
+        let channel = |space: &str| Some(cac_core::Conversation::Channel { space_id: space.into() });
+        assert_eq!(selected(cx), channel("g"));
+
+        follow(window, &format!("cac:recording/{in_a}"), cx);
+        let row = format!("recording-{in_a}");
+        wait_until(cx, "en Producto, con ésa marcada", |cx| element(window, &row, cx).is_some_and(|row| row.selected() == Some(true)));
+        assert_eq!(selected(cx), channel("a"));
+        assert!(!on_screen(window, "channel-tabs-notice", cx), "dijo algo al llegar");
+
+        click(window, "comms-channel-g", cx);
+        wait_until(cx, "de vuelta en General", |cx| on_screen(window, "conversation-tab-thread", cx) && !on_screen(window, &row, cx));
+        follow(window, &format!("cac:recording/{hidden}"), cx);
+        wait_until(cx, "dice que su canal no sale", |cx| label(window, "channel-tabs-notice", cx) == tr_es("recordings:channelHidden"));
+        assert_eq!(selected(cx), channel("g"));
+
+        follow(window, &format!("cac:recording/{late}"), cx);
+        wait_until(cx, "se pregunta dónde está", |_| gate.held() == 1);
+        click(window, "comms-channel-a", cx);
+        wait_until(cx, "en Producto, sabiendo que graba", |cx| selected(cx) == channel("a") && on_screen(window, "conversation-tab-recordings", cx));
+        gate.open();
+        // Lo que se pide después, y contesta 404, llega cuando la tardía ya
+        // se atendió: es la marca de que ya pasó lo que fuera a pasar.
+        wait_until(cx, "llega la respuesta", |_| gate.held() == 0);
+        follow(window, "cac:recording/3f3c1a2b-4d5e-4f70-8192-a3b4c5d6e7f8", cx);
+        wait_until(cx, "dice que ya no está", |cx| label(window, "channel-tabs-notice", cx) == tr_es("recordings:notFound"));
+        assert_eq!(element(window, "conversation-tab-thread", cx).unwrap().selected(), Some(true), "una respuesta tardía abrió Grabaciones en la conversación de después");
         stop(cx);
     }
 

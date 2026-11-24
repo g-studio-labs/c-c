@@ -60,7 +60,7 @@ pub use chat::{
 };
 pub use channel_tabs::{
     call_title, channel_tabs, guest_link, local_moment, recording_duration, row_meta, recording_file_name, search_page, search_path, tab_path, CallInvite, CallOccupant, ChannelTab, ChannelTabs,
-    ChatLinkItem, ChatMediaItem, PagedTab, Recording, RecordingPolicy, TabItem, TabPage, TabShows, CALL_TITLE_MAX, GUEST_TTLS, SEARCH_PAGE,
+    ChatLinkItem, ChatMediaItem, PagedTab, Recording, RecordingPlace, RecordingPolicy, TabItem, TabPage, TabShows, CALL_TITLE_MAX, GUEST_TTLS, SEARCH_PAGE,
 };
 pub use comms::{
     comms_panel, conversation_title, people_matching, resolve_conversation, Channel, Comms, CommsPanel, CommsRow, CommsRows, CommsSection, CommsState,

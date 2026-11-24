@@ -620,6 +620,33 @@ async fn opening_a_conversation_puts_it_in_front() {
     rig.core.stream().stop();
 }
 
+/// Un enlace a una grabación lleva al canal donde se grabó, que dice el
+/// servidor; y a uno que no está en la lista de quien pulsa no lleva.
+///
+/// Roturas que atrapa: tomar por bueno el canal que se mira en vez del de
+/// la grabación; llevar a un canal de otra organización (o a uno que no
+/// sale), que no hay fila que elegir; dar por encontrada una que el
+/// servidor no tiene.
+#[tokio::test]
+async fn a_recording_link_goes_to_the_channel_it_was_recorded_in() {
+    use cac_core::RecordingPlace;
+    let rig = rig().await;
+    mount_two_orgs(&rig.server).await;
+    mount_latest(&rig.server, json!([])).await;
+    mount_dms(&rig.server, json!([])).await;
+    let recording = |id: &str, space: &str| ok(json!({ "id": id, "spaceId": space, "startedBy": "u1", "status": "ready", "startedAt": "2026-10-15T15:00:00Z" }));
+    get("/api/v1/recordings/r-b").respond_with(recording("r-b", "b")).mount(&rig.server).await;
+    get("/api/v1/recordings/r-z").respond_with(recording("r-z", "z")).mount(&rig.server).await;
+    rig.core.open_workspace().await;
+    assert_eq!(rig.core.comms().state().selected, Some(channel("g")));
+    let tabs = rig.core.channel_tabs();
+
+    assert_eq!(tabs.recording_place("r-b").await.unwrap(), RecordingPlace::Channel { space_id: "b".into() });
+    assert_eq!(tabs.recording_place("r-z").await.unwrap(), RecordingPlace::Hidden);
+    assert!(tabs.recording_place("r-gone").await.is_err(), "se dio por encontrada una que el servidor no tiene");
+    rig.core.stream().stop();
+}
+
 /// La sala general se ofrece sólo a quien administra la organización que se
 /// mira: el core sabe el papel de quien está dentro en cada una.
 ///

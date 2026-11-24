@@ -473,6 +473,17 @@ struct UrlTicket {
     ticket: String,
 }
 
+/// A dónde lleva un enlace a una grabación.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum RecordingPlace {
+    /// A las Grabaciones de ese canal, que está en la lista de quien pulsa.
+    Channel { space_id: String },
+    /// Existe, pero es de un canal que no está en su lista: de otra
+    /// organización que la que se mira, o uno que no le sale.
+    Hidden,
+}
+
 /// Las pestañas de los canales de este core.
 pub struct ChannelTabs {
     core: Core,
@@ -515,6 +526,18 @@ impl ChannelTabs {
     /// Lo grabado en este canal.
     pub async fn recordings(&self, space_id: &str) -> Result<Vec<Recording>, ApiError> {
         self.core.get_list(&format!("/api/v1/task-spaces/{space_id}/recordings")).await
+    }
+
+    /// En qué canal está una grabación, para seguir un enlace a ella.
+    ///
+    /// Lo dice el servidor y no la lista del canal que se mira: un enlace
+    /// copiado de otro canal (o pegado en un directo) apunta a una que no
+    /// está ahí. Y sólo se lleva a un canal que la lista de quien pulsa
+    /// tiene: el servidor deja leerla a cualquiera de la organización.
+    pub async fn recording_place(&self, recording_id: &str) -> Result<RecordingPlace, ApiError> {
+        let recording: Recording = self.core.get(&format!("/api/v1/recordings/{recording_id}")).await?;
+        let listed = self.core.comms().state().channels.iter().any(|channel| channel.space_id == recording.space_id);
+        Ok(if listed { RecordingPlace::Channel { space_id: recording.space_id } } else { RecordingPlace::Hidden })
     }
 
     /// Borra una grabación: el vídeo y todas sus pistas.

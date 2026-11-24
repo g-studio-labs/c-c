@@ -39,5 +39,7 @@
   "downloaded": "Saved to {{path}}",
   "downloadStarted": "Downloading the recording",
   "downloadFailed": "Could not download the recording",
-  "notInChannel": "That recording isn't in this channel"
+  "notInChannel": "That recording isn't in this channel",
+  "channelHidden": "That recording belongs to a channel that isn't in your list",
+  "notFound": "That recording is gone, or you can't see it"
 }
