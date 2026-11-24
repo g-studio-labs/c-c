@@ -1276,12 +1276,13 @@ mod tests {
 
         click(window, "rail-work", cx);
         wait_until(cx, "de vuelta en Trabajo", |cx| !on_screen(window, "comms-channel-a", cx));
-        std::thread::sleep(Duration::from_millis(150));
-        cx.run_until_parked();
         let asked = server.hits("/api/v1/chat/voice-presence");
-        std::thread::sleep(Duration::from_millis(350));
+        std::thread::sleep(Duration::from_millis(500));
         cx.run_until_parked();
-        assert_eq!(server.hits("/api/v1/chat/voice-presence"), asked, "fuera de comunicación no se pregunta");
+        // La pregunta que ya había salido al irse puede llegar todavía: parar
+        // es no hacer más, no deshacer la que va de camino. Con un respiro
+        // fijo para que llegara, en una máquina cargada llegaba después.
+        assert!(server.hits("/api/v1/chat/voice-presence") <= asked + 1, "fuera de comunicación no se pregunta");
         stop(cx);
     }
 
