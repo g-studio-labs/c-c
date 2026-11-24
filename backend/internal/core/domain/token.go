@@ -105,6 +105,12 @@ const (
 	// tocó esto», que ya lo dice la fecha de modificación.
 	ScopeDocsWrite  = "docs:write"
 	ScopeDocsManage = "docs:manage"
+	// ScopeDocsShare: abrir y revocar un enlace que deja leer una página a
+	// quien no tiene cuenta (command-and-control-496). Aparte y no dentro de
+	// `docs:write` ni `docs:manage`: esos tocan lo que ya ve la organización, y
+	// éste saca el texto **fuera** de ella. Que un token pueda hacerlo se
+	// elige token a token, no viene con escribir docs.
+	ScopeDocsShare = "docs:share"
 	// No matching Manage: a token may create a collection and nothing else.
 	// Editing, deleting and sharing one all reach work a person already owns,
 	// and sharing reaches other people — that stays a human decision.
@@ -154,7 +160,7 @@ func ValidScope(s string) bool {
 	case ScopeTasksWrite, ScopeTasksManage,
 		ScopeNotesWrite, ScopeNotesManage,
 		ScopeReportsWrite, ScopeReportsManage,
-		ScopeDocsWrite, ScopeDocsManage,
+		ScopeDocsWrite, ScopeDocsManage, ScopeDocsShare,
 		ScopeCollectionsWrite, ScopeDeploysManage, ScopeServersManage, ScopeNotifyMe, ScopePostsWrite, ScopeChatWrite:
 		return true
 	default:

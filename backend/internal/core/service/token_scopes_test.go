@@ -44,6 +44,7 @@ func TestEveryDefinedScopeIsValid(t *testing.T) {
 		domain.ScopeNotesWrite, domain.ScopeNotesManage,
 		domain.ScopeReportsWrite, domain.ScopeReportsManage,
 		domain.ScopeCollectionsWrite, domain.ScopeServersManage,
+		domain.ScopeDocsShare,
 	}
 	for _, s := range all {
 		if !domain.ValidScope(s) {

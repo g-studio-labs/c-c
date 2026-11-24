@@ -83,7 +83,7 @@ func CORS(next http.Handler) http.Handler {
 		}
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Doc-Share")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -476,6 +476,10 @@ var patWritable = []struct {
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/servers/[^/]+/provisioning-requests/[^/]+/reverify$`), domain.ScopeServersManage},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/organizations/[^/]+/server-templates/?$`), domain.ScopeServersManage},
 	{http.MethodPut, regexp.MustCompile(`^/api/v1/organizations/[^/]+/server-templates/[^/]+$`), domain.ScopeServersManage},
+	// Compartir una página fuera de la organización, y cerrar el enlace. Con su
+	// propio permiso: ver ScopeDocsShare. Listar es un GET y no lo necesita.
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/docs/[^/]+/[^/]+/pages/[^/]+/shares/?$`), domain.ScopeDocsShare},
+	{http.MethodDelete, regexp.MustCompile(`^/api/v1/doc-shares/[^/]+$`), domain.ScopeDocsShare},
 }
 
 // patScopeFor reports the scope this request needs, and whether it's reachable
