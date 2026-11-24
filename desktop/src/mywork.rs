@@ -493,8 +493,6 @@ impl MyWorkView {
                 div().w(px(224.)).flex_none().child(
                     Input::new(&self.search)
                         .id("work-search")
-                        .small()
-                        .h(px(28.))
                         .leading_xs()
                         .when(dark, |this| this.bg(input.opacity(0.3)))
                         .cleanable(true)

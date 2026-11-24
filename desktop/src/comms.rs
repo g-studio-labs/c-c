@@ -369,9 +369,6 @@ impl Render for CommsView {
                 div().flex_none().px_2().py_1().child(
                     Input::new(&self.filter)
                         .id("comms-filter")
-                        .small()
-                        // `PanelFilter.tsx`: `h-7`, y la lupa a `size-3.5`.
-                        .h_7()
                         .cleanable(true)
                         .prefix(Icon::new(IconName::Search).size_3p5().text_color(muted)),
                 ),
@@ -729,8 +726,6 @@ impl Render for NewConversation {
                     div().min_w_0().flex_1().child(
                         Input::new(&self.search)
                             .id("new-conversation-search")
-                            .small()
-                            .h_8()
                             .prefix(Icon::new(IconName::Search).size_3p5().text_color(muted)),
                     ),
                 )

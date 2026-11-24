@@ -3,34 +3,50 @@
 
 use std::path::Path;
 
-/// Las llamadas `Input::new(…)` seguidas de `.small()` o `.xsmall()`: un
-/// campo de texto en tamaño chico queda sin aire y apretado (23-nov-2026,
-/// pedido varias veces).
+/// Las llamadas `Input::new(…)` con `.small()` o `.xsmall()` en su cadena
+/// (no sólo pegado: un `.id(…)` en medio lo escondía): un campo de texto en
+/// tamaño chico queda sin aire y apretado (23-nov-2026, pedido varias veces).
 fn shrunk_inputs(source: &str) -> usize {
     let mut found = 0;
     let mut rest = source;
     while let Some(at) = rest.find("Input::new(") {
-        let after = &rest[at + "Input::new(".len()..];
-        let mut depth = 1;
-        let mut end = after.len();
-        for (index, char) in after.char_indices() {
-            match char {
-                '(' => depth += 1,
-                ')' => depth -= 1,
-                _ => {}
+        let (_, mut tail) = balanced(&rest[at + "Input::new(".len()..]);
+        loop {
+            tail = tail.trim_start();
+            if tail.starts_with("//") {
+                tail = tail.split_once('\n').map_or("", |(_, next)| next);
+                continue;
             }
-            if depth == 0 {
-                end = index + 1;
-                break;
+            let Some(call) = tail.strip_prefix('.') else { break };
+            let name_len = call.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(call.len());
+            let (name, after) = call.split_at(name_len);
+            let Some(args) = after.strip_prefix('(') else { break };
+            let (inside, next) = balanced(args);
+            if (name == "small" || name == "xsmall") && inside.trim().is_empty() {
+                found += 1;
             }
+            tail = next;
         }
-        let tail = after[end..].trim_start();
-        if tail.starts_with(".small()") || tail.starts_with(".xsmall()") {
-            found += 1;
-        }
-        rest = &after[end..];
+        rest = tail;
     }
     found
+}
+
+/// Parte `text`, que empieza justo después de un `(`, en lo de dentro y lo
+/// que sigue al `)` que lo cierra.
+fn balanced(text: &str) -> (&str, &str) {
+    let mut depth = 1;
+    for (index, char) in text.char_indices() {
+        match char {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            return (&text[..index], &text[index + 1..]);
+        }
+    }
+    (text, "")
 }
 
 fn sources(dir: &Path, out: &mut Vec<(String, String)>) {
@@ -48,7 +64,8 @@ fn sources(dir: &Path, out: &mut Vec<(String, String)>) {
 fn no_text_input_is_shrunk() {
     assert_eq!(shrunk_inputs("Input::new(&self.a).small()"), 1);
     assert_eq!(shrunk_inputs("Input::new(&self.a)\n    .xsmall()"), 1);
-    assert_eq!(shrunk_inputs("Input::new(&state(x)).w_full()"), 0);
+    assert_eq!(shrunk_inputs("Input::new(&self.a)\n    .id(\"x\")\n    // por qué\n    .small()\n    .h_7()"), 1);
+    assert_eq!(shrunk_inputs("Input::new(&state(x)).w_full().prefix(Button::new(\"b\").small())"), 0);
     let mut files = Vec::new();
     sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
     let shrunk: Vec<&str> = files.iter().filter(|(_, source)| shrunk_inputs(source) > 0).map(|(path, _)| path.as_str()).collect();

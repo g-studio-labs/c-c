@@ -395,7 +395,7 @@ impl Workspace {
                     cx.stop_propagation();
                 }
             }))
-            .child(div().h(px(ROW_HEIGHT)).flex().items_center().child(Input::new(&field.input).id("tree-name-input").small().h_6().disabled(field.busy)))
+            .child(div().h(px(ROW_HEIGHT)).flex().items_center().child(Input::new(&field.input).id("tree-name-input").h_6().disabled(field.busy)))
             .children(field.problem.clone().map(|problem| {
                 div().id("tree-name-problem").pb_1().leading_xs().text_color(danger).aria_label(problem.clone()).child(problem).test_support()
             }))
@@ -1459,9 +1459,6 @@ impl Workspace {
                 div().mt_1().px_2().py_1().child(
                     Input::new(&self.tree_filter)
                         .id("tree-filter")
-                        .small()
-                        // `PanelFilter.tsx`: `h-7`, y la lupa a `size-3.5`.
-                        .h_7()
                         .cleanable(true)
                         .prefix(Icon::new(IconName::Search).size_3p5().text_color(muted)),
                 ),
