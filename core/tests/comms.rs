@@ -11,6 +11,10 @@ use serde_json::{json, Value};
 use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[path = "support/gated.rs"]
+mod gated;
+use gated::{Gate, GatedProxy};
+
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, String>>);
 
@@ -51,6 +55,9 @@ impl Recorder {
 
 struct Rig {
     server: MockServer,
+    /// Por donde habla el core: deja pasar todo, y retiene lo que una
+    /// prueba ate a una [`Gate`].
+    proxy: GatedProxy,
     core: Core,
     recorder: Arc<Recorder>,
     storage: Arc<MemoryStorage>,
@@ -69,8 +76,9 @@ async fn rig() -> Rig {
     let server = MockServer::start().await;
     let recorder = Arc::new(Recorder::default());
     let storage = Arc::new(MemoryStorage::default());
-    let core = core_for(&server.uri(), storage.clone(), recorder.clone());
-    Rig { server, core, recorder, storage }
+    let proxy = GatedProxy::start(server.uri());
+    let core = core_for(&proxy.uri(), storage.clone(), recorder.clone());
+    Rig { server, proxy, core, recorder, storage }
 }
 
 fn ok(data: Value) -> ResponseTemplate {
@@ -131,13 +139,17 @@ fn both_orgs_dms() -> Value {
     json!([dm("c1", "o1", "luis", 2, "¿vienes?", "u-luis"), dm("c9", "o2", "zoe", 500, "de otra organización", "u-zoe")])
 }
 
-/// Un stream que entrega esos eventos una vez, tras `delay`, y se acaba.
-async fn mount_events(server: &MockServer, frames: &str, delay: Duration) {
+/// Un stream que entrega esos eventos una vez, cuando la prueba abre la
+/// puerta que devuelve, y se acaba. Con un plazo de llegada, en una máquina
+/// cargada los eventos llegaban antes de que la lista estuviera cargada.
+async fn mount_events(server: &MockServer, frames: &str) -> Gate {
+    let said = Gate::default();
     get("/api/v1/events")
-        .respond_with(ResponseTemplate::new(200).set_body_raw(frames.as_bytes().to_vec(), "text/event-stream").set_delay(delay))
+        .respond_with(said.hold(ResponseTemplate::new(200).set_body_raw(frames.as_bytes().to_vec(), "text/event-stream")))
         .up_to_n_times(1)
         .mount(server)
         .await;
+    said
 }
 
 async fn until(what: &str, mut done: impl FnMut() -> bool) {
@@ -290,7 +302,7 @@ async fn each_organization_keeps_its_own_list_and_its_own_place() {
     rig.core.stream().stop();
 
     // Otra vez la app, con lo guardado en esta máquina.
-    let again = core_for(&rig.server.uri(), rig.storage.clone(), Arc::new(Recorder::default()));
+    let again = core_for(&rig.proxy.uri(), rig.storage.clone(), Arc::new(Recorder::default()));
     again.open_workspace().await;
     assert_eq!(again.comms().state().selected, Some(direct("c1")));
     assert!(again.switch_org("o2").await);
@@ -350,11 +362,12 @@ async fn a_channel_message_moves_its_row() {
         "event: chat:message\ndata: {\"spaceId\":\"b\",\"messageId\":\"m1\",\"actorId\":\"u2\",\"kind\":\"user\",\"authorName\":\"Luis Mora\",",
         "\"preview\":\"esto ya estaba\",\"mentions\":null,\"repliedTo\":\"\",\"edited\":true}\n\n",
     );
-    // Tarde, para que la lista ya esté cargada cuando lleguen.
-    mount_events(&rig.server, frames, Duration::from_millis(300)).await;
+    // Cuando la lista ya esté cargada.
+    let said = mount_events(&rig.server, frames).await;
 
     rig.core.open_workspace().await;
     assert_eq!(last_body(&rig.core.comms().state(), "a").as_deref(), Some("lo de antes"));
+    said.open();
 
     until("la fila del canal enseña lo que trajo el evento", || rig.recorder.ever(|state| last_body(state, "a").as_deref() == Some("Grabación lista"))).await;
     let moved = rig.recorder.comms.lock().unwrap().iter().find(|state| last_body(state, "a").as_deref() == Some("Grabación lista")).cloned().unwrap();
@@ -392,12 +405,13 @@ async fn a_direct_message_and_a_read_receipt_move_their_row() {
         "event: dm:read\ndata: {\"conversationId\":\"c2\",\"userId\":\"u-bea\",\"at\":\"2026-10-15T15:00:05Z\"}\n\n",
         "event: dm:message\ndata: {\"conversationId\":\"c2\",\"messageId\":\"d9\",\"actorId\":\"u-bea\",\"authorName\":\"Bea\"}\n\n",
     );
-    mount_events(&rig.server, frames, Duration::from_millis(300)).await;
+    let said = mount_events(&rig.server, frames).await;
 
     rig.core.open_workspace().await;
     let now = chrono::Utc::now();
     let ticks = |core: &Core| core.comms().panel("", Locale::Es, &now).directs.rows.iter().map(|row| (row.name.clone(), row.ticks)).collect::<Vec<_>>();
     assert_eq!(ticks(&rig.core), [("luis".to_string(), Some(false)), ("bea".to_string(), Some(false))]);
+    said.open();
 
     // El aviso de lectura, antes de que la lista se vuelva a pedir.
     until("lo que escribí a Bea pasa a leído, y sólo eso", || {
@@ -427,15 +441,13 @@ async fn a_stream_that_comes_back_asks_for_the_last_lines_again() {
     get("/api/v1/chat/latest").respond_with(ok(json!([latest("a", "u2", "Luis Mora", "user", "antes del corte")]))).up_to_n_times(1).mount(&rig.server).await;
     mount_latest(&rig.server, json!([latest("a", "u2", "Luis Mora", "user", "durante el corte")])).await;
     mount_dms(&rig.server, json!([])).await;
-    // Un stream que se acaba en seguida, y otro que vuelve.
-    mount_events(&rig.server, ": hola\n\n", Duration::from_millis(250)).await;
-    get("/api/v1/events")
-        .respond_with(ResponseTemplate::new(200).set_body_raw(b": de vuelta\n\n".to_vec(), "text/event-stream").set_delay(Duration::from_millis(50)))
-        .mount(&rig.server)
-        .await;
+    // Un stream que se acaba, y otro que vuelve.
+    let cut = mount_events(&rig.server, ": hola\n\n").await;
+    get("/api/v1/events").respond_with(ResponseTemplate::new(200).set_body_raw(b": de vuelta\n\n".to_vec(), "text/event-stream")).mount(&rig.server).await;
 
     rig.core.open_workspace().await;
     assert_eq!(last_body(&rig.core.comms().state(), "a").as_deref(), Some("antes del corte"));
+    cut.open();
 
     until("la fila enseña lo que se dijo durante el corte", || last_body(&rig.core.comms().state(), "a").as_deref() == Some("durante el corte")).await;
     rig.core.stream().stop();
@@ -456,10 +468,12 @@ async fn a_stream_that_comes_back_asks_for_the_last_lines_again() {
 async fn a_late_answer_does_not_paint_the_organization_that_was_left() {
     let rig = rig().await;
     get("/api/v1/organizations/").respond_with(ok(json!([org("o1"), org("o2")]))).mount(&rig.server).await;
-    let slow = Duration::from_millis(400);
+    // Lo de `o1` no contesta hasta que ya se cambió: con un plazo, en una
+    // máquina cargada contestaba antes o se pedía después del cambio.
+    let late = Gate::default();
     get("/api/v1/task-spaces/")
         .and(query_param("orgId", "o1"))
-        .respond_with(ok(json!([space("a", "o1", "Producto", None)])).set_delay(slow))
+        .respond_with(late.hold(ok(json!([space("a", "o1", "Producto", None)]))))
         .mount(&rig.server)
         .await;
     get("/api/v1/task-spaces/").and(query_param("orgId", "o2")).respond_with(ok(json!([space("z", "o2", "Soporte", None)]))).mount(&rig.server).await;
@@ -468,13 +482,13 @@ async fn a_late_answer_does_not_paint_the_organization_that_was_left() {
     mount_dms(&rig.server, json!([dm("c1", "o1", "luis", 0, "hola", "u-luis"), dm("c9", "o2", "zoe", 0, "hola", "u-zoe")])).await;
     get("/api/v1/users/search")
         .and(query_param("orgId", "o1"))
-        .respond_with(ok(json!([{ "id": "u2", "username": "luis" }])).set_delay(slow))
+        .respond_with(late.hold(ok(json!([{ "id": "u2", "username": "luis" }]))))
         .mount(&rig.server)
         .await;
     get("/api/v1/users/search").and(query_param("orgId", "o2")).respond_with(ok(json!([{ "id": "u7", "username": "zoe" }]))).mount(&rig.server).await;
     Mock::given(method("POST"))
         .and(path("/api/v1/dm/open"))
-        .respond_with(ok(json!({ "id": "c1", "orgId": "o1" })).set_delay(slow))
+        .respond_with(late.hold(ok(json!({ "id": "c1", "orgId": "o1" }))))
         .mount(&rig.server)
         .await;
 
@@ -492,12 +506,13 @@ async fn a_late_answer_does_not_paint_the_organization_that_was_left() {
         let core = rig.core.clone();
         async move { core.comms().open_with("u2").await }
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    until("lo de o1 va en camino", || late.held() == 3).await;
     assert!(rig.core.switch_org("o2").await);
     rig.core.comms().load_people().await;
     let comms = rig.core.comms();
     assert_eq!(channel_names(&comms.state()), ["Soporte"]);
 
+    late.open();
     entering.await.unwrap();
     people.await.unwrap();
     assert_eq!(opening.await.unwrap().unwrap(), "c1");
@@ -529,19 +544,16 @@ async fn a_late_answer_does_not_paint_the_organization_that_was_left() {
 async fn a_late_failure_does_not_mark_the_new_organizations_tree() {
     let rig = rig().await;
     get("/api/v1/organizations/").respond_with(ok(json!([org("o1"), org("o2")]))).mount(&rig.server).await;
-    get("/api/v1/task-spaces/")
-        .and(query_param("orgId", "o1"))
-        .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_millis(300)))
-        .mount(&rig.server)
-        .await;
+    let late = Gate::default();
+    get("/api/v1/task-spaces/").and(query_param("orgId", "o1")).respond_with(late.hold(ResponseTemplate::new(500))).mount(&rig.server).await;
     get("/api/v1/task-spaces/").and(query_param("orgId", "o2")).respond_with(ok(json!([space("z", "o2", "Soporte", None)]))).mount(&rig.server).await;
     let entering = tokio::spawn({
         let core = rig.core.clone();
         async move { core.open_workspace().await }
     });
-    until("se sabe en qué organización se está", || rig.core.orgs().state().current_org_id.is_some()).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    until("el árbol de o1 va en camino", || late.held() == 1).await;
     assert!(rig.core.switch_org("o2").await);
+    late.open();
     entering.await.unwrap();
 
     let tree = rig.core.tree().state();
@@ -662,7 +674,7 @@ async fn entering_folding_and_signing_out() {
     comms.toggle_section(CommsSection::Directs);
     rig.core.stream().stop();
 
-    let again = core_for(&rig.server.uri(), rig.storage.clone(), Arc::new(Recorder::default()));
+    let again = core_for(&rig.proxy.uri(), rig.storage.clone(), Arc::new(Recorder::default()));
     again.open_workspace().await;
     let state = again.comms().state();
     assert_eq!((state.org_id.as_deref(), state.channels_folded, state.directs_folded), (Some("o2"), false, true));
