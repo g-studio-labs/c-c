@@ -557,5 +557,14 @@
     "recordedBy": "Recorded by {{who}} on {{when}}",
     "fromTask": "in {{ref}}",
     "serverTitle": "What has bitten here"
+  },
+  "sharedDoc": {
+    "loading": "Opening the shared page…",
+    "goneTitle": "This link doesn't open anything",
+    "goneBody": "It may have expired, been revoked, or the page may have been deleted. Ask whoever sent it for a new one.",
+    "failed": "The page could not be loaded. Try again in a moment.",
+    "expires": "Shared until {{when}}",
+    "pages": "Pages",
+    "readOnly": "Read only"
   }
 }
