@@ -25,6 +25,9 @@ path = "src/main.rs"
 # Sin workspace a propósito, como `core/` y `desktop/`: cada crate con su
 # `target/` y su `Cargo.lock`.
 [dependencies]
+# Lo que el MCP comparte con las apps: hoy, el enlace web de una página
+# compartida (`shared_doc_link`), que tiene que ser el mismo en todas.
+cac-core = { path = "../core" }
 # Las mismas features que usa la app, para que Cargo compile reqwest una vez
 # cuando lo consume ella.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }

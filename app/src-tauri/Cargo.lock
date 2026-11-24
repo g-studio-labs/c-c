@@ -724,6 +724,7 @@ dependencies = [
 name = "cac-mcp"
 version = "1.33.0"
 dependencies = [
+ "cac-core",
  "image",
  "reqwest 0.12.28",
  "serde",
