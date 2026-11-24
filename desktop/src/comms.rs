@@ -768,7 +768,7 @@ impl Render for NewConversation {
 mod tests {
     // Sin `use super::*`: ver la nota en `shell.rs`.
     use crate::backend::Backend;
-    use crate::testing::{ok, sign_in, wait_until, FakeServer};
+    use crate::testing::{ok, sign_in, wait_until, FakeServer, Gate};
     use crate::workspace::Workspace;
     use cac_core::Conversation;
     use gpui_kit::test::TestWindowExt;
@@ -1161,11 +1161,10 @@ mod tests {
             muted.lock().unwrap().retain(|id| *id != "a");
             ok(json!(null))
         }));
-        server.mount(
-            Mock::given(method("DELETE"))
-                .and(follow("b"))
-                .respond_with(ResponseTemplate::new(500).set_body_json(json!({ "success": false, "error": "boom" })).set_delay(Duration::from_millis(300))),
-        );
+        // El fallo se retiene hasta haber visto el cambio: con un plazo, en
+        // una máquina cargada llegaba antes de que la prueba mirara.
+        let refusal = Gate::default();
+        server.mount(Mock::given(method("DELETE")).and(follow("b")).respond_with(refusal.hold(ResponseTemplate::new(500).set_body_json(json!({ "success": false, "error": "boom" })))));
         server.install(cx);
         let window = open(cx);
         enter(window, cx);
@@ -1180,6 +1179,9 @@ mod tests {
         wait_until(cx, "el otro canal dice que se sigue", |cx| label(window, "conversation-title", cx) == "#Diseño" && label(window, "conversation-follow", cx) == "Siguiendo");
         click(window, "conversation-follow", cx);
         wait_until(cx, "cambia en el acto", |cx| label(window, "conversation-follow", cx) == "Seguir");
+        wait_until(cx, "se le pide al servidor", |_| refusal.held() == 1);
+        assert_eq!(label(window, "conversation-follow", cx), "Seguir", "volvió antes de que el servidor contestara");
+        refusal.open();
         wait_until(cx, "el servidor dice que no y vuelve", |cx| label(window, "conversation-follow", cx) == "Siguiendo");
         wait_until(cx, "y se dice", |cx| on_screen(window, "thread-notice", cx));
 
