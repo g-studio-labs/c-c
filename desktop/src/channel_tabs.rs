@@ -780,7 +780,10 @@ impl Render for ChannelTabsView {
                 .min_w_0()
                 .flex_1()
                 .pl_2()
-                .child(Input::new(&self.search).id("channel-search-input").cleanable(true).prefix(Icon::new(IconName::Search).size_3().text_color(muted)))
+                // Sin caja, como en Tauri: es un modificador de la pestaña activa en la
+                // misma fila, no un campo de formulario.
+                .text_xs()
+                .child(Input::new(&self.search).id("channel-search-input").appearance(false).cleanable(true).prefix(Icon::new(IconName::Search).size_3().text_color(muted)))
                 .test_support()
         });
         let body: AnyElement = match self.tab {
