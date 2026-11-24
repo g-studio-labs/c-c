@@ -32,13 +32,17 @@ impl Storage for MemoryStorage {
 #[derive(Default)]
 struct Recorder {
     connection: Mutex<Vec<ConnectionState>>,
+    /// Cuándo llegó cada uno de `connection`.
+    connection_at: Mutex<Vec<std::time::Instant>>,
     events: Mutex<Vec<ServerEvent>>,
 }
 
 impl Listener for Recorder {
     fn session_changed(&self, _session: Option<Session>) {}
     fn connection_changed(&self, state: ConnectionState) {
-        self.connection.lock().unwrap().push(state);
+        let mut seen = self.connection.lock().unwrap();
+        seen.push(state);
+        self.connection_at.lock().unwrap().push(std::time::Instant::now());
     }
     fn server_event(&self, event: ServerEvent) {
         self.events.lock().unwrap().push(event);
@@ -101,6 +105,16 @@ async fn hits(server: &MockServer, verb: &str, route: &str) -> usize {
         .iter()
         .filter(|request| request.method.as_str() == verb && request.url.path() == route)
         .count()
+}
+
+async fn until_hits(server: &MockServer, verb: &str, route: &str, wanted: usize) {
+    for _ in 0..200 {
+        if hits(server, verb, route).await >= wanted {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{verb} {route} no llegó a pedirse {wanted} veces");
 }
 
 /// Espera a que «Mi trabajo» se haya pedido más veces que `before`.
@@ -298,14 +312,17 @@ async fn a_stream_refused_with_a_fresh_token_waits_before_trying_again() {
         .mount(&rig.server)
         .await;
 
+    let started = std::time::Instant::now();
     rig.core.stream().start();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    until_hits(&rig.server, "POST", "/api/v1/auth/refresh", 4).await;
+    let took = started.elapsed();
     rig.core.stream().stop();
 
-    // Con la espera de prueba (40 ms, y el doble cada vez) caben cuatro o
-    // cinco; sin espera serían decenas.
-    let renewals = hits(&rig.server, "POST", "/api/v1/auth/refresh").await;
-    assert!((2..=6).contains(&renewals), "{renewals} renovaciones en 300 ms");
+    // La primera renovación reintenta en el acto; desde la segunda, con la
+    // espera de prueba (40 ms, y el doble cada vez): la cuarta no llega antes
+    // de 80 + 160 ms. Sin espera llegarían seguidas. Contar las que cabían en
+    // 300 ms dependía de lo rápido que contestara el servidor.
+    assert!(took >= Duration::from_millis(240), "cuatro renovaciones en {took:?}");
 }
 
 /// Un corte sólo se avisa cuando dura; al volver, el aviso se quita.
@@ -330,14 +347,18 @@ async fn an_outage_is_only_announced_once_it_lasts() {
         .mount(&server)
         .await;
 
+    let started = std::time::Instant::now();
     core.stream().start();
     until("el corte dura", || recorder.connection.lock().unwrap().iter().any(|state| state.lasting)).await;
     {
         let seen = recorder.connection.lock().unwrap();
         let first_down = seen.iter().find(|state| state.status == Connection::Down).unwrap();
         assert!(!first_down.lasting, "se avisó en la primera caída");
-        let quiet = seen.iter().take_while(|state| !state.lasting).filter(|state| state.status == Connection::Down).count();
-        assert!(quiet >= 2, "avisó antes de tiempo: {quiet} caídas calladas");
+        // El corte empezó después de arrancar: avisar antes de que pase el
+        // plazo desde ahí es avisar antes de tiempo. Contar caídas calladas
+        // dependía de lo rápido que contestara el servidor.
+        let lasting_at = recorder.connection_at.lock().unwrap()[seen.iter().position(|state| state.lasting).unwrap()];
+        assert!(lasting_at - started >= Duration::from_millis(200), "avisó antes de tiempo: a los {:?}", lasting_at - started);
     }
     // Y una vez puesto no parpadea: cada reintento sigue diciendo que dura.
     until("hay otro reintento que mirar", || {

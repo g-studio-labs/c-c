@@ -11,6 +11,10 @@ use serde_json::{json, Value};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[path = "support/gated.rs"]
+mod gated;
+use gated::{Gate, GatedProxy};
+
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, String>>);
 
@@ -41,19 +45,23 @@ impl Listener for Recorder {
 
 struct Rig {
     server: MockServer,
+    /// Por donde habla el core: deja pasar todo, y retiene lo que una
+    /// prueba ate a una [`Gate`].
+    _proxy: GatedProxy,
     core: Core,
     recorder: Arc<Recorder>,
 }
 
 async fn rig() -> Rig {
     let server = MockServer::start().await;
+    let proxy = GatedProxy::start(server.uri());
     let recorder = Arc::new(Recorder::default());
-    let mut config = Config::new(server.uri());
+    let mut config = Config::new(proxy.uri());
     config.stream_backoff = Duration::from_millis(40);
     let core = Core::new(config, Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
     let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana" })).unwrap();
     core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
-    Rig { server, core, recorder }
+    Rig { server, _proxy: proxy, core, recorder }
 }
 
 fn ok(data: Value) -> ResponseTemplate {
@@ -260,8 +268,8 @@ async fn the_bell_is_always_asked_for_an_organization() {
 }
 
 /// Lo cargado con uno de cada; el servidor pasa a tener más de todo, y llega
-/// ese evento. Devuelve lo que la pantalla acaba viendo.
-async fn after_event(event: &str, data: &str) -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
+/// ese evento. La pantalla tiene que acabar viendo `expected`, y quedarse ahí.
+async fn after_event(event: &str, data: &str, expected: (Option<i64>, Option<i64>, Option<i64>, Option<i64>), what: &str) {
     let rig = rig().await;
     mount_all(&rig.server, 1, 1, 1, 1, 1).await;
     rig.core.orgs().load().await;
@@ -273,10 +281,12 @@ async fn after_event(event: &str, data: &str) -> (Option<i64>, Option<i64>, Opti
     mount_all(&rig.server, 5, 10, 100, 3, 4).await;
     mount_events(&rig.server, &format!("event: {event}\ndata: {data}\n\n")).await;
     rig.core.stream().start();
-    // El respiro de antes de volver a contar, y de sobra para que llegue.
+    until(what, || counts(&rig.core.counters().state()) == expected).await;
+    // Lo que no se mueve no tiene a qué esperar: se le da el respiro de antes
+    // de volver a contar, y de sobra, a la cuenta que no debe salir.
     tokio::time::sleep(Duration::from_millis(900)).await;
     rig.core.stream().stop();
-    counts(&rig.core.counters().state())
+    assert_eq!(counts(&rig.core.counters().state()), expected, "{what}");
 }
 
 /// Cada evento vuelve a contar lo que mueve, y nada más.
@@ -290,12 +300,12 @@ async fn after_event(event: &str, data: &str) -> (Option<i64>, Option<i64>, Opti
 async fn each_event_recounts_what_it_moves() {
     // Lo que no cambia se queda en lo cargado: 1 aviso, 1 + 1 de
     // comunicación, 1 servidor, 1 invitación.
-    assert_eq!(after_event("task:assigned", "{}").await, (Some(5), Some(2), Some(1), Some(1)), "un aviso");
-    assert_eq!(after_event("chat:message", "{}").await, (Some(5), Some(11), Some(1), Some(1)), "un mensaje de canal");
-    assert_eq!(after_event("dm:message", "{}").await, (Some(5), Some(101), Some(1), Some(1)), "un directo");
-    assert_eq!(after_event("org:membership", "{}").await, (Some(1), Some(2), Some(1), Some(4)), "una membresía");
-    assert_eq!(after_event("ci:run", r#"{"status":"completed"}"#).await, (Some(5), Some(2), Some(1), Some(1)), "un run que acaba");
-    assert_eq!(after_event("task:move", "{}").await, (Some(1), Some(2), Some(1), Some(1)), "mover una tarjeta no cuenta");
+    after_event("task:assigned", "{}", (Some(5), Some(2), Some(1), Some(1)), "un aviso").await;
+    after_event("chat:message", "{}", (Some(5), Some(11), Some(1), Some(1)), "un mensaje de canal").await;
+    after_event("dm:message", "{}", (Some(5), Some(101), Some(1), Some(1)), "un directo").await;
+    after_event("org:membership", "{}", (Some(1), Some(2), Some(1), Some(4)), "una membresía").await;
+    after_event("ci:run", r#"{"status":"completed"}"#, (Some(5), Some(2), Some(1), Some(1)), "un run que acaba").await;
+    after_event("task:move", "{}", (Some(1), Some(2), Some(1), Some(1)), "mover una tarjeta no cuenta").await;
 }
 
 /// Diez mensajes seguidos son una sola cuenta nueva.
@@ -310,6 +320,9 @@ async fn a_burst_of_messages_recounts_once() {
     mount_events(&rig.server, &"event: chat:message\ndata: {}\n\n".repeat(10)).await;
 
     rig.core.stream().start();
+    until_hits(&rig.server, "/api/v1/chat/unread", before + 1).await;
+    // Lo que se mira es que no salgan más: se les da el respiro de antes de
+    // volver a contar, y de sobra.
     tokio::time::sleep(Duration::from_millis(900)).await;
     rig.core.stream().stop();
 
@@ -517,19 +530,17 @@ async fn a_recount_that_fails_keeps_what_was_known() {
 #[tokio::test]
 async fn a_late_answer_for_another_organization_is_dropped() {
     let rig = rig().await;
-    get("/api/v1/notifications/")
-        .and(query_param("orgId", "o1"))
-        .respond_with(ok(json!({ "items": [], "unread": 4 })).set_delay(Duration::from_millis(300)))
-        .mount(&rig.server)
-        .await;
+    let late = Gate::default();
+    get("/api/v1/notifications/").and(query_param("orgId", "o1")).respond_with(late.hold(ok(json!({ "items": [], "unread": 4 })))).mount(&rig.server).await;
     mount_bell(&rig.server, "o2", 8).await;
 
     let slow = {
         let core = rig.core.clone();
         tokio::spawn(async move { core.counters().load(Some("o1".into())).await })
     };
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    until("la de o1 va en camino", || late.held() == 1).await;
     rig.core.counters().load(Some("o2".into())).await;
+    late.open();
     slow.await.unwrap();
 
     assert_eq!(rig.core.counters().state().notifications, Some(8));
