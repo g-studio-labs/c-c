@@ -478,11 +478,13 @@ mod tests {
         stop(cx);
     }
 
-    /// Lo que dice el aviso del tablero.
+    /// Lo que dice el aviso del tablero; vacío si no hay. Se mira también
+    /// esperando, y entre un aviso y el siguiente puede pintarse un cuadro
+    /// sin ninguno: buscarlo a la fuerza tumbaba la prueba en ese cuadro.
     fn said(window: AnyWindowHandle, cx: &mut TestAppContext) -> String {
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
-            window.find(gpui_kit::SharedString::from("board-error")).label().unwrap_or_default().to_string()
+            window.try_find(gpui_kit::SharedString::from("board-error")).and_then(|found| found.label().map(str::to_string)).unwrap_or_default()
         })
         .unwrap()
     }
