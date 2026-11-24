@@ -115,6 +115,14 @@ pub struct ChatView {
     _on_snapshot: Subscription,
 }
 
+/// Un enlace a una grabación, pulsado en un canal: lo abre quien tiene sus
+/// pestañas (`channel_tabs.rs`).
+pub struct OpenRecording {
+    pub id: String,
+}
+
+impl EventEmitter<OpenRecording> for ChatView {}
+
 impl ChatView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let list = ListState::new(0, ListAlignment::Bottom, px(OVERDRAW));
@@ -330,6 +338,15 @@ impl ChatView {
                 ThreadLink::File { path } => {
                     let name = this.file_name(&path);
                     this.open_file(path, name, window, cx);
+                }
+                ThreadLink::Recording { id } => {
+                    let in_channel = matches!(Backend::snapshot(cx).read(cx).comms.selected, Some(Conversation::Channel { .. }));
+                    // Un directo no tiene Grabaciones.
+                    if in_channel {
+                        cx.emit(OpenRecording { id });
+                    } else {
+                        this.say(tr(cx, "common:misc.notInThisApp"), cx);
+                    }
                 }
                 ThreadLink::NotHere => this.say(tr(cx, "common:misc.notInThisApp"), cx),
                 ThreadLink::Unknown => this.say(tr(cx, "common:last.openLinkFailed"), cx),

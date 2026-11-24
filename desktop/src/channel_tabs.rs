@@ -20,7 +20,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
-use crate::chat::ChatView;
+use crate::chat::{ChatView, OpenRecording};
 use crate::files;
 use crate::lang::{error_text, locale, tr};
 use crate::theme::Leading as _;
@@ -43,6 +43,11 @@ struct RecordingList {
     /// Las que se están bajando o borrando: su botón gira y no se pulsa dos
     /// veces (un segundo clic sería una segunda descarga de cientos de MB).
     busy: Vec<String>,
+    /// La que se pidió ver desde un enlace del chat: va marcada y a la vista.
+    pointed: Option<String>,
+    /// La fila que hay que traer a la vista en cuanto se pueda.
+    scroll_to: Option<usize>,
+    scroll: ScrollHandle,
 }
 
 /// Las pestañas del canal que se tiene delante, y debajo lo que muestre la
@@ -71,6 +76,7 @@ pub struct ChannelTabsView {
     pub(crate) guest: Option<Entity<GuestCall>>,
     _on_guest: Option<Subscription>,
     _on_search: Subscription,
+    _on_recording_link: Subscription,
 }
 
 impl ChannelTabsView {
@@ -82,6 +88,7 @@ impl ChannelTabsView {
                 this.searched(query, cx);
             }
         });
+        let on_recording_link = cx.subscribe_in(&thread, window, |this, _, event: &OpenRecording, window, cx| this.show_recording(event.id.clone(), window, cx));
         Self {
             thread,
             space_id: None,
@@ -99,6 +106,7 @@ impl ChannelTabsView {
             guest: None,
             _on_guest: None,
             _on_search: on_search,
+            _on_recording_link: on_recording_link,
         }
     }
 
@@ -161,10 +169,24 @@ impl ChannelTabsView {
 
     fn pick(&mut self, tab: ChannelTab, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = tab;
+        self.recordings.pointed = None;
+        self.recordings.scroll_to = None;
         self.query.clear();
         self.search.update(cx, |search, cx| search.set_value("", window, cx));
         self.reload(cx);
         cx.notify();
+    }
+
+    /// Un enlace `cac:recording/…` del chat: a Grabaciones, con esa marcada
+    /// en cuanto llegue la lista (`onOpenRecordings` en `ChannelView.tsx`,
+    /// que sólo cambia de pestaña).
+    fn show_recording(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.recordings_enabled {
+            self.say(tr(cx, "recordings:notInChannel"), cx);
+            return;
+        }
+        self.pick(ChannelTab::Recordings, window, cx);
+        self.recordings.pointed = Some(id);
     }
 
     fn searched(&mut self, query: String, cx: &mut Context<Self>) {
@@ -244,7 +266,20 @@ impl ChannelTabsView {
                     return;
                 }
                 match answer {
-                    Ok(rows) => this.recordings.rows = Some(rows),
+                    Ok(rows) => {
+                        if let Some(pointed) = this.recordings.pointed.clone() {
+                            match rows.iter().position(|row| row.id == pointed) {
+                                Some(at) => this.recordings.scroll_to = Some(at),
+                                // Borrada, o de otro canal: decirlo, en vez
+                                // de una lista que no dice por qué se abrió.
+                                None => {
+                                    this.recordings.pointed = None;
+                                    this.say(tr(cx, "recordings:notInChannel"), cx);
+                                }
+                            }
+                        }
+                        this.recordings.rows = Some(rows);
+                    }
                     Err(_) => this.recordings.failed = true,
                 }
                 cx.notify();
@@ -609,15 +644,16 @@ impl ChannelTabsView {
 
     fn render_recordings(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (border, muted, danger) = (theme.border, theme.muted_foreground, theme.danger);
+        let (border, muted, danger, primary) = (theme.border, theme.muted_foreground, theme.danger, theme.primary);
+        let state = |shows, empty, cx: &App| Self::tab_body().child(Self::render_state(shows, empty, cx)).test_support().into_any_element();
         if self.recordings.failed {
-            return Self::render_state(TabShows::Failed, String::new(), cx);
+            return state(TabShows::Failed, String::new(), cx);
         }
         let Some(rows) = &self.recordings.rows else {
-            return Self::render_state(TabShows::Loading, String::new(), cx);
+            return state(TabShows::Loading, String::new(), cx);
         };
         if rows.is_empty() {
-            return Self::render_state(TabShows::Empty, tr(cx, "recordings:panelEmpty"), cx);
+            return state(TabShows::Empty, tr(cx, "recordings:panelEmpty"), cx);
         }
         let rows: Vec<AnyElement> = rows
             .iter()
@@ -654,11 +690,14 @@ impl ChannelTabsView {
                         )
                 });
                 let delete = id.clone();
+                let pointed = self.recordings.pointed.as_deref() == Some(id.as_str());
                 div()
                     .id(SharedString::from(format!("recording-{id}")))
                     .rounded(px(8.))
                     .border_1()
-                    .border_color(border)
+                    .border_color(if pointed { primary } else { border })
+                    .when(pointed, |this| this.bg(primary.opacity(0.06)))
+                    .aria_selected(pointed)
                     .p_3()
                     .flex()
                     .flex_col()
@@ -696,7 +735,14 @@ impl ChannelTabsView {
                     .into_any_element()
             })
             .collect();
-        div().p_3().flex().flex_col().gap_2().children(rows).into_any_element()
+        // Las filas, hijas directas de lo que se desliza: `scroll_to_item`
+        // cuenta por hijos.
+        Self::tab_body().track_scroll(&self.recordings.scroll).p_3().flex().flex_col().gap_2().children(rows).test_support().into_any_element()
+    }
+
+    /// Lo que se desliza debajo de las pestañas.
+    fn tab_body() -> Stateful<Div> {
+        div().id("channel-tab-body").w_full().flex_1().min_h_0().overflow_y_scroll()
     }
 }
 
@@ -715,6 +761,16 @@ impl Render for ChannelTabsView {
         }
         let theme = cx.theme();
         let (border, muted, foreground, background) = (theme.border, theme.muted_foreground, theme.foreground, theme.background);
+        if let Some(at) = self.recordings.scroll_to.filter(|_| self.tab == ChannelTab::Recordings) {
+            // Un `ScrollHandle` que aún no se pintó no sabe su alto y tira la
+            // petición sin moverse: se pide cuando la lista ya se pintó una vez.
+            if self.recordings.scroll.bounds().size.height > px(0.) {
+                self.recordings.scroll.scroll_to_item(at);
+                self.recordings.scroll_to = None;
+            } else {
+                window.refresh();
+            }
+        }
         let tabs: Vec<AnyElement> = cac_core::channel_tabs(self.recordings_enabled).into_iter().map(|tab| self.render_tab(tab, cx)).collect();
         let searching = !self.query.trim().is_empty();
         let search = self.tab.searchable().then(|| {
@@ -729,15 +785,10 @@ impl Render for ChannelTabsView {
         });
         let body: AnyElement = match self.tab {
             ChannelTab::Thread if !searching => self.thread.clone().into_any_element(),
-            tab => {
-                let content = match tab {
-                    ChannelTab::Thread => self.render_hits(cx),
-                    ChannelTab::Media => self.render_media(window, cx),
-                    ChannelTab::Links => self.render_links(cx),
-                    ChannelTab::Recordings => self.render_recordings(cx),
-                };
-                div().id("channel-tab-body").w_full().flex_1().min_h_0().overflow_y_scroll().child(content).test_support().into_any_element()
-            }
+            ChannelTab::Recordings => self.render_recordings(cx),
+            ChannelTab::Thread => Self::tab_body().child(self.render_hits(cx)).test_support().into_any_element(),
+            ChannelTab::Media => Self::tab_body().child(self.render_media(window, cx)).test_support().into_any_element(),
+            ChannelTab::Links => Self::tab_body().child(self.render_links(cx)).test_support().into_any_element(),
         };
         let notice = self.notice.clone().map(|(_, text)| {
             div()
@@ -1359,6 +1410,54 @@ mod tests {
         wait_until(cx, "se va la fila", |cx| !on_screen(window, "recording-r1", cx));
         assert_eq!(server.requests().iter().filter(|request| request.method.as_str() == "DELETE").count(), 2);
         stop(cx);
+    }
+
+    /// Un enlace a una grabación pulsado en el canal lleva a Grabaciones con
+    /// ésa marcada y a la vista, aunque esté al fondo de la lista; y una que
+    /// no está en el canal lo dice en vez de abrir la lista sin más.
+    ///
+    /// Roturas que atrapa: un enlace que no cambia de pestaña; marcar otra o
+    /// ninguna; dejarla fuera de la vista al fondo de la lista; abrir la
+    /// lista callada cuando la grabación no está en ella.
+    #[gpui_kit::test]
+    fn a_recording_link_opens_its_tab_pointing_at_it(cx: &mut TestAppContext) {
+        let server = server();
+        let id = |at: usize| format!("{at:08x}-0000-4000-8000-000000000000");
+        let rows: Vec<Value> = (0..30).map(|at| recording(&id(at), "ready")).collect();
+        server.mount(get("/api/v1/task-spaces/g/recordings/policy").respond_with(ok(json!({ "enabled": true, "active": null }))));
+        server.mount(get("/api/v1/task-spaces/g/recordings").respond_with(ok(Value::Array(rows))));
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "sale Grabaciones", |cx| on_screen(window, "conversation-tab-recordings", cx));
+
+        let follow = |href: String, cx: &mut TestAppContext| {
+            cx.update_window(window, |root, window, cx| {
+                let root = root.downcast::<gpui_kit::base::Root>().unwrap();
+                let workspace = root.read(cx).view().clone().downcast::<Workspace>().unwrap();
+                let chat = workspace.read(cx).chat.clone();
+                chat.update(cx, |chat, cx| chat.follow_link(&href, window, cx));
+            })
+            .unwrap()
+        };
+        let last = format!("recording-{}", id(29));
+        follow(format!("cac:recording/{}", id(29)), cx);
+        wait_until(cx, "Grabaciones, con ésa marcada", |cx| element(window, &last, cx).is_some_and(|row| row.selected() == Some(true)));
+        assert!(element(window, &last, cx).unwrap().visible(), "la marcada se quedó fuera de la vista");
+        assert_eq!(element(window, &format!("recording-{}", id(0)), cx).unwrap().selected(), Some(false));
+
+        follow(format!("cac:recording/{}", id(99)), cx);
+        wait_until(cx, "dice que no está", |cx| label(window, "channel-tabs-notice", cx) == tr_es("recordings:notInChannel"));
+        assert_eq!(element(window, &last, cx).unwrap().selected(), Some(false));
+        stop(cx);
+    }
+
+    fn element(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> Option<gpui_kit::test::ElementSnapshot> {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find(id)
+        })
+        .unwrap()
     }
 
     /// «Llamar con invitados» crea la llamada con el título y la duración

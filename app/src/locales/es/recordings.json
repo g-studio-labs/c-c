@@ -38,5 +38,6 @@
   "download": "Descargar",
   "downloaded": "Guardada en {{path}}",
   "downloadStarted": "Descargando la grabación",
-  "downloadFailed": "No se pudo descargar la grabación"
+  "downloadFailed": "No se pudo descargar la grabación",
+  "notInChannel": "Esa grabación no está en este canal"
 }

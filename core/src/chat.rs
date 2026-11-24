@@ -1414,11 +1414,13 @@ pub enum ThreadLink {
     Task { id: String },
     /// Un documento, una página o una sección.
     Doc,
+    /// Una grabación: se abre en la pestaña Grabaciones del canal.
+    Recording { id: String },
     /// Algo de fuera: lo abre el sistema.
     Web { url: String },
     /// Nombra a alguien sin llevar a ningún sitio.
     Inert,
-    /// De cac, pero esta app todavía no lo abre: una llamada, una grabación.
+    /// De cac, pero esta app todavía no lo abre: una llamada.
     NotHere,
     /// No se sabe abrir, o ya no está.
     Unknown,
@@ -1430,6 +1432,12 @@ pub(crate) fn thread_link(href: &str, base_url: &str) -> ThreadLink {
     let href = href.trim();
     if let Some(path) = body_attachment(href, base_url) {
         return ThreadLink::File { path };
+    }
+    if let Some(id) = href.strip_prefix("cac:recording/") {
+        // Lo mismo que `recordingIdFromHref`: sólo un id con forma de uuid
+        // llega a la pestaña; lo demás es un enlace roto.
+        let well_formed = id.len() == 36 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+        return if well_formed { ThreadLink::Recording { id: id.to_string() } } else { ThreadLink::Unknown };
     }
     match doc_link(href) {
         DocLink::Task { id } => ThreadLink::Task { id },
@@ -1783,8 +1791,9 @@ mod tests {
     ///
     /// Roturas que atrapa: una tarea citada que sale al navegador; un
     /// fichero de la conversación dado al navegador, que no tiene la
-    /// sesión; una mención que intenta abrirse; una llamada o una grabación
-    /// tomadas por un enlace roto en vez de decir que aún no están aquí.
+    /// sesión; una mención que intenta abrirse; una llamada tomada por un
+    /// enlace roto en vez de decir que aún no está aquí; una grabación que
+    /// no lleva a su pestaña, o un id que no es uno llevado a ella.
     #[test]
     fn each_link_in_a_message_goes_where_it_points() {
         let link = |href: &str| thread_link(href, BASE);
@@ -1794,7 +1803,9 @@ mod tests {
         assert_eq!(link("/api/v1/dm/c1/attachments/a1/raw"), ThreadLink::File { path: "/api/v1/dm/c1/attachments/a1/raw".into() });
         assert_eq!(link("cac:user/11111111-1111-4111-8111-111111111111"), ThreadLink::Inert);
         assert_eq!(link("cac:call/0f3c1a2b-4d5e-6f70-8192-a3b4c5d6e7f8"), ThreadLink::NotHere);
-        assert_eq!(link("cac:recording/r1"), ThreadLink::NotHere);
+        assert_eq!(link("cac:recording/0f3c1a2b-4d5e-6f70-8192-a3b4c5d6e7f8"), ThreadLink::Recording { id: "0f3c1a2b-4d5e-6f70-8192-a3b4c5d6e7f8".into() });
+        assert_eq!(link("cac:recording/r1"), ThreadLink::Unknown);
+        assert_eq!(link("cac:recording/0f3c1a2b-4d5e-6f70-8192-a3b4c5d6e7f8/../x"), ThreadLink::Unknown);
         assert_eq!(link("#seccion"), ThreadLink::Unknown);
         assert_eq!(link("javascript:alert(1)"), ThreadLink::Unknown);
     }

@@ -38,5 +38,6 @@
   "download": "Download",
   "downloaded": "Saved to {{path}}",
   "downloadStarted": "Downloading the recording",
-  "downloadFailed": "Could not download the recording"
+  "downloadFailed": "Could not download the recording",
+  "notInChannel": "That recording isn't in this channel"
 }
