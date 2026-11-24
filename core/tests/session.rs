@@ -12,6 +12,10 @@ use cac_core::{ApiError, Config, Core, FileStorage, Listener, Session, Storage};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+#[path = "support/gated.rs"]
+mod gated;
+use gated::{front, Gate};
+
 /// Un almacén en memoria que además deja mirar qué tenía el core en la mano
 /// en el momento de guardar.
 #[derive(Default)]
@@ -75,7 +79,7 @@ async fn signed_in() -> Rig {
     let server = MockServer::start().await;
     let storage = Arc::new(MemoryStorage::default());
     let recorder = Arc::new(Recorder::default());
-    let core = Core::new(Config::new(server.uri()), storage.clone(), recorder.clone()).unwrap();
+    let core = Core::new(Config::new(front(&server.uri())), storage.clone(), recorder.clone()).unwrap();
     core.sign_in(ana(), "old-access".into(), "old-refresh".into()).unwrap();
     Rig { server, core, storage, recorder }
 }
@@ -113,20 +117,32 @@ fn refreshed() -> ResponseTemplate {
 async fn calls_that_expire_together_refresh_once() {
     let rig = signed_in().await;
     mount_tasks(&rig.server).await;
+    let renewal = Gate::default();
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/refresh"))
         .and(header("authorization", "Bearer old-refresh"))
-        // Lento adrede: que las diez estén esperando a la vez.
-        .respond_with(refreshed().set_delay(Duration::from_millis(150)))
+        // Retenido hasta que las diez han chocado con el token viejo: que
+        // estén esperando a la vez, cargue lo que cargue la máquina.
+        .respond_with(renewal.hold(refreshed()))
         .expect(1)
         .mount(&rig.server)
         .await;
 
-    let calls = (0..10).map(|_| {
-        let core = rig.core.clone();
-        tokio::spawn(async move { core.request("GET", "/api/v1/tasks/", None, true).await })
-    });
-    for call in calls.collect::<Vec<_>>() {
+    let calls: Vec<_> = (0..10)
+        .map(|_| {
+            let core = rig.core.clone();
+            tokio::spawn(async move { core.request("GET", "/api/v1/tasks/", None, true).await })
+        })
+        .collect();
+    for _ in 0..300 {
+        let asked = rig.server.received_requests().await.unwrap_or_default();
+        if asked.iter().filter(|request| request.url.path() == "/api/v1/tasks/").count() >= 10 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    renewal.open();
+    for call in calls {
         assert_eq!(call.await.unwrap().unwrap().status, 200);
     }
     // `expect(1)` se comprueba al soltar el servidor.

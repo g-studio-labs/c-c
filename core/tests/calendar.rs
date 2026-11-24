@@ -7,7 +7,6 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use cac_core::{
     calendar_chips, calendar_tone, day_title, lane_open_by_default, month_title, month_view, today_in, tone_is_high, unscheduled,
@@ -18,6 +17,10 @@ use chrono::{NaiveDate, TimeZone, Utc};
 use serde_json::{json, Value};
 use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+#[path = "support/gated.rs"]
+mod gated;
+use gated::{front, until, Gate};
 
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, String>>);
@@ -450,7 +453,7 @@ async fn rig(tasks: Vec<Value>) -> Rig {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true, "data": tasks })))
         .mount(&server)
         .await;
-    let core = Core::new(Config::new(server.uri()), Arc::new(MemoryStorage::default()), Arc::new(Quiet)).unwrap();
+    let core = Core::new(Config::new(front(&server.uri())), Arc::new(MemoryStorage::default()), Arc::new(Quiet)).unwrap();
     let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana" })).unwrap();
     core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
     core.my_work().load(None).await;
@@ -585,14 +588,16 @@ async fn tomorrow_is_the_day_after_the_organizations_today() {
 #[tokio::test]
 async fn dropping_on_a_day_moves_the_card_before_the_server_answers() {
     let rig = rig(vec![wire("a", Some("2026-09-30T00:00:00Z"), json!({})), wire("b", None, json!({}))]).await;
-    mount_patch(&rig.server, "a", ok().set_delay(Duration::from_millis(400))).await;
+    let answer = Gate::default();
+    mount_patch(&rig.server, "a", answer.hold(ok())).await;
     mount_patch(&rig.server, "b", ok()).await;
 
     let work = rig.core.my_work();
     let dropping = tokio::spawn(async move { work.set_due_day("a", Some("2026-10-02")).await });
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    until("se le pide al servidor", || answer.held() == 1).await;
     assert!(!dropping.is_finished(), "el servidor todavía no ha contestado");
     assert_eq!(due_of(&rig.core, "a"), (Some("2026-10-02".into()), Some("2026-10-02T00:00:00Z".into())));
+    answer.open();
     dropping.await.unwrap().expect("se guardó");
     assert_eq!(due_of(&rig.core, "a").0.as_deref(), Some("2026-10-02"));
 
@@ -702,10 +707,11 @@ async fn a_day_that_does_not_exist_changes_nothing() {
 #[tokio::test]
 async fn a_late_refusal_does_not_undo_a_newer_drop() {
     let rig = rig(vec![wire("a", Some("2026-09-30T00:00:00Z"), json!({}))]).await;
+    let late = Gate::default();
     Mock::given(method("PATCH"))
         .and(path("/api/v1/tasks/a"))
         .and(body_json(json!({ "dueAt": "2026-10-02T00:00:00Z" })))
-        .respond_with(refusal().set_delay(Duration::from_millis(400)))
+        .respond_with(late.hold(refusal()))
         .mount(&rig.server)
         .await;
     Mock::given(method("PATCH"))
@@ -717,8 +723,9 @@ async fn a_late_refusal_does_not_undo_a_newer_drop() {
 
     let work = rig.core.my_work();
     let first = tokio::spawn(async move { work.set_due_day("a", Some("2026-10-02")).await });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    until("el primero va en camino", || late.held() == 1).await;
     rig.core.my_work().set_due_day("a", Some("2026-10-05")).await.expect("el segundo se guardó");
+    late.open();
     assert!(first.await.unwrap().is_err());
 
     assert_eq!(due_of(&rig.core, "a").0.as_deref(), Some("2026-10-05"));

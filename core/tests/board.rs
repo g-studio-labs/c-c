@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use cac_core::{
     can_drop, hue_index, work_board, ApiError, BoardStatus, Config, Core, DropVerdict, DueState, Listener, Locale, MyWorkState,
@@ -15,6 +14,10 @@ use cac_core::{
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+#[path = "support/gated.rs"]
+mod gated;
+use gated::{front, until, Gate};
 
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, String>>);
@@ -93,7 +96,7 @@ async fn rig(tasks: Vec<Value>) -> Rig {
     let server = MockServer::start().await;
     Mock::given(method("GET")).and(path("/api/v1/tasks/")).respond_with(ok(json!(tasks))).mount(&server).await;
     let recorder = Arc::new(Recorder::default());
-    let core = Core::new(Config::new(server.uri()), Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
+    let core = Core::new(Config::new(front(&server.uri())), Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
     let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana" })).unwrap();
     core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
     core.my_work().load(Some("o1".into())).await;
@@ -325,15 +328,20 @@ async fn a_drop_moves_the_card_to_that_column_of_its_own_list() {
 #[tokio::test]
 async fn the_card_changes_column_before_the_server_answers() {
     let rig = rig(vec![raw("t1", "open", "l1")]).await;
-    mount_columns(&rig.server, "l1", ok(columns_of("l1")).set_delay(Duration::from_millis(400))).await;
+    // Las columnas no contestan hasta que se ha mirado el tablero a media
+    // petición: con un plazo, en una máquina cargada contestaban antes.
+    let columns = Gate::default();
+    mount_columns(&rig.server, "l1", columns.hold(ok(columns_of("l1")))).await;
     mount_move(&rig.server, "t1", ok(Value::Null)).await;
     let work = rig.core.my_work();
 
     let meanwhile = async {
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        until("se pregunta por las columnas", || columns.held() == 1).await;
         let state = rig.core.my_work().state();
         let board = work_board(&state.tasks, false, Locale::Es, day(2026, 9, 30));
-        (asked(&rig.server).await.len(), board[0].cards.len(), board[1].cards.len())
+        let seen = (asked(&rig.server).await.len(), board[0].cards.len(), board[1].cards.len());
+        columns.open();
+        seen
     };
     let (moved, seen) = tokio::join!(work.drop_on("t1", BoardStatus::InProgress), meanwhile);
 
@@ -585,7 +593,7 @@ async fn a_server_refusal_for_open_subtasks_is_said_with_the_fresh_count() {
     Mock::given(method("GET")).and(path("/api/v1/tasks/")).respond_with(ok(json!([raw("t1", "in_progress", "l1")]))).up_to_n_times(1).mount(&server).await;
     Mock::given(method("GET")).and(path("/api/v1/tasks/")).respond_with(ok(json!([parent("t1", "in_progress", 2, 0)]))).mount(&server).await;
     let recorder = Arc::new(Recorder::default());
-    let core = Core::new(Config::new(server.uri()), Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
+    let core = Core::new(Config::new(front(&server.uri())), Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
     core.sign_in(serde_json::from_value(json!({ "id": "u1", "username": "ana" })).unwrap(), "access".into(), "refresh".into()).unwrap();
     core.my_work().load(Some("o1".into())).await;
     mount_columns(&server, "l1", ok(columns_of("l1"))).await;

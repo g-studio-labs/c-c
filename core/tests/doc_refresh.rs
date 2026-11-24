@@ -15,6 +15,10 @@ use serde_json::{json, Value};
 use wiremock::matchers::path_regex;
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+#[path = "support/gated.rs"]
+mod gated;
+use gated::{front, until, Gate};
+
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, String>>);
 
@@ -37,12 +41,13 @@ struct World {
     overview: (String, u32, &'static str),
     page: (String, u32, &'static str),
     owner: &'static str,
-    /// Cuánto tarda en contestar una lectura del documento.
-    read_delay: Duration,
+    /// Si la hay, una lectura del documento no contesta hasta que se abre.
+    read_gate: Option<Gate>,
     /// Con esto, leer el documento falla.
     broken: bool,
-    /// Cuánto tarda en contestar un guardado (que ya quedó hecho).
-    write_delay: Duration,
+    /// Si la hay, un guardado (que ya quedó hecho) no contesta hasta que se
+    /// abre.
+    write_gate: Option<Gate>,
 }
 
 impl World {
@@ -67,6 +72,13 @@ fn refused(status: u16, code: &str, data: Value) -> ResponseTemplate {
     ResponseTemplate::new(status).set_body_json(json!({ "success": false, "error": code, "message": code, "data": data }))
 }
 
+fn held(answer: ResponseTemplate, gate: &Option<Gate>) -> ResponseTemplate {
+    match gate {
+        Some(gate) => gate.hold(answer),
+        None => answer,
+    }
+}
+
 fn answer(world: &Mutex<World>, request: &Request) -> ResponseTemplate {
     let mut world = world.lock().unwrap();
     let route = request.url.path().trim_start_matches("/api/v1/docs/space/a").to_string();
@@ -74,7 +86,7 @@ fn answer(world: &Mutex<World>, request: &Request) -> ResponseTemplate {
     let sent: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
     match (request.method.as_str(), parts.as_slice()) {
         ("GET", []) if world.broken => refused(500, "boom", Value::Null),
-        ("GET", []) => ok(world.doc()).set_delay(world.read_delay),
+        ("GET", []) => held(ok(world.doc()), &world.read_gate),
         ("GET", ["pages"]) => ok(json!([{ "id": "p1", "title": "Arquitectura", "hasBody": true }])),
         ("GET", ["pages", "p1"]) => ok(json!({ "page": world.page(), "breadcrumb": [], "children": [], "referencedFrom": [] })),
         ("PUT", ["tabs", "overview"]) => {
@@ -82,7 +94,7 @@ fn answer(world: &Mutex<World>, request: &Request) -> ResponseTemplate {
                 return refused(409, "doc-conflict", world.doc());
             }
             world.overview = (sent["body"].as_str().unwrap_or_default().into(), world.overview.1 + 1, "Ana Ruiz");
-            ok(world.doc()).set_delay(world.write_delay)
+            held(ok(world.doc()), &world.write_gate)
         }
         _ => refused(404, "not-found", Value::Null),
     }
@@ -92,6 +104,8 @@ struct Rig {
     server: MockServer,
     core: Core,
     world: Arc<Mutex<World>>,
+    /// Antes de pedir el documento al abrirlo: lo leído es de después.
+    opened_at: std::time::Instant,
 }
 
 impl Rig {
@@ -121,22 +135,23 @@ async fn rig() -> Rig {
         overview: ("Lo de siempre.".into(), 1, "Ana Ruiz"),
         page: ("## Capas\n\nTres.".into(), 1, "Ana Ruiz"),
         owner: "Ana Ruiz",
-        read_delay: Duration::ZERO,
+        read_gate: None,
         broken: false,
-        write_delay: Duration::ZERO,
+        write_gate: None,
     }));
     let seen = world.clone();
     Mock::given(path_regex("^/api/v1/docs/space/a(/|$)")).respond_with(move |request: &Request| answer(&seen, request)).mount(&server).await;
 
-    let mut config = Config::new(server.uri());
+    let mut config = Config::new(front(&server.uri()));
     config.doc_fresh_for = Duration::from_millis(80);
     let core = Core::new(config, Arc::new(MemoryStorage::default()), Arc::new(NoListener)).unwrap();
     let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana" })).unwrap();
     core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
     core.orgs().load().await;
     core.tree().load("o1").await;
+    let opened_at = std::time::Instant::now();
     core.docs().open("a").await;
-    Rig { server, core, world }
+    Rig { server, core, world, opened_at }
 }
 
 /// Ponerse al día trae lo que hay ahora —el texto, la cabecera, la página
@@ -261,16 +276,18 @@ async fn a_reading_that_lands_after_a_save_does_not_count() {
     assert!(docs.start_edit());
     docs.draft_body("Lo mío.");
 
-    rig.world.lock().unwrap().read_delay = Duration::from_millis(150);
+    let late = Gate::default();
+    rig.world.lock().unwrap().read_gate = Some(late.clone());
     let slow = rig.core.clone();
     let reading = tokio::spawn(async move { slow.docs().refresh().await });
-    tokio::time::sleep(Duration::from_millis(40)).await;
-    rig.world.lock().unwrap().read_delay = Duration::ZERO;
+    until("la lectura va en camino", || late.held() == 1).await;
+    rig.world.lock().unwrap().read_gate = None;
     // Se sigue escribiendo mientras viaja el guardado, así el editor no se
     // cierra y la lectura tardía lo encuentra abierto.
     docs.save().await;
     assert!(docs.start_edit());
     docs.draft_body("Lo mío, y más.");
+    late.open();
     reading.await.unwrap();
 
     let state = docs.state();
@@ -291,15 +308,17 @@ async fn my_own_save_in_flight_is_not_taken_for_someone_elses() {
     let docs = rig.core.docs();
     assert!(docs.start_edit());
     docs.draft_body("Lo mío.");
-    rig.world.lock().unwrap().write_delay = Duration::from_millis(150);
+    let in_flight = Gate::default();
+    rig.world.lock().unwrap().write_gate = Some(in_flight.clone());
     let saver = rig.core.clone();
     let saving = tokio::spawn(async move { saver.docs().save().await });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    until("el guardado va en camino", || in_flight.held() == 1).await;
     assert!(docs.state().edit.is_some_and(|edit| edit.saving), "el guardado ya no viaja");
     docs.draft_body("Lo mío, y más.");
 
     docs.refresh().await;
     assert_eq!(docs.state().edit.and_then(|edit| edit.conflict), None, "tomó su propio guardado por el de otro");
+    in_flight.open();
     saving.await.unwrap();
     let edit = docs.state().edit.expect("se seguía escribiendo");
     assert_eq!((edit.conflict, edit.base_hash.as_deref(), edit.body.as_str()), (None, Some("h2"), "Lo mío, y más."));
@@ -318,16 +337,24 @@ async fn coming_back_refreshes_unless_it_was_just_read() {
     let after_opening = rig.reads().await;
 
     docs.came_back().await;
-    assert_eq!(rig.reads().await, after_opening, "recién leído, lo volvió a pedir");
+    // Recién leído es dentro de los 80 ms que vale por reciente; si la
+    // máquina tardó más en llegar aquí, volver a pedirlo es lo correcto.
+    if rig.opened_at.elapsed() < Duration::from_millis(80) {
+        assert_eq!(rig.reads().await, after_opening, "recién leído, lo volvió a pedir");
+    }
+    let after_opening = rig.reads().await;
 
     // Pasado el rato en que vale por reciente (80 ms en esta prueba).
     rig.luis_saves_the_overview("Lo de Luis.");
     tokio::time::sleep(Duration::from_millis(120)).await;
+    let read_at = std::time::Instant::now();
     docs.came_back().await;
     assert_eq!(rig.reads().await, after_opening + 1);
     assert_eq!(rig.body(), "Lo de Luis.");
     docs.came_back().await;
-    assert_eq!(rig.reads().await, after_opening + 1, "ponerse al día no cuenta como haber leído");
+    if read_at.elapsed() < Duration::from_millis(80) {
+        assert_eq!(rig.reads().await, after_opening + 1, "ponerse al día no cuenta como haber leído");
+    }
 
     rig.core.docs().close();
     let before = rig.server.received_requests().await.unwrap().len();

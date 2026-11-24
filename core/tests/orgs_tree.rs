@@ -11,6 +11,21 @@ use cac_core::{
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[path = "support/gated.rs"]
+mod gated;
+use gated::{Gate, GatedProxy};
+
+/// Espera a algo que viene de otro hilo.
+async fn until(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..300 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("no llegó a pasar: {what}");
+}
+
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, String>>);
 
@@ -65,6 +80,9 @@ fn space(id: &str, kind: Option<&str>) -> serde_json::Value {
 
 struct Rig {
     server: MockServer,
+    /// Por donde habla el core: deja pasar todo, y retiene lo que una
+    /// prueba ate a una [`Gate`].
+    proxy: GatedProxy,
     core: Core,
     storage: Arc<MemoryStorage>,
     recorder: Arc<Recorder>,
@@ -72,12 +90,13 @@ struct Rig {
 
 async fn rig() -> Rig {
     let server = MockServer::start().await;
+    let proxy = GatedProxy::start(server.uri());
     let storage = Arc::new(MemoryStorage::default());
     let recorder = Arc::new(Recorder::default());
-    let core = Core::new(Config::new(server.uri()), storage.clone(), recorder.clone()).unwrap();
+    let core = Core::new(Config::new(proxy.uri()), storage.clone(), recorder.clone()).unwrap();
     let ana = serde_json::from_value(serde_json::json!({ "id": "u1", "username": "ana" })).unwrap();
     core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
-    Rig { server, core, storage, recorder }
+    Rig { server, proxy, core, storage, recorder }
 }
 
 async fn mount_orgs(server: &MockServer, orgs: Vec<serde_json::Value>) {
@@ -113,7 +132,7 @@ async fn reopening_stays_on_the_organization_that_was_open() {
     rig.core.orgs().load().await;
     assert!(rig.core.orgs().set_current("o2"));
 
-    let reopened = Core::new(Config::new(rig.server.uri()), rig.storage.clone(), Arc::new(Recorder::default())).unwrap();
+    let reopened = Core::new(Config::new(rig.proxy.uri()), rig.storage.clone(), Arc::new(Recorder::default())).unwrap();
     assert_eq!(reopened.orgs().state().current_org_id.as_deref(), Some("o2"), "antes de pedir nada");
     reopened.orgs().load().await;
 
@@ -128,7 +147,7 @@ async fn reopening_stays_on_the_organization_that_was_open() {
 async fn an_organization_that_is_no_longer_theirs_is_dropped() {
     let rig = rig().await;
     rig.storage.set("orgs", r#"{"currentOrgId":"se-fue"}"#).unwrap();
-    let core = Core::new(Config::new(rig.server.uri()), rig.storage.clone(), Arc::new(Recorder::default())).unwrap();
+    let core = Core::new(Config::new(rig.proxy.uri()), rig.storage.clone(), Arc::new(Recorder::default())).unwrap();
     mount_orgs(&rig.server, vec![org("o1", "")]).await;
 
     core.orgs().load().await;
@@ -551,7 +570,7 @@ async fn what_is_opened_or_closed_by_hand_wins_and_is_remembered() {
     assert!(tree.rows()[0].open);
 
     // Y al volver —o al reiniciar la app— sigue como se dejó.
-    let again = Core::new(Config::new(rig.server.uri()), rig.storage.clone(), rig.recorder.clone()).unwrap();
+    let again = Core::new(Config::new(rig.proxy.uri()), rig.storage.clone(), rig.recorder.clone()).unwrap();
     again.tree().load("o1").await;
     assert_eq!(shape(&again.tree().rows()), [at("a", 0, false)]);
 }
@@ -790,13 +809,10 @@ async fn an_empty_tab_and_a_failed_load_say_which_they_are() {
 #[tokio::test]
 async fn a_late_answer_for_another_node_is_dropped() {
     let rig = loaded_tree(vec![nested_space("a"), nested_space("b")]).await;
+    let late = Gate::default();
     Mock::given(method("GET"))
         .and(path("/api/v1/docs/space/a"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_delay(std::time::Duration::from_millis(300))
-                .set_body_json(serde_json::json!({ "success": true, "data": doc(&[("overview", "lo de a")], serde_json::json!([])) })),
-        )
+        .respond_with(late.hold(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": doc(&[("overview", "lo de a")], serde_json::json!([])) }))))
         .mount(&rig.server)
         .await;
     mount_doc(&rig.server, "space", "b", doc(&[("overview", "lo de b")], serde_json::json!([]))).await;
@@ -805,8 +821,9 @@ async fn a_late_answer_for_another_node_is_dropped() {
         let core = rig.core.clone();
         tokio::spawn(async move { core.docs().open("a").await })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    until("lo de a va en camino", || late.held() == 1).await;
     rig.core.docs().open("b").await;
+    late.open();
     slow.await.unwrap();
 
     let state = rig.core.docs().state();
@@ -1185,14 +1202,13 @@ async fn a_page_has_its_own_contents_and_its_name_before_its_text() {
     let decisions = serde_json::json!([{ "id": "d1", "title": "Vigente", "body": "", "decidedAt": "2026-10-30T00:00:00Z" }]);
     mount_doc(&rig.server, "space", "a", doc(&[("overview", "portada")], decisions)).await;
     mount_pages(&rig.server, "space", "a", page_tree()).await;
+    let arriving = Gate::default();
     Mock::given(method("GET"))
         .and(path("/api/v1/docs/space/a/pages/p-types"))
-        .respond_with(
-            ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(200)).set_body_json(serde_json::json!({
-                "success": true,
-                "data": page_view("p-types", "Los tipos", "## Uno\n\n## Dos", &[("p-arq", "Arquitectura"), ("p-core", "El core")], serde_json::Value::Null, serde_json::Value::Null),
-            })),
-        )
+        .respond_with(arriving.hold(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true,
+            "data": page_view("p-types", "Los tipos", "## Uno\n\n## Dos", &[("p-arq", "Arquitectura"), ("p-core", "El core")], serde_json::Value::Null, serde_json::Value::Null),
+        }))))
         .mount(&rig.server)
         .await;
     mount_page(&rig.server, "space", "a", page_view("p-run", "Runbooks", "lo de antes", &[], serde_json::Value::Null, serde_json::Value::Null)).await;
@@ -1204,8 +1220,8 @@ async fn a_page_has_its_own_contents_and_its_name_before_its_text() {
 
     let docs = rig.core.docs();
     let opening = tokio::spawn(async move { docs.open_page("p-types").await });
-    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-    let arriving = rig.core.docs().state();
+    until("la página va en camino", || arriving.held() == 1).await;
+    let (gate, arriving) = (arriving, rig.core.docs().state());
     assert!(arriving.page_loading && arriving.page.is_none());
     assert_eq!(arriving.body(), "", "se lee la página anterior bajo el título de la que llega");
     assert_eq!(arriving.empty_reason(), Some("work:tree.loading"));
@@ -1213,6 +1229,7 @@ async fn a_page_has_its_own_contents_and_its_name_before_its_text() {
     let trail: Vec<String> = arriving.page_trail(Locale::Es).into_iter().map(|crumb| crumb.title).collect();
     assert_eq!(trail, ["Arquitectura", "El core"]);
 
+    gate.open();
     opening.await.unwrap();
     let state = rig.core.docs().state();
     assert!(state.standing_decisions().is_empty(), "el registro de la portada sale bajo la página");
@@ -1311,11 +1328,12 @@ async fn another_node_starts_at_its_home_and_the_same_one_keeps_its_page() {
     let rig = docs_with_pages().await;
     mount_doc(&rig.server, "space", "b", doc(&[("overview", "la de b")], serde_json::json!([]))).await;
     mount_pages(&rig.server, "space", "b", serde_json::json!([page_item("p-b", None, "De b")])).await;
+    let late = Gate::default();
     Mock::given(method("GET"))
         .and(path("/api/v1/docs/folder/f-a/pages/p-core"))
-        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(250)).set_body_json(
+        .respond_with(late.hold(ResponseTemplate::new(200).set_body_json(
             serde_json::json!({ "success": true, "data": page_view("p-core", "El core", "tarde", &[], serde_json::Value::Null, serde_json::Value::Null) }),
-        ))
+        )))
         .mount(&rig.server)
         .await;
     rig.core.docs().open("f-a").await;
@@ -1333,8 +1351,9 @@ async fn another_node_starts_at_its_home_and_the_same_one_keeps_its_page() {
 
     let docs = rig.core.docs();
     let slow = tokio::spawn(async move { docs.open_page("p-core").await });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    until("la página va en camino", || late.held() == 1).await;
     rig.core.docs().open("b").await;
+    late.open();
     slow.await.unwrap();
 
     let state = rig.core.docs().state();
@@ -1399,18 +1418,20 @@ async fn a_late_page_tree_for_another_node_is_dropped() {
     let rig = loaded_tree(vec![nested_space("a"), nested_space("b")]).await;
     mount_doc(&rig.server, "space", "a", doc(&[("overview", "la de a")], serde_json::json!([]))).await;
     mount_doc(&rig.server, "space", "b", doc(&[("overview", "la de b")], serde_json::json!([]))).await;
+    let late = Gate::default();
     Mock::given(method("GET"))
         .and(path("/api/v1/docs/space/a/pages"))
-        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(300)).set_body_json(serde_json::json!({ "success": true, "data": page_tree() })))
+        .respond_with(late.hold(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": page_tree() }))))
         .mount(&rig.server)
         .await;
     mount_pages(&rig.server, "space", "b", serde_json::json!([page_item("p-b", None, "De b")])).await;
 
     let docs = rig.core.docs();
     let slow = tokio::spawn(async move { docs.open("a").await });
-    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-    assert_eq!(rig.core.docs().state().body(), "la de a", "la prueba no llegó a esperar por las páginas");
+    until("las páginas de a van en camino", || late.held() == 1).await;
+    until("llega la portada de a", || rig.core.docs().state().body() == "la de a").await;
     rig.core.docs().open("b").await;
+    late.open();
     slow.await.unwrap();
 
     assert_eq!(page_shape(&rig.core.docs().state()), [at("p-b", 0, false)]);

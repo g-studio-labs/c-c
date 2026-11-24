@@ -10,6 +10,10 @@ use serde_json::{json, Value};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[path = "support/gated.rs"]
+mod gated;
+use gated::{front, until, Gate};
+
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, String>>);
 
@@ -78,7 +82,7 @@ async fn rig() -> Rig {
     Mock::given(method("POST")).and(path("/api/v1/notifications/read")).respond_with(ok(json!(null))).mount(&server).await;
     Mock::given(method("POST")).and(path("/api/v1/notifications/read-all")).respond_with(ok(json!(null))).mount(&server).await;
     let recorder = Arc::new(Recorder::default());
-    let mut config = Config::new(&server.uri());
+    let mut config = Config::new(front(&server.uri()));
     config.stream_backoff = Duration::from_millis(40);
     let core = Core::new(config, Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
     let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana", "name": "Ana Ruiz" })).unwrap();
@@ -191,24 +195,24 @@ async fn opening_a_notice_goes_where_it_says() {
 async fn an_event_that_rings_the_bell_reloads_an_open_inbox() {
     let rig = rig().await;
     let frame = |task: &str| format!("event: task:assigned\ndata: {{\"taskId\":\"{task}\"}}\n\n").into_bytes();
-    // Un evento antes de abrir la bandeja y otro después.
-    get("/api/v1/events")
-        .respond_with(ResponseTemplate::new(200).set_body_raw(frame("t8"), "text/event-stream").set_delay(Duration::from_millis(300)))
-        .up_to_n_times(1)
-        .mount(&rig.server)
-        .await;
-    get("/api/v1/events")
-        .respond_with(ResponseTemplate::new(200).set_body_raw(frame("t9"), "text/event-stream").set_delay(Duration::from_millis(1500)))
-        .up_to_n_times(1)
-        .mount(&rig.server)
-        .await;
-    get("/api/v1/events").respond_with(ResponseTemplate::new(200).set_body_raw(b": nada\n\n".to_vec(), "text/event-stream").set_delay(Duration::from_secs(30))).mount(&rig.server).await;
+    // Un evento antes de abrir la bandeja y otro después, cada uno cuando la
+    // prueba lo suelta: con plazos, en una máquina cargada el segundo podía
+    // llegar antes de abrirla.
+    let (before, after) = (Gate::default(), Gate::default());
+    get("/api/v1/events").respond_with(before.hold(ResponseTemplate::new(200).set_body_raw(frame("t8"), "text/event-stream"))).up_to_n_times(1).mount(&rig.server).await;
+    get("/api/v1/events").respond_with(after.hold(ResponseTemplate::new(200).set_body_raw(frame("t9"), "text/event-stream"))).up_to_n_times(1).mount(&rig.server).await;
+    get("/api/v1/events").respond_with(Gate::default().hold(ResponseTemplate::new(200).set_body_raw(b": nada\n\n".to_vec(), "text/event-stream"))).mount(&rig.server).await;
     rig.core.open_workspace().await;
+    before.open();
+    until("sale el primer evento", || before.passed() == 1).await;
+    // Lo que se mira es que no pase nada: se le da tiempo de sobra a la
+    // recarga que no debe salir.
     tokio::time::sleep(Duration::from_millis(1000)).await;
     assert_eq!(full_loads(&rig.server).await, 0, "sin abrirla, un evento no la pide");
 
     rig.core.inbox().load().await;
     assert_eq!(full_loads(&rig.server).await, 1);
+    after.open();
     for _ in 0..300 {
         if full_loads(&rig.server).await >= 2 {
             break;

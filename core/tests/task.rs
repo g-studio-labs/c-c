@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use cac_core::{
     new_task_body, patch_body, Config, Core, DueChange, Listener, NewTask, Session, Storage, TaskPatch, TaskState,
@@ -11,6 +10,10 @@ use cac_core::{
 use serde_json::{json, Value};
 use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+#[path = "support/gated.rs"]
+mod gated;
+use gated::{front, until, Gate};
 
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, String>>);
@@ -48,7 +51,7 @@ async fn rig() -> Rig {
     let server = MockServer::start().await;
     let recorder = Arc::new(Recorder::default());
     let core =
-        Core::new(Config::new(server.uri()), Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
+        Core::new(Config::new(front(&server.uri())), Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
     let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana" })).unwrap();
     core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
     Rig { server, core, recorder }
@@ -287,9 +290,10 @@ async fn editing_shows_what_the_server_answered() {
 #[tokio::test]
 async fn a_late_answer_does_not_replace_the_task_that_is_open() {
     let rig = rig().await;
+    let late = Gate::default();
     Mock::given(method("GET"))
         .and(path("/api/v1/tasks/slow"))
-        .respond_with(ok(detail("slow", "La lenta", "pending", "", "")).set_delay(Duration::from_millis(300)))
+        .respond_with(late.hold(ok(detail("slow", "La lenta", "pending", "", ""))))
         .mount(&rig.server)
         .await;
     mount_task(&rig.server, "fast", detail("fast", "La rápida", "pending", "", "")).await;
@@ -300,8 +304,9 @@ async fn a_late_answer_does_not_replace_the_task_that_is_open() {
         let core = rig.core.clone();
         async move { core.tasks().open("slow").await }
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    until("la lenta va en camino", || late.held() == 1).await;
     tasks.open("fast").await;
+    late.open();
     slow.await.unwrap();
 
     let state = tasks.state();
@@ -626,19 +631,18 @@ async fn late_choices_are_not_offered_on_another_task() {
     mount_task(&rig.server, "t1", first).await;
     mount_task(&rig.server, "t2", detail("t2", "Segunda", "pending", "", "")).await;
     mount_columns(&rig.server).await;
+    let late = Gate::default();
     Mock::given(method("GET"))
         .and(path("/api/v1/task-tags/"))
-        .respond_with(
-            ok(json!([{ "id": "tag1", "orgId": "o1", "name": "del otro", "color": "#0f0" }]))
-                .set_delay(Duration::from_millis(250)),
-        )
+        .respond_with(late.hold(ok(json!([{ "id": "tag1", "orgId": "o1", "name": "del otro", "color": "#0f0" }]))))
         .mount(&rig.server)
         .await;
 
     let slow = rig.core.clone();
     let opening = tokio::spawn(async move { slow.tasks().open("t1").await });
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    until("las etiquetas de la primera van en camino", || late.held() == 1).await;
     rig.core.tasks().open("t2").await;
+    late.open();
     opening.await.unwrap();
 
     let state = rig.core.tasks().state();

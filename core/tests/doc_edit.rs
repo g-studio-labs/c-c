@@ -8,12 +8,15 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use cac_core::{Config, Core, DocAsk, DocEditWhat, DocLeave, Locale, NoListener, Storage, WorkLayout};
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+#[path = "support/gated.rs"]
+mod gated;
+use gated::{front, until, Gate};
 
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, String>>);
@@ -55,8 +58,10 @@ struct World {
     pages: Vec<(String, Kept)>,
     /// Con esto, todo guardado falla con ese estado y esa etiqueta.
     failing: Option<(u16, &'static str)>,
-    /// Cuánto tarda en contestar un guardado.
-    delay: Duration,
+    /// Si la hay, un guardado no contesta hasta que se abre: lo que la prueba
+    /// hace «mientras viaja» pasa mientras viaja, cargue lo que cargue la
+    /// máquina.
+    gate: Option<Gate>,
     /// Con esto, un guardado contesta 200 sin nada dentro.
     garbled: bool,
     /// El documento en sí (`doc` en el sobre). No existe hasta que se guarda
@@ -115,6 +120,13 @@ fn late(kept: Option<&Kept>, sent: &Value) -> bool {
     kept.is_some_and(|kept| sent.get("baseHash").and_then(Value::as_str) != Some(kept.hash().as_str()))
 }
 
+fn held(answer: ResponseTemplate, gate: &Option<Gate>) -> ResponseTemplate {
+    match gate {
+        Some(gate) => gate.hold(answer),
+        None => answer,
+    }
+}
+
 /// Contesta a todo lo de `/api/v1/docs/space/a` con lo que haya en `world`.
 fn answer(world: &Mutex<World>, request: &Request) -> ResponseTemplate {
     let mut world = world.lock().unwrap();
@@ -124,10 +136,9 @@ fn answer(world: &Mutex<World>, request: &Request) -> ResponseTemplate {
     let verb = request.method.as_str();
     if verb != "GET" {
         if let Some((status, code)) = world.failing {
-            return refused(status, code, Value::Null).set_delay(world.delay);
+            return held(refused(status, code, Value::Null), &world.gate);
         }
     }
-    let delay = world.delay;
     if verb != "GET" && world.garbled {
         return ResponseTemplate::new(200).set_body_json(json!({ "success": true }));
     }
@@ -181,7 +192,7 @@ fn answer(world: &Mutex<World>, request: &Request) -> ResponseTemplate {
     if verb == "GET" {
         reply
     } else {
-        reply.set_delay(delay)
+        held(reply, &world.gate)
     }
 }
 
@@ -255,7 +266,7 @@ async fn rig_as(role: &str, superadmin: bool) -> Rig {
         .await;
     Mock::given(method("GET")).and(path_regex("^/api/v1/docs/(space/b|list/l-a)/pages$")).respond_with(ok(json!([]))).mount(&server).await;
 
-    let core = Core::new(Config::new(server.uri()), Arc::new(MemoryStorage::default()), Arc::new(NoListener)).unwrap();
+    let core = Core::new(Config::new(front(&server.uri())), Arc::new(MemoryStorage::default()), Arc::new(NoListener)).unwrap();
     let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana", "superadmin": superadmin })).unwrap();
     core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
     core.orgs().load().await;
@@ -567,17 +578,19 @@ async fn what_is_typed_while_a_save_travels_is_not_lost() {
     let rig = rig().await;
     let docs = rig.core.docs();
     rig.write("primera frase");
-    rig.world.lock().unwrap().delay = Duration::from_millis(150);
+    let in_flight = Gate::default();
+    rig.world.lock().unwrap().gate = Some(in_flight.clone());
 
     let saving = {
         let docs = rig.core.docs();
         tokio::spawn(async move { docs.save().await })
     };
-    tokio::time::sleep(Duration::from_millis(40)).await;
+    until("el guardado va en camino", || in_flight.held() == 1).await;
     assert!(rig.edit().saving);
     // Pulsar guardar otra vez mientras viaja no manda otro.
     docs.save().await;
     docs.draft_body("primera frase y otra");
+    in_flight.open();
     saving.await.unwrap();
     assert_eq!(rig.writes().await.len(), 1, "dos guardados a la vez del mismo texto");
 
@@ -706,16 +719,18 @@ async fn a_late_answer_does_not_land_on_another_draft() {
     let rig = rig().await;
     let docs = rig.core.docs();
     rig.write("el resumen nuevo");
-    rig.world.lock().unwrap().delay = Duration::from_millis(150);
+    let in_flight = Gate::default();
+    rig.world.lock().unwrap().gate = Some(in_flight.clone());
     let saving = {
         let docs = rig.core.docs();
         tokio::spawn(async move { docs.save().await })
     };
-    tokio::time::sleep(Duration::from_millis(40)).await;
+    until("el guardado va en camino", || in_flight.held() == 1).await;
     docs.show_tab("runbook");
     docs.answer(true).await;
     rig.write("el runbook");
     let other = rig.edit();
+    in_flight.open();
     saving.await.unwrap();
 
     assert_eq!(rig.edit(), other, "la respuesta de otro guardado tocó este borrador");
@@ -831,17 +846,19 @@ async fn a_page_saved_while_typing_goes_on_from_the_new_version() {
     let docs = rig.core.docs();
     docs.open_page("p1").await;
     rig.write("uno");
-    rig.world.lock().unwrap().delay = Duration::from_millis(150);
+    let in_flight = Gate::default();
+    rig.world.lock().unwrap().gate = Some(in_flight.clone());
     let saving = {
         let docs = rig.core.docs();
         tokio::spawn(async move { docs.save().await })
     };
-    tokio::time::sleep(Duration::from_millis(40)).await;
+    until("el guardado va en camino", || in_flight.held() == 1).await;
     docs.draft_body("uno y dos");
+    in_flight.open();
     saving.await.unwrap();
     assert_eq!(rig.edit().body, "uno y dos");
 
-    rig.world.lock().unwrap().delay = Duration::ZERO;
+    rig.world.lock().unwrap().gate = None;
     docs.save().await;
     assert_eq!(rig.writes().await[1].2, json!({ "body": "uno y dos", "baseHash": "h2" }));
     assert!(docs.state().edit.is_none(), "chocó consigo mismo");
@@ -927,17 +944,19 @@ async fn typing_while_a_page_is_created_edits_that_page() {
     let docs = rig.core.docs();
     docs.new_page(None);
     docs.draft_title("Nueva");
-    rig.world.lock().unwrap().delay = Duration::from_millis(150);
+    let in_flight = Gate::default();
+    rig.world.lock().unwrap().gate = Some(in_flight.clone());
     let saving = {
         let docs = rig.core.docs();
         tokio::spawn(async move { docs.save().await })
     };
-    tokio::time::sleep(Duration::from_millis(40)).await;
+    until("el guardado va en camino", || in_flight.held() == 1).await;
     docs.draft_body("y su texto");
+    in_flight.open();
     saving.await.unwrap();
 
     assert_eq!(rig.edit().what, DocEditWhat::Page { id: "new3".into() });
-    rig.world.lock().unwrap().delay = Duration::ZERO;
+    rig.world.lock().unwrap().gate = None;
     docs.save().await;
 
     let writes = rig.writes().await;
