@@ -3556,7 +3556,9 @@ mod tests {
         assert!(!on_screen(window, "platform-users", cx), "«Usuarios» a quien no es superadmin");
 
         click(window, "platform-server-s2", cx);
-        assert_eq!(cx.update(|cx| Backend::core(cx).platform().state().open_server), Some("s2".into()));
+        // Lo apunta el core, en su hilo: mirarlo de golpe tras el clic
+        // dependía de que ese hilo corriera antes.
+        wait_until(cx, "se abre ese servidor", |cx| cx.update(|cx| Backend::core(cx).platform().state().open_server) == Some("s2".into()));
 
         click(window, "rail-work", cx);
         wait_until(cx, "«Trabajo» devuelve el árbol", |cx| on_screen(window, "tree-l-a", cx));
