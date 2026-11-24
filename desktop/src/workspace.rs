@@ -2629,8 +2629,9 @@ mod tests {
     /// no pide nada.
     #[gpui_kit::test]
     fn an_outage_that_lasts_is_announced(cx: &mut TestAppContext) {
-        // Sin ruta de eventos: el stream se cae en cada intento.
+        // El stream se cae en cada intento.
         let server = server();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/events")).respond_with(wiremock::ResponseTemplate::new(503)));
         server.install_with(cx, |config| config.stream_grace = Duration::from_millis(400));
         let window = open(cx);
         // Nada más abrir, sin esperar a nada: el corte todavía no puede durar.

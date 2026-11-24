@@ -50,6 +50,17 @@ impl FakeServer {
         let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
         let server = runtime.block_on(MockServer::start());
         let proxy = gated::GatedProxy::start(server.uri());
+        // Como el servidor de verdad: un stream de eventos abierto que no dice
+        // nada. Sin él, el stream caía en cada intento y a los 45 s la app
+        // avisaba del corte con una franja encima de la pantalla: una prueba
+        // que en una máquina lenta pasaba de ese minuto veía moverse todo lo
+        // de debajo. Con menos prioridad que la de cualquier prueba, que
+        // monta el suyo cuando quiere eventos (o un corte).
+        let quiet = Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/events"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(Vec::new(), "text/event-stream").set_delay(Duration::from_secs(3600)))
+            .with_priority(10);
+        runtime.block_on(quiet.mount(&server));
         Self { runtime, server, proxy }
     }
 
