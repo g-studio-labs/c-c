@@ -876,12 +876,12 @@ async fn a_count_asked_before_marking_does_not_bring_the_badge_back() {
     until_hits(&rig.server, "POST", READ_A, 2).await;
     let asked = counts.held();
     counts.open();
-    until("contesta la cuenta de antes de marcar", || counts.passed() >= asked).await;
-    // Lo que se mira es que el contador no vuelva: se le da tiempo a
-    // ponerse a la cuenta que ya salió.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // La cuenta vieja puede poner el «1» un momento; lo que no puede es
+    // quedarse: tras marcar se vuelve a contar. Se espera a esa cuenta de
+    // después, no a un plazo (con 500 ms, en la caja no había salido aún).
+    until("se vuelve a contar tras marcar", || counts.passed() > asked).await;
+    until("el contador no vuelve con una cuenta de antes de marcar", || unread_of(&rig.core, "a") == 0).await;
     assert_eq!(ids(&rig.core.chat().state()), ["m1", "m2"]);
-    assert_eq!(unread_of(&rig.core, "a"), 0, "el contador volvió con una cuenta de antes de marcar");
     rig.core.stream().stop();
 }
 
