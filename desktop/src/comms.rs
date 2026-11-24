@@ -584,7 +584,7 @@ pub fn conversation(thread: &Entity<crate::chat::ChatView>, tabs: &Entity<crate:
     // Un canal lleva sus pestañas, con la conversación dentro; un directo,
     // sólo la conversación.
     let body: AnyElement = if direct { thread.clone().into_any_element() } else { tabs.clone().into_any_element() };
-    div().id("conversation").size_full().flex().flex_col().child(header).child(div().flex_1().min_h_0().child(body)).test_support().into_any_element()
+    div().id("conversation").size_full().flex().flex_col().child(header).child(div().flex_1().min_h_0().flex().flex_col().child(body)).test_support().into_any_element()
 }
 
 /// «Nueva conversación» se cerró: quien la tiene la quita.

@@ -1386,8 +1386,7 @@ mod tests {
         let order: Vec<f32> = ["m1", "m2", "m3", "m4", "m5", "m6", "m7"].iter().map(|id| top(window, &format!("thread-line-{id}"), cx)).collect();
         assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "los mensajes no están en su orden: {order:?}");
 
-        // La caja vacía no manda nada, y lo que todavía no se hace aquí
-        // (las pestañas) tampoco escribe.
+        // La caja vacía no manda nada, y abrir una pestaña sólo lee.
         assert_eq!(label(window, "thread-composer", cx), "Escríbele al equipo — con @ nombras a alguien");
         let before = server.requests().len();
         click(window, "thread-send", cx);
@@ -1397,6 +1396,7 @@ mod tests {
         for tab in ["conversation-tab-thread", "conversation-tab-media", "conversation-tab-links"] {
             assert!(on_screen(window, tab, cx), "falta {tab}");
         }
+        click(window, "conversation-tab-thread", cx);
         wait_until(cx, "la cabecera dice quién anda por aquí", |cx| label(window, "conversation-around", cx) == "Luis Mora");
 
         // Un mensaje que se corrige y una reacción que llega se ven sin salir.

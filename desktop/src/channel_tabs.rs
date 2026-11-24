@@ -739,7 +739,7 @@ impl Render for ChannelTabsView {
                     ChannelTab::Links => self.render_links(cx),
                     ChannelTab::Recordings => self.render_recordings(cx),
                 };
-                div().id("channel-tab-body").size_full().overflow_y_scroll().child(content).test_support().into_any_element()
+                div().id("channel-tab-body").w_full().flex_1().min_h_0().overflow_y_scroll().child(content).test_support().into_any_element()
             }
         };
         let notice = self.notice.clone().map(|(_, text)| {
@@ -764,7 +764,11 @@ impl Render for ChannelTabsView {
         });
         div()
             .id("channel-tabs-view")
-            .size_full()
+            // El hilo es `flex_1`: necesita un padre columna que lo estire,
+            // o se queda en alto cero y no pinta ningún mensaje.
+            .w_full()
+            .flex_1()
+            .min_h_0()
             .relative()
             .flex()
             .flex_col()
@@ -783,7 +787,7 @@ impl Render for ChannelTabsView {
                     .children(search)
                     .test_support(),
             )
-            .child(div().flex_1().min_h_0().overflow_hidden().child(body))
+            .child(div().flex_1().min_h_0().flex().flex_col().overflow_hidden().child(body))
             .children(notice)
     }
 }
