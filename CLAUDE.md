@@ -257,10 +257,11 @@ scripts/remote.sh --off                          # la apaga; si no, sola a las 2
   corta lo que quede vivo de otra del mismo worktree (todo proceso que trabaje
   en su copia), y `--kill` lo corta sin lanzar nada. Entre worktrees comparten
   `target/` y cargo las pone en fila.
-- La caja es unas **3× más lenta por hilo**. Dos pruebas del escritorio que
-  dependen del reloj fallan ahí por tiempo, no por tu cambio:
-  `a_picture_comes_with_the_session…` y `the_follow_button_mutes…`
-  (command-and-control-436).
+- La caja es unas **3× más lenta por hilo**, y su carga cambia. **Una prueba
+  que falla ahí es un fallo, aunque pase sola**: no hay pruebas «flojas
+  conocidas» que se puedan dar por buenas. Se arregla sin cronometrar la pared
+  (una `Gate` que retiene la respuesta hasta que la prueba la suelta, ver
+  command-and-control-436); subir un plazo o reintentar no es arreglarla.
 
 **Los hooks de cac** (`.claude/hooks/`) corren en cada sesión de Claude Code:
 al arrancar meten en el contexto el espacio, lo que está en curso con su
