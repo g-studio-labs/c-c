@@ -1604,8 +1604,11 @@ mod tests {
     fn a_picture_comes_with_the_session_and_does_not_push_what_is_read(cx: &mut TestAppContext) {
         let server = server();
         let png = include_bytes!("../../core/tests/fixtures/gray_600x200.png").to_vec();
-        // Sólo con la sesión, y tarde: llega cuando ya se lee más arriba.
-        server.mount(get(SHOT).and(header("Authorization", "Bearer access")).respond_with(ResponseTemplate::new(200).set_body_raw(png.clone(), "image/png").set_delay(Duration::from_millis(700))));
+        // Sólo con la sesión, y tarde: no sale hasta que ya se lee más
+        // arriba. Con un plazo de llegada, en una máquina cargada llegaba
+        // antes de subir y no había nada que empujar.
+        let picture = Gate::default();
+        server.mount(get(SHOT).and(header("Authorization", "Bearer access")).respond_with(picture.hold(ResponseTemplate::new(200).set_body_raw(png.clone(), "image/png"))));
         server.mount(get(NOTES).and(header("Authorization", "Bearer access")).respond_with(ResponseTemplate::new(200).set_body_raw(b"el acta".to_vec(), "text/plain")));
         let mut messages = numbered(0..30);
         messages.push(line("pic", "u2", "Luis Mora", &format!("así queda:\n\n![captura.png]({SHOT})\n\n[acta.txt]({NOTES})"), 5, 30));
@@ -1628,6 +1631,7 @@ mod tests {
         // La imagen llega con su fila fuera de la vista, encima.
         let (row, at) = reading(window, cx);
         wait_until(cx, "se pide la imagen", |_| server.hits(SHOT) == 1);
+        picture.open();
         wait_until(cx, "la imagen llega", |cx| view.read_with(cx, |view, _| matches!(view.thumbs.get(SHOT), Some(crate::thumbs::Thumb::Ready(_)))));
         cx.run_until_parked();
         assert_eq!(top(window, &format!("thread-line-{row}"), cx), at, "la imagen, al llegar, empujó lo que se lee");
