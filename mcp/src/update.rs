@@ -338,8 +338,19 @@ pub struct Installed {
 /// La versión que dice un binario con `--version` (`cac-mcp X.Y.Z` en la
 /// primera línea). `None` si no arranca o contesta otra cosa: no es `cac-mcp`.
 pub fn version_of(binary: &Path) -> Option<String> {
-    let out = crate::host::command(binary).arg("--version").stdin(std::process::Stdio::null()).output().ok()?;
-    version_line(&String::from_utf8_lossy(&out.stdout))
+    // Recién escrito, el binario puede estar todavía abierto para escribir
+    // en otro proceso: uno que otro hilo de este acababa de lanzar hereda el
+    // fichero hasta que arranca su programa, y mientras tanto ejecutarlo da
+    // «Text file busy». Es cosa de un instante; no es que no arranque.
+    // Medido en la caja de compilación: 1 de 30 pasadas de las pruebas.
+    for _ in 0..100 {
+        match crate::host::command(binary).arg("--version").stdin(std::process::Stdio::null()).output() {
+            Ok(out) => return version_line(&String::from_utf8_lossy(&out.stdout)),
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 fn version_line(output: &str) -> Option<String> {
