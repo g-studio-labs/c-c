@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 /**
  * El selector de zona: arriba la del equipo y la tuya, y una zona guardada que
@@ -9,7 +9,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 const { default: TimezoneSelect } = await import("./TimezoneSelect");
 const { myZone, zoneLabel } = await import("@/lib/timezones");
-const { pick } = await import("@/test-pick");
+const { options, pick } = await import("@/test-pick");
 
 afterEach(cleanup);
 
@@ -19,7 +19,7 @@ describe("el selector de zona", () => {
     render(<TimezoneSelect ariaLabel="zona" value="America/Cancun" teamZone="America/Cancun" onChange={onChange} />);
     const boton = screen.getByRole("combobox", { name: "zona" });
     fireEvent.click(boton);
-    const opciones = (await screen.findAllByRole("option")).map((o) => o.textContent ?? "");
+    const opciones = (await waitFor(() => { const o = options(); expect(o.length).toBeGreaterThan(0); return o; })).map((o) => o.textContent ?? "");
     expect(opciones[0]).toContain(zoneLabel("America/Cancun"));
     expect(opciones.slice(0, 2).some((o) => o.includes(zoneLabel(myZone())))).toBe(true);
     fireEvent.keyDown(boton, { key: "Escape" });
