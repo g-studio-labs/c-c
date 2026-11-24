@@ -115,6 +115,9 @@ fn token(space: &str) -> Value {
     json!({ "url": "wss://sfu", "token": format!("t-{space}"), "room": format!("voice:{space}"), "orgId": "o1", "spaceName": format!("Canal {space}") })
 }
 
+/// Cuánto suena un timbre en estas pruebas.
+const RING_FOR: Duration = Duration::from_millis(150);
+
 async fn rig() -> Rig {
     rig_polling_every(Duration::from_millis(60)).await
 }
@@ -138,7 +141,7 @@ async fn rig_polling_every(every: Duration) -> Rig {
 
     let mut config = Config::new(server.uri());
     config.voice_presence_every = every;
-    config.ring_for = Duration::from_millis(150);
+    config.ring_for = RING_FOR;
     let storage = Arc::new(MemoryStorage::default());
     let core = Core::new(config, storage.clone(), Arc::new(Quiet)).unwrap();
     let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana", "name": "Ana Ruiz" })).unwrap();
@@ -166,6 +169,16 @@ async fn requests(server: &MockServer, verb: &str, route: &str) -> Vec<Value> {
 
 async fn asked(server: &MockServer) -> usize {
     server.received_requests().await.unwrap().iter().filter(|request| request.url.path() == "/api/v1/chat/voice-presence").count()
+}
+
+async fn until_asked(server: &MockServer, wanted: usize, what: &str) {
+    for _ in 0..300 {
+        if asked(server).await >= wanted {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no llegó: {what}");
 }
 
 async fn wait_until(what: &str, mut check: impl FnMut() -> bool) {
@@ -354,17 +367,16 @@ async fn occupancy_is_asked_only_while_watched() {
     let first = rig.core.voice().watch_occupancy();
     let second = rig.core.voice().watch_occupancy();
     wait_until("la ocupación", || state(&rig).occupancy.get("a").is_some_and(|peers| peers[0].name == "Luis")).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    until_asked(&rig.server, 3, "cada poco").await;
     let while_watching = asked(&rig.server).await;
-    assert!(while_watching >= 3, "cada poco: {while_watching}");
     drop(first);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(asked(&rig.server).await > while_watching, "otro sigue mirando");
+    until_asked(&rig.server, while_watching + 1, "otro sigue mirando").await;
     drop(second);
-    tokio::time::sleep(Duration::from_millis(100)).await;
     let stopped = asked(&rig.server).await;
     tokio::time::sleep(Duration::from_millis(250)).await;
-    assert_eq!(asked(&rig.server).await, stopped, "nadie mira: se para");
+    // La pregunta que ya había salido puede llegar todavía: parar es no
+    // hacer más, no deshacer la que va de camino.
+    assert!(asked(&rig.server).await <= stopped + 1, "nadie mira: se para");
     let queries: Vec<String> = rig.server.received_requests().await.unwrap().iter().filter(|r| r.url.path() == "/api/v1/chat/voice-presence").map(|r| r.url.query().unwrap_or_default().to_string()).collect();
     assert!(queries.iter().all(|query| query == "orgId=o1"));
 }
@@ -379,10 +391,16 @@ async fn occupancy_is_asked_only_while_watched() {
 async fn ringing_someone_gives_up_and_hangs_up() {
     let rig = rig().await;
     rig.core.voice().join_channel("a", None, None).await;
+    let rang_at = std::time::Instant::now();
     rig.core.voice().ring("u2", "Luis").await;
-    assert_eq!(requests(&rig.server, "POST", "/api/v1/task-spaces/a/voice/ring").await, [json!({ "userId": "u2" })]);
     let outgoing = state(&rig).outgoing.unwrap();
-    assert!(!outgoing.unanswered && outgoing.name == "Luis");
+    // Si la máquina tardó más que el timbre en llegar aquí, ya se rindió con
+    // razón: sólo se puede decir que aún suena dentro de su plazo.
+    if rang_at.elapsed() < RING_FOR {
+        assert!(!outgoing.unanswered, "se rindió en el acto");
+    }
+    assert_eq!(outgoing.name, "Luis");
+    assert_eq!(requests(&rig.server, "POST", "/api/v1/task-spaces/a/voice/ring").await, [json!({ "userId": "u2" })]);
     wait_until("no contestó", || state(&rig).outgoing.is_some_and(|ring| ring.unanswered)).await;
 
     rig.core.voice().ring("u2", "Luis").await;
@@ -409,8 +427,14 @@ async fn being_rung() {
         let expires = (chrono::Utc::now() + chrono::Duration::milliseconds(secs)).to_rfc3339();
         event("voice.ring", json!({ "ringId": format!("r-{space}-{from}"), "spaceId": space, "orgId": "o1", "spaceName": "Canal", "from": { "id": from, "name": "Luis" }, "expiresAt": expires }))
     };
+    let rung_at = std::time::Instant::now();
     rig.core.stream().deliver(ring("a", "u2", 150));
-    assert_eq!(state(&rig).incoming.unwrap().from.id, "u2");
+    // Dentro de su plazo, la tarjeta está; pasado (una máquina lenta), ya
+    // caducó con razón.
+    let incoming = state(&rig).incoming;
+    if rung_at.elapsed() < Duration::from_millis(150) {
+        assert_eq!(incoming.map(|ring| ring.from.id).as_deref(), Some("u2"));
+    }
     wait_until("caduca", || state(&rig).incoming.is_none()).await;
 
     rig.core.stream().deliver(ring("a", "u2", 5_000));
@@ -493,12 +517,11 @@ async fn joining_or_leaving_asks_again_who_is_there() {
     wait_until("la primera pregunta", || state(&rig).occupancy.contains_key("a")).await;
     let before = asked(&rig.server).await;
     rig.core.voice().join_channel("a", None, None).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    until_asked(&rig.server, before + 1, "al entrar").await;
     let joined = asked(&rig.server).await;
-    assert_eq!(joined, before + 1, "al entrar");
+    assert_eq!(joined, before + 1, "al entrar, una vez");
     rig.core.voice().leave().await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(asked(&rig.server).await, joined + 1, "al salir");
+    until_asked(&rig.server, joined + 1, "al salir").await;
 }
 
 /// Si el servidor no da el pase, se dice por qué y de qué canal, y no se

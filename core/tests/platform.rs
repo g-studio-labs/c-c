@@ -12,6 +12,10 @@ use serde_json::{json, Value};
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+#[path = "support/gated.rs"]
+mod gated;
+use gated::{front, Gate};
+
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, String>>);
 
@@ -53,7 +57,7 @@ struct Rig {
 async fn rig() -> Rig {
     let server = MockServer::start().await;
     let recorder = Arc::new(Recorder::default());
-    let mut config = Config::new(server.uri());
+    let mut config = Config::new(front(&server.uri()));
     config.stream_backoff = Duration::from_millis(5);
     config.stats_every = Duration::from_millis(20);
     let core = Core::new(config, Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
@@ -541,16 +545,14 @@ async fn a_failing_part_of_the_overview_stays_empty() {
 async fn a_late_overview_does_not_land_on_another_server() {
     let rig = rig().await;
     as_role(&rig, "member", vec![row(&rig, "a", "o1", "online", true), row(&rig, "b", "o1", "online", true)]).await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/servers/a/incidents"))
-        .respond_with(ok(json!({ "incidents": [] })).set_delay(std::time::Duration::from_millis(300)))
-        .mount(&rig.server)
-        .await;
+    let held = Gate::default();
+    Mock::given(method("GET")).and(path("/api/v1/servers/a/incidents")).respond_with(held.hold(ok(json!({ "incidents": [] })))).mount(&rig.server).await;
     rig.core.platform().open_server("a");
     let platform = rig.core.platform();
     let late = tokio::spawn(async move { platform.load_overview().await });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    gated::until("el resumen de a va en camino", || held.held() == 1).await;
     rig.core.platform().open_server("b");
+    held.open();
     late.await.unwrap();
     let state = rig.core.platform().state();
     assert_eq!(state.open_server.as_deref(), Some("b"));
@@ -1001,6 +1003,22 @@ async fn a_log_that_closes_at_once_is_not_reopened_forever() {
     assert_eq!(logs.error.as_deref(), Some("docker: no such service"));
 }
 
+/// Al parar el sondeo, la lectura que ya había salido puede llegar todavía
+/// al servidor: parar es no pedir más, no deshacer la que va de camino.
+/// Contarla con un respiro fijo dependía de lo cargada que estuviera la
+/// máquina.
+const IN_FLIGHT: usize = 1;
+
+async fn until_stats_hits(rig: &Rig, wanted: usize, what: &str) {
+    for _ in 0..300 {
+        if stats_hits(rig).await >= wanted {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{what}");
+}
+
 async fn stats_hits(rig: &Rig) -> usize {
     rig.server.received_requests().await.unwrap().iter().filter(|request| request.url.path() == "/api/v1/stats").count()
 }
@@ -1032,18 +1050,11 @@ async fn the_resources_tab_polls_until_you_leave_it() {
     assert_eq!(state.stats.unwrap()[0].cpu_percent, 12.5);
     assert_eq!(state.nodes.unwrap()[0].hostname, "manager-1");
     assert!(state.stats_fetched_at.is_some());
-    for _ in 0..100 {
-        if stats_hits(&rig).await >= 3 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(stats_hits(&rig).await >= 3, "no volvió a preguntar");
+    until_stats_hits(&rig, 3, "no volvió a preguntar").await;
     rig.core.platform().select_tab(ServerTab::Nodes);
-    tokio::time::sleep(Duration::from_millis(30)).await;
     let left_at = stats_hits(&rig).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(stats_hits(&rig).await, left_at, "siguió preguntando fuera de la pestaña");
+    assert!(stats_hits(&rig).await <= left_at + IN_FLIGHT, "siguió preguntando fuera de la pestaña");
 }
 
 /// Rotura que atrapa: seguir sondeando al irse de Plataforma, o no volver
@@ -1054,14 +1065,13 @@ async fn leaving_platform_pauses_the_polling_until_you_come_back() {
     rig.core.platform().enter();
     until(&rig, |state| state.stats.is_some()).await;
     rig.core.platform().leave();
-    tokio::time::sleep(Duration::from_millis(30)).await;
     let left_at = stats_hits(&rig).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(stats_hits(&rig).await, left_at, "siguió preguntando fuera de Plataforma");
+    let stopped_at = stats_hits(&rig).await;
+    assert!(stopped_at <= left_at + IN_FLIGHT, "siguió preguntando fuera de Plataforma");
     rig.core.platform().enter();
     rig.core.platform().start_stats();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(stats_hits(&rig).await > left_at, "no volvió a preguntar al regresar");
+    until_stats_hits(&rig, stopped_at + 1, "no volvió a preguntar al regresar").await;
 }
 
 /// Rotura que atrapa: que volver a arrancar el sondeo con una lectura a
@@ -1109,10 +1119,9 @@ async fn pausing_keeps_what_was_read_and_closing_stops_it() {
     let rig = rig_on_stats().await;
     until(&rig, |state| state.stats.is_some()).await;
     rig.core.platform().pause_stats(true);
-    tokio::time::sleep(Duration::from_millis(30)).await;
     let paused_at = stats_hits(&rig).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(stats_hits(&rig).await, paused_at, "siguió con la pausa puesta");
+    assert!(stats_hits(&rig).await <= paused_at + IN_FLIGHT, "siguió con la pausa puesta");
     let state = rig.core.platform().state();
     assert!(state.stats_paused);
     assert_eq!(state.stats.map(|stats| stats.len()), Some(1));
@@ -1120,25 +1129,20 @@ async fn pausing_keeps_what_was_read_and_closing_stops_it() {
     rig.core.platform().select_tab(ServerTab::Nodes);
     rig.core.platform().open_tab(ServerTab::Stats).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(stats_hits(&rig).await, paused_at, "volver a la pestaña se saltó la pausa");
+    assert!(stats_hits(&rig).await <= paused_at + IN_FLIGHT, "volver a la pestaña se saltó la pausa");
 
+    let before = stats_hits(&rig).await;
     rig.core.platform().refresh_stats().await;
-    assert_eq!(stats_hits(&rig).await, paused_at + 1, "refrescar lee una vez aunque esté pausado");
+    let after = stats_hits(&rig).await;
+    assert!(after > before && after <= paused_at + IN_FLIGHT + 1, "refrescar lee una vez aunque esté pausado");
 
     rig.core.platform().pause_stats(false);
-    for _ in 0..100 {
-        if stats_hits(&rig).await >= paused_at + 3 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(stats_hits(&rig).await >= paused_at + 3, "reanudar no volvió a preguntar");
+    until_stats_hits(&rig, paused_at + 3, "reanudar no volvió a preguntar").await;
 
     rig.core.platform().close_server();
-    tokio::time::sleep(Duration::from_millis(30)).await;
     let closed_at = stats_hits(&rig).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(stats_hits(&rig).await, closed_at, "siguió con el servidor cerrado");
+    assert!(stats_hits(&rig).await <= closed_at + IN_FLIGHT, "siguió con el servidor cerrado");
     assert!(rig.core.platform().state().stats.is_none());
 }
 

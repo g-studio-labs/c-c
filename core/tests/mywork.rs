@@ -14,6 +14,10 @@ use cac_core::{
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+#[path = "support/gated.rs"]
+mod gated;
+use gated::front;
+
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, String>>);
 
@@ -68,13 +72,24 @@ async fn rig(tasks: Vec<serde_json::Value>) -> Rig {
         .await;
     let storage = Arc::new(MemoryStorage::default());
     let recorder = Arc::new(Recorder::default());
-    let core = Core::new(Config::new(server.uri()), storage.clone(), recorder.clone()).unwrap();
+    let core = Core::new(Config::new(front(&server.uri())), storage.clone(), recorder.clone()).unwrap();
     let ana = serde_json::from_value(serde_json::json!({ "id": "u1", "username": "ana" })).unwrap();
     core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
     Rig { server, core, storage, recorder }
 }
 
 /// Las consultas que recibió `/api/v1/tasks/`, en orden.
+/// Espera a que «Mi trabajo» se haya pedido tantas veces.
+async fn until_queries(server: &MockServer, wanted: usize) {
+    for _ in 0..300 {
+        if queries(server).await.len() >= wanted {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("«Mi trabajo» no llegó a pedirse {wanted} veces");
+}
+
 async fn queries(server: &MockServer) -> Vec<String> {
     server
         .received_requests()
@@ -220,7 +235,7 @@ async fn a_failed_load_says_so_and_is_tried_again() {
         .respond_with(ResponseTemplate::new(500).set_body_string(r#"{"success":false,"error":"internal","message":"Something broke"}"#))
         .mount(&server)
         .await;
-    let core = Core::new(Config::new(server.uri()), Arc::new(MemoryStorage::default()), Arc::new(Recorder::default())).unwrap();
+    let core = Core::new(Config::new(front(&server.uri())), Arc::new(MemoryStorage::default()), Arc::new(Recorder::default())).unwrap();
     let work = core.my_work();
 
     work.ensure_loaded(None).await;
@@ -298,6 +313,8 @@ async fn a_burst_of_events_is_one_reload() {
     for _ in 0..5 {
         work.task_event("a", false);
     }
+    until_queries(&rig.server, 2).await;
+    // Lo que se mira es que no salgan más: se les da el respiro, y de sobra.
     tokio::time::sleep(Duration::from_millis(700)).await;
 
     assert_eq!(queries(&rig.server).await.len(), 2, "la carga inicial y una recarga");
@@ -323,7 +340,7 @@ async fn only_our_tasks_and_new_ones_reload() {
     assert_eq!(queries(&rig.server).await.len(), 1, "una que no es nuestra no recarga");
 
     work.task_event("nueva", true);
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    until_queries(&rig.server, 2).await;
     assert_eq!(queries(&rig.server).await.len(), 2, "una nueva sí");
 }
 
