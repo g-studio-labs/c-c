@@ -23,6 +23,7 @@ pub mod doc_header;
 pub mod doc_links;
 pub mod doc_pages;
 pub mod doc_reading;
+pub mod doc_share;
 pub mod docs;
 pub mod docs_panel;
 pub mod events;
@@ -74,6 +75,7 @@ pub use counters::{count_badge, counted_label, rings_bell, Counters, CountersSta
 pub use dates::{date_and_time, due_day, due_state, short_date, today_in, zone_hint, DueState};
 pub use doc_edit::{close_window_question, doc_editor_side_by_side, DocAsk, DocConflict, DocEdit, DocEditError, DocEditWhat, DocLeave, SIDE_BY_SIDE_FROM};
 pub use doc_header::{DocHeader, DocInfo};
+pub use doc_share::{shared_doc_link, DocShare, DocShares, DOC_SHARE_TTLS};
 pub use doc_links::{doc_link, heading_slug, DocJump, DocLink, DocLinkFailure};
 pub use doc_pages::{DocBacklink, DocBacklinkRow, DocPage, DocPageCrumb, DocPageItem, DocPageLink, DocPageRow, DocPageView};
 pub use doc_reading::{decision_record_link, doc_active_entry, doc_headings, doc_pieces, DocEntryPlace, DocHeading, DocPiece, DocPieceEnd};

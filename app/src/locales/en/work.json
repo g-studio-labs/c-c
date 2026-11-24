@@ -340,6 +340,27 @@
       "title": "Filters"
     }
   },
+  "docShare": {
+    "action": "Share by link",
+    "title": "Share with a link",
+    "body": "Anyone with the link, without an account, can read this page and all its subpages, including ones added later, with the attachments they cite. It works until it expires or you revoke it.",
+    "validFor": "The link works for",
+    "ttl24": "24 h",
+    "ttl168": "7 days",
+    "ttl720": "30 days",
+    "create": "Create link",
+    "creating": "Creating…",
+    "copied": "Link copied. It opens this page and its subpages until it expires.",
+    "live": "Live links",
+    "none": "This page has no live links.",
+    "line": "Until {{when}} · created by {{who}}",
+    "copy": "Copy link",
+    "revoke": "Revoke",
+    "revokeTitle": "Revoke this link?",
+    "revokeBody": "It stops opening the page right away, also for anyone who already has it. This can't be undone: to share it again, create a new one.",
+    "revokeAction": "Revoke link",
+    "errList": "Couldn't load this page's links."
+  },
   "docs": {
     "overview": "Overview",
     "runbook": "Runbook",

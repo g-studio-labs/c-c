@@ -37,6 +37,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
+use crate::doc_share::{PageShare, PageShareClosed};
 use crate::editor::MarkdownEditor;
 use crate::theme::Leading as _;
 use crate::lang::{locale, tr};
@@ -346,6 +347,8 @@ pub struct DocsView {
     readings_of: String,
     /// La entrada del índice marcada en el último pintado.
     active_entry: Option<u32>,
+    /// «Compartir con enlace» de la página que se lee, mientras está abierto.
+    share_link: Option<(Entity<PageShare>, Subscription)>,
 }
 
 /// Cuánto se queda a la vista el aviso de un enlace que no se pudo abrir:
@@ -416,7 +419,21 @@ impl DocsView {
             readings: HashMap::new(),
             readings_of: String::new(),
             active_entry: None,
+            share_link: None,
         }
+    }
+
+    /// Abre «Compartir con enlace» para la página que se lee.
+    fn open_share_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let docs = Backend::snapshot(cx).read(cx).docs.clone();
+        let (Some(target), Some(page)) = (docs.target, docs.page) else { return };
+        let share = cx.new(|cx| PageShare::new(target.kind, target.id, page.page.id, window, cx));
+        let closed = cx.subscribe(&share, |this, _, _: &PageShareClosed, cx| {
+            this.share_link = None;
+            cx.notify();
+        });
+        self.share_link = Some((share, closed));
+        cx.notify();
     }
 
     fn answer(yes: bool, cx: &App) {
@@ -1763,6 +1780,15 @@ impl Render for DocsView {
                     .child(
                         ghost_button("doc-page-history", Lucide::RotateCcwClock, tr(cx, "work:docs.history"), cx).h_6().gap_1p5().leading_xs().tooltip(not_yet(cx)).test_support(),
                     )
+                    .child(
+                        ghost_button("doc-page-share-link", Lucide::Link2, tr(cx, "work:docShare.action"), cx)
+                            .h_6()
+                            .gap_1p5()
+                            .leading_xs()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, window, cx| this.open_share_link(window, cx)))
+                            .test_support(),
+                    )
                     .child(ghost_button("doc-page-trash", Lucide::Trash, tr(cx, "work:docs.trashPage"), cx).ml_auto().text_color(muted).tooltip(not_yet(cx)).test_support()),
             )
         } else if on_page {
@@ -1827,6 +1853,11 @@ impl Render for DocsView {
             let gone = if top.item_ix == 0 { f32::from(top.offset_in_item) } else { READING_PAD };
             (list, (READING_PAD - gone).max(0.))
         });
+        // Los enlaces son de una página: si ya no se lee ésa, se cierra.
+        if self.share_link.as_ref().is_some_and(|(share, _)| docs.page_id.as_deref() != Some(share.read(cx).page_id())) {
+            self.share_link = None;
+        }
+        let share_link = self.share_link.as_ref().map(|(share, _)| div().id("doc-share-link-over").absolute().inset_0().child(share.clone()));
         // Un enlace que no se pudo abrir lo dice, abajo a la derecha.
         let link_failure = docs.link_failed.as_ref().map(|failure| self.render_link_failure(failure, cx));
         if link_failure.is_none() {
@@ -1882,6 +1913,7 @@ impl Render for DocsView {
             .children(link_failure)
             .children(sheet)
             .children(question)
+            .children(share_link)
     }
 }
 
@@ -2107,6 +2139,66 @@ mod tests {
 
     fn stop(cx: &mut TestAppContext) {
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// «Compartir con enlace» de una página enseña sus enlaces vivos, crea
+    /// uno con la duración elegida para esa página, deja en el portapapeles
+    /// el enlace web y revoca preguntando antes.
+    ///
+    /// Roturas que atrapa: crear con otra duración, para otra página o en
+    /// el documento de otro nodo; el enlace a la app, al de las llamadas
+    /// o con el token fuera del `#`; no copiar nada; no decir que abre
+    /// también las subpáginas; revocar sin preguntar o al cancelar; un enlace revocado
+    /// que sigue en la lista, o que se lleva a los demás.
+    #[gpui_kit::test]
+    fn a_page_is_shared_by_a_web_link_and_revoked_after_asking(cx: &mut TestAppContext) {
+        use wiremock::matchers::body_json;
+        let (server, _) = server("member");
+        let share = |id: &str, by: &str| {
+            json!({ "id": id, "pageId": "p1", "expiresAt": "2026-12-24T15:00:00Z", "createdBy": "u2", "createdByName": by, "link": format!("{id}.firma") })
+        };
+        let shares = "/api/v1/docs/space/a/pages/p1/shares";
+        server.mount(Mock::given(method("GET")).and(path(shares)).respond_with(ok(json!([share("s0", "Luis Gil")]))));
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path(shares))
+                .and(body_json(json!({ "ttlHours": 720 })))
+                .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "success": true, "data": share("s1", "Ana Ruiz") }))),
+        );
+        server.mount(Mock::given(method("DELETE")).and(path("/api/v1/doc-shares/s1")).respond_with(ResponseTemplate::new(204)));
+        let (window, _) = open(&server, 1400., cx);
+        cx.update(|cx| Backend::run(cx, |core| async move { core.docs().open_page("p1").await }));
+        wait_until(cx, "llega la página", |cx| on_screen(window, "doc-page-share-link", cx));
+
+        click(window, "doc-page-share-link", cx);
+        wait_until(cx, "sale el diálogo con el enlace vivo", |cx| on_screen(window, "doc-share-link-s0", cx));
+        assert!(on_screen(window, "doc-share-scope", cx), "no dice que abre también las subpáginas");
+        click(window, "doc-share-ttl-720", cx);
+        click(window, "doc-share-create", cx);
+        wait_until(cx, "el enlace nuevo sale en la lista", |cx| on_screen(window, "doc-share-link-s1", cx));
+        let copied = cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
+        assert_eq!(copied, format!("http://127.0.0.1:{}/app/shared#s1.firma", server.port()));
+        assert!(on_screen(window, "doc-share-copied", cx));
+
+        // Cancelar no revoca. Se le da tiempo a llegar a lo que se hubiera
+        // mandado: lo que corre tras la pregunta sólo avanza si la prueba
+        // mueve el ejecutor, y la petición sale por otro hilo.
+        click(window, "doc-share-revoke-s1", cx);
+        assert!(cx.has_pending_prompt(), "revocó sin preguntar");
+        cx.simulate_prompt_answer("Cancelar");
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        cx.run_until_parked();
+        assert_eq!(server.hits("/api/v1/doc-shares/s1"), 0, "revocó sin que se confirmara");
+        assert!(on_screen(window, "doc-share-link-s1", cx));
+
+        click(window, "doc-share-revoke-s1", cx);
+        assert!(cx.has_pending_prompt(), "revocó sin preguntar");
+        cx.simulate_prompt_answer("Revocar enlace");
+        wait_until(cx, "se va de la lista", |cx| !on_screen(window, "doc-share-link-s1", cx));
+        assert_eq!(server.hits("/api/v1/doc-shares/s1"), 1);
+        assert!(on_screen(window, "doc-share-link-s0", cx), "se llevó también el otro enlace");
+        stop(cx);
     }
 
     thread_local! {

@@ -23,6 +23,7 @@ mod chat;
 mod composer;
 mod comms;
 mod connect;
+mod doc_share;
 mod docs;
 mod docs_module;
 mod editor;

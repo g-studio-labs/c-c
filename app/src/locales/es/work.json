@@ -340,6 +340,27 @@
       "title": "Filtros"
     }
   },
+  "docShare": {
+    "action": "Compartir con enlace",
+    "title": "Compartir con un enlace",
+    "body": "Quien tenga el enlace, sin cuenta, puede leer esta página y todas sus subpáginas, también las que se añadan después, con los adjuntos que citan. Vale hasta que caduque o lo revoques.",
+    "validFor": "El enlace vale",
+    "ttl24": "24 h",
+    "ttl168": "7 días",
+    "ttl720": "30 días",
+    "create": "Crear enlace",
+    "creating": "Creando…",
+    "copied": "Enlace copiado. Abre esta página y sus subpáginas hasta que caduque.",
+    "live": "Enlaces vivos",
+    "none": "Esta página no tiene enlaces vivos.",
+    "line": "Hasta {{when}} · lo creó {{who}}",
+    "copy": "Copiar enlace",
+    "revoke": "Revocar",
+    "revokeTitle": "¿Revocar este enlace?",
+    "revokeBody": "Deja de abrir la página al momento, también a quien ya lo tenga. No se puede deshacer: para volver a compartirla, crea otro.",
+    "revokeAction": "Revocar enlace",
+    "errList": "No se pudieron traer los enlaces de esta página."
+  },
   "docs": {
     "overview": "Resumen",
     "runbook": "Runbook",
