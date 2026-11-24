@@ -23,6 +23,14 @@ use crate::theme::Leading as _;
 /// por letra sería pedir la lista entera diez veces para escribir un nombre.
 const SEARCH_PAUSE: Duration = Duration::from_millis(250);
 
+/// Cien lotes pueden ser miles de eventos: pintarlos todos trababa la vista.
+#[cfg(not(test))]
+const TIMELINE_STEP: usize = 200;
+// La plataforma de pruebas se cuelga entre 150 y 200 filas (medido en la
+// caja, 23-nov); la app pintaba miles. La prueba mira el corte, no la cifra.
+#[cfg(test)]
+pub(crate) const TIMELINE_STEP: usize = 20;
+
 pub struct DiagnosticsView {
     search: Entity<InputState>,
     text: Entity<InputState>,
@@ -31,6 +39,9 @@ pub struct DiagnosticsView {
     /// Los eventos abiertos, y las ramas pulsadas dentro de cada uno.
     open_rows: Vec<String>,
     row_toggled: Vec<String>,
+    /// Cuántos eventos se pintan: cien lotes pueden traer miles, y pintarlos
+    /// todos en cada frame trababa la vista.
+    shown: usize,
     /// Lo último que se mandó a buscar: cada letra lo cambia, y sólo la
     /// búsqueda de la última sale.
     typed: u64,
@@ -66,7 +77,7 @@ impl DiagnosticsView {
                 Backend::run(cx, move |core| async move { core.platform().set_timeline_filters(filters).await });
             }
         });
-        DiagnosticsView { search, text, sheet_toggled: Vec::new(), open_rows: Vec::new(), row_toggled: Vec::new(), typed: 0, _subscriptions: [on_search, on_text] }
+        DiagnosticsView { search, text, sheet_toggled: Vec::new(), open_rows: Vec::new(), row_toggled: Vec::new(), shown: TIMELINE_STEP, typed: 0, _subscriptions: [on_search, on_text] }
     }
 
     fn device_row(&self, device: &DeviceSummary, active: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -95,6 +106,7 @@ impl DiagnosticsView {
                 this.sheet_toggled.clear();
                 this.open_rows.clear();
                 this.row_toggled.clear();
+                this.shown = TIMELINE_STEP;
                 let reference = reference.clone();
                 Backend::run(cx, move |core| async move { core.platform().select_device(reference).await });
             }))
@@ -176,7 +188,7 @@ impl DiagnosticsView {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(div().flex_none().p_2().border_b_1().border_color(border).child(div().id("diag-search").child(Input::new(&self.search).small().prefix(Icon::new(Lucide::Search).size_3p5().text_color(muted))).test_support()))
+            .child(div().flex_none().p_2().border_b_1().border_color(border).child(div().id("diag-search").child(Input::new(&self.search).prefix(Icon::new(Lucide::Search).size_3p5().text_color(muted))).test_support()))
             .child(div().id("diag-devices").flex_1().min_h_0().overflow_y_scroll().p_2().flex().flex_col().gap_1p5().children(note).children(rows).children(more).test_support())
     }
 
@@ -290,7 +302,7 @@ impl DiagnosticsView {
         let broken = state.timeline.iter().filter(|batch| batch.undecryptable).count();
         let chip = |id: String, label: String, on: bool, next: TimelineFilters| {
             Button::new(SharedString::from(id))
-                .xsmall()
+                .small()
                 .when(on, |chip| chip.primary())
                 .when(!on, |chip| chip.outline())
                 .label(label)
@@ -331,7 +343,7 @@ impl DiagnosticsView {
                 .rounded(px(8.))
                 .border_1()
                 .border_color(border)
-                .children(rows.iter().enumerate().map(|(index, row)| self.timeline_row(row, index > 0, cx)))
+                .children(rows.iter().take(self.shown).enumerate().map(|(index, row)| self.timeline_row(row, index > 0, &filters, cx)))
                 .test_support()
                 .into_any_element()
         };
@@ -339,7 +351,7 @@ impl DiagnosticsView {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().w(px(192.)).child(div().id("diag-text").child(Input::new(&self.text).small()).test_support()))
+            .child(div().w(px(192.)).child(div().id("diag-text").child(Input::new(&self.text)).test_support()))
             .child(group("diagnostics:timeline.severity", severity.into_iter().collect(), cx))
             .child(group("diagnostics:timeline.types", kinds, cx))
             .child(group("diagnostics:timeline.since", since.into_iter().collect(), cx))
@@ -347,7 +359,13 @@ impl DiagnosticsView {
             .children(state.timeline_error.clone().map(|error| div().id("diag-timeline-error").flex().items_center().gap_1p5().text_xs().text_color(danger).child(Icon::new(Lucide::CircleAlert).size_3()).child(error).test_support()))
             .when(broken > 0, |column| column.child(div().text_xs().text_color(warning).child(tr(cx, "diagnostics:timeline.undecryptable"))))
             .child(body)
-            .children(state.timeline_before.is_some().then(|| {
+            .when(rows.len() > self.shown, |column| {
+                column.child(Button::new("diag-timeline-show-more").ghost().small().w_full().label(tr(cx, "diagnostics:loadMore")).on_click(cx.listener(|this, _, _, cx| {
+                    this.shown += TIMELINE_STEP;
+                    cx.notify();
+                })))
+            })
+            .children((rows.len() <= self.shown && state.timeline_before.is_some()).then(|| {
                 Button::new("diag-timeline-more")
                     .ghost()
                     .small()
@@ -359,7 +377,7 @@ impl DiagnosticsView {
             .into_any_element()
     }
 
-    fn timeline_row(&self, row: &TimelineRow, separated: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn timeline_row(&self, row: &TimelineRow, separated: bool, filters: &TimelineFilters, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (muted, border, danger, warning, success, accent, panel, mono) = (theme.muted_foreground, theme.border, theme.danger, theme.warning, theme.success, theme.accent, theme.muted, theme.mono_font_family.clone());
         let tone = match row.severity.as_str() {
@@ -371,7 +389,7 @@ impl DiagnosticsView {
         let at = chrono::DateTime::from_timestamp_millis(row.at).map(|at| cac_core::date_and_time(locale(cx), at.with_timezone(&chrono::Local).naive_local())).unwrap_or_default();
         let new_session = row.session_start.then(|| {
             let session = row.session_id.clone();
-            let mut next = Backend::snapshot(cx).read(cx).platform.diagnostics.clone().unwrap_or_default().filters;
+            let mut next = filters.clone();
             next.session_id = session.clone();
             div()
                 .id(SharedString::from(format!("diag-session-{}", row.key)))
@@ -623,6 +641,6 @@ impl Render for DiagnosticsView {
                     )
                     .child(self.device_list(cx)),
             )
-            .child(div().id("diag-main").flex_1().min_w_0().h_full().overflow_y_scroll().child(right))
+            .child(div().id("diag-main").flex_1().min_w_0().h_full().overflow_y_scroll().child(right).test_support())
     }
 }

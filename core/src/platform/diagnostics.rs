@@ -357,6 +357,12 @@ pub struct StripMark {
 
 /// La tira de latidos: un punto por latido y una banda por hueco, en la
 /// ventana `[from, to]` (milisegundos). Lo que cae fuera se recorta.
+/// Cuántas marcas de latido caben en la tira. Un dispositivo que late cada
+/// minuto deja miles en unos días, y cada una es un elemento con su tooltip:
+/// pintarlas todas trababa la ficha. Dos latidos en la misma franja se ven
+/// como uno de todos modos.
+pub const STRIP_SLOTS: usize = 400;
+
 pub fn heartbeat_strip(beats: &[String], gaps: &[HeartbeatGap], from: i64, to: i64) -> Vec<StripMark> {
     let span = (to - from) as f64;
     if span <= 0. {
@@ -371,9 +377,14 @@ pub fn heartbeat_strip(beats: &[String], gaps: &[HeartbeatGap], from: i64, to: i
             marks.push(StripMark { left, width: right - left, kind: StripKind::Gap, open: gap.open, from: gap.from.clone(), to: gap.to.clone() });
         }
     }
+    let mut taken = [false; STRIP_SLOTS];
     for beat in beats {
         let Some(at) = millis(beat) else { continue };
         if at < from || at > to {
+            continue;
+        }
+        let slot = ((place(at) * STRIP_SLOTS as f32) as usize).min(STRIP_SLOTS - 1);
+        if std::mem::replace(&mut taken[slot], true) {
             continue;
         }
         marks.push(StripMark { left: place(at), width: 0., kind: StripKind::Beat, open: false, from: beat.clone(), to: beat.clone() });
@@ -659,6 +670,16 @@ mod tests {
         assert_eq!((gaps[1].left, gaps[1].width, gaps[1].open), (0.875, 0.125, true));
         let beats: Vec<f32> = marks.iter().filter(|mark| mark.kind == StripKind::Beat).map(|mark| mark.left).collect();
         assert_eq!(beats, [0., 0.25, 0.5], "un latido de antes de la ventana se pintó");
+    }
+
+    /// Rotura que atrapa: pintar un elemento por latido (miles en unos días,
+    /// y la ficha se traba) o juntar latidos que caen lejos.
+    #[test]
+    fn the_heartbeat_strip_paints_one_mark_per_slot() {
+        let start = at("2026-11-20T00:00:00Z");
+        let beats: Vec<String> = (0..5000).map(|minute| chrono::DateTime::from_timestamp_millis(start + minute * 60_000).unwrap().to_rfc3339()).collect();
+        let marks = heartbeat_strip(&beats, &[], start, start + 5000 * 60_000);
+        assert_eq!(marks.len(), STRIP_SLOTS);
     }
 
     /// Rotura que atrapa: ordenar por lote y no por la hora de cada evento,

@@ -105,3 +105,46 @@ fn the_heartbeat_strip_paints_the_gaps(cx: &mut TestAppContext) {
     assert!(on_screen(window, "diag-strip-beat-2", cx));
     cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
 }
+
+/// Cien lotes pueden traer miles de eventos: se pintan por tandas y el
+/// resto a petición, antes de volver a pedir al servidor.
+///
+/// Roturas que atrapa: pintar todos (la vista se traba); un «Cargar más»
+/// que no enseña los que ya llegaron.
+#[gpui_kit::test]
+fn a_long_timeline_paints_by_steps(cx: &mut TestAppContext) {
+    let (server, window) = platform_as("member", cx);
+    let device = json!({ "deviceId": "dev-1", "projectId": "p1", "projectName": "Rastreo", "label": "moto g54", "platform": "android", "appVersion": "2.3.0",
+                         "batches": 1, "reqCount": 0, "errorCount": 0, "warnCount": 0, "lastSeen": "2026-11-20T10:00:00Z", "alerts": [] });
+    let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+    server.mount(get("/api/v1/telemetry/devices").respond_with(ok(json!([device.clone()]))));
+    server.mount(get("/api/v1/telemetry/devices/p1/dev-1").respond_with(ok(device)));
+    let crumbs: Vec<serde_json::Value> = (0..25).map(|index| json!({ "type": "lifecycle", "name": format!("e{index}"), "ts": 1795168860000i64 + index * 1000 })).collect();
+    let severities: Vec<&str> = (0..25).map(|_| "info").collect();
+    server.mount(get("/api/v1/telemetry/timeline").respond_with(ok(json!([{ "id": "b1", "sessionId": "s1", "receivedAt": "2026-11-20T10:00:00Z", "breadcrumbs": crumbs, "severities": severities }]))));
+
+    click(window, "platform-diagnostics", cx);
+    wait_until(cx, "llega el dispositivo", |cx| on_screen(window, "diag-device-p1-dev-1", cx));
+    click(window, "diag-device-p1-dev-1", cx);
+    wait_until(cx, "sale el timeline", |cx| on_screen(window, "diag-timeline", cx));
+    // Un frame y un solo recorrido, no un `on_screen` por fila.
+    let painted = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .within("diag-timeline")
+                .elements()
+                .iter()
+                .filter(|element| element.path().last().is_some_and(|id| format!("{id:?}").contains("\"diag-event-b1:")))
+                .count()
+        })
+        .unwrap()
+    };
+    let step = crate::platform::diagnostics::TIMELINE_STEP;
+    assert_eq!(painted(cx), step);
+    reveal(window, "diag-main", "diag-timeline-show-more", cx);
+    click(window, "diag-timeline-show-more", cx);
+    assert_eq!(painted(cx), 25, "«Cargar más» no enseñó lo que ya había llegado");
+    assert!(!on_screen(window, "diag-timeline-show-more", cx));
+    cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+}
