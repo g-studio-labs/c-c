@@ -2900,8 +2900,11 @@ mod tests {
         wait_until(cx, "descartar pregunta", |cx| on_screen(window, "doc-ask", cx));
         assert_eq!(boxes(&view, cx).1, typed, "lo tiró sin esperar la respuesta");
         click(window, "doc-ask-yes", cx);
-        wait_until(cx, "se lee lo que hay guardado", |cx| draft(cx).is_none() && on_screen(window, "doc-body", cx));
-        assert_eq!(cx.update(|cx| Backend::snapshot(cx).read(cx).docs.body().to_string()), "lo de Luis");
+        // Cerrar el editor es en el acto; lo guardado llega después, de otro
+        // hilo: se espera a ello y no a lo primero.
+        wait_until(cx, "se lee lo que hay guardado", |cx| {
+            draft(cx).is_none() && on_screen(window, "doc-body", cx) && cx.update(|cx| Backend::snapshot(cx).read(cx).docs.body() == "lo de Luis")
+        });
         stop(cx);
     }
 
