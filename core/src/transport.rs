@@ -123,3 +123,39 @@ pub async fn send_raw(client: &reqwest::Client, request: RawRequest) -> Result<R
     let body = response.bytes().await.map_err(|e| ApiError::Network(format!("response body: {e}")))?;
     Ok(RawReply { status, body: body.to_vec() })
 }
+
+/// Baja un GET directo a un fichero, trozo a trozo: una grabación son
+/// cientos de megas que no tienen por qué pasar enteros por la memoria.
+///
+/// El fichero sólo se crea si el servidor dijo que sí; un error vuelve como
+/// [`RawReply`] con su cuerpo, igual que en [`send_raw`]. `request.timeout`
+/// no es el plazo de toda la descarga sino el de cada espera (la cabecera y
+/// cada trozo): un plazo total cortaría una grabación grande en una red
+/// lenta que sigue llegando.
+pub async fn receive_to_file(client: &reqwest::Client, request: RawRequest, file: &std::path::Path) -> Result<RawReply, ApiError> {
+    use std::io::Write as _;
+
+    let mut builder = client.get(&request.url);
+    for (name, value) in &request.headers {
+        builder = builder.header(name, value);
+    }
+    let stalled = || ApiError::Network("timed out".to_string());
+    let response = tokio::time::timeout(request.timeout, builder.send()).await.map_err(|_| stalled())?.map_err(|e| {
+        ApiError::Network(if e.is_timeout() { "timed out".to_string() } else if e.is_connect() { "could not connect".to_string() } else { e.to_string() })
+    })?;
+    let status = response.status().as_u16();
+    if status >= 400 {
+        let body = tokio::time::timeout(request.timeout, response.bytes()).await.map_err(|_| stalled())?.map_err(|e| ApiError::Network(format!("response body: {e}")))?;
+        return Ok(RawReply { status, body: body.to_vec() });
+    }
+    let local = |e: std::io::Error| ApiError::Storage(e.to_string());
+    let mut out = std::fs::File::create(file).map_err(local)?;
+    let mut response = response;
+    while let Some(chunk) = tokio::time::timeout(request.timeout, response.chunk()).await.map_err(|_| stalled())?.map_err(|e| ApiError::Network(format!("response body: {e}")))? {
+        out.write_all(&chunk).map_err(local)?;
+    }
+    // A disco antes de que quien llama le ponga el nombre final: un apagón
+    // justo después no deja un fichero con su nombre y sin sus bytes.
+    out.sync_all().map_err(local)?;
+    Ok(RawReply { status, body: Vec::new() })
+}

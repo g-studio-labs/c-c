@@ -522,9 +522,10 @@ impl ChannelTabs {
         self.core.call_ok("DELETE", &format!("/api/v1/recordings/{recording_id}"), None).await
     }
 
-    /// Los bytes de una grabación, con la sesión en la cabecera.
-    pub async fn recording_bytes(&self, recording_id: &str) -> Result<Vec<u8>, ApiError> {
-        self.core.download(&format!("/api/v1/recordings/{recording_id}/media")).await
+    /// Guarda una grabación en `target`, con la sesión en la cabecera. Va a
+    /// disco según llega y sólo toma el nombre al terminar entera.
+    pub async fn save_recording(&self, recording_id: &str, target: &std::path::Path) -> Result<(), ApiError> {
+        self.core.download_to(&format!("/api/v1/recordings/{recording_id}/media"), target).await
     }
 
     /// Una dirección para ver la grabación fuera de la app. **Por el proxy de

@@ -116,6 +116,124 @@ async fn watching_a_recording_uses_a_short_ticket() {
     core.channel_tabs().delete_recording("r1").await.unwrap();
 }
 
+/// Un servidor a mano para una sola petición: contesta con lo que la prueba
+/// le vaya mandando, cuando lo mande, y cierra al soltar el emisor. Con
+/// wiremock la respuesta sale entera de golpe, y aquí lo que se mira es qué
+/// pasa con lo que va llegando.
+async fn by_hand() -> (String, tokio::sync::mpsc::UnboundedSender<Vec<u8>>, tokio::task::JoinHandle<String>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (send, mut parts) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let served = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            socket.read_exact(&mut byte).await.unwrap();
+            head.push(byte[0]);
+        }
+        while let Some(part) = parts.recv().await {
+            socket.write_all(&part).await.unwrap();
+            socket.flush().await.unwrap();
+        }
+        String::from_utf8(head).unwrap()
+    });
+    (base, send, served)
+}
+
+fn signed_in_at(base: &str) -> Core {
+    let core = Core::new(Config::new(base.to_string()), Arc::new(MemoryStorage::default()), Arc::new(Quiet)).unwrap();
+    let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana", "name": "Ana Ruiz" })).unwrap();
+    core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
+    core
+}
+
+fn part_of(target: &std::path::Path) -> std::path::PathBuf {
+    let mut partial = target.as_os_str().to_owned();
+    partial.push(".part");
+    partial.into()
+}
+
+/// Una grabación se guarda según llega, a un `.part` al lado, y sólo toma
+/// su nombre al terminar entera; la pide con la sesión en la cabecera.
+///
+/// Roturas que atrapa: juntar la grabación entera en memoria antes de
+/// escribirla (cientos de megas); escribir directamente con el nombre
+/// final, que a mitad ya parece el fichero; dejar el `.part` al terminar;
+/// pedirla sin la sesión.
+#[tokio::test]
+async fn a_recording_is_written_to_disk_as_it_arrives() {
+    let (base, send, served) = by_hand().await;
+    let core = signed_in_at(&base);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("llamada.mp4");
+    let half = 1_000_000;
+    let whole: Vec<u8> = (0..2 * half).map(|at| (at % 251) as u8).collect();
+
+    let mut first = format!("HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\n\r\n", whole.len()).into_bytes();
+    first.extend_from_slice(&whole[..half]);
+    send.send(first).unwrap();
+    let saving = tokio::spawn({
+        let (core, target) = (core.clone(), target.clone());
+        async move { core.channel_tabs().save_recording("r1", &target).await }
+    });
+
+    let partial = part_of(&target);
+    let mut waited = 0;
+    while std::fs::metadata(&partial).map(|meta| meta.len()).unwrap_or(0) < half as u64 {
+        assert!(waited < 500, "la primera mitad no llegó a disco mientras faltaba la otra");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        waited += 1;
+    }
+    assert!(!target.exists(), "a medias ya lleva el nombre final");
+
+    send.send(whole[half..].to_vec()).unwrap();
+    drop(send);
+    saving.await.unwrap().unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), whole);
+    assert!(!partial.exists(), "se quedó el .part");
+    let head = served.await.unwrap().to_lowercase();
+    assert!(head.starts_with("get /api/v1/recordings/r1/media "), "{head}");
+    assert!(head.contains("authorization: bearer access"), "{head}");
+}
+
+/// Una descarga que se corta a mitad, o que el servidor rechaza, no deja
+/// nada con el nombre elegido, ni su `.part`, ni se lleva el fichero que
+/// ya había con ese nombre.
+///
+/// Roturas que atrapa: dar por buena una descarga cortada (un vídeo
+/// truncado con su nombre); dejar el `.part` tirado; guardar el cuerpo de
+/// un error como si fuera la grabación; pisar el fichero de antes cuando
+/// la nueva no llegó.
+#[tokio::test]
+async fn a_download_cut_short_leaves_nothing_under_its_name() {
+    let (base, send, served) = by_hand().await;
+    let core = signed_in_at(&base);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("llamada.mp4");
+    std::fs::write(&target, b"la de antes").unwrap();
+
+    let mut cut = b"HTTP/1.1 200 OK\r\nContent-Length: 2000\r\n\r\n".to_vec();
+    cut.extend_from_slice(&[7u8; 1000]);
+    send.send(cut).unwrap();
+    drop(send);
+    assert!(core.channel_tabs().save_recording("r1", &target).await.is_err(), "una descarga cortada se dio por buena");
+    served.await.unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"la de antes");
+    assert!(!part_of(&target).exists(), "se quedó el .part de una descarga cortada");
+
+    let (server, core) = rig().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/recordings/r2/media"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({ "success": false, "error": { "code": "boom", "message": "boom" } })))
+        .mount(&server)
+        .await;
+    let refused = dir.path().join("otra.mp4");
+    assert!(core.channel_tabs().save_recording("r2", &refused).await.is_err());
+    assert!(!refused.exists() && !part_of(&refused).exists(), "el cuerpo de un error se guardó como grabación");
+}
+
 /// Crear una llamada con invitados manda la organización, el canal, el
 /// título recortado y cuánto vale; el enlace sale de su token; y cerrarla
 /// la borra.

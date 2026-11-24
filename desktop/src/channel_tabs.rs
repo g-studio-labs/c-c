@@ -318,10 +318,7 @@ impl ChannelTabsView {
                 this.set_busy(&id, true, cx);
                 this.say(tr(cx, "recordings:downloadStarted"), cx);
                 let id = id.clone();
-                Backend::ask(cx, move |core| async move {
-                    let bytes = core.channel_tabs().recording_bytes(&id).await.map_err(|_| ())?;
-                    files::write_copy(&target, &bytes).map_err(|_| ())
-                })
+                Backend::ask(cx, move |core| async move { core.channel_tabs().save_recording(&id, &target).await })
             }) else {
                 return;
             };

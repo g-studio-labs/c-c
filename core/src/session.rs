@@ -32,6 +32,11 @@ const STORAGE_KEY: &str = "session";
 /// servidor da a una subida (`attachmentReadWindow`).
 const FILE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
+/// Cuánto puede quedarse parada una descarga que va a disco antes de darla
+/// por perdida. Es por espera, no por descarga: una grabación de cientos de
+/// megas en una red lenta tarda más que cualquier plazo total razonable.
+const DOWNLOAD_STALL: Duration = Duration::from_secs(60);
+
 /// Quién está dentro. Espejo de `domain.Session` del backend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -475,6 +480,49 @@ impl Core {
             return Err(Self::file_error(&reply));
         }
         Ok(reply.body)
+    }
+
+    /// Lo mismo que [`Self::download`], pero los bytes van llegando a
+    /// `target` en vez de juntarse en memoria.
+    ///
+    /// Se escriben a un `.part` al lado y sólo al final se renombra: un corte
+    /// a mitad no deja algo que parece el fichero y no lo es, ni se lleva por
+    /// delante el que ya estaba con ese nombre.
+    pub(crate) async fn download_to(&self, path: &str, target: &std::path::Path) -> Result<(), ApiError> {
+        let mut partial = target.as_os_str().to_owned();
+        partial.push(".part");
+        let partial = std::path::PathBuf::from(partial);
+        let saved = match self.download_into(path, &partial).await {
+            Ok(()) => std::fs::rename(&partial, target).map_err(|e| ApiError::Storage(e.to_string())),
+            Err(error) => Err(error),
+        };
+        if saved.is_err() {
+            let _ = std::fs::remove_file(&partial);
+        }
+        saved
+    }
+
+    async fn download_into(&self, path: &str, file: &std::path::Path) -> Result<(), ApiError> {
+        let fetch = |bearer: Option<String>| {
+            let mut headers = Vec::new();
+            if let Some(token) = bearer {
+                headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+            }
+            let request = RawRequest { method: "GET".into(), url: format!("{}{}", self.inner.config.base_url, path), headers, body: None, timeout: DOWNLOAD_STALL };
+            transport::receive_to_file(&self.inner.http, request, file)
+        };
+        let token = self.access_token();
+        let mut reply = fetch(token.clone()).await?;
+        // El mismo 404 que no dice «caducó» que en `download`.
+        if matches!(reply.status, 401 | 404) {
+            if let Some(fresh) = self.refresh(token).await {
+                reply = fetch(Some(fresh)).await?;
+            }
+        }
+        if reply.status >= 400 {
+            return Err(Self::file_error(&reply));
+        }
+        Ok(())
     }
 
     /// Sube un cuerpo ya montado (un `multipart`) con la sesión puesta.
