@@ -392,6 +392,10 @@ fn api_delete(cfg: &Cfg, path: &str) -> Result<Value, String> {
             .await
             .map_err(|e| format!("request failed: {e}"))?;
         let status = res.status();
+        // Revocar un enlace contesta 204, sin cuerpo que leer: no es un fallo.
+        if status == reqwest::StatusCode::NO_CONTENT {
+            return Ok(Value::Null);
+        }
         let body: Value = res
             .json()
             .await
@@ -1448,6 +1452,40 @@ fn short_page_write(page: &Value, kind: &str, owner: &str) -> Value {
         "bodyHash": page.get("bodyHash"),
         "chars": page.get("body").and_then(|b| b.as_str()).map(|b| b.chars().count()),
         "link": page_link(kind, owner, id),
+    })
+}
+
+/// Las duraciones que crea el servidor (`domain.ValidDocShareTTL`), en horas.
+/// Es la copia de `cac_core::DOC_SHARE_TTLS` del escritorio nativo: este
+/// crate no depende del core.
+const DOC_SHARE_TTL_HOURS: [u32; 3] = [24, 168, 720];
+
+/// La dirección web de un enlace compartido: el token detrás del `#`, que no
+/// llega a los logs de ningún servidor. Igual que `cac_core::shared_doc_link`.
+fn shared_doc_link(base_url: &str, token: &str) -> String {
+    format!("{}/app/shared#{token}", base_url.trim_end_matches('/'))
+}
+
+/// Las horas que pide cac por los días que pide el agente: 1, 7 o 30, y
+/// una semana si no dice. Otro número no lo crearía el servidor.
+fn share_ttl_hours(args: &Value) -> Result<u32, String> {
+    let Some(days) = args.get("days").filter(|v| !v.is_null()) else { return Ok(168) };
+    days.as_u64()
+        .and_then(|d| u32::try_from(d.saturating_mul(24)).ok())
+        .filter(|hours| DOC_SHARE_TTL_HOURS.contains(hours))
+        .ok_or_else(|| format!("days must be 1, 7 or 30, not {days}"))
+}
+
+/// Un enlace público, como lo necesita quien lo va a mandar: la dirección web
+/// (el token detrás del `#`, nunca en la ruta), cuándo caduca y su id para
+/// revocarlo.
+fn short_share(base: &str, share: &Value) -> Value {
+    let token = share.get("link").and_then(|v| v.as_str()).unwrap_or("");
+    json!({
+        "id": share.get("id"),
+        "url": shared_doc_link(base, token),
+        "expiresAt": share.get("expiresAt"),
+        "createdBy": share.get("createdByName"),
     })
 }
 
@@ -3381,6 +3419,45 @@ fn tool_defs() -> Value {
                     "dryRun": { "type": "boolean" }
                 },
                 "required": ["kind", "ownerId", "pageId"]
+            }
+        },
+        {
+            "name": "share_doc_page",
+            "description": "Create a public link to a page. Anyone who has it, without an account, can read the page AND all its subpages, including ones added later, and the attachments they cite, until it expires or is revoked. Only share when the user asked to send it outside. Returns the web `url` to send, `expiresAt` and the share `id` (to revoke it). Needs a token with `docs:share`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["space", "folder", "list"] },
+                    "ownerId": { "type": "string" },
+                    "pageId": { "type": "string" },
+                    "days": { "type": "integer", "enum": [1, 7, 30], "description": "How long the link works. Default 7." },
+                    "dryRun": { "type": "boolean", "description": "Validate the page and the token's permission without creating a link." }
+                },
+                "required": ["kind", "ownerId", "pageId"]
+            }
+        },
+        {
+            "name": "list_doc_page_shares",
+            "description": "The live public links of a page: each one's web `url`, `expiresAt`, who created it and its `id`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["space", "folder", "list"] },
+                    "ownerId": { "type": "string" },
+                    "pageId": { "type": "string" }
+                },
+                "required": ["kind", "ownerId", "pageId"]
+            }
+        },
+        {
+            "name": "revoke_doc_share",
+            "description": "Revoke a public page link by its `id` (from share_doc_page or list_doc_page_shares). It stops working right away, also for whoever already has it; it cannot be undone. Needs a token with `docs:share`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" }
+                },
+                "required": ["id"]
             }
         }
     ])
@@ -5641,6 +5718,29 @@ fn run_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
             }))
         }
 
+        "share_doc_page" => {
+            let (kind, id, page) = page_target(cfg, args)?;
+            let ttl_hours = share_ttl_hours(args)?;
+            if arg_bool(args, "dryRun") {
+                return dry_run(cfg, "docs:share", api_get(cfg, &format!("/api/v1/docs/{kind}/{id}/pages/{page}")));
+            }
+            let share = api_post(cfg, &format!("/api/v1/docs/{kind}/{id}/pages/{page}/shares"), json!({ "ttlHours": ttl_hours }))?;
+            Ok(short_share(&cfg.base, &share))
+        }
+
+        "list_doc_page_shares" => {
+            let (kind, id, page) = page_target(cfg, args)?;
+            let shares = list_or_empty(api_get(cfg, &format!("/api/v1/docs/{kind}/{id}/pages/{page}/shares"))?);
+            let shares: Vec<Value> = shares.as_array().map(|a| a.iter().map(|s| short_share(&cfg.base, s)).collect()).unwrap_or_default();
+            Ok(json!({ "shares": shares }))
+        }
+
+        "revoke_doc_share" => {
+            let share = arg_str(args, "id").ok_or("id is required: use list_doc_page_shares")?;
+            api_delete(cfg, &format!("/api/v1/doc-shares/{}", urlencode(&share)))?;
+            Ok(json!({ "revoked": true, "id": share, "note": "The link stopped working right away." }))
+        }
+
         "update_doc" => {
             let (kind, id) = doc_target(cfg, args)?;
             if arg_bool(args, "dryRun") {
@@ -6444,7 +6544,7 @@ fn is_read_only(name: &str) -> bool {
 
 /// Lo que borra o reemplaza entero algo que otra persona pudo escribir.
 fn is_destructive(name: &str) -> bool {
-    name.starts_with("delete_") || matches!(name, "write_doc_tab" | "write_doc_page")
+    name.starts_with("delete_") || matches!(name, "write_doc_tab" | "write_doc_page" | "revoke_doc_share")
 }
 
 /// La sección del overview donde va lo que ya mordió a alguien. El nombre es
@@ -7880,6 +7980,106 @@ mod tests {
         assert!(req("move_doc_page").contains("pageId"));
         assert!(req("delete_doc_page").contains("pageId"));
         assert!(tool(&defs, "write_doc_page")["inputSchema"]["properties"].get("baseHash").is_some());
+    }
+
+    // ── Compartir una página por enlace (command-and-control-499) ───────────
+
+    /// Las tres herramientas piden la página o el enlace, la que crea dice
+    /// qué abre y qué permiso hace falta, y revocar se anuncia como algo que
+    /// no tiene vuelta.
+    ///
+    /// Roturas que atrapa: una herramienta sin anunciar; crear o listar sin
+    /// `pageId`; revocar sin `id`; una descripción que calla que se abren
+    /// también las subpáginas o qué permiso pide; revocar como algo inocuo.
+    #[test]
+    fn the_share_tools_are_declared_with_what_they_need() {
+        let defs = annotate(tool_defs());
+        let req = |n: &str| tool(&defs, n)["inputSchema"]["required"].clone();
+        assert_eq!(req("share_doc_page"), json!(["kind", "ownerId", "pageId"]));
+        assert_eq!(req("list_doc_page_shares"), json!(["kind", "ownerId", "pageId"]));
+        assert_eq!(req("revoke_doc_share"), json!(["id"]));
+        let said = tool(&defs, "share_doc_page")["description"].as_str().unwrap();
+        assert!(said.contains("subpages") && said.contains("added later") && said.contains("attachments") && said.contains("docs:share"), "{said}");
+        assert!(tool(&defs, "revoke_doc_share")["description"].as_str().unwrap().contains("docs:share"));
+        assert_eq!(tool(&defs, "revoke_doc_share")["annotations"]["destructiveHint"], true);
+        assert_eq!(tool(&defs, "list_doc_page_shares")["annotations"]["readOnlyHint"], true);
+    }
+
+    /// Los días que pide el agente son las horas que pide cac, una semana si
+    /// no dice, y nada más.
+    ///
+    /// Roturas que atrapa: mandar días donde cac espera horas; otro valor
+    /// por defecto; aceptar una duración que el servidor no crea (2 días, un
+    /// año, cero, negativa o escrita como texto).
+    #[test]
+    fn days_become_the_hours_cac_takes() {
+        let hours = |args: Value| share_ttl_hours(&args);
+        assert_eq!(hours(json!({ "days": 1 })), Ok(24));
+        assert_eq!(hours(json!({ "days": 7 })), Ok(168));
+        assert_eq!(hours(json!({ "days": 30 })), Ok(720));
+        assert_eq!(hours(json!({})), Ok(168));
+        for wrong in [json!(2), json!(365), json!(0), json!(-1), json!("7")] {
+            let refused = hours(json!({ "days": wrong.clone() }));
+            assert!(refused.as_ref().is_err_and(|e| e.contains("1, 7 or 30")), "{wrong}: {refused:?}");
+        }
+    }
+
+    /// De punta a punta contra un cac falso: crear manda las horas a la
+    /// página del nodo y devuelve la dirección web con el token detrás del
+    /// `#`; un argumento que no declara se rechaza sin crear nada.
+    ///
+    /// Roturas que atrapa: crear en otra ruta o con otro cuerpo; devolver el
+    /// token suelto, el enlace de la app o el token en la ruta; ignorar un
+    /// argumento mal escrito y crear un enlace con lo que se entendió.
+    #[test]
+    fn sharing_a_page_returns_its_web_link() {
+        let share = json!({ "id": "s1", "pageId": "p1", "expiresAt": "2026-12-24T15:00:00Z", "createdBy": "u1", "createdByName": "Ana Ruiz", "link": "s1.firma" });
+        let (cfg, seen) = fake_cac(move |_, _, _| share.clone());
+        let base = cfg.base.clone();
+        let call = |args: Value| {
+            let cfg = Cfg { base: base.clone(), token: "cac_pat_test".into() };
+            handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "share_doc_page", "arguments": args } }), &Ok(cfg)).unwrap()
+        };
+        let refused = call(json!({ "kind": "list", "ownerId": "l1", "pageId": "p1", "dias": 30 }));
+        assert_eq!(refused["result"]["isError"], true, "{refused}");
+        assert!(seen.lock().unwrap().is_empty(), "creó un enlace con un argumento que no declara");
+
+        let out = call(json!({ "kind": "list", "ownerId": "l1", "pageId": "p1", "days": 30 }));
+        let text = out["result"]["content"][0]["text"].as_str().unwrap();
+        let answer: Value = serde_json::from_str(text).unwrap_or_else(|_| panic!("{text}"));
+        assert_eq!(answer["url"], format!("{base}/app/shared#s1.firma"));
+        assert_eq!((answer["id"].as_str(), answer["expiresAt"].as_str()), (Some("s1"), Some("2026-12-24T15:00:00Z")));
+        assert_eq!(*seen.lock().unwrap(), [("POST".to_string(), "/api/v1/docs/list/l1/pages/p1/shares".to_string(), json!({ "ttlHours": 720 }))]);
+    }
+
+    /// Revocar contesta 204 sin cuerpo, y eso es que salió bien.
+    ///
+    /// Rotura que atrapa: leer el cuerpo vacío como JSON y decirle al agente
+    /// que falló un enlace que sí se revocó.
+    #[test]
+    fn a_delete_answered_with_no_content_went_well() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // La petición entera antes de contestar, y la conexión abierta
+            // hasta que el cliente la cierre: cerrar con algo sin leer la
+            // corta y el fallo sería otro.
+            let mut seen = Vec::new();
+            let mut buf = [0; 1024];
+            while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => seen.extend_from_slice(&buf[..n]),
+                }
+            }
+            let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n");
+            let _ = stream.flush();
+            while matches!(stream.read(&mut buf), Ok(n) if n > 0) {}
+        });
+        let cfg = Cfg { base, token: "cac_pat_test".into() };
+        assert_eq!(api_delete(&cfg, "/api/v1/doc-shares/s1"), Ok(Value::Null));
     }
 
     /// El índice de un doc avisa de que hay páginas.
