@@ -184,6 +184,9 @@ pub(crate) struct CommsData {
     /// (`/chat/following`): los suyos menos los silenciados. `None` mientras
     /// no se sabe; lo usan los avisos.
     following: Option<HashSet<String>>,
+    /// Cuántas veces se ha cambiado a mano si se sigue un canal: la lista que
+    /// se pidió antes de un cambio posterior ya no manda sobre él.
+    follow_edits: u64,
     /// Lo último que se avisó, para no avisar de lo mismo.
     published: CommsState,
 }
@@ -353,8 +356,10 @@ impl Comms {
     /// el acto; si el servidor dice que no, vuelve a como estaba y se dice
     /// por qué. Después se vuelve a pedir la lista, que es la que manda.
     pub async fn set_following(&self, space_id: &str, on: bool) -> Result<(), ApiError> {
-        let before = {
+        let (before, edit) = {
             let mut data = self.data();
+            data.follow_edits += 1;
+            let edit = data.follow_edits;
             let before = data.following.clone();
             let following = data.following.get_or_insert_with(HashSet::new);
             if on {
@@ -362,18 +367,24 @@ impl Comms {
             } else {
                 following.remove(space_id);
             }
-            before
+            (before, edit)
         };
         self.publish();
         let path = format!("/api/v1/task-spaces/{space_id}/chat/follow");
         let answer = if on { self.core.call_ok("POST", &path, Some(serde_json::json!({}))).await } else { self.core.call_ok("DELETE", &path, None).await };
-        if answer.is_err() {
+        // Con otro cambio hecho entre tanto, ni deshacer éste ni la lista que
+        // se pidió antes de él: el otro cambio ya vuelve a pedirla.
+        if answer.is_err() && self.data().follow_edits == edit {
             self.data().following = before;
             self.publish();
         }
         if let Ok(following) = self.core.get_list::<String>("/api/v1/chat/following").await {
-            self.data().following = Some(following.into_iter().collect());
-            self.publish();
+            let mut data = self.data();
+            if data.follow_edits == edit {
+                data.following = Some(following.into_iter().collect());
+                drop(data);
+                self.publish();
+            }
         }
         self.core.counters().reload_channels().await;
         answer

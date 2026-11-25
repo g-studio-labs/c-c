@@ -1177,7 +1177,8 @@ mod tests {
     ///
     /// Roturas que atrapa: un botón que no cambia; pedir lo contrario (POST
     /// para silenciar); quedarse silenciado tras un fallo, o callarse el
-    /// fallo; el botón en un directo.
+    /// fallo; el botón en un directo; que la lista que se pidió tras un
+    /// cambio, llegando después de otro, lo deshaga.
     #[gpui_kit::test]
     fn the_follow_button_mutes_a_channel_and_says_when_it_cannot(cx: &mut TestAppContext) {
         let server = server();
@@ -1185,7 +1186,20 @@ mod tests {
         // sigue, y es lo que contesta la lista que se vuelve a pedir.
         let following = std::sync::Arc::new(std::sync::Mutex::new(vec!["a", "b", "g"]));
         let listed = following.clone();
-        server.mount(get("/api/v1/chat/following").respond_with(move |_: &wiremock::Request| ok(json!(*listed.lock().unwrap()))).with_priority(1));
+        // La lista que se vuelve a pedir tras silenciar `a` se retiene, con
+        // lo que el servidor sabía entonces: es la que, llegando tarde, no
+        // puede deshacer lo que se pulsó después. Con un plazo, sólo
+        // llegaba tarde en una máquina cargada.
+        let stale = Gate::default();
+        let held = stale.clone();
+        server.mount(
+            get("/api/v1/chat/following")
+                .respond_with(move |_: &wiremock::Request| {
+                    let list = listed.lock().unwrap().clone();
+                    if list.contains(&"a") { ok(json!(list)) } else { held.hold(ok(json!(list))) }
+                })
+                .with_priority(1),
+        );
         let follow = |space: &str| path(format!("/api/v1/task-spaces/{space}/chat/follow"));
         let muted = following.clone();
         server.mount(Mock::given(method("DELETE")).and(follow("a")).respond_with(move |_: &wiremock::Request| {
@@ -1205,6 +1219,7 @@ mod tests {
         click(window, "conversation-follow", cx);
         wait_until(cx, "pasa a «Seguir»", |cx| label(window, "conversation-follow", cx) == "Seguir");
         wait_until(cx, "se le pide al servidor", |_| server.requests().iter().any(|request| request.method.as_str() == "DELETE" && request.url.path() == "/api/v1/task-spaces/a/chat/follow"));
+        wait_until(cx, "se vuelve a pedir la lista", |_| stale.held() == 1);
 
         click(window, "comms-channel-b", cx);
         wait_until(cx, "el otro canal dice que se sigue", |cx| label(window, "conversation-title", cx) == "#Diseño" && label(window, "conversation-follow", cx) == "Siguiendo");
@@ -1212,6 +1227,14 @@ mod tests {
         wait_until(cx, "cambia en el acto", |cx| label(window, "conversation-follow", cx) == "Seguir");
         wait_until(cx, "se le pide al servidor", |_| refusal.held() == 1);
         assert_eq!(label(window, "conversation-follow", cx), "Seguir", "volvió antes de que el servidor contestara");
+        // La lista de antes llega ahora, ya con `b` como seguido: no manda
+        // sobre lo que se pulsó después. Tras ella el core vuelve a contar lo
+        // sin leer, que es cuando ya la aplicó.
+        let counted = server.hits("/api/v1/chat/unread");
+        stale.open();
+        wait_until(cx, "llega la lista de antes", |_| server.hits("/api/v1/chat/unread") > counted);
+        cx.run_until_parked();
+        assert_eq!(label(window, "conversation-follow", cx), "Seguir", "la lista pedida antes deshizo el cambio");
         refusal.open();
         wait_until(cx, "el servidor dice que no y vuelve", |cx| label(window, "conversation-follow", cx) == "Siguiendo");
         wait_until(cx, "y se dice", |cx| on_screen(window, "thread-notice", cx));
