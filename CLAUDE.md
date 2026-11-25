@@ -394,6 +394,15 @@ actualizar la copia global. El mismo `settings.json` está en la
 raíz, en `app/` y en `backend/` porque Claude Code sólo lee el de la carpeta
 donde se abre; los scripts buscan la raíz con git.
 
+## Trabajar con agentes
+
+`/task <ref>` (`.claude/skills/task/`) lleva una tarea con agentes: el
+orquestador reparte y no implementa, `builder` escribe en Sonnet (en Opus si
+toca auth, las máquinas de estados, migraciones o concurrencia del core) en su
+propio worktree, `reviewer` revisa en Opus sin ver el resumen del builder, y
+sólo con PASA se fusiona a `main`. Los dos dejan su informe en la tarea. Los de
+`.claude/agents/` ganan a los globales del mismo nombre (`~/.claude/agents/`).
+
 ## Soltar una release
 
 Hay skill: `/soltar`. El orden importa y no perdona: **el backend despliega antes
