@@ -154,4 +154,14 @@ describe("Por atender", () => {
       expect(screen.getByTestId("requests-elsewhere").textContent).toBe("1 more request in DWIT");
     });
   });
+
+  // Rotura que atrapa: contestar un pedido y que el número de la barra siga
+  // contándolo hasta que llegue la recarga.
+  it("contestar un pedido lo quita del número en el acto", async () => {
+    const { api } = await import("@/lib/api");
+    vi.mocked(api.post).mockResolvedValueOnce({ success: true, data: req("req-aaaaaa", "answered") });
+    useAgentRequestsStore.setState({ open: [req("req-aaaaaa", "open")], mineOpen: [req("req-aaaaaa", "open"), req("req-zzzzzz", "open")] });
+    await useAgentRequestsStore.getState().answer("req-aaaaaa", { approved: true });
+    expect(useAgentRequestsStore.getState().mineOpen.map((r) => r.code)).toEqual(["req-zzzzzz"]);
+  });
 });
