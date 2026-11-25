@@ -113,7 +113,7 @@ pub use org_github::{
 };
 pub use org_integrations::{inbox_lists, list_path, lists_by_space, ListPath, ProjectForm, ProjectPatch};
 pub use org_meetings::{
-    default_meeting_zone, dual_time, hour_in, is_zone, local_zone_name, meeting_when, next_ring, normalized_wall_time, readable_rule, readable_weekdays, reached, toggled_exclusion, wall_time_today,
+    default_meeting_zone, dual_time, hour_in, is_zone, local_zone_name, meeting_preview, meeting_when, next_ring, normalized_wall_time, readable_rule, readable_weekdays, reached, toggled_exclusion, wall_time_today,
     zone_city, zone_label, zone_offset, Freq, Meeting, MeetingDraft, MeetingForm, MeetingRoom, MeetingWhen, ALL_DAYS, WEEK_ORDER, WORKWEEK,
 };
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};

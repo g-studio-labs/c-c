@@ -124,6 +124,7 @@
   "reachesOf": "{{invited}} de {{total}}",
   "rotateNamed": "¿Rotar la llave de {{name}}?",
   "nowhereLost": "en ningún sitio: lo que mande se está perdiendo",
+  "timeDoesNotExist": "Esa hora no existe ese día por el cambio de horario",
   "membership": {
     "added": "Te han añadido a {{org}}",
     "removed": "Ya no perteneces a {{org}}",

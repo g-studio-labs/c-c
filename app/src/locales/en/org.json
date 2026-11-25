@@ -124,6 +124,7 @@
   "reachesOf": "{{invited}} of {{total}}",
   "rotateNamed": "Rotate the key for {{name}}?",
   "nowhereLost": "nowhere — anything it sends is being lost",
+  "timeDoesNotExist": "That time doesn't exist that day because of the clock change",
   "membership": {
     "added": "You were added to {{org}}",
     "removed": "You no longer belong to {{org}}",

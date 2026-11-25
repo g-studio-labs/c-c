@@ -273,18 +273,23 @@ pub fn zone_label(zone: &str, at: DateTime<Utc>) -> String {
     }
 }
 
-/// La zona de la máquina, con el nombre que le da el sistema (`TZ`, o a dónde
-/// apunta `/etc/localtime`). Sin saberla, UTC: quien muestre dos horas no
-/// enseñará una segunda, que es peor que no enseñarla.
+/// La zona de la máquina con su nombre IANA: `TZ` manda si es una zona que
+/// existe, y si no, lo que dice el sistema (`iana-time-zone` lo sabe en cada
+/// uno: `/etc/localtime` en Linux, el registro en Windows). Sin saberla, UTC:
+/// quien muestre dos horas no enseñará una segunda, que es peor que no
+/// enseñarla.
 pub fn local_zone_name() -> String {
-    let named = |name: &str| name.trim().trim_start_matches(':').parse::<Tz>().is_ok().then(|| name.trim().trim_start_matches(':').to_string());
-    if let Some(zone) = std::env::var("TZ").ok().and_then(|tz| named(&tz)) {
-        return zone;
-    }
-    std::fs::read_link("/etc/localtime")
-        .ok()
-        .and_then(|target| target.to_string_lossy().split_once("zoneinfo/").map(|(_, name)| name.to_string()))
-        .and_then(|name| named(&name))
+    zone_from(std::env::var("TZ").ok(), iana_time_zone::get_timezone().ok())
+}
+
+/// La elección de `local_zone_name`, con sus fuentes a la vista para poder
+/// probarla.
+fn zone_from(tz_variable: Option<String>, system: Option<String>) -> String {
+    [tz_variable, system]
+        .into_iter()
+        .flatten()
+        .map(|name| name.trim().trim_start_matches(':').to_string())
+        .find(|name| is_zone(name))
         .unwrap_or_else(|| "UTC".into())
 }
 
@@ -316,6 +321,27 @@ pub fn wall_time_today(time: &str, zone: &str, now: DateTime<Utc>) -> Option<Dat
     let naive = now.with_timezone(&tz).date_naive().and_time(time);
     let local = tz.from_local_datetime(&naive);
     Some(local.earliest().or_else(|| local.latest())?.with_timezone(&Utc))
+}
+
+/// Lo que dice el formulario de a qué hora sonaría hoy: allí y para quien
+/// mira, o por qué no hay hora que decir. `None` si lo escrito aún no es una
+/// hora o una zona.
+///
+/// Una hora que el cambio de horario se come (las 2:30 del día en que se
+/// adelanta el reloj) no se esconde: la reunión no sonaría ese día, y quien la
+/// escribe tiene que saber por qué.
+pub fn meeting_preview(time: &str, zone: &str, viewer_zone: &str, now: DateTime<Utc>, locale: Locale) -> Option<String> {
+    let tz = zone.trim().parse::<Tz>().ok()?;
+    let wall = NaiveTime::parse_from_str(time.trim(), "%H:%M").ok()?;
+    let naive = now.with_timezone(&tz).date_naive().and_time(wall);
+    if matches!(tz.from_local_datetime(&naive), chrono::LocalResult::None) {
+        return Some(text(locale, "org:timeDoesNotExist"));
+    }
+    let (there, here) = dual_time(wall_time_today(time, zone, now)?, zone, viewer_zone, locale);
+    Some(match here {
+        Some(here) => format!("{there} · {here}"),
+        None => there,
+    })
 }
 
 /// La misma hora dicha dos veces: allí, y para quien mira si no coincide.
@@ -389,11 +415,14 @@ pub fn readable_rule(meeting: &Meeting, locale: Locale) -> String {
     parts.join(" · ")
 }
 
-/// «lun, 1 sept»: el día de la próxima vez, en la zona de quien mira.
-pub fn next_ring(meeting: &Meeting, viewer: &impl TimeZone, locale: Locale) -> String {
-    let Ok(at) = DateTime::parse_from_rfc3339(&meeting.next_fire_at) else { return String::new() };
-    let day = at.with_timezone(viewer).date_naive();
+/// «lun, 1 sept»: el día de la próxima vez, en la zona de quien mira: la
+/// misma con la que se dice su hora, para que el día y la hora no se
+/// contradigan.
+pub fn next_ring(meeting: &Meeting, viewer_zone: &str, locale: Locale) -> String {
     use chrono::Datelike;
+    let Ok(at) = DateTime::parse_from_rfc3339(&meeting.next_fire_at) else { return String::new() };
+    let viewer = viewer_zone.trim().parse::<Tz>().unwrap_or(Tz::UTC);
+    let day = at.with_timezone(&viewer).date_naive();
     format!("{}, {}", weekday_name(locale, day.weekday().num_days_from_monday(), true), day_and_month(locale, day))
 }
 
@@ -628,7 +657,37 @@ mod tests {
     #[test]
     fn the_next_ring_is_dated_where_the_viewer_is() {
         let m = meeting("daily", 1);
-        assert_eq!(next_ring(&m, &chrono::FixedOffset::east_opt(13 * 3600).unwrap(), Locale::En), "Tue, Oct 6");
-        assert_eq!(next_ring(&m, &chrono::FixedOffset::west_opt(6 * 3600).unwrap(), Locale::En), "Mon, Oct 5");
+        assert_eq!(next_ring(&m, "Pacific/Auckland", Locale::En), "Tue, Oct 6");
+        assert_eq!(next_ring(&m, "America/Mexico_City", Locale::En), "Mon, Oct 5");
+        assert_eq!(next_ring(&m, "no existe", Locale::En), "Mon, Oct 5", "una zona que no existe cuenta como UTC");
+    }
+
+    /// Roturas que atrapa: que `TZ` no mande sobre el sistema; que una `TZ`
+    /// inventada (o con los dos puntos de POSIX mal quitados) tape la del
+    /// sistema; no caer a UTC cuando ninguna sirve.
+    #[test]
+    fn the_machine_zone_comes_from_tz_then_the_system_then_utc() {
+        let some = |zone: &str| Some(zone.to_string());
+        assert_eq!(zone_from(some("America/Cancun"), some("Europe/Madrid")), "America/Cancun");
+        assert_eq!(zone_from(some(":America/Cancun"), None), "America/Cancun");
+        assert_eq!(zone_from(some("Mars/Olympus"), some("Europe/Madrid")), "Europe/Madrid");
+        assert_eq!(zone_from(None, some(" Europe/Madrid ")), "Europe/Madrid");
+        assert_eq!(zone_from(some("Mars/Olympus"), some("also/not")), "UTC");
+        assert_eq!(zone_from(None, None), "UTC");
+    }
+
+    /// Roturas que atrapa: esconder la vista previa de una hora que el cambio
+    /// de horario se come (en vez de decir por qué); decir que no existe una
+    /// hora que sí existe, o la del día en que se atrasa el reloj.
+    #[test]
+    fn a_time_the_clock_change_eats_says_so_instead_of_vanishing() {
+        let spring = utc("2026-03-08T12:00:00Z");
+        let said = meeting_preview("02:30", "America/New_York", "UTC", spring, Locale::Es).unwrap();
+        assert_eq!(said, "Esa hora no existe ese día por el cambio de horario");
+        assert!(meeting_preview("03:30", "America/New_York", "UTC", spring, Locale::En).unwrap().starts_with("03:30 AM in New York"));
+        let fall = utc("2026-11-01T12:00:00Z");
+        assert!(meeting_preview("01:30", "America/New_York", "UTC", fall, Locale::En).unwrap().starts_with("01:30 AM in New York"), "la repetida sí existe");
+        assert_eq!(meeting_preview("nope", "America/New_York", "UTC", spring, Locale::En), None);
+        assert_eq!(meeting_preview("09:00", "Mars/Olympus", "UTC", spring, Locale::En), None);
     }
 }

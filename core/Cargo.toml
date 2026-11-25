@@ -22,6 +22,9 @@ tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 # organización no puede depender de qué zonas conozca cada teléfono.
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 chrono-tz = "0.10"
+# El nombre IANA de la zona de la máquina, en cada sistema (en Windows no hay
+# `/etc/localtime`).
+iana-time-zone = "0.1"
 # Para buscar sin acentos: «revision» encuentra «Revisión».
 unicode-normalization = "0.1"
 # Los bindings de Kotlin y Swift. Opcional: el escritorio no lo necesita, y

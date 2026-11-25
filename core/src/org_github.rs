@@ -98,6 +98,16 @@ pub struct RepoChange {
 }
 
 impl RepoChange {
+    /// Lo que ya estaba por mandarse, con esto encima: dos clics seguidos en
+    /// casillas distintas del mismo repo son un solo cambio, no uno que pisa
+    /// al otro.
+    pub fn merged_with(mut self, later: RepoChange) -> RepoChange {
+        self.space_id = later.space_id.or(self.space_id);
+        self.bare_refs = later.bare_refs.or(self.bare_refs);
+        self.show_docs = later.show_docs.or(self.show_docs);
+        self
+    }
+
     /// El cuerpo del PATCH: el servidor reemplaza, así que va el repo entero
     /// con lo cambiado encima.
     fn body(&self, repo: &GitHubRepo) -> serde_json::Value {
@@ -235,5 +245,14 @@ mod tests {
         assert_eq!(docs_line(&GitHubRepo { docs_state: "truncated".into(), ..synced.clone() }, &now, Locale::En), "Too many files: only the first 1000 are shown");
         assert_eq!(docs_line(&GitHubRepo { docs_state: "error".into(), ..synced }, &now, Locale::En), "The last sync failed");
         assert_eq!(docs_line(&repo("r", "sp"), &now, Locale::En), "Not synced yet");
+    }
+
+    /// Rotura que atrapa: que el segundo clic borre al primero (o que el
+    /// primero gane sobre el que vino después).
+    #[test]
+    fn two_quick_changes_become_one_with_the_later_winning() {
+        let first = RepoChange { bare_refs: Some(true), show_docs: Some(false), ..Default::default() };
+        let later = RepoChange { show_docs: Some(true), ..Default::default() };
+        assert_eq!(first.merged_with(later), RepoChange { space_id: None, bare_refs: Some(true), show_docs: Some(true) });
     }
 }
