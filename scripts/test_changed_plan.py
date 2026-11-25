@@ -113,7 +113,7 @@ def local_plan(changed):
     if touched("app/src-tauri/", "core/", "mcp/", "ops/"):
         steps.append("cd app/src-tauri && cargo check --locked")
     if touched("backend/"):
-        steps.append("cd backend && go build ./... && go vet ./... && go test ./...")
+        steps.append("cd backend && go build ./... && go vet ./... && go test -timeout 30m ./...")
     if touched(".claude/hooks/"):
         steps.append("python3 .claude/hooks/hooks_test.py")
     if touched("scripts/test-changed.sh", "scripts/test_changed_plan"):
@@ -217,7 +217,7 @@ def main():
             f"{{ {step} 2>&1 | cac_guard{' --expect-tests' if step in guarded else ''}; s=(\"${{PIPESTATUS[@]}}\"); test ${{s[0]}} -eq 0 -a ${{s[1]}} -eq 0; }}"
             for step in steps
         )
-        lines.append(f'echo "== {name}"; (cd {name} && {joined}) || fail=1')
+        lines.append(f'echo "== {name}"; (cd {name} && {joined}) || {{ echo "test-changed.sh: FALLÓ {name}" >&2; fail=1; }}')
     if lines:
         lines.insert(0, f"cac_guard() {{ python3 -I -c {shlex.quote(guard_source())} \"$@\"; }}")
         lines.insert(1, "fail=0")

@@ -97,7 +97,7 @@ class Planner(unittest.TestCase):
 
     def test_a_failure_makes_the_whole_run_fail(self):
         plan = self.plan("desktop/src/chat.rs")
-        self.assertIn("|| fail=1", plan)
+        self.assertIn("fail=1", plan)
         self.assertIn("PIPESTATUS", plan)
         self.assertTrue(plan.rstrip().endswith('exit "$fail"'))
 
@@ -107,7 +107,7 @@ class Planner(unittest.TestCase):
     def test_the_rest_runs_here_by_suite(self):
         self.assertEqual(self.plan("app/src/App.tsx", local=True).splitlines(), ["cd app && npx tsc --noEmit && bun run test"])
         self.assertEqual(self.plan("app/src-tauri/src/lib.rs", local=True).splitlines(), ["cd app/src-tauri && cargo check --locked"])
-        self.assertIn("go test ./...", self.plan("backend/internal/x.go", local=True))
+        self.assertIn("go test -timeout 30m ./...", self.plan("backend/internal/x.go", local=True))
         self.assertIn("hooks_test.py", self.plan(".claude/hooks/cac_hooks.py", local=True))
         self.assertEqual(self.plan("docs/x.md", local=True).strip(), "")
 
@@ -192,6 +192,96 @@ class Guard(unittest.TestCase):
 
     def test_no_result_lines_at_all_is_left_to_cargo(self):
         self.assertIsNone(self.verdict(["error: could not compile"], True))
+
+
+class Script(unittest.TestCase):
+    """`test-changed.sh` corrido de verdad contra suites falsas: un rojo de
+    dentro tiene que salir como código distinto de 0 y con su nombre
+    (command-and-control-529)."""
+
+    SCRIPT = os.path.join(HERE, "test-changed.sh")
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.root = self.dir.name
+        scripts = os.path.join(self.root, "scripts")
+        os.makedirs(scripts)
+        for name in ("test-changed.sh", "test_changed_plan.py", "cargo_guard.py"):
+            with open(os.path.join(HERE, name), encoding="utf-8") as src, open(os.path.join(scripts, name), "w", encoding="utf-8") as dst:
+                dst.write(src.read())
+        # La caja, aquí, es esta misma máquina.
+        remote = os.path.join(scripts, "remote.sh")
+        with open(remote, "w", encoding="utf-8") as handle:
+            handle.write('#!/usr/bin/env bash\nshift\nexec "$@"\n')
+        os.chmod(remote, 0o755)
+        self.bin = os.path.join(self.root, "bin")
+        os.makedirs(self.bin)
+        self.git("init", "-q")
+        self.write(".claude/hooks/hooks_test.py", "import sys\nsys.exit(0)\n")
+        self.write("core/Cargo.toml", "")
+        self.write("core/src/lib.rs", "")
+        self.git("-c", "user.email=t@t", "-c", "user.name=t", "add", ".")
+        self.git("-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", "commit", "-qm", "base")
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def git(self, *args):
+        subprocess.run(["git", "-C", self.root, *args], check=True, capture_output=True)
+
+    def write(self, path, text):
+        full = os.path.join(self.root, path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def fake_cargo(self, code, line):
+        self.write("bin/cargo", f'#!/usr/bin/env bash\necho "{line}"\nexit {code}\n')
+        os.chmod(os.path.join(self.bin, "cargo"), 0o755)
+
+    def run_script(self, *args):
+        env = {**os.environ, "PATH": self.bin + os.pathsep + os.environ["PATH"]}
+        return subprocess.run(["bash", os.path.join(self.root, "scripts", "test-changed.sh"), *args], cwd=self.root, env=env, capture_output=True, text=True)
+
+    def test_a_failing_local_suite_fails_the_script_and_names_it(self):
+        self.write(".claude/hooks/hooks_test.py", "import sys\nsys.exit(1)\n")
+        done = self.run_script()
+        self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("FALLÓ", done.stderr)
+        self.assertIn("hooks_test.py", done.stderr)
+
+    def test_a_green_local_suite_exits_zero(self):
+        self.write(".claude/hooks/hooks_test.py", "import sys\nsys.exit(0)\n")
+        done = self.run_script()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_one_red_suite_among_green_ones_is_not_hidden(self):
+        self.write(".claude/hooks/hooks_test.py", "import sys\nsys.exit(0)\n")
+        self.write("scripts/test_changed_plan_test.py", "import sys\nsys.exit(1)\n")
+        done = self.run_script()
+        self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_failing_crate_in_the_box_fails_the_script(self):
+        self.write("core/src/lib.rs", "pub fn x() {}\n")
+        self.fake_cargo(101, "error: nope")
+        done = self.run_script()
+        self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("FALLÓ", done.stderr)
+
+    def test_a_failing_crate_with_quiet_output_still_fails_under_all(self):
+        self.fake_cargo(101, "nothing the filter keeps")
+        done = self.run_script("--all")
+        self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_all_passes_when_cargo_does(self):
+        self.fake_cargo(0, "test result: ok. 1 passed")
+        done = self.run_script("--all")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_an_unknown_since_reference_is_an_error_not_nothing_to_test(self):
+        done = self.run_script("--since", "no-such-ref")
+        self.assertNotEqual(done.returncode, 0)
+        self.assertNotIn("nada que probar", done.stdout)
 
 
 if __name__ == "__main__":

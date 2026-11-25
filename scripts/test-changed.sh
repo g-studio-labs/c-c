@@ -46,8 +46,18 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Una referencia que no existe no puede dar «nada que probar» con código 0:
+# los `git diff` de abajo callan su error.
+if [ -n "$since" ] && ! git -C "$root" rev-parse --verify --quiet "$since^{commit}" >/dev/null; then
+  echo "test-changed.sh: no existe la referencia «$since»" >&2
+  exit 2
+fi
+
 if [ "$mode" = all ]; then
-  plan='for c in voice core mcp ops desktop; do [ -d "$c" ] && (echo "== $c" && cd "$c" && cargo test --quiet 2>&1 | grep -E "^test .* FAILED|panicked|test result|^error") || true; done'
+  # El código de salida de cargo manda (PIPESTATUS): el `grep` que recorta la
+  # salida sale 1 cuando no hay nada que enseñar, y antes un `|| true` se
+  # tragaba también el rojo de la suite (command-and-control-529).
+  plan='fail=0; for c in voice core mcp ops desktop; do [ -d "$c" ] || continue; echo "== $c"; (cd "$c" && cargo test --quiet 2>&1 | grep -E "^test .* FAILED|panicked|test result|^error"; s=("${PIPESTATUS[@]}"); test ${s[0]} -eq 0) || { echo "test-changed.sh: FALLÓ $c" >&2; fail=1; }; done; exit "$fail"'
 else
   changed="$(
     cd "$root"
@@ -66,13 +76,18 @@ fi
 [ "$mode" = plan ] && exit 0
 
 cd "$root"
-fail=0
+# Cualquier suite que falle da código distinto de 0 y se nombra al final.
+failed=()
 while IFS= read -r step; do
   [ -z "$step" ] && continue
   echo "== $step"
-  (cd "$root" && bash -c "$step") || fail=1
+  (cd "$root" && bash -c "$step") || failed+=("$step")
 done <<<"${local_steps:-}"
 if [ -n "$plan" ]; then
-  "$here/remote.sh" -- bash -c "$plan" || fail=1
+  "$here/remote.sh" -- bash -c "$plan" || failed+=("caja (remote.sh)")
 fi
-exit "$fail"
+if [ "${#failed[@]}" -gt 0 ]; then
+  echo "test-changed.sh: FALLÓ:" >&2
+  printf '  - %s\n' "${failed[@]}" >&2
+  exit 1
+fi
