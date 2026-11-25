@@ -279,6 +279,8 @@
     "exportNeedsDesktopBody": "Una pestaña del navegador no puede escribir una carpeta en el disco.",
     "exportFailed": "Falló la exportación",
     "errSaveNote": "No se pudo guardar",
+    "errLoadTrash": "No se pudo cargar la papelera",
+    "errSearch": "Falló la búsqueda",
     "couldNotLoadPage": "No se pudo cargar esta página.",
     "linkToPage": "Enlazar a una página (⌘K)",
     "close": "Cerrar",

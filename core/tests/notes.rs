@@ -64,6 +64,12 @@ struct World {
     gate_write: Option<Gate>,
     /// Con esto, la búsqueda de ese texto no contesta hasta que se abre.
     gate_search: Option<(String, Gate)>,
+    /// Con esto, la lectura del árbol no contesta hasta que se abre.
+    gate_tree: Option<Gate>,
+    /// Con esto, buscar y leer la papelera fallan con ese estado.
+    failing_get: Option<(u16, &'static str)>,
+    /// Con esto, un guardado que sólo lleva el título falla.
+    fail_title_only: bool,
     next: u32,
 }
 
@@ -98,6 +104,11 @@ fn answer(world: &Mutex<World>, request: &Request) -> ResponseTemplate {
             return refused(status, code);
         }
     }
+    if verb == "GET" && matches!(parts.as_slice(), ["search"] | ["trash"]) {
+        if let Some((status, code)) = world.failing_get {
+            return refused(status, code);
+        }
+    }
     match (verb, parts.as_slice()) {
         ("GET", []) => {
             let live: Vec<Value> = world
@@ -106,7 +117,11 @@ fn answer(world: &Mutex<World>, request: &Request) -> ResponseTemplate {
                 .filter(|stored| !world.trashed.contains(&stored.id))
                 .map(|stored| json!({ "id": stored.id, "parentId": stored.parent, "position": stored.position, "title": stored.title, "hasBody": !stored.body.is_empty(), "favorite": stored.favorite }))
                 .collect();
-            ok(Value::Array(live))
+            let reply = ok(Value::Array(live));
+            match &world.gate_tree {
+                Some(gate) => gate.hold(reply),
+                None => reply,
+            }
         }
         ("GET", ["search"]) => {
             let wanted = request.url.query_pairs().find(|(key, _)| key == "q").map(|(_, value)| value.to_lowercase()).unwrap_or_default();
@@ -152,6 +167,9 @@ fn answer(world: &Mutex<World>, request: &Request) -> ResponseTemplate {
         }
         ("PATCH", [id]) => {
             let Some(at) = world.notes.iter().position(|stored| &stored.id == id) else { return refused(404, "not-found") };
+            if world.fail_title_only && sent.get("body").is_none() && sent.get("title").is_some() {
+                return refused(500, "internal");
+            }
             let late = sent.get("body").is_some() && sent.get("baseHash").and_then(Value::as_str) != Some(world.notes[at].hash().as_str());
             if late {
                 // Como el servidor de verdad: la nota se queda, lo escrito cuelga como hija.
@@ -159,7 +177,11 @@ fn answer(world: &Mutex<World>, request: &Request) -> ResponseTemplate {
                 let child = format!("n{}", world.next);
                 let body = sent["body"].as_str().unwrap_or_default().to_string();
                 world.add(&child, Some(id), 99, "(conflicting edit)", &body);
-                return ok(json!({ "note": world.notes[at].note(), "conflict": { "id": child, "title": "(conflicting edit)" } }));
+                let reply = ok(json!({ "note": world.notes[at].note(), "conflict": { "id": child, "title": "(conflicting edit)" } }));
+                return match &world.gate_write {
+                    Some(gate) => gate.hold(reply),
+                    None => reply,
+                };
             }
             let stored = &mut world.notes[at];
             if let Some(title) = sent.get("title").and_then(Value::as_str) {
@@ -177,6 +199,11 @@ fn answer(world: &Mutex<World>, request: &Request) -> ResponseTemplate {
                 Some(gate) => gate.hold(reply),
                 None => reply,
             }
+        }
+        ("DELETE", ["trash"]) => {
+            let gone = std::mem::take(&mut world.trashed);
+            world.notes.retain(|stored| !gone.contains(&stored.id));
+            ok(json!({ "deleted": gone.len() }))
         }
         ("DELETE", [id]) => {
             let mut doomed = vec![id.to_string()];
@@ -318,19 +345,19 @@ async fn saving_sends_only_what_changed_and_the_version_it_came_from() {
     let rig = rig().await;
     rig.write("d", "Cuarta, corregida.").await;
     assert!(rig.writes().await.is_empty(), "escribir no guarda: se guarda con su botón");
-    rig.core.notes().save().await;
+    rig.core.notes().save("Sin título").await;
     assert_eq!(rig.writes().await, [("PATCH".to_string(), "/api/v1/notes/d".to_string(), json!({ "body": "Cuarta, corregida.", "baseHash": "h1" }))]);
     let state = rig.core.notes().state();
     assert!(state.edit.is_none());
     assert_eq!(state.detail.unwrap().note.body, "Cuarta, corregida.");
 
     rig.write("d", "Otra vez.").await;
-    rig.core.notes().save().await;
+    rig.core.notes().save("Sin título").await;
     assert_eq!(rig.writes().await[1].2["baseHash"], "h2");
 
     assert!(rig.core.notes().start_edit());
     rig.core.notes().draft_title("  Delta nueva ");
-    rig.core.notes().save().await;
+    rig.core.notes().save("Sin título").await;
     assert_eq!(rig.writes().await[2].2, json!({ "title": "Delta nueva" }));
     assert_eq!(rig.core.notes().state().tree.iter().find(|item| item.id == "d").unwrap().title, "Delta nueva", "el árbol se pone al día");
 }
@@ -350,7 +377,7 @@ async fn what_is_typed_while_saving_stays_and_saves_from_the_new_version() {
     rig.write("d", "Uno.").await;
     let saving = tokio::spawn({
         let core = rig.core.clone();
-        async move { core.notes().save().await }
+        async move { core.notes().save("Sin título").await }
     });
     until("el guardado salió", || gate.held() == 1).await;
     rig.core.notes().draft_body("Uno. Y dos.");
@@ -359,7 +386,7 @@ async fn what_is_typed_while_saving_stays_and_saves_from_the_new_version() {
     let edit = rig.edit();
     assert_eq!((edit.body.as_str(), edit.base_body.as_str(), edit.base_hash.as_deref()), ("Uno. Y dos.", "Uno.", Some("h2")));
 
-    rig.core.notes().save().await;
+    rig.core.notes().save("Sin título").await;
     assert!(rig.core.notes().state().conflict.is_none(), "el segundo guardado chocó con el primero");
     assert_eq!(rig.writes().await[1].2, json!({ "body": "Uno. Y dos.", "baseHash": "h2" }));
     assert!(rig.core.notes().state().edit.is_none());
@@ -376,7 +403,7 @@ async fn a_save_that_lost_the_race_says_where_the_text_went() {
     let rig = rig().await;
     rig.write("d", "Lo mío.").await;
     rig.world.lock().unwrap().someone_saves("d", "Lo suyo.");
-    rig.core.notes().save().await;
+    rig.core.notes().save("Sin título").await;
     let state = rig.core.notes().state();
     assert_eq!(state.conflict.as_ref().map(|conflict| conflict.title.as_str()), Some("(conflicting edit)"));
     assert!(state.edit.is_none());
@@ -395,7 +422,7 @@ async fn a_failed_save_keeps_the_text_and_says_why() {
     let rig = rig().await;
     rig.write("d", "Algo nuevo.").await;
     rig.world.lock().unwrap().failing = Some((500, "internal"));
-    rig.core.notes().save().await;
+    rig.core.notes().save("Sin título").await;
     let edit = rig.edit();
     assert_eq!(edit.body, "Algo nuevo.");
     assert!(!edit.saving && edit.is_dirty());
@@ -468,6 +495,7 @@ async fn leaving_the_screen_keeps_the_draft_and_logging_out_asks() {
     rig.core.logout().await;
     assert!(rig.core.session().is_some(), "no salió");
     assert_eq!(rig.core.notes().state().asking, Some(NoteAsk::Leave { to: NoteLeave::LogOut }));
+    assert!(rig.core.notes().state().on_screen, "la pregunta se pinta en Notas: hay que llevar a ella");
     rig.core.notes().answer(true).await;
     assert!(rig.core.session().is_none());
     assert_eq!(rig.core.notes().state(), Default::default(), "las notas de una persona no son de la siguiente");
@@ -525,14 +553,25 @@ async fn deleting_asks_first_and_closes_what_went_with_it() {
 #[tokio::test]
 async fn favorites_and_order_change_at_once_and_revert_on_failure() {
     let rig = rig().await;
-    rig.core.notes().toggle_favorite("d").await;
+    // Con el guardado retenido, ya se ve.
+    let gate = Gate::default();
+    rig.world.lock().unwrap().gate_write = Some(gate.clone());
+    let starring = tokio::spawn({
+        let core = rig.core.clone();
+        async move { core.notes().toggle_favorite("d").await }
+    });
+    until("la estrella salió", || gate.held() == 1).await;
+    assert!(rig.core.notes().state().tree.iter().find(|item| item.id == "d").unwrap().favorite, "esperó al servidor para pintarla");
+    gate.open();
+    starring.await.unwrap();
+    rig.world.lock().unwrap().gate_write = None;
     assert!(rig.core.notes().state().tree.iter().find(|item| item.id == "d").unwrap().favorite);
     assert_eq!(rig.writes().await[0], ("PATCH".to_string(), "/api/v1/notes/d".to_string(), json!({ "favorite": true })));
 
     rig.world.lock().unwrap().failing = Some((500, "internal"));
     rig.core.notes().toggle_favorite("d").await;
     assert!(rig.core.notes().state().tree.iter().find(|item| item.id == "d").unwrap().favorite, "el no del servidor la deja como estaba");
-    assert!(rig.core.notes().state().problem.is_some());
+    assert_eq!(rig.core.notes().state().problem.map(|problem| problem.fallback_key), Some("work:notes.errSaveNote".to_string()));
     rig.core.notes().dismiss_problem();
     rig.world.lock().unwrap().failing = None;
 
@@ -600,11 +639,234 @@ async fn the_trash_lists_restores_and_asks_before_purging() {
     assert!(state.trash.items.is_empty());
     assert!(state.tree.iter().any(|item| item.id == "d"));
 
-    rig.core.notes().ask_delete("e");
+    // Borrar para siempre y vaciar salen al servidor, y lo que se vacía tenía algo.
+    for id in ["d", "e"] {
+        rig.core.notes().ask_delete(id);
+        rig.core.notes().answer(true).await;
+    }
+    rig.core.notes().open_trash().await;
+    assert_eq!(rig.core.notes().state().trash.items.len(), 2);
+    rig.core.notes().ask_purge("d");
     rig.core.notes().answer(true).await;
-    rig.core.notes().load_tree().await;
+    assert_eq!(rig.writes().await.pop().unwrap(), ("DELETE".to_string(), "/api/v1/notes/trash/d".to_string(), Value::Null));
+    assert_eq!(rig.core.notes().state().trash.items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), ["e"]);
+
     rig.core.notes().ask_empty_trash();
     assert_eq!(rig.core.notes().state().asking, Some(NoteAsk::EmptyTrash));
+    rig.core.notes().answer(false).await;
+    assert_eq!(rig.core.notes().state().trash.items.len(), 1, "un no no vacía");
+    rig.core.notes().ask_empty_trash();
     rig.core.notes().answer(true).await;
+    assert_eq!(rig.writes().await.pop().unwrap(), ("DELETE".to_string(), "/api/v1/notes/trash".to_string(), Value::Null));
     assert!(rig.core.notes().state().trash.items.is_empty());
+    assert!(rig.world.lock().unwrap().notes.iter().all(|stored| stored.id != "e"), "el servidor no la borró");
+}
+
+/// Un título en blanco se guarda como «Sin título», sin mandar el texto.
+///
+/// Rotura que atrapa: guardar la nota con el título vacío (el navegador
+/// pintaría una fila sin nada que pulsar).
+#[tokio::test]
+async fn an_empty_title_is_saved_as_untitled() {
+    let rig = rig().await;
+    rig.core.notes().open("d").await;
+    assert!(rig.core.notes().start_edit());
+    rig.core.notes().draft_title("   ");
+    rig.core.notes().save("Sin título").await;
+    assert_eq!(rig.writes().await, [("PATCH".to_string(), "/api/v1/notes/d".to_string(), json!({ "title": "Sin título" }))]);
+    assert_eq!(rig.core.notes().state().detail.unwrap().note.title, "Sin título");
+}
+
+/// Renombrar y chocar en el mismo guardado no pierde el título: va en otra
+/// petición, porque el servidor vuelve antes de aplicar nada.
+///
+/// Roturas que atrapa: cerrar el editor con el título tecleado sin guardar
+/// (se perdería); mandar el título otra vez con el texto (volvería a chocar);
+/// dejar la nota o el árbol con el título de antes.
+#[tokio::test]
+async fn a_rename_that_travels_with_a_conflicting_text_is_sent_apart() {
+    let rig = rig().await;
+    rig.write("d", "Lo mío.").await;
+    rig.core.notes().draft_title("Delta nueva");
+    rig.world.lock().unwrap().someone_saves("d", "Lo suyo.");
+    rig.core.notes().save("Sin título").await;
+    let writes = rig.writes().await;
+    assert_eq!(writes[0].2, json!({ "title": "Delta nueva", "body": "Lo mío.", "baseHash": "h1" }));
+    assert_eq!(writes[1].2, json!({ "title": "Delta nueva" }));
+    let state = rig.core.notes().state();
+    assert!(state.conflict.is_some() && state.edit.is_none());
+    let note = state.detail.unwrap().note;
+    assert_eq!((note.title.as_str(), note.body.as_str()), ("Delta nueva", "Lo suyo."));
+    assert_eq!(state.tree.iter().find(|item| item.id == "d").unwrap().title, "Delta nueva");
+}
+
+/// Si el título no llega tras el choque, el editor se queda con él y con el
+/// motivo.
+///
+/// Rotura que atrapa: dar por guardado un título que el servidor no tiene.
+#[tokio::test]
+async fn a_rename_that_fails_after_a_conflict_stays_in_the_editor() {
+    let rig = rig().await;
+    rig.write("d", "Lo mío.").await;
+    rig.core.notes().draft_title("Delta nueva");
+    rig.world.lock().unwrap().someone_saves("d", "Lo suyo.");
+    rig.world.lock().unwrap().fail_title_only = true;
+    rig.core.notes().save("Sin título").await;
+    let edit = rig.edit();
+    assert_eq!(edit.title, "Delta nueva");
+    assert!(edit.error.is_some() && edit.is_dirty() && !edit.saving);
+    assert_eq!(edit.base_title, "Delta", "el título no se aplicó: la base sigue siendo la de antes");
+    assert!(rig.core.notes().state().conflict.is_some(), "el texto sí quedó a salvo");
+}
+
+/// Seguir escribiendo tras un choque no deja pisar al otro dispositivo: el
+/// siguiente guardado sale de la versión vieja y vuelve a chocar.
+///
+/// Rotura que atrapa: tomar la versión del servidor como base (el segundo
+/// guardado sobrescribiría lo que escribió el otro dispositivo, sin choque).
+#[tokio::test]
+async fn writing_on_after_a_conflict_cannot_overwrite_the_other_device() {
+    let rig = rig().await;
+    let gate = Gate::default();
+    rig.write("d", "Lo mío.").await;
+    rig.world.lock().unwrap().someone_saves("d", "Lo suyo.");
+    rig.world.lock().unwrap().gate_write = Some(gate.clone());
+    let saving = tokio::spawn({
+        let core = rig.core.clone();
+        async move { core.notes().save("Sin título").await }
+    });
+    until("el guardado salió", || gate.held() == 1).await;
+    rig.core.notes().draft_body("Lo mío. Y más.");
+    gate.open();
+    saving.await.unwrap();
+    assert_eq!(rig.edit().base_hash.as_deref(), Some("h1"), "la base sigue siendo la que se leyó");
+    rig.core.notes().save("Sin título").await;
+    assert_eq!(rig.world.lock().unwrap().notes.iter().find(|stored| stored.id == "d").unwrap().body, "Lo suyo.", "pisó al otro dispositivo");
+    assert_eq!(rig.world.lock().unwrap().notes.iter().filter(|stored| stored.title == "(conflicting edit)").count(), 2);
+}
+
+/// Cancelar con un guardado viajando no hace nada, y cuando vuelve la nota
+/// y su versión son las guardadas: el siguiente guardado no choca consigo
+/// mismo.
+///
+/// Roturas que atrapa: dejar cancelar y descartar algo que ya salió; quedarse
+/// con el texto y el hash de antes de guardar.
+#[tokio::test]
+async fn cancelling_while_a_save_travels_changes_nothing_and_the_answer_lands() {
+    let rig = rig().await;
+    let gate = Gate::default();
+    rig.write("d", "Guardado.").await;
+    rig.world.lock().unwrap().gate_write = Some(gate.clone());
+    let saving = tokio::spawn({
+        let core = rig.core.clone();
+        async move { core.notes().save("Sin título").await }
+    });
+    until("el guardado salió", || gate.held() == 1).await;
+    rig.core.notes().cancel_edit();
+    assert!(rig.core.notes().state().asking.is_none());
+    gate.open();
+    saving.await.unwrap();
+    let detail = rig.core.notes().state().detail.unwrap();
+    assert_eq!((detail.note.body.as_str(), detail.note.body_hash.as_deref()), ("Guardado.", Some("h2")));
+    rig.world.lock().unwrap().gate_write = None;
+    rig.write("d", "Otra.").await;
+    rig.core.notes().save("Sin título").await;
+    assert!(rig.core.notes().state().conflict.is_none());
+}
+
+/// Una lectura del árbol que llega tarde no resucita el árbol de quien salió
+/// ni apaga la estrella que se acaba de marcar.
+///
+/// Roturas que atrapa: dejar el árbol de la persona anterior a la vista de la
+/// siguiente (privacidad); una lectura vieja que desmarca la estrella.
+#[tokio::test]
+async fn a_late_tree_read_does_not_bring_back_what_changed_since() {
+    let rig = rig().await;
+    let gate = Gate::default();
+    rig.world.lock().unwrap().gate_tree = Some(gate.clone());
+    let slow = tokio::spawn({
+        let core = rig.core.clone();
+        async move { core.notes().load_tree().await }
+    });
+    until("la lectura salió", || gate.held() == 1).await;
+    rig.core.notes().toggle_favorite("d").await;
+    gate.open();
+    slow.await.unwrap();
+    assert!(rig.core.notes().state().tree.iter().find(|item| item.id == "d").unwrap().favorite, "la lectura vieja apagó la estrella");
+
+    let gate = Gate::default();
+    rig.world.lock().unwrap().gate_tree = Some(gate.clone());
+    let slow = tokio::spawn({
+        let core = rig.core.clone();
+        async move { core.notes().load_tree().await }
+    });
+    until("la lectura salió", || gate.held() == 1).await;
+    rig.core.logout().await;
+    gate.open();
+    slow.await.unwrap();
+    assert!(rig.core.notes().state().tree.is_empty(), "el árbol de quien salió");
+}
+
+/// Borrar la nota que se está escribiendo avisa de que se va lo no guardado;
+/// borrar otra no.
+///
+/// Rotura que atrapa: tirar el borrador sin decirlo.
+#[tokio::test]
+async fn deleting_the_note_being_written_warns_about_the_draft() {
+    let rig = rig().await;
+    rig.write("b", "Sin guardar.").await;
+    rig.core.notes().ask_delete("a");
+    assert!(rig.core.notes().state().question(Locale::Es).unwrap().warning.is_some());
+    rig.core.notes().answer(false).await;
+    rig.core.notes().ask_delete("e");
+    assert!(rig.core.notes().state().question(Locale::Es).unwrap().warning.is_none());
+}
+
+/// Lo que falla se dice con su frase: una búsqueda rota no es «sin
+/// resultados», y la papelera que no llega no dice «no se pudo recuperar».
+///
+/// Roturas que atrapa: leer un fallo del servidor como cero resultados;
+/// frases de otra acción.
+#[tokio::test]
+async fn a_failed_search_or_trash_read_says_so() {
+    let rig = rig().await;
+    rig.world.lock().unwrap().failing_get = Some((500, "internal"));
+    rig.core.notes().open_search();
+    rig.core.notes().search("alfa").await;
+    let search = rig.core.notes().state().search;
+    assert!(search.failed.is_some() && search.results.is_empty() && !search.searching);
+    rig.world.lock().unwrap().failing_get = None;
+    rig.core.notes().search("alfa").await;
+    assert!(rig.core.notes().state().search.failed.is_none());
+
+    rig.world.lock().unwrap().failing_get = Some((500, "internal"));
+    rig.core.notes().open_trash().await;
+    assert_eq!(rig.core.notes().state().problem.map(|problem| problem.fallback_key), Some("work:notes.errLoadTrash".to_string()));
+}
+
+/// Abrir una documentación (o volver de ella) deja Notas y «Por atender»,
+/// y la fila de Notas no queda encendida.
+///
+/// Rotura que atrapa: que «volver a tareas» lleve a Notas.
+#[tokio::test]
+async fn opening_a_document_leaves_notes_and_requests() {
+    let rig = rig().await;
+    let space = json!({ "id": "a", "orgId": "o1", "name": "Espacio a", "color": "#888", "people": [], "folders": [], "lists": [] });
+    let org = json!({ "id": "o1", "name": "Org", "slug": "o1", "role": "member", "memberCount": 1, "createdAt": "2026-06-09T12:00:00Z", "timezone": "" });
+    Mock::given(wiremock::matchers::method("GET")).and(wiremock::matchers::path("/api/v1/organizations/")).respond_with(ok(json!([org]))).mount(&rig.server).await;
+    Mock::given(wiremock::matchers::method("GET")).and(wiremock::matchers::path("/api/v1/task-spaces/")).respond_with(ok(json!([space]))).mount(&rig.server).await;
+    Mock::given(wiremock::matchers::method("GET")).and(wiremock::matchers::path("/api/v1/docs/")).respond_with(ok(json!({}))).mount(&rig.server).await;
+    Mock::given(wiremock::matchers::method("GET")).and(wiremock::matchers::path("/api/v1/tasks/")).respond_with(ok(json!([]))).mount(&rig.server).await;
+    Mock::given(path_regex("^/api/v1/docs/space/a(/pages)?$")).respond_with(ok(json!({ "doc": null, "orgId": "o1", "tabs": [], "decisions": [], "attachments": [] }))).mount(&rig.server).await;
+    rig.core.orgs().load().await;
+    rig.core.tree().load("o1").await;
+
+    assert!(rig.core.notes().state().on_screen);
+    rig.core.docs().open("a").await;
+    assert!(!rig.core.notes().state().on_screen, "Notas siguió delante de la documentación");
+    rig.core.notes().show();
+    rig.core.requests().show(None);
+    assert!(!rig.core.notes().state().on_screen, "«Por atender» tiene que dejar Notas");
+    rig.core.docs().open("a").await;
+    assert!(!rig.core.requests().state().on_screen, "«Por atender» siguió delante de la documentación");
 }

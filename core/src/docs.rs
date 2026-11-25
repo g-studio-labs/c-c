@@ -486,6 +486,8 @@ impl Docs {
         // Plataforma se pinta por delante de la documentación: un documento
         // abierto desde la campana estando en ella no se veía.
         self.core.platform().leave();
+        self.core.requests().leave();
+        self.core.notes().leave();
         // Quién puede escribir aquí: quien puede cambiar el árbol de la
         // organización que se mira (`can_edit_tree`). Un `viewer` lee.
         let can_edit = self.core.tree().can_edit();

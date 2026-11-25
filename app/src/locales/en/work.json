@@ -279,6 +279,8 @@
     "exportNeedsDesktopBody": "A browser tab can't write a folder to disk.",
     "exportFailed": "Export failed",
     "errSaveNote": "Could not save",
+    "errLoadTrash": "Could not load the trash",
+    "errSearch": "Search failed",
     "couldNotLoadPage": "Could not load this page.",
     "linkToPage": "Link to a page (⌘K)",
     "close": "Close",

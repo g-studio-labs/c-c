@@ -274,6 +274,8 @@ pub struct NoteSearch {
     pub query: String,
     pub results: Vec<NoteLink>,
     pub searching: bool,
+    /// Por qué no llegó la búsqueda: no es lo mismo que «sin resultados».
+    pub failed: Option<NoteProblem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -437,7 +439,8 @@ impl NotesState {
                 Question {
                     title: text_with(locale, "work:notes.deleteTitle", &[("name", &name)]),
                     body: if count > 0 { text_count(locale, "common:count.removesSubpages", count) } else { text(locale, "work:notes.restoreFromTrash") },
-                    warning: None,
+                    // Borrar la que se está escribiendo se lleva lo no guardado.
+                    warning: self.edit.as_ref().filter(|edit| edit.is_dirty() && self.subtree_of(id).contains(&edit.id)).map(|_| text(locale, "work:docs.discardWhy")),
                     confirm: text(locale, "work:notes.delete"),
                     cancel,
                 }
@@ -485,6 +488,9 @@ pub(crate) struct NotesData {
     /// Qué lectura de una nota es la vigente: una que llega tarde no se pone.
     open_turn: u64,
     search_turn: u64,
+    /// Qué lectura del árbol y de la papelera es la vigente.
+    tree_turn: u64,
+    trash_turn: u64,
 }
 
 #[derive(Clone)]
@@ -570,6 +576,8 @@ impl Notes {
         self.change(|data| {
             data.open_turn += 1;
             data.search_turn += 1;
+            data.tree_turn += 1;
+            data.trash_turn += 1;
             data.state = NotesState::default();
         });
     }
@@ -579,7 +587,12 @@ impl Notes {
     pub(crate) fn held_back(&self, to: NoteLeave) -> bool {
         let Some(edit) = self.state().edit else { return false };
         if edit.is_dirty() {
+            // La pregunta se pinta en Notas: desde otra pantalla, se va a ella.
+            let logging_out = to == NoteLeave::LogOut;
             self.update(|state| state.asking = Some(NoteAsk::Leave { to }));
+            if logging_out {
+                self.show();
+            }
             return true;
         }
         self.update(|state| state.edit = None);
@@ -611,8 +624,18 @@ impl Notes {
 
     /// Trae el árbol. Si falla, el que había se queda a la vista.
     pub async fn load_tree(&self) {
-        self.update(|state| state.tree_loading = true);
-        match self.core.get_list::<NoteTreeItem>("/api/v1/notes/").await {
+        let turn = self.change(|data| {
+            data.tree_turn += 1;
+            data.state.tree_loading = true;
+            data.tree_turn
+        });
+        let answer = self.core.get_list::<NoteTreeItem>("/api/v1/notes/").await;
+        // Una lectura que llega tarde (tras salir, o tras un cambio que se
+        // ve al instante) no es la del árbol de ahora.
+        if self.data().tree_turn != turn {
+            return;
+        }
+        match answer {
             Ok(tree) => self.update(|state| {
                 state.tree = tree;
                 state.tree_loading = false;
@@ -624,6 +647,14 @@ impl Notes {
                 self.fail("work:notes.couldNotLoadPage", &error);
             }
         }
+    }
+
+    /// Lo que se acaba de cambiar a la vista no lo pisa una lectura vieja.
+    fn supersede_tree_reads(&self) {
+        self.change(|data| {
+            data.tree_turn += 1;
+            data.state.tree_loading = false;
+        });
     }
 
     pub fn toggle_fold(&self, id: &str) {
@@ -732,6 +763,10 @@ impl Notes {
 
     /// «Cancelar»: sin cambios cierra el editor; con ellos, pregunta.
     pub fn cancel_edit(&self) {
+        // Con un guardado viajando no se cancela: ya salió, y lo que conteste es de esta sesión.
+        if self.state().edit.is_some_and(|edit| edit.saving) {
+            return;
+        }
         self.held_back(NoteLeave::Cancel);
     }
 
@@ -761,8 +796,14 @@ impl Notes {
     }
 
     /// Guarda lo escrito, mandando sólo lo que cambió: renombrar no manda el
-    /// texto, y así no puede chocar con quien lo esté escribiendo.
-    pub async fn save(&self) {
+    /// texto, y así no puede chocar con quien lo esté escribiendo. Un título
+    /// en blanco se guarda como `untitled`, como en la app de siempre.
+    ///
+    /// Si el texto choca, el servidor vuelve antes de aplicar nada (ni
+    /// siquiera el título): el título va entonces en otra petición, y el
+    /// editor conserva la versión vieja de la que salió, para que seguir
+    /// escribiendo vuelva a chocar en vez de pisar al otro dispositivo.
+    pub async fn save(&self, untitled: &str) {
         let Some(edit) = self.state().edit else { return };
         if edit.saving {
             return;
@@ -775,10 +816,11 @@ impl Notes {
             edit.saving = true;
             edit.error = None;
         });
-        let mut body = json!({});
+        let title = Some(edit.title.trim()).filter(|title| !title.is_empty()).unwrap_or(untitled).to_string();
         let renamed = edit.title != edit.base_title;
+        let mut body = json!({});
         if renamed {
-            body["title"] = json!(edit.title.trim());
+            body["title"] = json!(title);
         }
         if edit.body != edit.base_body {
             body["body"] = json!(edit.body);
@@ -787,14 +829,28 @@ impl Notes {
             }
         }
         let path = format!("/api/v1/notes/{}", edit.id);
-        let outcome = match self.core.request("PATCH", &path, Some(body.to_string()), true).await {
-            Ok(reply) => unwrap_data::<SaveResult>(&reply),
-            Err(error) => Err(error),
+        let path = &path;
+        let send = |body: serde_json::Value| async move {
+            match self.core.request("PATCH", path, Some(body.to_string()), true).await {
+                Ok(reply) => unwrap_data::<SaveResult>(&reply),
+                Err(error) => Err(error),
+            }
         };
-        // Si el editor ya no es éste, la respuesta no es de nadie.
-        if self.state().edit.as_ref().map(|current| current.session) != Some(edit.session) {
-            return;
+        let mut outcome = send(body).await;
+        let mut rename_error = None;
+        let mut title_applied = renamed;
+        if let Ok(saved) = &mut outcome {
+            if saved.conflict.is_some() && renamed {
+                match send(json!({ "title": title })).await {
+                    Ok(again) => saved.note = again.note,
+                    Err(error) => {
+                        title_applied = false;
+                        rename_error = Some(error);
+                    }
+                }
+            }
         }
+        let session = edit.session;
         match outcome {
             Ok(saved) => {
                 let (sent_title, sent_body) = (edit.title.clone(), edit.body.clone());
@@ -803,20 +859,27 @@ impl Notes {
                     if let Some(conflict) = saved.conflict {
                         state.conflict = Some(NoteConflict { id: conflict.id, title: conflict.title });
                     }
+                    // Lo guardado es de la nota aunque el editor ya sea otro:
+                    // lo que se lee y su versión tienen que ser los del servidor.
                     if state.open_id.as_deref() == Some(&saved.note.id) {
                         let attachments = state.detail.as_ref().map(|detail| detail.attachments.clone()).unwrap_or_default();
                         let backlinks = state.detail.as_ref().map(|detail| detail.backlinks.clone()).unwrap_or_default();
                         state.detail = Some(NoteDetail { note: saved.note.clone(), attachments, backlinks });
                     }
-                    let Some(edit) = &mut state.edit else { return };
+                    let Some(edit) = state.edit.as_mut().filter(|edit| edit.session == session) else { return };
                     edit.saving = false;
                     let still_writing = edit.body != sent_body || edit.title != sent_title;
-                    edit.base_hash = saved.note.body_hash.clone();
-                    // Con choque, lo escrito no se aplicó: el servidor
-                    // conserva lo suyo.
-                    edit.base_body = if has_conflict { saved.note.body.clone() } else { sent_body.clone() };
-                    edit.base_title = if has_conflict { saved.note.title.clone() } else { sent_title.clone() };
-                    if !still_writing {
+                    if !has_conflict {
+                        edit.base_hash = saved.note.body_hash.clone();
+                        edit.base_body = sent_body.clone();
+                    }
+                    if title_applied {
+                        edit.base_title = sent_title.clone();
+                    }
+                    if let Some(error) = &rename_error {
+                        edit.error = Some(DocEditError::from(error));
+                    }
+                    if !still_writing && rename_error.is_none() {
                         state.edit = None;
                     }
                 });
@@ -825,7 +888,7 @@ impl Notes {
                 self.load_tree().await;
             }
             Err(error) => self.update(|state| {
-                if let Some(edit) = &mut state.edit {
+                if let Some(edit) = state.edit.as_mut().filter(|edit| edit.session == session) {
                     edit.saving = false;
                     edit.error = Some(DocEditError::from(&error));
                 }
@@ -890,10 +953,11 @@ impl Notes {
                 detail.note.favorite = value;
             }
         };
+        self.supersede_tree_reads();
         self.update(|state| mark(state, next));
         if let Err(error) = self.core.call::<serde_json::Value>("PATCH", &format!("/api/v1/notes/{id}"), Some(json!({ "favorite": next }))).await {
             self.update(|state| mark(state, now));
-            self.fail("work:notes.errMove", &error);
+            self.fail("work:notes.errSaveNote", &error);
         }
     }
 
@@ -901,6 +965,7 @@ impl Notes {
     pub async fn move_by_one(&self, id: &str, up: bool) {
         let Some(moves) = swapped(&self.state().tree, id, up) else { return };
         let before = self.state().tree;
+        self.supersede_tree_reads();
         self.update(|state| {
             for (moved, parent, position) in &moves {
                 if let Some(item) = state.tree.iter_mut().find(|item| &item.id == moved) {
@@ -934,6 +999,7 @@ impl Notes {
             data.search_turn += 1;
             data.state.search.query = query.to_string();
             data.state.search.searching = !query.trim().is_empty();
+            data.state.search.failed = None;
             if query.trim().is_empty() {
                 data.state.search.results.clear();
             }
@@ -943,10 +1009,14 @@ impl Notes {
             return;
         }
         let path = format!("/api/v1/notes/search?q={}", encode_query(query));
+        let mut failed = None;
         let found = match self.core.get_list::<NoteLink>(&path).await {
             Ok(found) => found,
             Err(ApiError::Network(_)) => titles_matching(&self.state().tree, query),
-            Err(_) => Vec::new(),
+            Err(error) => {
+                failed = Some(NoteProblem::of("work:notes.errSearch", &error));
+                Vec::new()
+            }
         };
         if self.data().search_turn != turn {
             return;
@@ -954,6 +1024,7 @@ impl Notes {
         self.update(|state| {
             state.search.results = found;
             state.search.searching = false;
+            state.search.failed = failed;
         });
     }
 
@@ -967,15 +1038,23 @@ impl Notes {
     }
 
     async fn load_trash(&self) {
-        self.update(|state| state.trash.loading = true);
-        match self.core.get_list::<NoteTrashItem>("/api/v1/notes/trash").await {
+        let turn = self.change(|data| {
+            data.trash_turn += 1;
+            data.state.trash.loading = true;
+            data.trash_turn
+        });
+        let answer = self.core.get_list::<NoteTrashItem>("/api/v1/notes/trash").await;
+        if self.data().trash_turn != turn {
+            return;
+        }
+        match answer {
             Ok(items) => self.update(|state| {
                 state.trash.items = items;
                 state.trash.loading = false;
             }),
             Err(error) => {
                 self.update(|state| state.trash.loading = false);
-                self.fail("work:notes.errRestore", &error);
+                self.fail("work:notes.errLoadTrash", &error);
             }
         }
     }
