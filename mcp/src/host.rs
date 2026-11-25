@@ -182,7 +182,7 @@ pub fn open_dir(dir: &Path) -> Result<(), String> {
 /// y puede venir dirigido por contenido ajeno, y abrir un `.jar`, un `.exe` o
 /// un enlace a un ejecutable lo ejecutaría con un clic. Primero se resuelven
 /// los enlaces simbólicos (como `read_dropped_file`) y se muestra el destino
-/// real. Una carpeta sí se abre, que es lo que se quiere ver. `open_dir` abre
+/// real. Una carpeta sí se abre, que es lo que se quiere ver (salvo en macOS: ver `opens_folders`). `open_dir` abre
 /// la carpeta cuando el gestor no sabe seleccionar (en Linux, sin D-Bus).
 pub fn reveal_path(path: &str, open_dir: &dyn Fn(&Path) -> Result<(), String>) -> Result<(), RevealError> {
     if is_network_path(path.trim()) {
@@ -197,7 +197,7 @@ pub fn reveal_path(path: &str, open_dir: &dyn Fn(&Path) -> Result<(), String>) -
         Some(plain) if !plain.starts_with("UNC") => std::path::PathBuf::from(plain),
         _ => canonical.clone(),
     };
-    if canonical.is_dir() {
+    if canonical.is_dir() && opens_folders(THIS_OS) {
         return open_dir(&canonical).map_err(RevealError::Failed);
     }
     let (program, args) = reveal_command(THIS_OS, &canonical);
@@ -206,6 +206,12 @@ pub fn reveal_path(path: &str, open_dir: &dyn Fn(&Path) -> Result<(), String>) -
         Err(_) if THIS_OS == Os::Linux => open_dir(canonical.parent().unwrap_or(Path::new("/"))).map_err(RevealError::Failed),
         Err(e) => Err(RevealError::Failed(e)),
     }
+}
+
+/// Si una carpeta se puede abrir ella misma. En macOS no: una `.app` es una
+/// carpeta y `open` la lanzaría, así que allí también se muestra con `-R`.
+pub fn opens_folders(os: Os) -> bool {
+    os != Os::Mac
 }
 
 /// `reveal_path` con el gestor de esta máquina, para quien no es la app de Tauri.
@@ -320,6 +326,16 @@ mod tests {
         assert_eq!(launched(), vec![(expected.to_string(), args)]);
         assert!(opened.borrow().is_empty(), "el gestor sí supo mostrarlo: no se abre nada más");
         assert!(!launched().iter().any(|(_, args)| args.iter().any(|a| a.contains("innocent.txt"))), "el enlace no se muestra: se muestra su destino");
+    }
+
+    /// Una `.app` de macOS es una carpeta, y abrirla la lanza: allí ninguna
+    /// carpeta se abre, se muestra.
+    ///
+    /// Rotura que detecta: abrir carpetas en macOS, que ejecutaría una `.app`.
+    #[test]
+    fn on_macos_a_folder_is_revealed_because_an_app_is_a_folder() {
+        assert!(!opens_folders(Os::Mac));
+        assert!(opens_folders(Os::Linux) && opens_folders(Os::Windows));
     }
 
     /// Sin D-Bus (o sin gestor que sepa seleccionar) se abre la carpeta que lo
