@@ -54,7 +54,8 @@ cd <worktree> && (unset CLAUDE_CONFIG_DIR; command claude --bg \
 - el criterio de aceptación;
 - el plan, si lo hubo;
 - lo que ya sabes que muerde ahí (la trampa del CLAUDE.md, el incidente);
-- su Postgres desechable, si toca Go (`docker run -d --rm --name cac-test-pg-<n> -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=cac -p 127.0.0.1:<puerto>:5432 postgres:16`), nunca la de otro proyecto.
+- su Postgres desechable, si toca Go, en memoria y sin `fsync` (`docker run -d --rm --name cac-test-pg-<n> --tmpfs /var/lib/postgresql/data -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=cac -p 127.0.0.1:<puerto>:5432 postgres:16 -c fsync=off -c synchronous_commit=off -c full_page_writes=off`), nunca la de otro proyecto;
+- que sólo corra sus propias pruebas, nunca una suite entera (paso 6).
 
 Una sesión de fondo no avisa al terminar: vigílala con `claude agents --json --all` (sale de `busy` al acabar) en un bucle en segundo plano, y lee su informe en la tarea (`get_task`), no en sus logs.
 
@@ -65,17 +66,25 @@ Con el builder en `listo`: otra sesión, igual, con `--model opus`, `--name "<n>
 - `FALLA` → un builder nuevo con los hallazgos, una vez. Segundo `FALLA` → builder en Opus con todo el historial; si vuelve a fallar, `create_request` decidir con los hallazgos y para.
 - `PASA` → paso 6.
 
-## 6. Fusionar
+## 6. Juntar y compilar una sola vez
 
-Desde el worktree de la tarea:
+**Builders y reviewers sólo corren sus propias pruebas, nunca una suite entera** (jose, 25-nov: varias suites a la vez saturan la CPU). La puerta entera la corre el orquestador **una vez**, sobre todas las ramas con PASA juntas:
 
 ```sh
-git fetch origin main && git rebase origin/main
-scripts/test-changed.sh --since origin/main   # tras el rebase, otra vez
+cd ~/projects/personal/guz-studio/cac
+git fetch origin main
+git worktree add .claude/worktrees/integrate -b integrate origin/main
+cd .claude/worktrees/integrate
+git cherry-pick <commits de cada rama con PASA, en orden>   # o merge de cada rama
+scripts/test-changed.sh --since origin/main                 # una sola corrida
 git push origin HEAD:main
 ```
 
-Si el push falla porque `main` se movió, rebase y repite; si el rebase choca, es del builder. Después borra el worktree y la rama (`git worktree remove`, `git branch -d`).
+- Junta lo que haya con PASA en ese momento; no esperes a una tarea lenta si las demás ya están.
+- Si la puerta sale en rojo, `test-changed.sh` dice qué suite: averigua de qué rama viene (`git log` de los ficheros), quita esa rama del lote y devuélvesela a su builder con el fallo; el resto sale.
+- Si un cherry-pick choca, esa rama vuelve a su builder para rebasarla; el resto sale.
+- Go necesita su base desechable; para la puerta, una rápida: `docker run -d --rm --name cac-gate-pg --tmpfs /var/lib/postgresql/data -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=cac -p 127.0.0.1:55499:5432 postgres:16 -c fsync=off -c synchronous_commit=off -c full_page_writes=off` (en disco, `service` tarda ~10 min aquí; en CI, 72 s).
+- Después borra los worktrees y ramas de lo que salió.
 
 ## 7. Cerrar
 

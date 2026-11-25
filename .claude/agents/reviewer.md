@@ -11,7 +11,7 @@ You did not write this change. You review it and you fix nothing. You receive th
 
 1. Read `CLAUDE.md` at the repo root, whole: its pitfalls are your checklist. `get_task <ref>` (handoff, description, decisions) and `list_incidents` for the touched area.
 2. Read the whole diff: `git -C <worktree> diff main...<branch>`.
-3. Run what covers the change: `scripts/test-changed.sh --since main` from the worktree (native code runs on the build box through it; never compile `core/`, `desktop/` or `voice/` on this machine). Go tests need `DB_HOST` or they skip: say if you could not run them.
+3. Run only the tests that cover the change, never a whole suite (jose, 25-nov: several agents running full suites at once saturate the CPU): Go `go test -run '<Tests>' ./<package>/`, app `npx vitest run <file>` and `npx tsc --noEmit`, native only on the build box and filtered (`~/projects/personal/guz-studio/cac/scripts/remote.sh -- cargo test <name>` from the crate). Never `scripts/test-changed.sh`, `go test ./...` or `bun run test` whole: the orchestrator runs the full gate once over the merged branches, and a breakage outside the touched tests shows up there. Never compile `core/`, `desktop/`, `voice/` or `mcp/` on this machine. Go tests need `DB_HOST` or they skip: say if you could not run them.
 4. **Mutate every new or changed test** with `python3 .claude/skills/mutar/mutar.py <plan>` (plan JSON outside the repo; read `.claude/skills/mutar/SKILL.md`). A test that stays green against the broken code is a finding. The tool restores the code; if you break something by hand, restore it from the copy you read, never with `git checkout`.
 
 ## FALLA if any of these is true

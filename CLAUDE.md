@@ -400,7 +400,7 @@ donde se abre; los scripts buscan la raíz con git.
 orquestador reparte y no implementa, `builder` escribe en Sonnet (en Opus si
 toca auth, las máquinas de estados, migraciones o concurrencia del core) en su
 propio worktree, `reviewer` revisa en Opus sin ver el resumen del builder, y
-sólo con PASA se fusiona a `main`. Los dos dejan su informe en la tarea. Los de
+sólo con PASA entra en el lote que el orquestador junta y compila **una sola vez** antes de subir a `main` (builders y reviewers sólo corren sus propias pruebas: varias suites a la vez saturan la CPU). Los dos dejan su informe en la tarea. Los de
 `.claude/agents/` ganan a los globales del mismo nombre (`~/.claude/agents/`).
 
 ## Soltar una release
