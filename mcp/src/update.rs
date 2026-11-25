@@ -173,6 +173,17 @@ pub fn fetch_latest(source: &Source, timeout: Duration) -> Result<String, String
     parse_version(version).map(|_| version.to_string()).ok_or_else(|| format!("{} did not answer with a version", source.version_url))
 }
 
+/// Un texto de una dirección; `Err` si no contesta o no es un 200.
+pub fn fetch_text(url: &str, timeout: Duration) -> Result<String, String> {
+    runtime()?.block_on(async {
+        let res = client(timeout)?.get(url).send().await.map_err(|e| format!("could not reach {url}: {e}"))?;
+        if !res.status().is_success() {
+            return Err(format!("{url} answered {}", res.status()));
+        }
+        res.text().await.map_err(|e| e.to_string())
+    })
+}
+
 /// La suma publicada de un fichero, de un `SHA256SUMS` (`<hex>  <nombre>`, o
 /// `<hex> *<nombre>` en modo binario).
 pub fn checksum_for(sums: &str, file: &str) -> Option<String> {

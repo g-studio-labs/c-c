@@ -103,6 +103,15 @@ pub fn delivery(package: Package, exe: Option<&Path>, replaceable: bool) -> Deli
     }
 }
 
+/// Un binario que vive dentro de un `target/` de cargo es una compilación de
+/// desarrollo: sustituirlo por el publicado deshace lo que se está probando.
+fn is_dev_build(exe: &Path) -> bool {
+    exe.components().any(|part| part.as_os_str() == "target")
+}
+
+/// El prefijo de la carpeta donde se deja lo que se baja y no es el binario.
+pub const DOWNLOAD_DIR_PREFIX: &str = "cac-desktop-update-";
+
 /// Si se puede crear un fichero junto a `exe`: lo que hace falta para
 /// sustituirlo por renombrado.
 fn folder_is_writable(exe: &Path) -> bool {
@@ -178,7 +187,7 @@ impl Updater {
             exe: std::env::current_exe().ok(),
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
-            download_dir: std::env::temp_dir().join(format!("cac-desktop-update-{}", std::process::id())),
+            download_dir: std::env::temp_dir().join(format!("{DOWNLOAD_DIR_PREFIX}{}", std::process::id())),
         }
     }
 
@@ -195,13 +204,38 @@ impl Updater {
             Some(dir) => update::latest_known_within(&self.source, dir, update::now(), max_age.as_secs()),
             None => update::check_now(&self.source, None, Duration::from_secs(8)).ok(),
         }?;
-        self.offer(&latest)
+        self.offer(&latest).filter(|offer| self.is_published(offer))
+    }
+
+    /// Si la release de esa versión ya tiene su fichero y su suma. `VERSION` se
+    /// sube a `main` antes de que el workflow publique, y durante la
+    /// compilación (o para siempre, si un sistema falla) ofrecer esa versión
+    /// acabaría en un 404. Sin respuesta tampoco se ofrece: sin red no se
+    /// puede bajar nada de todos modos.
+    fn is_published(&self, offer: &Offer) -> bool {
+        let url = self.source.asset_url_tagged(&tag(&offer.version), update::CHECKSUMS);
+        update::fetch_text(&url, Duration::from_secs(8)).is_ok_and(|sums| update::checksum_for(&sums, &offer.asset).is_some())
+    }
+
+    /// Borra lo que dejaron las descargas de otras ejecuciones (el instalador
+    /// que se lanzó y ya no hace falta), si tiene más de `older_than`.
+    pub fn clean_leftovers(&self, older_than: Duration) {
+        let Some(parent) = self.download_dir.parent() else { return };
+        let Ok(entries) = std::fs::read_dir(parent) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ours = entry.file_name().to_string_lossy().starts_with(DOWNLOAD_DIR_PREFIX);
+            let old = entry.metadata().and_then(|m| m.modified()).ok().and_then(|at| at.elapsed().ok()).is_some_and(|age| age >= older_than);
+            if ours && old && path != self.download_dir && path.is_dir() {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        }
     }
 
     /// La oferta de esa versión para esta máquina, si es más nueva y hay algo
     /// publicado para ella.
     pub fn offer(&self, latest: &str) -> Option<Offer> {
-        if !update::is_newer(latest, &self.current) {
+        if !update::is_newer(latest, &self.current) || self.exe.as_deref().is_some_and(is_dev_build) {
             return None;
         }
         let (asset, package) = asset_name(latest, self.os, self.arch)?;
@@ -310,12 +344,13 @@ mod tests {
         let app = machine(&releases, &dir, "0.9.0");
 
         assert!(app.check(CHECK_EVERY).is_some());
-        let asked = releases.asked().len();
+        let versions = || releases.asked().iter().filter(|path| path.as_str() == "/desktop/VERSION").count();
+        let asked = versions();
         assert!(app.check(CHECK_EVERY).is_some());
-        assert_eq!(releases.asked().len(), asked, "asked again within the day");
+        assert_eq!(versions(), asked, "asked again within the day");
 
         let offline = Updater { source: Source { version_url: "http://127.0.0.1:9/VERSION".into(), ..app.source.clone() }, ..app.clone() };
-        assert!(offline.check(Duration::ZERO).is_some(), "with no network, what was known is still offered");
+        assert!(offline.check(Duration::ZERO).is_some(), "when VERSION does not answer, what was known is still offered");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -451,6 +486,63 @@ mod tests {
         assert!(app.install(&offer, &mut |_| {}).is_err());
         assert_eq!(releases.asked().len(), before);
         assert_eq!(release_page("0.10.0"), "https://github.com/g-studio-labs/c-c/releases/tag/desktop-v0.10.0");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Una versión que `VERSION` anuncia pero que aún no está publicada no se
+    /// ofrece: el clic acabaría en un 404. Roturas que atrapa: ofrecer en
+    /// cuanto `VERSION` lo dice; contentarse con que exista `SHA256SUMS` sin
+    /// que nombre el fichero de este sistema (un sistema que falló al
+    /// publicar); dejar de ofrecerla cuando por fin se publica.
+    #[test]
+    fn a_version_that_is_announced_but_not_published_is_not_offered() {
+        let releases = FakeReleases::start();
+        let dir = scratch("unpublished");
+        let app = machine(&releases, &dir, "0.9.0");
+        releases.announce_desktop("0.10.0");
+        assert_eq!(app.check(Duration::ZERO), None, "no release at all");
+
+        releases.publish_desktop("0.10.0", &[("cac-desktop-0.10.0-windows-x86_64-setup.exe", b"other system")]);
+        assert_eq!(app.check(Duration::ZERO), None, "a release without this system's file");
+
+        publish_linux(&releases, "0.10.0", b"new");
+        assert_eq!(app.check(Duration::ZERO).map(|offer| offer.version), Some("0.10.0".into()), "published, and the notice never came");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Una compilación de desarrollo no se ofrece. Rotura que atrapa: pisar con
+    /// el publicado el binario de `target/debug` que se está probando.
+    #[test]
+    fn a_binary_inside_a_cargo_target_folder_is_never_offered_an_update() {
+        let releases = FakeReleases::start();
+        let dir = scratch("dev");
+        publish_linux(&releases, "0.10.0", b"new");
+        let mut app = machine(&releases, &dir, "0.9.0");
+        assert!(app.check(Duration::ZERO).is_some());
+        app.exe = Some(dir.join("repo").join("target").join("release").join(APP_BINARY));
+        assert_eq!(app.check(Duration::ZERO), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Lo que dejó una ejecución anterior se borra, y sólo eso. Roturas que
+    /// atrapa: borrar carpetas que no son de la app; borrar la de esta misma
+    /// ejecución; borrar lo reciente (puede ser de otra instancia que está
+    /// bajando ahora).
+    #[test]
+    fn old_download_folders_are_removed_and_nothing_else() {
+        let releases = FakeReleases::start();
+        let dir = scratch("leftovers");
+        let mut app = machine(&releases, &dir, "0.9.0");
+        app.download_dir = dir.join(format!("{DOWNLOAD_DIR_PREFIX}200"));
+        for name in [format!("{DOWNLOAD_DIR_PREFIX}100"), format!("{DOWNLOAD_DIR_PREFIX}200"), "somebody-elses".to_string()] {
+            std::fs::create_dir_all(dir.join(name).join("inner")).unwrap();
+        }
+        app.clean_leftovers(Duration::from_secs(3600));
+        assert!(dir.join(format!("{DOWNLOAD_DIR_PREFIX}100")).exists(), "removed what is recent");
+        app.clean_leftovers(Duration::ZERO);
+        assert!(!dir.join(format!("{DOWNLOAD_DIR_PREFIX}100")).exists(), "left an old download folder");
+        assert!(dir.join(format!("{DOWNLOAD_DIR_PREFIX}200")).exists(), "removed this run's own folder");
+        assert!(dir.join("somebody-elses").exists(), "removed a folder that is not the app's");
         let _ = std::fs::remove_dir_all(dir);
     }
 }
