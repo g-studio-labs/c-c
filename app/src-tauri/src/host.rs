@@ -147,6 +147,20 @@ pub async fn open_url(url: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?
 }
 
+/// Abre una ruta que escribió un agente en un pedido. Si no existe contesta
+/// `not-found`, que la página convierte en un aviso en su idioma.
+#[tauri::command]
+pub async fn open_local_path(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if !cac_mcp::host::expand_home(path.trim()).exists() {
+            return Err("not-found".to_string());
+        }
+        cac_mcp::host::open_path(path.trim())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Abre un fichero con la app que el sistema tenga para él.
 pub fn open_path(path: &std::path::Path) -> Result<(), String> {
     open_with_system(&path.to_string_lossy())

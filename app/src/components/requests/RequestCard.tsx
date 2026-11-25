@@ -5,6 +5,7 @@ import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import RequestText from "@/components/requests/RequestText";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
@@ -49,7 +50,7 @@ export default function RequestCard({ request, highlighted }: { request: AgentRe
         <span className="text-xs text-muted-foreground">· {desde(r.createdAt)}</span>
         <CopyId code={r.code} />
       </header>
-      <p className="whitespace-pre-wrap">{r.summary}</p>
+      <p className="whitespace-pre-wrap"><RequestText text={r.summary} /></p>
       <p className="text-xs text-muted-foreground">
         {t("work:requests.askedBy", { name: r.requestedBy.name })}
         {r.via === "mcp" && ` ${t("work:requests.viaAgent")}`}
@@ -127,7 +128,7 @@ function KindBody({ request: r }: { request: AgentRequest }) {
             )}
           </Field>
           <Field label={t("work:requests.draft")}>
-            <pre className="whitespace-pre-wrap rounded-md bg-muted p-3 font-sans">{b.draft}</pre>
+            <pre className="whitespace-pre-wrap rounded-md bg-muted p-3 font-sans"><RequestText text={b.draft ?? ""} /></pre>
           </Field>
         </div>
       );
@@ -143,26 +144,26 @@ function KindBody({ request: r }: { request: AgentRequest }) {
           <Field label={t("work:requests.steps")}>
             <ol className="list-decimal pl-5">
               {(b.steps ?? []).map((s, i) => (
-                <li key={i}>{s}</li>
+                <li key={i}><RequestText text={s} /></li>
               ))}
             </ol>
           </Field>
           <Field label={t("work:requests.expected")}>
-            <span>{b.expected}</span>
+            <span><RequestText text={b.expected ?? ""} /></span>
           </Field>
         </div>
       );
     case "decide":
-      return b.question ? <p className="font-medium">{b.question}</p> : null;
+      return b.question ? <p className="font-medium"><RequestText text={b.question} /></p> : null;
     case "run":
       return (
         <div className="flex flex-col gap-2">
           <Field label={t("work:requests.where")}>
-            <span>{b.where}</span>
+            <span><RequestText text={b.where ?? ""} /></span>
           </Field>
           <Field label={t("work:requests.command")}>
             <div className="flex items-start gap-2">
-              <pre className="min-w-0 flex-1 overflow-x-auto rounded-md bg-muted p-3">{b.command}</pre>
+              <pre className="min-w-0 flex-1 overflow-x-auto rounded-md bg-muted p-3"><RequestText text={b.command ?? ""} /></pre>
               <Button
                 variant="outline"
                 size="icon-sm"
@@ -175,11 +176,11 @@ function KindBody({ request: r }: { request: AgentRequest }) {
             </div>
           </Field>
           <Field label={t("work:requests.expected")}>
-            <span>{b.expected}</span>
+            <span><RequestText text={b.expected ?? ""} /></span>
           </Field>
           {b.undo && (
             <Field label={t("work:requests.undo")}>
-              <span>{b.undo}</span>
+              <span><RequestText text={b.undo ?? ""} /></span>
             </Field>
           )}
         </div>
@@ -188,10 +189,10 @@ function KindBody({ request: r }: { request: AgentRequest }) {
       return (
         <div className="flex flex-col gap-2">
           <Field label={t("work:requests.what")}>
-            <span>{b.what}</span>
+            <span><RequestText text={b.what ?? ""} /></span>
           </Field>
           <Field label={t("work:requests.from")}>
-            <span>{b.from}</span>
+            <span><RequestText text={b.from ?? ""} /></span>
           </Field>
         </div>
       );

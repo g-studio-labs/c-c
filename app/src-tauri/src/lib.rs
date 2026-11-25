@@ -704,6 +704,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             relaunch::relaunch_app,
             host::open_url,
+            host::open_local_path,
             agent_install::install_swarm_manage_agent,
             set_github_token,
             delete_github_token,

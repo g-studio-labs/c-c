@@ -678,6 +678,8 @@
     "command": "Comando",
     "copyCommand": "Copiar el comando",
     "commandCopied": "Comando copiado",
+    "pathMissing": "Esa ruta no existe: {{path}}",
+    "pathCopied": "Ruta copiada",
     "undo": "Para deshacerlo",
     "output": "Salida (pega lo que salió)",
     "done": "Hecho",
