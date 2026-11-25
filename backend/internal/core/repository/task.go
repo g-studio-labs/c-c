@@ -354,12 +354,22 @@ func (r *TaskRepository) FindFolder(id string) (*domain.TaskFolder, error) {
 	return &f, nil
 }
 
-// DeleteFolder removes the folder; its lists move up to the space so no work is
-// silently destroyed.
+// DeleteFolder removes the folder; what hangs from it (lists and subfolders)
+// moves up one level, to the folder's own parent or to the space, so no work is
+// silently destroyed and nothing is left pointing at a parent that is gone
+// (command-and-control-384).
 func (r *TaskRepository) DeleteFolder(id string) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
+		var f domain.TaskFolder
+		if err := tx.First(&f, "id = ?", id).Error; err != nil {
+			return err
+		}
 		if err := tx.Model(&domain.TaskList{}).Where("folder_id = ?", id).
-			Update("folder_id", nil).Error; err != nil {
+			Update("folder_id", f.ParentFolderID).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&domain.TaskFolder{}).Where("parent_folder_id = ?", id).
+			Update("parent_folder_id", f.ParentFolderID).Error; err != nil {
 			return err
 		}
 		return tx.Delete(&domain.TaskFolder{}, "id = ?", id).Error
