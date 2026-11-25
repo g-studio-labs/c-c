@@ -35,6 +35,7 @@ pub mod orgs;
 pub mod platform;
 pub mod prefs;
 pub mod prose;
+pub mod request_links;
 pub mod requests;
 pub mod session;
 pub mod storage;
@@ -114,6 +115,7 @@ pub use platform::provision_run::*;
 pub use platform::{detect_databases, is_age_public_key, Backup, BackupEngine, BackupKind, BackupRecipient, BackupStatus, BackupTarget, BackupTargetForm, BackupsState, BackupsStatus, DetectedDatabase, DEFAULT_BACKUP_TIMEZONE};
 pub use ansi::{ansi_spans, AnsiColor, AnsiSpan};
 pub use prose::prose_for_painting;
+pub use request_links::{link_segments, LinkSegment};
 pub use requests::{
     build_answer, request_outcome, waiting_label, AgentRequest, AnswerDraft, RequestAnswer, RequestBody, RequestKind, RequestOption, RequestPerson, RequestScope, RequestStatus,
     RequestTask, Requests, RequestsState,

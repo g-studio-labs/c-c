@@ -56,6 +56,36 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     cmd
 }
 
+/// A dónde apunta una ruta escrita por una persona o un agente: `~/` es la
+/// casa de quien corre esto.
+pub fn expand_home(path: &str) -> std::path::PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(|home| Path::new(&home).join(rest)).unwrap_or_else(|| path.into()),
+        None => path.into(),
+    }
+}
+
+/// Abre un fichero o carpeta con lo que el sistema tenga para ello. Devuelve
+/// el error si no existe o no hay con qué abrirlo; no espera a que termine.
+pub fn open_path(path: &str) -> Result<(), String> {
+    let target = expand_home(path);
+    if !target.exists() {
+        return Err(format!("{} does not exist", target.display()));
+    }
+    #[cfg(target_os = "linux")]
+    let mut cmd = command("xdg-open");
+    #[cfg(target_os = "macos")]
+    let mut cmd = command("open");
+    #[cfg(windows)]
+    let mut cmd = command("explorer");
+    cmd.arg(&target).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn().map_err(|e| format!("Could not open {}: {e}", target.display()))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 /// Limpia el entorno de un `Command` ya creado.
 pub fn clean(cmd: &mut Command) {
     let env: Vec<(String, String)> = std::env::vars().collect();
@@ -105,6 +135,24 @@ pub fn unclean_launches(dir: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rotura que detecta: no expandir `~/` (abriría una ruta relativa que no
+    /// existe), o expandir una `~` que no abre la ruta.
+    #[test]
+    fn a_tilde_path_starts_at_home() {
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).expect("home");
+        assert_eq!(expand_home("~/a/b.txt"), Path::new(&home).join("a/b.txt"));
+        assert_eq!(expand_home("/tmp/a"), Path::new("/tmp/a"));
+        assert_eq!(expand_home("~x/a"), Path::new("~x/a"));
+    }
+
+    /// Rotura que detecta: lanzar el abridor con una ruta que no existe (el
+    /// sistema contesta con un aviso suyo o con nada) en vez de decirlo.
+    #[test]
+    fn a_missing_path_is_reported_instead_of_launched() {
+        let error = open_path("/no/existe/cac-504.txt").unwrap_err();
+        assert!(error.contains("does not exist"), "{error}");
+    }
 
     fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
