@@ -101,8 +101,13 @@ fn publishing_is_opt_in_by_hand_and_refuses_a_version_already_out() {
     assert!(publish_job < create);
     assert!(version_job < tag_check && tag_check < build_job, "no mira si la etiqueta existe antes de compilar");
     assert!(version_job < release_check && release_check < build_job, "no mira si la release existe antes de compilar");
-    assert!(commands[build_job + 1..build_job + 3].iter().any(|line| line == "needs: [test, plan, version]"), "compilar no espera a la comprobación de la versión");
+    assert!(commands[build_job + 1..build_job + 3].iter().any(|line| line == "needs: [test, guards, plan, version]"), "compilar no espera a las pruebas, a los guardianes y a la comprobación de la versión");
     assert!(position(&commands, "uses: ./.github/workflows/desktop.yml") < build_job, "las pruebas no van por delante");
+    assert!(position(&commands, "uses: ./.github/workflows/mcp.yml") < build_job, "los guardianes de la release no van por delante");
+    // La etiqueta se vuelve a mirar en el trabajo que publica, justo antes.
+    let rechecks: Vec<usize> = commands.iter().enumerate().filter(|(_, line)| line.contains("git ls-remote --exit-code --tags origin")).map(|(at, _)| at).collect();
+    assert_eq!(rechecks.len(), 2, "la etiqueta se mira en `version` y otra vez al publicar: {rechecks:?}");
+    assert!(publish_job < rechecks[1] && rechecks[1] < create, "el trabajo que publica no vuelve a mirar la etiqueta antes de crear la release");
     assert!(commands.iter().any(|line| line == "tag=\"desktop-v$version\""), "la etiqueta no es desktop-vX.Y.Z");
     assert!(commands.iter().any(|line| line == "tag=\"desktop-v$VERSION\""), "se publica con otra etiqueta");
     assert!(commands.iter().any(|line| line.contains("refs/heads/main") && line.contains("GITHUB_REF")), "se puede publicar fuera de main");

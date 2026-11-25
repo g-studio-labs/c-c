@@ -67,6 +67,12 @@ jobs:
   test:
     uses: ./.github/workflows/desktop.yml
 
+  # Los guardianes de esta release (`mcp/tests/desktop_release.rs`) y la lógica
+  # con la que se actualiza (`desktop_update`) viven en el crate `mcp/`, y sólo
+  # corrían en `mcp.yml`: una release podía salir con ellos en rojo.
+  guards:
+    uses: ./.github/workflows/mcp.yml
+
   # Qué versión sale, y si puede salir. Sin `publish` no hace nada.
   version:
     runs-on: ubuntu-24.04
@@ -143,7 +149,7 @@ jobs:
           echo "os=[$list]" >> "$GITHUB_OUTPUT"
 
   build:
-    needs: [test, plan, version]
+    needs: [test, guards, plan, version]
     strategy:
       # Que falle un sistema no tira los instaladores de los otros dos.
       fail-fast: false
@@ -272,6 +278,19 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Para mirar las etiquetas de nuevo: pasó tiempo desde el trabajo
+      # `version` (compilar son decenas de minutos) y alguien pudo cortarla.
+      - uses: actions/checkout@v4
+
+      - name: The tag is still free
+        run: |
+          set -euo pipefail
+          tag="desktop-v${{ needs.version.outputs.version }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "La etiqueta $tag ya existe. Una versión publicada no se re-corta." >&2
+            exit 1
+          fi
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
