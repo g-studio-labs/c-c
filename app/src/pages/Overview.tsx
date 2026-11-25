@@ -31,7 +31,10 @@ import type { ReportListItem, ReportListResult } from "@/types/report";
  * dejó un filtro en otra pantalla estaría mintiendo sobre cuánto hay.
  */
 
-const CERRADOS = new Set(["resolved", "closed"]);
+// Lo que ya no está abierto, en los nombres de después de `normalizeStatus`:
+// ahí «resolved» ya es «done», así que mirar «resolved» no quitaba ninguno y la
+// tarjeta contaba como abiertos los reportes hechos.
+const CERRADOS = new Set(["done", "closed"]);
 
 export default function Overview() {
   const { t } = useT();
