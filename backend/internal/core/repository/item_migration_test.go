@@ -967,7 +967,7 @@ func TestDeletingATaskHidesItsThread(t *testing.T) {
 	migrateItems(db)
 	repo := NewTaskRepository(db)
 
-	if err := repo.DeleteTask("task-done"); err != nil {
+	if _, err := repo.DeleteTask("task-done"); err != nil {
 		t.Fatal(err)
 	}
 	var visible int64

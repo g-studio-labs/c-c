@@ -957,10 +957,16 @@ func (s *TaskService) DeleteTask(id string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.repo.DeleteTask(id); err != nil {
+	gone, err := s.repo.DeleteTask(id)
+	if err != nil {
 		return err
 	}
-	s.publish("task:delete", t.OrgID, t.ListID, t.ID)
+	// One event per row that went: a subtask assigned to somebody else sits in
+	// their «Mi trabajo», and their client only forgets the taskId it is told.
+	// Subtasks live in their parent's list, so the routing is the same.
+	for _, goneID := range gone {
+		s.publish("task:delete", t.OrgID, t.ListID, goneID)
+	}
 	return nil
 }
 

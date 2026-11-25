@@ -620,9 +620,13 @@ func (r *TaskRepository) MoveTask(id string, status domain.ReportStatus, newRank
 // behind they would be invisible rows pointing at nothing. Deleting a list
 // already takes its subtasks along; this is the same rule one level down
 // (command-and-control-386).
-func (r *TaskRepository) DeleteTask(id string) error {
-	return r.db.Transaction(func(tx *gorm.DB) error {
-		ids := []string{id}
+//
+// Returns the ids it removed, the task first, so the caller can tell every
+// client which rows are gone and not just the one that was asked for.
+func (r *TaskRepository) DeleteTask(id string) ([]string, error) {
+	ids := []string{id}
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		ids = []string{id}
 		seen := map[string]bool{id: true}
 		frontier := []string{id}
 		for len(frontier) > 0 {
@@ -657,6 +661,10 @@ func (r *TaskRepository) DeleteTask(id string) error {
 		}
 		return tx.Delete(&domain.Item{}, "id IN ?", ids).Error
 	})
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // ListOpen returns unfinished tasks across every list in the given orgs, worst

@@ -81,8 +81,9 @@ func TestDeletingAFolderMovesItsSubfoldersAndListsUpOneLevel(t *testing.T) {
 // toca las de otra (command-and-control-386).
 //
 // Roturas que atrapa: dejar las subtareas vivas apuntando a una madre borrada;
-// llevarse sólo el primer nivel; y borrar de más (una tarea hermana o sus
-// subtareas).
+// llevarse sólo el primer nivel; borrar de más (una tarea hermana o sus
+// subtareas); y dejar vivos los asignados, etiquetas, comentarios o adjuntos
+// de las subtareas (borrarlos sólo por el id de la madre).
 func TestDeletingATaskTakesItsSubtasksWithIt(t *testing.T) {
 	db, cleanup := itemMigrationDB(t)
 	defer cleanup()
@@ -99,12 +100,32 @@ func TestDeletingATaskTakesItsSubtasksWithIt(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := db.Create(&domain.ItemAssignee{ItemID: "subsub", UserID: "u-1"}).Error; err != nil {
+	// Cada subtarea con todo lo que puede colgarle, y más de un asignado: un
+	// borrado que sólo mirara el id de la madre dejaría esto vivo.
+	tag := domain.TaskTag{BaseModel: domain.BaseModel{ID: "tag-1"}, OrgID: "org-1", Name: "t", Color: "red"}
+	if err := db.Create(&tag).Error; err != nil {
 		t.Fatal(err)
 	}
+	for _, id := range []string{"sub", "subsub"} {
+		for _, row := range []any{
+			&domain.ItemAssignee{ItemID: id, UserID: "u-1"},
+			&domain.ItemAssignee{ItemID: id, UserID: "u-2"},
+			&domain.TaskTagLink{TaskID: id, TagID: "tag-1"},
+			&domain.ItemComment{BaseModel: domain.BaseModel{ID: "c-" + id}, ItemID: id, Body: "hola"},
+			&domain.ItemAttachment{BaseModel: domain.BaseModel{ID: "a-" + id}, ItemID: id, FileName: "f.txt"},
+		} {
+			if err := db.Create(row).Error; err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 
-	if err := NewTaskRepository(db).DeleteTask("parent"); err != nil {
+	gone, err := NewTaskRepository(db).DeleteTask("parent")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(gone) != 3 || gone[0] != "parent" {
+		t.Fatalf("debía devolver parent y sus dos subtareas, devolvió %v", gone)
 	}
 
 	var alive []string
@@ -112,10 +133,21 @@ func TestDeletingATaskTakesItsSubtasksWithIt(t *testing.T) {
 	if len(alive) != 2 || alive[0] != "other" || alive[1] != "other-sub" {
 		t.Fatalf("debían quedar sólo other y other-sub, quedan %v", alive)
 	}
-	var links int64
-	db.Model(&domain.ItemAssignee{}).Where("item_id = ?", "subsub").Count(&links)
-	if links != 0 {
-		t.Fatal("la asignación de una subtarea borrada se queda colgando")
+	for name, model := range map[string]any{
+		"asignados":   &domain.ItemAssignee{},
+		"etiquetas":   &domain.TaskTagLink{},
+		"comentarios": &domain.ItemComment{},
+		"adjuntos":    &domain.ItemAttachment{},
+	} {
+		var left int64
+		col := "item_id"
+		if name == "etiquetas" {
+			col = "task_id"
+		}
+		db.Model(model).Where(col+" IN ?", []string{"sub", "subsub"}).Count(&left)
+		if left != 0 {
+			t.Errorf("los %s de una subtarea borrada se quedan colgando (%d)", name, left)
+		}
 	}
 }
 
@@ -138,7 +170,7 @@ func TestDeletingATaskInAParentCycleTerminates(t *testing.T) {
 		}
 	}
 	done := make(chan error, 1)
-	go func() { done <- NewTaskRepository(db).DeleteTask("a") }()
+	go func() { _, err := NewTaskRepository(db).DeleteTask("a"); done <- err }()
 	select {
 	case err := <-done:
 		if err != nil {
