@@ -3139,9 +3139,9 @@ mod tests {
         assert!(!on_screen(window, "task-page", cx), "el panel sale sin ninguna tarea abierta");
 
         click(window, "work-row-t1", cx);
-        wait_until(cx, "llega el detalle", |cx| on_screen(window, "task-title", cx));
-
-        assert!(!on_screen(window, "task-waiting", cx));
+        // El título sale con la fila antes que el detalle: hay que esperar a
+        // que el «cargando» se vaya, no mirarlo al ver el título.
+        wait_until(cx, "llega el detalle", |cx| on_screen(window, "task-title", cx) && !on_screen(window, "task-waiting", cx));
         assert!(on_screen(window, "task-description", cx) && on_screen(window, "task-handoff", cx));
         assert!(on_screen(window, "task-status", cx) && on_screen(window, "subtask-t2", cx));
         wait_until(cx, "llegan las columnas y la subtarea sale hecha", |cx| on_screen(window, "subtask-done-t2", cx));
