@@ -36,6 +36,7 @@ mod mentions;
 mod message_actions;
 mod mywork;
 mod picture_viewer;
+mod requests;
 mod newtask;
 mod notifier;
 mod platform;

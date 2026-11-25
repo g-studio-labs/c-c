@@ -17,7 +17,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use cac_core::{
-    Announcement, ApiError, CommsState, InboxState, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, OrgsState, PlatformState, Session, Storage,
+    Announcement, ApiError, CommsState, InboxState, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, OrgsState, PlatformState, RequestsState, Session, Storage,
     TaskState, ThreadState, TreeState, VoiceState,
 };
 use gpui_kit::{App, AppContext, Entity, Global};
@@ -38,6 +38,9 @@ enum CoreEvent {
     Inbox(InboxState),
     Voice(VoiceState),
     Platform(PlatformState),
+    Requests(RequestsState),
+    /// No es estado: un agente pidió que se mire un pedido ya.
+    ShowRequest,
     /// No es estado: un aviso del sistema que enseñar (`notifier`).
     Announce(Announcement),
 }
@@ -96,6 +99,12 @@ impl Listener for Forwarder {
     fn announce(&self, announcement: Announcement) {
         self.send(CoreEvent::Announce(announcement));
     }
+    fn requests_changed(&self, state: RequestsState) {
+        self.send(CoreEvent::Requests(state));
+    }
+    fn show_request(&self, _code: String) {
+        self.send(CoreEvent::ShowRequest);
+    }
 }
 
 /// El estado del core tal como lo ve la pantalla, entero y ya en el hilo
@@ -126,6 +135,9 @@ pub struct Snapshot {
     /// Plataforma: los servidores de la organización que se mira, y si se
     /// está en ella.
     pub platform: PlatformState,
+    /// «Por atender»: los pedidos de los agentes, su número y las marcas
+    /// «espera a…» de las tareas.
+    pub requests: RequestsState,
 }
 
 impl Snapshot {
@@ -147,8 +159,9 @@ impl Snapshot {
             CoreEvent::Inbox(state) => self.inbox = state,
             CoreEvent::Voice(state) => self.voice = state,
             CoreEvent::Platform(state) => self.platform = state,
-            // No llega aquí: lo enseña `notifier` sin pasar por el estado.
-            CoreEvent::Announce(_) => {}
+            CoreEvent::Requests(state) => self.requests = state,
+            // No llegan aquí: no son estado.
+            CoreEvent::Announce(_) | CoreEvent::ShowRequest => {}
         }
     }
 }
@@ -190,6 +203,7 @@ impl Backend {
             while let Some(event) = receiver.recv().await {
                 cx.update(|cx| match event {
                     CoreEvent::Announce(announcement) => crate::notifier::show(announcement, cx),
+                    CoreEvent::ShowRequest => crate::notifier::bring_to_front(cx),
                     event => target.update(cx, |snapshot, cx| {
                         snapshot.apply(event);
                         cx.notify();

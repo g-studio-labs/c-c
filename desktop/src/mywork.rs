@@ -592,6 +592,7 @@ impl MyWorkView {
                     .child(div().flex_shrink_0().max_w_full().truncate().child(row.title))
                     .children(row.parent.map(|parent| div().min_w_0().truncate().leading_xs().text_color(muted).child(parent))),
             )
+            .children(crate::requests::waiting_chip(format!("work-waiting-{}", row.id), &row.id, cx))
             .children(priority)
             .children(due)
             .child(div().id(SharedString::from(format!("work-list-{}", row.id))).w(rems(7.)).flex_none().truncate().leading_xs().text_right().text_color(muted).child(row.list).test_support())

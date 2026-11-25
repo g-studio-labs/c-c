@@ -18,8 +18,12 @@ tablero: **App** `ca0bfd49-0909-43eb-8135-bc8ecd0f282c` y **Backend**
 `cac-wt-requests`), sin fusionar. Backend (`domain/request.go`, rutas
 `/api/v1/requests`, eventos `request:*`, «espera a…» en la tarea, el tablero y
 `get_context`), MCP (`create_request` … `open_request`, `wait_request`) y la
-pantalla de Tauri (`/requests`). Falta la app nativa, sobre el mismo contrato,
-y que la skill `inbox` y el hook de la escucha lean la bandeja.
+pantalla de Tauri (`/requests`). La app nativa, en la rama
+`wt-requests-native`: `core/src/requests.rs` (lista, número, marcas «espera
+a…», contestar, `request:open` con su `/opened`) y `desktop/src/requests.rs`
+(la fila del panel con el número, la pantalla, la marca en las filas y
+tarjetas). Falta que la skill `inbox` y el hook de la escucha lean la bandeja,
+y adjuntar captura en «Probar» desde la nativa.
 
 **23-nov, las pestañas de un canal en la app nativa** (command-and-control-489,
 subtareas 490–494), en la rama `wt-comms` (worktree `cac-wt-comms`), sin

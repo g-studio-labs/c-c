@@ -66,6 +66,16 @@ pub(crate) fn show(announcement: Announcement, cx: &mut App) {
     crate::sound::after_notice(kind, cx);
 }
 
+/// La ventana de la app al frente: al pulsar un aviso, o porque un agente
+/// pidió que se mire un pedido ya (`request:open`). Un gestor de ventanas que
+/// no deja robar el foco no es un fallo: lo pedido ya está en pantalla.
+pub(crate) fn bring_to_front(cx: &mut App) {
+    cx.activate(true);
+    if let Some(window) = cx.active_window().or_else(|| cx.windows().first().copied()) {
+        let _ = window.update(cx, |_, window, _| window.activate_window());
+    }
+}
+
 /// Se pulsó un aviso: la ventana al frente, y su conversación delante.
 fn respond(response: SystemNotificationResponse, cx: &mut App) {
     let ring = response.tag.starts_with("ring:");
@@ -73,10 +83,7 @@ fn respond(response: SystemNotificationResponse, cx: &mut App) {
     if target.is_none() && !ring {
         return;
     }
-    cx.activate(true);
-    if let Some(window) = cx.active_window().or_else(|| cx.windows().first().copied()) {
-        let _ = window.update(cx, |_, window, _| window.activate_window());
-    }
+    bring_to_front(cx);
     let Some(target) = target else { return };
     Backend::run(cx, move |core| async move {
         core.notices().open(target).await;

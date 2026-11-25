@@ -103,6 +103,8 @@ pub struct Workspace {
     /// Lo escrito para filtrar el árbol de Documentación.
     docs_filter: Entity<InputState>,
     pub(crate) task: Entity<TaskView>,
+    /// «Por atender»: los pedidos de los agentes.
+    pub(crate) requests: Entity<crate::requests::RequestsView>,
     /// La lista de comunicación: lo que el panel enseña mientras se está en
     /// ese módulo.
     pub(crate) comms: Entity<CommsView>,
@@ -202,6 +204,7 @@ impl Workspace {
             doc_index: cx.new(|cx| crate::docs_module::DocIndexView::new(window, cx)),
             docs_filter: cx.new(|cx| InputState::new(window, cx).placeholder(tr(cx, "nav:panel.filter"))),
             task: cx.new(|cx| TaskView::new(window, cx)),
+            requests: cx.new(|cx| crate::requests::RequestsView::new(window, cx)),
             comms,
             servers: cx.new(|_| crate::platform::servers::ServersView::new()),
             _on_comms: on_comms,
@@ -846,6 +849,58 @@ impl Workspace {
     }
 
     /// Una fila del panel que la app de siempre tiene y ésta todavía no.
+    /// «Por atender», con cuántos pedidos te esperan (`WorkPanel.tsx`). El
+    /// número es tuyo aunque la pantalla mire «Equipo»: lo cuenta el core.
+    fn requests_row(&self, active: bool, waiting: i64, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, hover, foreground, primary, on_primary) = (theme.muted_foreground, theme.sidebar_accent, theme.sidebar_foreground, theme.primary, theme.primary_foreground);
+        let label = tr(cx, "nav:item.requests");
+        let badge = count_badge(Some(waiting), RAIL_CAP);
+        div()
+            .id("panel-requests")
+            .h(px(PANEL_ROW_HEIGHT))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .px_1()
+            .mx_1()
+            .rounded(px(8.))
+            .leading_sm()
+            .when(active, |this| this.bg(hover).font_weight(FontWeight::MEDIUM))
+            .when(!active, |this| this.text_color(muted).hover(move |style| style.bg(hover.opacity(0.5)).text_color(foreground)))
+            .cursor_pointer()
+            .aria_label(counted_label(&label, Some(waiting)))
+            .on_click(|_, _, cx| {
+                Backend::run(cx, |core| async move {
+                    if core.requests().show(None) {
+                        core.requests().load().await;
+                    }
+                })
+            })
+            .child(Icon::new(Lucide::Hand).size_4())
+            .child(div().flex_1().child(label))
+            .children(badge.map(|text| {
+                div()
+                    .id("panel-requests-count")
+                    .mr_1()
+                    .min_w_5()
+                    .flex()
+                    .justify_center()
+                    .rounded_full()
+                    .px_1p5()
+                    .text_size(px(10.))
+                    .line_height(px(16.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .bg(primary)
+                    .text_color(on_primary)
+                    .aria_label(text.clone())
+                    .child(text)
+                    .test_support()
+            }))
+            .test_support()
+    }
+
     pub(crate) fn pending_panel_row(id: &'static str, icon: Lucide, label_key: &str, cx: &App) -> impl IntoElement {
         let theme = cx.theme();
         let (muted, hover, foreground) = (theme.muted_foreground, theme.sidebar_accent.opacity(0.5), theme.sidebar_foreground);
@@ -1354,8 +1409,10 @@ impl Workspace {
             (theme.sidebar, theme.sidebar_border, theme.muted_foreground, theme.sidebar_accent, theme.sidebar_foreground);
         let snapshot = Backend::snapshot(cx).read(cx);
         // «Mi trabajo» es la pantalla, esté acotada o no: a qué, lo dice el
-        // árbol. Leyendo documentación ya no se está en ella.
-        let on_my_work = snapshot.docs.target.is_none();
+        // árbol. Leyendo documentación o en «Por atender» ya no se está en ella.
+        let on_requests = snapshot.requests.on_screen;
+        let on_my_work = snapshot.docs.target.is_none() && !on_requests;
+        let waiting = snapshot.requests.mine_count;
         // En comunicación el panel es su lista, y en Plataforma sus filas:
         // misma cabecera, otro cuerpo.
         let (on_comms, on_platform, on_docs) = Self::modules(cx);
@@ -1505,6 +1562,7 @@ impl Workspace {
                     .child(Icon::new(IconName::Inbox).size_4())
                     .child(tr(cx, "nav:item.myWork")),
             )
+            .child(self.requests_row(on_requests, waiting, cx))
             .child(Self::pending_panel_row("panel-overview", Lucide::LayoutDashboard, "nav:item.overview", cx))
             .child(Self::pending_panel_row("panel-notes", Lucide::NotebookPen, "nav:item.notes", cx))
             // Filtra lo que ya está en el panel; no es el buscador.
@@ -1663,6 +1721,8 @@ impl Render for Workspace {
             self.doc_index.clone().into_any_element()
         } else if snapshot.docs.target.is_some() {
             self.docs.clone().into_any_element()
+        } else if snapshot.requests.on_screen {
+            self.requests.clone().into_any_element()
         } else {
             self.my_work.clone().into_any_element()
         };

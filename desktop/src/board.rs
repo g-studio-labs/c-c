@@ -109,6 +109,7 @@ fn card_face(card: &BoardCard, cx: &App) -> Div {
                 .child(div().min_w_0().truncate().child(card.path.clone())),
         )
         .child(div().mt_0p5().leading_sm().line_clamp(2).text_ellipsis().child(card.title.clone()))
+        .children(crate::requests::waiting_chip(format!("board-waiting-{}", card.id), &card.id, cx).map(|chip| div().mt_1p5().flex().child(chip)))
         .child(
             div()
                 .mt_1p5()
