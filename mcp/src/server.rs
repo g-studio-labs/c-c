@@ -2446,7 +2446,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "get_context",
-            "description": "START HERE when you begin work in a repository. One call returns what the team knows about its project, without any bodies: the space's tree (folders and lists, with `path`; a list with `projectId` belongs to a client), for each node with a document the headings of its tabs (overview, runbook, decisions, links; up to level 3, with their size in `chars`), its subpages and its decisions still in force (id and title; the body with get_decision), the markdown files of the repos linked to the space, and the tasks already in progress — each with its `ref`, who is on it (`assignees`) and its `handoff`: where it was left, by whom and when, so you don't open every task to find out. A task in progress whose linked commits have all gone out in a GitHub release carries `shipped` {tag, at}: move it to done with a comment saying so (cac marks it; it never moves it). Each node's `incidents` are the ones still open (id, title, servers, areas; the body with get_incident) and `fixedIncidents` counts the fixed ones (list_incidents by server or area when you touch them); an open one with `shippedIn` has its fix released: tell the user. `truncated` names anything cut for size.\n\nWith no arguments it reads the git remote of the folder you are working in and finds the space that GitHub repo is linked to. Then read only the sections you need: get_doc with kind, ownerId (the node's id), tab and section (a heading's text); get_doc_page for a subpage; get_repo_doc for a repo file.",
+            "description": "START HERE when you begin work in a repository. One call returns what the team knows about its project, without any bodies: the space's tree (folders and lists, with `path`; a list with `projectId` belongs to a client), for each node with a document the headings of its tabs (overview, runbook, decisions, links; up to level 3, with their size in `chars`), its subpages and its decisions still in force (id and title; the body with get_decision), the markdown files of the repos linked to the space, and the tasks already in progress — each with its `ref`, who is on it (`assignees`), its `handoff`: where it was left, by whom and when, so you don't open every task to find out, and `openRequests` {count, waitingOn} when it waits on a person. `myRequests` {count, top} are the open requests waiting on the token's owner, in all their organizations: tell them how many are pending (get_request by `code`). A task in progress whose linked commits have all gone out in a GitHub release carries `shipped` {tag, at}: move it to done with a comment saying so (cac marks it; it never moves it). Each node's `incidents` are the ones still open (id, title, servers, areas; the body with get_incident) and `fixedIncidents` counts the fixed ones (list_incidents by server or area when you touch them); an open one with `shippedIn` has its fix released: tell the user. `truncated` names anything cut for size.\n\nWith no arguments it reads the git remote of the folder you are working in and finds the space that GitHub repo is linked to. Then read only the sections you need: get_doc with kind, ownerId (the node's id), tab and section (a heading's text); get_doc_page for a subpage; get_repo_doc for a repo file.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2495,7 +2495,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "get_task",
-            "description": "Full detail of one task, with its `ref` — how to name it in a commit message, branch or PR so cac links it by itself: its space key and number (`proteus-12`), or a client's folio (`acme-7`): its `handoff` (where the last session left it: read this before the thread), `tracker` when the task IS an outside ticket (`tickets`: the keys on its **Jira:** line, or in its title; `since`: when the handoff was written — read that ticket's comments after it with the tracker's own tool), what it waits for (`blockedBy`, each with whether it is still open), the decisions that apply to it (`decisions`; one superseded says by which, read with get_decision), its markdown description, status, priority, tags, assignees, attachments, the comment thread (people and agents only: GitHub's commit notes are left out, they are the same commits as `git.commits`), its subtasks — which are its checklist — and `git`: the GitHub branches, pull requests (with state open/draft/merged/closed) and commits linked to it, by the task named in a commit/PR or by the branch name (cac-12-…, acme-7-…); each commit carries `releasedIn` {tag, at, url} once it went out in a GitHub release of its repo. get_board does not list subtasks; it only shows how many are done.",
+            "description": "Full detail of one task, with its `ref` — how to name it in a commit message, branch or PR so cac links it by itself: its space key and number (`proteus-12`), or a client's folio (`acme-7`): its `handoff` (where the last session left it: read this before the thread), `tracker` when the task IS an outside ticket (`tickets`: the keys on its **Jira:** line, or in its title; `since`: when the handoff was written — read that ticket's comments after it with the tracker's own tool), what it waits for (`blockedBy`, each with whether it is still open; `openRequests` {count, waitingOn, codes}: the requests waiting on a person, read with get_request), the decisions that apply to it (`decisions`; one superseded says by which, read with get_decision), its markdown description, status, priority, tags, assignees, attachments, the comment thread (people and agents only: GitHub's commit notes are left out, they are the same commits as `git.commits`), its subtasks — which are its checklist — and `git`: the GitHub branches, pull requests (with state open/draft/merged/closed) and commits linked to it, by the task named in a commit/PR or by the branch name (cac-12-…, acme-7-…); each commit carries `releasedIn` {tag, at, url} once it went out in a GitHub release of its repo. get_board does not list subtasks; it only shows how many are done.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "id": { "type": "string", "description": "The task id, or its ref as people write it: `proteus-12` (space key and number) or a client's folio `acme-7`. A tracker key in capitals (`PROTEUS-165`, Jira) resolves to the task that names it in its title or description — numbered apart from refs, so `proteus-165` is another task; several tasks naming it are listed instead. `cac#12` does not resolve: a number without its space." } },
@@ -3423,6 +3423,106 @@ fn tool_defs() -> Value {
             }
         },
         {
+            "name": "create_request",
+            "description": "Leave a request for a person on a task, when you need them and cannot go on alone: it waits in their «Por atender» inbox in the app (with a notification) and survives this session. Returns its short `code` (req-…): tell the user, who can answer with a button or here. Kinds and their `body`: approve_message {draft: the exact text, destination, destinationUrl?} — you may only publish the approved `finalText`; test {url?, steps[], expected}; decide {question?, options: 2-4 of {label, consequence, recommended?}} — the recommended one goes first; run {command, where, expected, undo?}; obtain {what, from}. One request goes to ONE person; for two people, make two. Then park the task and follow it with wait_request or get_request. Needs `tasks:write`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "taskId": { "type": "string", "description": "The task's id or ref (proteus-12)." },
+                    "kind": { "type": "string", "enum": ["approve_message", "test", "decide", "run", "obtain"] },
+                    "summary": { "type": "string", "description": "2-3 lines: what you need and why." },
+                    "body": { "type": "object", "description": "The kind's fields, as above." },
+                    "requestedOf": { "type": "string", "description": "Username or name of a member. Default: the token's owner." }
+                },
+                "required": ["taskId", "kind", "summary", "body"]
+            }
+        },
+        {
+            "name": "list_requests",
+            "description": "Requests left for people: by default the open ones waiting on the token's owner, most urgent task first. `scope: team` lists everyone's; `status` open (default), closed (answered or withdrawn) or all; `taskId` narrows to one task. Each with its `code`, kind, summary, task ref and who it waits on.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scope": { "type": "string", "enum": ["mine", "team"] },
+                    "status": { "type": "string", "enum": ["open", "answered", "withdrawn", "closed", "all"] },
+                    "taskId": { "type": "string", "description": "A task's id or ref." }
+                }
+            }
+        },
+        {
+            "name": "get_request",
+            "description": "One request by its code (req-…), as the user pastes it: kind, summary, body, status, the answer (who, when, `answeredVia` app or session, chosen option / approved finalText / works + note / output), earlier versions (`history`), its task ref and the task's handoff. What you need to pick it up from any session.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string", "description": "req-… code (or the request's id)." } },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "update_request",
+            "description": "Re-issue an open request after talking it over with the user: new summary, body, kind or person; the previous version stays in its history and the person is notified again. Also, once you published an approved message, `publishedUrl` records where it went. Needs `tasks:write`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "req-… code." },
+                    "summary": { "type": "string" },
+                    "kind": { "type": "string", "enum": ["approve_message", "test", "decide", "run", "obtain"] },
+                    "body": { "type": "object", "description": "The whole new body of its kind (needed when the kind changes)." },
+                    "requestedOf": { "type": "string" },
+                    "publishedUrl": { "type": "string", "description": "Only this, on an approved message: where you published it." }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "answer_request",
+            "description": "Record the answer the person gave HERE in the terminal (it is marked as answered from a session, not by their button). Only for a request made to the token's owner, and only with what they said: approve_message {approved, finalText? (edited text), reason (when rejected)}; test {works, note (required when it does not work)}; decide {option: the label}; run {output?}; obtain {}; `note` on any. Needs `tasks:write`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "req-… code." },
+                    "approved": { "type": "boolean" },
+                    "finalText": { "type": "string" },
+                    "reason": { "type": "string" },
+                    "works": { "type": "boolean" },
+                    "option": { "type": "string" },
+                    "output": { "type": "string" },
+                    "note": { "type": "string" }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "withdraw_request",
+            "description": "Withdraw an open request you no longer need (it leaves the person's inbox; it cannot be reopened — create a new one). Needs `tasks:write`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string", "description": "req-… code." } },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "open_request",
+            "description": "Bring the person's cac app to the front with this request open in «Por atender», so they answer it now. Only for a request made to the token's owner. `delivered: true` means an open app showed it; false means none did: give them the `link` instead. Needs `tasks:write`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string", "description": "req-… code." } },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "wait_request",
+            "description": "Wait until the request is answered or withdrawn, up to `timeoutSeconds` (default 300, max 600), and return it with its answer. If it is still open at the timeout it says so: call again, or park the task and come back later.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "req-… code." },
+                    "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 600 }
+                },
+                "required": ["id"]
+            }
+        },
+        {
             "name": "share_doc_page",
             "description": "Create a public link to a page. Anyone who has it, without an account, can read the page AND all its subpages, including ones added later, and the attachments they cite, until it expires or is revoked. Only share when the user asked to send it outside. Returns the web `url` to send, `expiresAt` and the share `id` (to revoke it). Needs a token with `docs:share`.",
             "inputSchema": {
@@ -3462,6 +3562,82 @@ fn tool_defs() -> Value {
             }
         }
     ])
+}
+
+// ── Pedidos a una persona (command-and-control-500) ─────────────────────────
+
+/// El ID de un pedido tal como lo pega la persona: `req-…`, en minúsculas.
+fn request_id(args: &Value) -> Result<String, String> {
+    let id = arg_str(args, "id").ok_or("id is required: the request's code (req-…)")?;
+    let id = id.trim();
+    Ok(if id.to_ascii_lowercase().starts_with("req-") { id.to_ascii_lowercase() } else { id.to_string() })
+}
+
+/// Una línea de la bandeja: lo justo para elegir cuál abrir.
+fn request_line(v: &Value) -> Value {
+    json!({
+        "code": v.get("code"),
+        "kind": v.get("kind"),
+        "summary": v.get("summary"),
+        "status": v.get("status"),
+        "task": v.get("task").and_then(|t| t.get("ref")).cloned().filter(|r| r.as_str().is_some_and(|s| !s.is_empty()))
+            .or_else(|| v.get("task").and_then(|t| t.get("title")).cloned()),
+        "waitsOn": v.get("requestedOf").and_then(|p| p.get("name")),
+        "createdAt": v.get("createdAt"),
+        "link": v.get("link"),
+    })
+}
+
+/// El pedido entero, sin ids que a un agente no le sirven: la persona va por
+/// nombre y la tarea por su ref.
+fn request_view(v: &Value) -> Value {
+    let mut out = v.clone();
+    if let Some(m) = out.as_object_mut() {
+        for key in ["id", "orgId", "canAnswer"] {
+            m.remove(key);
+        }
+        for key in ["requestedOf", "requestedBy", "answeredBy"] {
+            if let Some(name) = v.get(key).and_then(|p| p.get("name")).cloned() {
+                m.insert(key.to_string(), name);
+            }
+        }
+    }
+    out
+}
+
+/// Cuánto esperar: 300 s si no se dice, y nunca más de 600.
+fn wait_seconds(args: &Value) -> Result<u64, String> {
+    match args.get("timeoutSeconds") {
+        None | Some(Value::Null) => Ok(300),
+        Some(v) => match v.as_i64() {
+            Some(n) if (1..=600).contains(&n) => Ok(n as u64),
+            _ => Err("timeoutSeconds is a whole number from 1 to 600".into()),
+        },
+    }
+}
+
+/// Encadena esperas largas de cac hasta que el pedido se cierra o se acaba el
+/// plazo. Cada una dura poco (cac corta antes de su propio plazo de escritura),
+/// así que el plazo total lo lleva esto. `now` se inyecta para las pruebas.
+fn wait_for_request(cfg: &Cfg, id: &str, total: u64, now: impl Fn() -> std::time::Instant) -> Result<Value, String> {
+    let start = now();
+    let mut last = Value::Null;
+    loop {
+        let elapsed = now().duration_since(start).as_secs();
+        if elapsed >= total {
+            return Ok(json!({
+                "settled": false,
+                "request": last,
+                "note": "Still open. Call wait_request again, or park the task and come back with get_request.",
+            }));
+        }
+        let slice = (total - elapsed).clamp(1, 12);
+        let w = api_get(cfg, &format!("/api/v1/requests/{}/wait?timeout={slice}", urlencode(id)))?;
+        last = w.get("request").map(request_view).unwrap_or(Value::Null);
+        if w.get("settled").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Ok(json!({ "settled": true, "request": last }));
+        }
+    }
 }
 
 /// De dónde viene un fichero que se adjunta: una URL o una ruta del disco.
@@ -3777,6 +3953,7 @@ fn task_id_fields(tool: &str) -> &'static [&'static str] {
         "update_task" | "add_task_comment" | "edit_task_comment" | "delete_task_comment"
         | "add_task_attachment" | "link_pull_request" => &["id"],
         "create_task" => &["parentId"],
+        "create_request" | "list_requests" => &["taskId"],
         "record_decision" | "record_incident" => &["originTaskId"],
         _ => &[],
     }
@@ -5742,6 +5919,95 @@ fn run_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
             Ok(json!({ "revoked": true, "id": share, "note": "The link stopped working right away." }))
         }
 
+        "create_request" => {
+            let task = arg_str(args, "taskId").ok_or("taskId is required")?;
+            let mut body = json!({ "taskId": task });
+            for key in ["kind", "summary", "requestedOf"] {
+                if let Some(v) = arg_str(args, key) {
+                    body[key] = json!(v);
+                }
+            }
+            body["body"] = args.get("body").cloned().unwrap_or(json!({}));
+            let out = api_post(cfg, "/api/v1/requests", body)?;
+            Ok(request_view(&out))
+        }
+
+        "list_requests" => {
+            let mut parts = vec![];
+            push_q(&mut parts, "scope", arg_str(args, "scope"));
+            push_q(&mut parts, "status", arg_str(args, "status"));
+            push_q(&mut parts, "taskId", arg_str(args, "taskId"));
+            let path = if parts.is_empty() { "/api/v1/requests".to_string() } else { format!("/api/v1/requests?{}", parts.join("&")) };
+            let rows = list_or_empty(api_get(cfg, &path)?);
+            let rows: Vec<Value> = rows.as_array().map(|a| a.iter().map(request_line).collect()).unwrap_or_default();
+            Ok(json!({ "requests": rows }))
+        }
+
+        "get_request" => {
+            let id = request_id(args)?;
+            Ok(request_view(&api_get(cfg, &format!("/api/v1/requests/{}", urlencode(&id)))?))
+        }
+
+        "update_request" => {
+            let id = request_id(args)?;
+            if let Some(url) = arg_str(args, "publishedUrl") {
+                let out = api_post(cfg, &format!("/api/v1/requests/{}/published", urlencode(&id)), json!({ "url": url }))?;
+                return Ok(request_view(&out));
+            }
+            let mut body = json!({});
+            for key in ["kind", "summary", "requestedOf"] {
+                if let Some(v) = arg_str(args, key) {
+                    body[key] = json!(v);
+                }
+            }
+            if let Some(b) = args.get("body") {
+                body["body"] = b.clone();
+            }
+            let out = api_patch(cfg, &format!("/api/v1/requests/{}", urlencode(&id)), body)?;
+            Ok(request_view(&out))
+        }
+
+        "answer_request" => {
+            let id = request_id(args)?;
+            let mut body = json!({});
+            for key in ["finalText", "reason", "option", "output", "note"] {
+                if let Some(v) = arg_str(args, key) {
+                    body[key] = json!(v);
+                }
+            }
+            for key in ["approved", "works"] {
+                if let Some(v) = args.get(key).and_then(|v| v.as_bool()) {
+                    body[key] = json!(v);
+                }
+            }
+            let out = api_post(cfg, &format!("/api/v1/requests/{}/answer", urlencode(&id)), body)?;
+            Ok(request_view(&out))
+        }
+
+        "withdraw_request" => {
+            let id = request_id(args)?;
+            let out = api_post(cfg, &format!("/api/v1/requests/{}/withdraw", urlencode(&id)), json!({}))?;
+            Ok(request_view(&out))
+        }
+
+        "open_request" => {
+            let id = request_id(args)?;
+            let out = api_post(cfg, &format!("/api/v1/requests/{}/open", urlencode(&id)), json!({}))?;
+            let delivered = out.get("delivered").and_then(|v| v.as_bool()).unwrap_or(false);
+            let note = if delivered {
+                "Their cac app is showing it now."
+            } else {
+                "No open cac app showed it. Give them the link."
+            };
+            Ok(json!({ "delivered": delivered, "link": out.get("link"), "note": note }))
+        }
+
+        "wait_request" => {
+            let id = request_id(args)?;
+            let total = wait_seconds(args)?;
+            wait_for_request(cfg, &id, total, std::time::Instant::now)
+        }
+
         "update_doc" => {
             let (kind, id) = doc_target(cfg, args)?;
             if arg_bool(args, "dryRun") {
@@ -6606,12 +6872,12 @@ fn annotate(mut tools: Value) -> Value {
 
 fn is_read_only(name: &str) -> bool {
     name != "get_attachment"
-        && (name.starts_with("get_") || name.starts_with("list_") || name.starts_with("search") || matches!(name, "read_messages" | "find_person"))
+        && (name.starts_with("get_") || name.starts_with("list_") || name.starts_with("search") || matches!(name, "read_messages" | "find_person" | "wait_request"))
 }
 
 /// Lo que borra o reemplaza entero algo que otra persona pudo escribir.
 fn is_destructive(name: &str) -> bool {
-    name.starts_with("delete_") || matches!(name, "write_doc_tab" | "write_doc_page" | "revoke_doc_share")
+    name.starts_with("delete_") || matches!(name, "write_doc_tab" | "write_doc_page" | "revoke_doc_share" | "withdraw_request")
 }
 
 /// La sección del overview donde va lo que ya mordió a alguien. El nombre es
@@ -8171,6 +8437,163 @@ mod tests {
         assert_eq!(answer["url"], format!("{base}/app/shared#s1.firma"));
         assert_eq!((answer["id"].as_str(), answer["expiresAt"].as_str()), (Some("s1"), Some("2026-12-24T15:00:00Z")));
         assert_eq!(*seen.lock().unwrap(), [("POST".to_string(), "/api/v1/docs/list/l1/pages/p1/shares".to_string(), json!({ "ttlHours": 720 }))]);
+    }
+
+    // ── Pedidos a una persona (command-and-control-500) ─────────────────────
+
+    /// Las herramientas de pedidos piden lo que necesitan, la de crear dice
+    /// los cinco tipos y que va a una sola persona, esperar es de leer y
+    /// retirar no tiene vuelta.
+    ///
+    /// Roturas que atrapa: una herramienta sin anunciar; crear sin tarea,
+    /// tipo, resumen o cuerpo; una descripción que calla un tipo o que el
+    /// mensaje aprobado es lo único publicable; esperar marcado como escritura
+    /// o retirar como inocuo.
+    #[test]
+    fn the_request_tools_are_declared_with_what_they_need() {
+        let defs = annotate(tool_defs());
+        let req = |n: &str| tool(&defs, n)["inputSchema"]["required"].clone();
+        assert_eq!(req("create_request"), json!(["taskId", "kind", "summary", "body"]));
+        for name in ["get_request", "update_request", "answer_request", "withdraw_request", "open_request", "wait_request"] {
+            assert_eq!(req(name), json!(["id"]), "{name}");
+        }
+        let said = tool(&defs, "create_request")["description"].as_str().unwrap();
+        for kind in ["approve_message", "test", "decide", "run", "obtain", "ONE person", "finalText"] {
+            assert!(said.contains(kind), "{kind}: {said}");
+        }
+        assert!(tool(&defs, "list_requests").is_object());
+        assert_eq!(tool(&defs, "wait_request")["annotations"]["readOnlyHint"], true);
+        assert_eq!(tool(&defs, "withdraw_request")["annotations"]["destructiveHint"], true);
+        assert_eq!(tool(&defs, "open_request")["annotations"]["readOnlyHint"], false);
+    }
+
+    /// Esperar es 300 s si no se dice, y de 1 a 600.
+    ///
+    /// Roturas que atrapa: otro valor por defecto; aceptar una espera de una
+    /// hora, cero o escrita como texto.
+    #[test]
+    fn a_wait_lasts_up_to_ten_minutes() {
+        assert_eq!(wait_seconds(&json!({})), Ok(300));
+        assert_eq!(wait_seconds(&json!({ "timeoutSeconds": 600 })), Ok(600));
+        assert_eq!(wait_seconds(&json!({ "timeoutSeconds": 1 })), Ok(1));
+        for wrong in [json!(601), json!(0), json!(-5), json!("60")] {
+            assert!(wait_seconds(&json!({ "timeoutSeconds": wrong.clone() })).is_err(), "{wrong}");
+        }
+    }
+
+    fn call(cfg: &Cfg, name: &str, args: Value) -> Value {
+        let cfg = Cfg { base: cfg.base.clone(), token: cfg.token.clone() };
+        let out = handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args } }), &Ok(cfg)).unwrap();
+        let text = out["result"]["content"][0]["text"].as_str().unwrap_or_default().to_string();
+        serde_json::from_str(&text).unwrap_or_else(|_| json!({ "error": text, "isError": out["result"]["isError"] }))
+    }
+
+    fn a_request(status: &str) -> Value {
+        json!({ "id": "uuid-1", "code": "req-7k2m9x", "orgId": "o1", "kind": "test", "summary": "Mira", "status": status,
+            "task": { "id": "t1", "ref": "cac-10", "title": "Panel", "link": "/tasks?task=t1" },
+            "requestedOf": { "id": "u1", "name": "Jose Guzman" }, "requestedBy": { "id": "u1", "name": "Jose Guzman" },
+            "canAnswer": true, "link": "/requests?open=req-7k2m9x" })
+    }
+
+    /// Crear un pedido sobre la ref de una tarea la cambia por su id, manda
+    /// tipo, resumen, cuerpo y persona, y devuelve el `code` con la liga
+    /// entera; la persona va por su nombre, sin ids.
+    ///
+    /// Roturas que atrapa: mandar la ref donde cac espera el id; perder el
+    /// cuerpo o la persona; devolver la liga como ruta suelta; enseñarle al
+    /// agente el uuid en vez del código.
+    #[test]
+    fn creating_a_request_returns_its_code_and_link() {
+        let (cfg, seen) = fake_cac(|m, p, _| {
+            if m == "GET" && p.starts_with("/api/v1/tasks/by-ref/") {
+                json!({ "task": { "id": "t1" } })
+            } else {
+                a_request("open")
+            }
+        });
+        let out = call(&cfg, "create_request", json!({ "taskId": "cac-10", "kind": "test", "summary": "Mira",
+            "body": { "steps": ["abrir"], "expected": "07:30" }, "requestedOf": "jose" }));
+        assert_eq!(out["code"], "req-7k2m9x", "{out}");
+        assert_eq!(out["link"], format!("{}/app/requests?open=req-7k2m9x", cfg.base));
+        assert_eq!(out["requestedOf"], "Jose Guzman");
+        assert!(out.get("id").is_none() && out.get("canAnswer").is_none(), "{out}");
+        let log = seen.lock().unwrap();
+        let (m, p, b) = log.last().unwrap();
+        assert_eq!((m.as_str(), p.as_str()), ("POST", "/api/v1/requests"));
+        assert_eq!(*b, json!({ "taskId": "t1", "kind": "test", "summary": "Mira", "requestedOf": "jose",
+            "body": { "steps": ["abrir"], "expected": "07:30" } }));
+    }
+
+    /// Contestar desde la terminal manda sólo lo que la persona dijo, al
+    /// pedido de su código (aunque lo peguen en mayúsculas).
+    ///
+    /// Roturas que atrapa: perder un booleano en falso («no funciona»); mandar
+    /// a otra ruta; no reconocer `REQ-…` pegado tal cual.
+    #[test]
+    fn answering_sends_what_the_person_said() {
+        let (cfg, seen) = fake_cac(|_, _, _| a_request("answered"));
+        call(&cfg, "answer_request", json!({ "id": "REQ-7K2M9X", "works": false, "note": "sale 07:00" }));
+        let log = seen.lock().unwrap();
+        assert_eq!(*log, [("POST".to_string(), "/api/v1/requests/req-7k2m9x/answer".to_string(),
+            json!({ "works": false, "note": "sale 07:00" }))]);
+    }
+
+    /// Abrir en la app dice la verdad: si ninguna app lo enseñó, lo dice y da
+    /// la liga entera para mandarla.
+    ///
+    /// Roturas que atrapa: decir que se abrió sin que nadie lo viera; dar la
+    /// liga sin `/app` o sin dominio.
+    #[test]
+    fn opening_says_whether_an_app_showed_it() {
+        let (cfg, _) = fake_cac(|_, _, _| json!({ "delivered": false, "link": "/requests?open=req-7k2m9x" }));
+        let out = call(&cfg, "open_request", json!({ "id": "req-7k2m9x" }));
+        assert_eq!(out["delivered"], false);
+        assert_eq!(out["link"], format!("{}/app/requests?open=req-7k2m9x", cfg.base));
+        assert!(out["note"].as_str().unwrap().contains("No open cac app"), "{out}");
+    }
+
+    /// Esperar encadena esperas cortas de cac hasta que el pedido se cierra,
+    /// y vuelve con la respuesta; si se acaba el plazo, dice que sigue
+    /// abierto. El reloj es de mentira: nada se cronometra.
+    ///
+    /// Roturas que atrapa: volver tras la primera espera corta diciendo que
+    /// sigue abierto; pedirle a cac esperas más largas que su propio corte;
+    /// esperar más allá del plazo; perder la respuesta.
+    #[test]
+    fn waiting_chains_short_waits_until_the_answer() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = calls.clone();
+        let (cfg, seen) = fake_cac(move |_, _, _| {
+            let i = n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if i < 2 {
+                json!({ "settled": false, "request": a_request("open") })
+            } else {
+                let mut r = a_request("answered");
+                r["answer"] = json!({ "works": true });
+                json!({ "settled": true, "request": r })
+            }
+        });
+        // Cada lectura del reloj avanza diez segundos.
+        let t0 = std::time::Instant::now();
+        let tick = std::sync::atomic::AtomicU64::new(0);
+        let clock = || t0 + std::time::Duration::from_secs(10 * tick.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+        let out = wait_for_request(&cfg, "req-7k2m9x", 300, clock).unwrap();
+        assert_eq!(out["settled"], true, "{out}");
+        assert_eq!(out["request"]["answer"]["works"], true);
+        let log = seen.lock().unwrap();
+        assert_eq!(log.len(), 3);
+        assert!(log.iter().all(|(m, p, _)| m == "GET" && p == "/api/v1/requests/req-7k2m9x/wait?timeout=12"), "{log:?}");
+        drop(log);
+
+        let (cfg, seen) = fake_cac(|_, _, _| json!({ "settled": false, "request": a_request("open") }));
+        let tick = std::sync::atomic::AtomicU64::new(0);
+        let clock = || t0 + std::time::Duration::from_secs(10 * tick.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+        let out = wait_for_request(&cfg, "req-7k2m9x", 25, clock).unwrap();
+        assert_eq!(out["settled"], false);
+        assert!(out["note"].as_str().unwrap().contains("Still open"));
+        let log = seen.lock().unwrap();
+        assert_eq!(log.len(), 2, "esperó de más");
+        assert!(log.last().unwrap().1.ends_with("timeout=5"), "la última espera sólo pide lo que queda: {:?}", log.last());
     }
 
     /// Revocar contesta 204 sin cuerpo, y eso es que salió bien.
