@@ -219,13 +219,21 @@ impl RequestsView {
             LinkSegment::Url(url) => cx.open_url(&url),
             LinkSegment::AppRoute { route, .. } => self.open_link(route, org_id, cx),
             LinkSegment::Path { path, .. } => {
-                let language = locale(cx);
-                if !cac_mcp::host::expand_home(&path).exists() {
-                    self.said = Some(cac_core::text_with(language, "work:requests.pathMissing", &[("path", &path)]));
-                } else if launch_path(&path).is_err() {
-                    self.said = Some(tr(cx, "common:last.openLinkFailed"));
-                }
-                cx.notify();
+                // Mirar si existe puede tardar (una ruta de red): fuera del hilo de la ventana.
+                let shown = path.clone();
+                cx.spawn(async move |this, cx| {
+                    let result = cx.background_executor().spawn(async move { reveal(&path) }).await;
+                    this.update(cx, |this, cx| {
+                        match result {
+                            Ok(()) => return,
+                            Err(cac_mcp::host::RevealError::Failed(_)) => this.said = Some(tr(cx, "common:last.openLinkFailed")),
+                            Err(_) => this.said = Some(cac_core::text_with(locale(cx), "work:requests.pathMissing", &[("path", &shown)])),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
             }
             LinkSegment::Text(_) => {}
         }
@@ -256,7 +264,11 @@ impl RequestsView {
             }
         }
         let (view, org_id) = (cx.entity().downgrade(), org_id.to_string());
-        let text = InteractiveText::new(SharedString::from(format!("{id}-text")), StyledText::new(shown).with_highlights(highlights)).on_click(ranges, move |at, _, cx| {
+        let path_ranges: Vec<std::ops::Range<usize>> = ranges.iter().zip(&targets).filter(|(_, target)| matches!(target, LinkSegment::Path { .. })).map(|(range, _)| range.clone()).collect();
+        let hint = tr(cx, "work:requests.revealPath");
+        let text = InteractiveText::new(SharedString::from(format!("{id}-text")), StyledText::new(shown).with_highlights(highlights))
+            .tooltip(move |at, window, cx| path_ranges.iter().any(|range| range.contains(&at)).then(|| gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx)))
+            .on_click(ranges, move |at, _, cx| {
             let target = targets[at].clone();
             let org_id = org_id.clone();
             view.update(cx, |this, cx| this.follow(target, org_id, cx)).ok();
@@ -772,16 +784,19 @@ impl RequestsView {
     }
 }
 
-/// Abrir una ruta con el sistema. En las pruebas sólo se anota: no se lanza
-/// nada de verdad.
-fn launch_path(path: &str) -> Result<(), String> {
+/// Mostrar una ruta en el gestor de ficheros, seleccionada: nunca se abre
+/// (ver `cac_mcp::host::reveal_path`). En las pruebas sólo se anota.
+fn reveal(path: &str) -> Result<(), cac_mcp::host::RevealError> {
     #[cfg(test)]
     {
-        tests::OPENED.with(|opened| opened.borrow_mut().push(path.to_string()));
+        if !cac_mcp::host::expand_home(path).exists() {
+            return Err(cac_mcp::host::RevealError::NotFound);
+        }
+        tests::OPENED.lock().unwrap().push(path.to_string());
         Ok(())
     }
     #[cfg(not(test))]
-    cac_mcp::host::open_path(path)
+    cac_mcp::host::reveal(path)
 }
 
 impl Render for RequestsView {
@@ -973,15 +988,12 @@ mod tests {
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{point, px, size, AnyWindowHandle, AppContext, Bounds, Pixels, Point, ScrollDelta, TestAppContext, WindowBounds, WindowOptions};
     use serde_json::{json, Value};
-    use std::cell::RefCell;
     use std::sync::{Arc, Mutex};
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, ResponseTemplate};
 
-    thread_local! {
-        /// Las rutas que la pantalla habría abierto con el sistema.
-        pub(super) static OPENED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-    }
+    /// Las rutas que la pantalla habría mostrado en el gestor de ficheros.
+    pub(super) static OPENED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
     fn request(code: &str, kind: &str, task: &str, of: (&str, &str), mine: bool, body: Value) -> Value {
         json!({
@@ -1250,7 +1262,7 @@ mod tests {
     /// escritas en el texto de un pedido se pulsan, y cada una hace lo suyo.
     ///
     /// Roturas que atrapa: la dirección que no llega al navegador; la ruta
-    /// que no llega al sistema, o que se abre sin existir; una ruta que no
+    /// que no llega al gestor de ficheros, o que se muestra sin existir; una ruta que no
     /// existe y no dice nada; una pantalla de la app que sale al navegador en
     /// vez de abrirse dentro.
     #[gpui_kit::test]
@@ -1266,17 +1278,18 @@ mod tests {
         let window = open_sized(&server, 2400., cx);
         show_list(window, "req-u1", cx);
         wait_until(cx, "el último pedido", |cx| on_screen(window, "request-summary-req-r1", cx));
-        OPENED.with(|opened| opened.borrow_mut().clear());
+        OPENED.lock().unwrap().clear();
 
         click_start(window, "request-summary-req-u1", cx);
         assert_eq!(cx.opened_url().as_deref(), Some("https://supabase.example/sql/new"));
-        assert!(OPENED.with(|opened| opened.borrow().is_empty()), "una dirección no es una ruta");
+        assert!(OPENED.lock().unwrap().is_empty(), "una dirección no es una ruta");
 
         click_start(window, "request-summary-req-p1", cx);
-        assert_eq!(OPENED.with(|opened| opened.borrow().clone()), [here.clone()]);
+        wait_until(cx, "la ruta mostrada", |_| !OPENED.lock().unwrap().is_empty());
+        assert_eq!(OPENED.lock().unwrap().clone(), [here.clone()]);
 
         click_start(window, "request-summary-req-p2", cx);
-        assert_eq!(OPENED.with(|opened| opened.borrow().len()), 1, "una ruta que no existe no se abre");
+        assert_eq!(OPENED.lock().unwrap().len(), 1, "una ruta que no existe no se abre");
         wait_until(cx, "el aviso de que no existe", |cx| label(window, "requests-said", cx).contains("/no/existe/cac-504.sql"));
 
         click_start(window, "request-summary-req-r1", cx);

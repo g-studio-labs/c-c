@@ -91,4 +91,35 @@ describe("los enlaces de un pedido", () => {
       .join("");
     expect(joined).toBe(original);
   });
+
+  // Mismos casos que `core/src/request_links.rs`.
+  it("una ruta de red escondida en un file:// es texto", () => {
+    for (const hidden of ["file:////srv/share/x", "file://localhost//srv/share/x", "file:///%5C%5Csrv%5Cshare", "file:///%2F%2Fsrv/x", "//srv/share/x", "/\\srv/x"]) {
+      expect(requestSegments(hidden).every((p) => p.kind === "text"), hidden).toBe(true);
+    }
+  });
+
+  it("Rust y TypeScript resuelven igual los casos raros", () => {
+    expect(requestSegments("https:///x")).toEqual([text("https:///x")]);
+    const decoded = (url: string) => {
+      const parts = requestSegments(url);
+      expect(parts).toHaveLength(1);
+      return parts[0].kind === "path" ? parts[0].path : null;
+    };
+    expect(decoded("file:///a%zzb")).toBe("/a%zzb");
+    expect(decoded("file:///a%20b%zz")).toBe("/a%20b%zz");
+    expect(decoded("file:///%ff")).toBe("/%ff");
+    expect(decoded("file:///a%20b")).toBe("/a b");
+  });
+
+  it("el markdown y el énfasis no se pegan a la ruta", () => {
+    expect(requestSegments("[/tmp/a](/tmp/b)")).toEqual([text("["), path("/tmp/a"), text("]("), path("/tmp/b"), text(")")]);
+    expect(requestSegments("[web](https://x.com/a_(b))")).toEqual([text("[web]("), { kind: "url", url: "https://x.com/a_(b)" }, text(")")]);
+    expect(requestSegments("[https://a.com/x](https://b.com/y)")).toEqual([
+      text("["), { kind: "url", url: "https://a.com/x" }, text("]("), { kind: "url", url: "https://b.com/y" }, text(")"),
+    ]);
+    expect(requestSegments("ve /tmp/a(/tmp/b)")).toEqual([text("ve "), path("/tmp/a"), text("("), path("/tmp/b"), text(")")]);
+    expect(requestSegments("**/tmp/a**")).toEqual([text("**"), path("/tmp/a"), text("**")]);
+    expect(requestSegments("*~/x.md*")).toEqual([text("*"), path("~/x.md"), text("*")]);
+  });
 });

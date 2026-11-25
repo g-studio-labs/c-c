@@ -56,8 +56,9 @@ export async function openExternal(url: string): Promise<void> {
 }
 
 /**
- * Abrir con el sistema una ruta de esta máquina (la que un agente puso en un
- * pedido). Va por Rust, no por `fetch`: la CSP de la app lo bloquearía. Si no
+ * Mostrar en la carpeta una ruta de esta máquina (la que un agente puso en un
+ * pedido): se selecciona, nunca se abre, porque abrirla ejecutaría un `.jar` o un
+ * `.exe`. Va por Rust, no por `fetch`: la CSP de la app lo bloquearía. Si no
  * existe se dice, en vez de dejar un clic que no hace nada. Sólo en escritorio:
  * en web la ruta no es de quien mira.
  */
@@ -66,7 +67,7 @@ export async function openLocalPath(path: string): Promise<void> {
   try {
     await invoke("open_local_path", { path });
   } catch (e) {
-    if (String(e) === "not-found") toast.error(i18next.t("work:requests.pathMissing", { path }));
+    if (String(e) === "not-found" || String(e) === "refused") toast.error(i18next.t("work:requests.pathMissing", { path }));
     else toast.error(i18next.t("common:last.openLinkFailed"), { description: String(e) });
   }
 }

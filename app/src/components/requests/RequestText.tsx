@@ -40,7 +40,7 @@ export default function RequestText({ text }: { text: string }) {
             );
           case "path":
             return isTauri ? (
-              <a key={i} href={part.path} className={LINK} onClick={(e) => { e.preventDefault(); void openLocalPath(part.path); }}>
+              <a key={i} href={part.path} title={t("work:requests.revealPath")} className={LINK} onClick={(e) => { e.preventDefault(); void openLocalPath(part.path); }}>
                 {part.shown}
               </a>
             ) : (

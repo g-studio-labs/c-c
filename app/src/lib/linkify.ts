@@ -49,18 +49,22 @@ export type RequestSegment =
 const APP_HOSTS = ["cac.guz-studio.dev"];
 // `/app/build/out.log` es un fichero: sólo es de la app lo que nombra una pantalla suya.
 const APP_SCREENS = ["tasks", "requests", "chat", "dm", "docs", "notes", "inbox", "reports"];
-const LINK_END = /[\s<>"'`]/;
-const LINK_START_AFTER = /[\s`"'(\[<=«]/;
+const LINK_END = /[\s<>"'`\]]/;
+const LINK_START_AFTER = /[\s`"'(\[<=«*]/;
 
 const isScreen = (route: string) => APP_SCREENS.includes(route.replace(/^\//, "").split(/[/?#]/)[0]);
 
 function trimLink(raw: string): string {
-  let out = raw.replace(/[.,;:!?»\]}]+$/, "");
+  let out = raw.replace(/[.,;:!?»\]}*]+$/, "");
   while (out.endsWith(")") && (out.match(/\(/g)?.length ?? 0) < (out.match(/\)/g)?.length ?? 0)) {
-    out = out.slice(0, -1).replace(/[.,;:!?»\]}]+$/, "");
+    out = out.slice(0, -1).replace(/[.,;:!?»\]}*]+$/, "");
   }
   return out;
 }
+
+// Dos separadores seguidos son una ruta de red (UNC) en Windows: mirar si
+// existe ya contacta al servidor. Se rechaza lo que se decodifica a eso.
+const isNetwork = (path: string) => /^[/\\]{2}/.test(path);
 
 function routeOfUrl(url: string): string | null {
   const m = /^https?:\/\/([^/]+)(\/.*)$/.exec(url);
@@ -83,12 +87,13 @@ function classify(token: string): RequestSegment | null {
     } catch {
       /* un escape roto se deja como está */
     }
+    if (!path.startsWith("/") || isNetwork(path)) return null;
     return { kind: "path", shown: token, path };
   }
   if (token.startsWith("/app/") && isScreen(token.slice("/app".length))) {
     return { kind: "route", shown: token, route: token.slice("/app".length) };
   }
-  const rooted = token.startsWith("/") && !token.startsWith("//") && token.length > 1;
+  const rooted = token.startsWith("/") && !isNetwork(token) && token.length > 1;
   if (rooted || (token.startsWith("~/") && token.length > 2) || /^[A-Za-z]:[\\/]/.test(token)) {
     return { kind: "path", shown: token, path: token };
   }
@@ -104,7 +109,11 @@ export function requestSegments(text: string): RequestSegment[] {
     if (prev === null || LINK_START_AFTER.test(prev)) {
       const rest = text.slice(i);
       const end = rest.search(LINK_END);
-      const token = trimLink(end === -1 ? rest : rest.slice(0, end));
+      let raw = end === -1 ? rest : rest.slice(0, end);
+      // `[/tmp/a](/tmp/b)`: el `(` abre el destino del enlace markdown. En una
+      // dirección web puede ser de ella (`Foo_(bar)`).
+      if (!rest.startsWith("http")) raw = raw.split("(")[0];
+      const token = trimLink(raw);
       const seg = token ? classify(token) : null;
       if (seg) {
         if (plain) out.push({ kind: "text", text: plain });

@@ -27,7 +27,15 @@ const APP_HOSTS: [&str; 1] = ["cac.guz-studio.dev"];
 const APP_SCREENS: [&str; 8] = ["tasks", "requests", "chat", "dm", "docs", "notes", "inbox", "reports"];
 
 fn is_end(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '<' | '>' | '"' | '`' | '\'')
+    c.is_whitespace() || matches!(c, '<' | '>' | '"' | '`' | '\'' | ']')
+}
+
+/// Dos separadores seguidos son una ruta de red (UNC) en Windows: mirar si
+/// existe ya contacta al servidor. Se rechaza lo que se decodifica a eso, que
+/// es como se colaba dentro de un `file://`.
+fn is_network(path: &str) -> bool {
+    let mut chars = path.chars();
+    matches!((chars.next(), chars.next()), (Some('/' | '\\'), Some('/' | '\\')))
 }
 
 /// Quita lo que cierra una frase pero no es del enlace: puntuación final, y un
@@ -38,7 +46,7 @@ fn trim_link(raw: &str) -> &str {
         let piece = &raw[..end];
         let Some(last) = piece.chars().next_back() else { return piece };
         let unbalanced = last == ')' && piece.matches('(').count() < piece.matches(')').count();
-        if matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | '»' | ']' | '}') || unbalanced {
+        if matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | '»' | ']' | '}' | '*') || unbalanced {
             end -= last.len_utf8();
         } else {
             return piece;
@@ -46,24 +54,23 @@ fn trim_link(raw: &str) -> &str {
     }
 }
 
+/// `%C3%B3` → `ó`. Un escape roto, o unos bytes que no son UTF-8, dejan el
+/// texto como estaba entero (lo mismo que `decodeURIComponent` en la app de Tauri).
 fn percent_decoded(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut at = 0;
     while at < bytes.len() {
-        let byte = (bytes[at] == b'%').then(|| text.get(at + 1..at + 3)).flatten().and_then(|pair| u8::from_str_radix(pair, 16).ok());
-        match byte {
-            Some(b) => {
-                out.push(b);
-                at += 3;
-            }
-            None => {
-                out.push(bytes[at]);
-                at += 1;
-            }
+        if bytes[at] != b'%' {
+            out.push(bytes[at]);
+            at += 1;
+            continue;
         }
+        let Some(byte) = text.get(at + 1..at + 3).and_then(|pair| u8::from_str_radix(pair, 16).ok()) else { return text.to_string() };
+        out.push(byte);
+        at += 3;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8(out).unwrap_or_else(|_| text.to_string())
 }
 
 fn is_screen(route: &str) -> bool {
@@ -91,7 +98,8 @@ fn is_windows_path(token: &str) -> bool {
 /// enlace puede empezar.
 fn classify(token: &str) -> Option<LinkSegment> {
     if token.starts_with("http://") || token.starts_with("https://") {
-        if token.split("://").nth(1).is_none_or(str::is_empty) {
+        // `https:///x` no tiene anfitrión: no es una dirección.
+        if token.split("://").nth(1).is_none_or(|rest| rest.is_empty() || rest.starts_with('/')) {
             return None;
         }
         return Some(match app_route_of_url(token) {
@@ -102,14 +110,15 @@ fn classify(token: &str) -> Option<LinkSegment> {
     if let Some(rest) = token.strip_prefix("file://") {
         // `file://host/x` no es de esta máquina; `file:///x` y `file://localhost/x` sí.
         let path = rest.strip_prefix("localhost").unwrap_or(rest);
-        return path.starts_with('/').then(|| LinkSegment::Path { shown: token.into(), path: percent_decoded(path) });
+        let path = percent_decoded(path);
+        return (path.starts_with('/') && !is_network(&path)).then(|| LinkSegment::Path { shown: token.into(), path });
     }
     if let Some(rest) = token.strip_prefix("/app/") {
         if is_screen(rest) {
             return Some(LinkSegment::AppRoute { shown: token.into(), route: token["/app".len()..].into() });
         }
     }
-    let rooted = token.starts_with('/') && !token.starts_with("//") && token.len() > 1;
+    let rooted = token.starts_with('/') && !is_network(token) && token.len() > 1;
     if rooted || token.starts_with("~/") && token.len() > 2 || is_windows_path(token) {
         return Some(LinkSegment::Path { shown: token.into(), path: token.into() });
     }
@@ -130,9 +139,14 @@ pub fn link_segments(text: &str) -> Vec<LinkSegment> {
     while let Some(c) = rest.chars().next() {
         // Un enlace empieza tras un blanco, comilla, paréntesis o el principio:
         // `y/o` o `a/b/c` dentro de una palabra no son rutas.
-        let may_start = previous.is_none_or(|p| p.is_whitespace() || matches!(p, '`' | '"' | '\'' | '(' | '[' | '<' | '=' | '«'));
+        let may_start = previous.is_none_or(|p| p.is_whitespace() || matches!(p, '`' | '"' | '\'' | '(' | '[' | '<' | '=' | '«' | '*'));
         if may_start {
-            let len = rest.find(is_end).unwrap_or(rest.len());
+            let mut len = rest.find(is_end).unwrap_or(rest.len());
+            // `[/tmp/a](/tmp/b)`: el `(` abre el destino del enlace markdown. En
+            // una dirección web puede ser de ella (`Foo_(bar)`).
+            if !rest.starts_with("http") {
+                len = rest[..len].find('(').unwrap_or(len);
+            }
             let token = trim_link(&rest[..len]);
             if let Some(segment) = classify(token) {
                 flush(&mut plain, &mut out);
@@ -249,5 +263,54 @@ mod tests {
             })
             .collect();
         assert_eq!(joined, original);
+    }
+
+    /// Una ruta de red escondida en un `file://` no es un enlace: mirar si
+    /// existe ya contacta al servidor SMB (y le da el hash NTLM a quien lo
+    /// puso). Mismos casos que `linkify.test.ts`.
+    ///
+    /// Roturas que atrapa: no rechazar lo que se decodifica a `//`, `/\` o
+    /// `\\`; mirar sólo el texto sin decodificar (`%5C%5C`).
+    #[test]
+    fn a_network_path_hidden_in_a_file_link_is_text() {
+        for hidden in ["file:////srv/share/x", "file://localhost//srv/share/x", "file:///%5C%5Csrv%5Cshare", "file:///%2F%2Fsrv/x", "//srv/share/x", r"/\srv/x"] {
+            assert!(link_segments(hidden).iter().all(|s| matches!(s, LinkSegment::Text(_))), "{hidden}: {:?}", link_segments(hidden));
+        }
+    }
+
+    /// Los casos que Rust y TypeScript tienen que resolver igual.
+    ///
+    /// Roturas que atrapa: `https:///x` como dirección; un escape roto
+    /// decodificado a medias (Rust dejaba el roto y decodificaba el resto);
+    /// bytes que no son UTF-8 convertidos en `�`.
+    #[test]
+    fn rust_and_typescript_agree_on_the_odd_cases() {
+        assert_eq!(link_segments("https:///x"), vec![text("https:///x")]);
+        let decoded = |url: &str| match link_segments(url).as_slice() {
+            [LinkSegment::Path { path, .. }] => path.clone(),
+            other => panic!("{url}: {other:?}"),
+        };
+        assert_eq!(decoded("file:///a%zzb"), "/a%zzb");
+        assert_eq!(decoded("file:///a%20b%zz"), "/a%20b%zz");
+        assert_eq!(decoded("file:///%ff"), "/%ff");
+        assert_eq!(decoded("file:///a%20b"), "/a b");
+    }
+
+    /// Un enlace markdown y el énfasis no se pegan a la ruta.
+    ///
+    /// Roturas que atrapa: una ruta `/tmp/a](/tmp/b)` de una pieza; no ver el
+    /// destino del enlace; no ver la ruta entre asteriscos.
+    #[test]
+    fn markdown_around_a_path_is_not_part_of_it() {
+        assert_eq!(link_segments("[/tmp/a](/tmp/b)"), vec![text("["), path("/tmp/a"), text("]("), path("/tmp/b"), text(")")]);
+        assert_eq!(
+            link_segments("[web](https://x.com/a_(b))"),
+            vec![text("[web]("), LinkSegment::Url("https://x.com/a_(b)".into()), text(")")]
+        );
+        let url = |u: &str| LinkSegment::Url(u.into());
+        assert_eq!(link_segments("[https://a.com/x](https://b.com/y)"), vec![text("["), url("https://a.com/x"), text("]("), url("https://b.com/y"), text(")")]);
+        assert_eq!(link_segments("ve /tmp/a(/tmp/b)"), vec![text("ve "), path("/tmp/a"), text("("), path("/tmp/b"), text(")")]);
+        assert_eq!(link_segments("**/tmp/a**"), vec![text("**"), path("/tmp/a"), text("**")]);
+        assert_eq!(link_segments("*~/x.md*"), vec![text("*"), path("~/x.md"), text("*")]);
     }
 }

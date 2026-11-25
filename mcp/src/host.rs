@@ -65,25 +65,152 @@ pub fn expand_home(path: &str) -> std::path::PathBuf {
     }
 }
 
-/// Abre un fichero o carpeta con lo que el sistema tenga para ello. Devuelve
-/// el error si no existe o no hay con qué abrirlo; no espera a que termine.
-pub fn open_path(path: &str) -> Result<(), String> {
-    let target = expand_home(path);
-    if !target.exists() {
-        return Err(format!("{} does not exist", target.display()));
+/// Por qué no se pudo mostrar una ruta.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RevealError {
+    NotFound,
+    /// Una ruta de red (`//host/…`, `\\host\…`): ni mirar si existe, que ya
+    /// contacta al servidor.
+    Refused,
+    Failed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Os {
+    Linux,
+    Mac,
+    Windows,
+}
+
+pub const THIS_OS: Os = if cfg!(windows) {
+    Os::Windows
+} else if cfg!(target_os = "macos") {
+    Os::Mac
+} else {
+    Os::Linux
+};
+
+/// Una ruta que empieza con dos separadores es de red en Windows (UNC), venga
+/// escrita como venga; mirarla ya habla con el servidor (y le regala el hash
+/// NTLM de quien la mira).
+pub fn is_network_path(path: &str) -> bool {
+    let mut chars = path.chars();
+    matches!((chars.next(), chars.next()), (Some('/' | '\\'), Some('/' | '\\')))
+}
+
+fn file_url(path: &Path) -> String {
+    let mut out = String::from("file://");
+    for byte in path.to_string_lossy().bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
     }
+    out
+}
+
+/// El programa y los argumentos que muestran `target` en el gestor de ficheros,
+/// con el fichero seleccionado. Nunca lo abren: lo que el sistema asocia a un
+/// `.jar`, un `.command` o un `.exe` es ejecutarlo.
+pub fn reveal_command(os: Os, target: &Path) -> (&'static str, Vec<String>) {
+    match os {
+        Os::Linux => (
+            "dbus-send",
+            vec![
+                "--session".into(),
+                "--reply-timeout=3000".into(),
+                "--dest=org.freedesktop.FileManager1".into(),
+                "--type=method_call".into(),
+                "/org/freedesktop/FileManager1".into(),
+                "org.freedesktop.FileManager1.ShowItems".into(),
+                format!("array:string:{}", file_url(target)),
+                "string:".into(),
+            ],
+        ),
+        Os::Mac => ("open", vec!["-R".into(), target.to_string_lossy().into_owned()]),
+        Os::Windows => ("explorer", vec![format!("/select,{}", target.to_string_lossy())]),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Lo que se habría lanzado, y qué programas fallan, sin lanzar nada.
+    pub(crate) static LAUNCHED: std::cell::RefCell<Vec<(String, Vec<String>)>> = const { std::cell::RefCell::new(Vec::new()) };
+    pub(crate) static FAILING: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Lanza `program`. `check`: esperar su salida y fallar si no fue buena (el
+/// `explorer` de Windows sale con 1 aunque lo haya mostrado).
+fn run(program: &str, args: &[String], check: bool) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        let _ = check;
+        LAUNCHED.with(|l| l.borrow_mut().push((program.to_string(), args.to_vec())));
+        return if FAILING.with(|f| f.borrow().iter().any(|p| p == program)) { Err(format!("{program} failed")) } else { Ok(()) };
+    }
+    #[cfg(not(test))]
+    {
+        let mut cmd = command(program);
+        cmd.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        let mut child = cmd.spawn().map_err(|e| format!("{program}: {e}"))?;
+        if check {
+            let status = child.wait().map_err(|e| e.to_string())?;
+            return if status.success() { Ok(()) } else { Err(format!("{program} exited with {status}")) };
+        }
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
+    }
+}
+
+/// Abrir una carpeta con el gestor de ficheros del sistema (la de esta
+/// máquina; la app de Tauri pasa la suya, que ya sabe qué probar).
+pub fn open_dir(dir: &Path) -> Result<(), String> {
     #[cfg(target_os = "linux")]
-    let mut cmd = command("xdg-open");
+    let program = "xdg-open";
     #[cfg(target_os = "macos")]
-    let mut cmd = command("open");
+    let program = "open";
     #[cfg(windows)]
-    let mut cmd = command("explorer");
-    cmd.arg(&target).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    let mut child = cmd.spawn().map_err(|e| format!("Could not open {}: {e}", target.display()))?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+    let program = "explorer";
+    run(program, &[dir.to_string_lossy().into_owned()], false)
+}
+
+/// Muestra una ruta de esta máquina en el gestor de ficheros, con el fichero
+/// seleccionado. **Nunca la abre**: el texto de un pedido lo escribe un agente
+/// y puede venir dirigido por contenido ajeno, y abrir un `.jar`, un `.exe` o
+/// un enlace a un ejecutable lo ejecutaría con un clic. Primero se resuelven
+/// los enlaces simbólicos (como `read_dropped_file`) y se muestra el destino
+/// real. Una carpeta sí se abre, que es lo que se quiere ver. `open_dir` abre
+/// la carpeta cuando el gestor no sabe seleccionar (en Linux, sin D-Bus).
+pub fn reveal_path(path: &str, open_dir: &dyn Fn(&Path) -> Result<(), String>) -> Result<(), RevealError> {
+    if is_network_path(path.trim()) {
+        return Err(RevealError::Refused);
+    }
+    let canonical = std::fs::canonicalize(expand_home(path.trim())).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => RevealError::NotFound,
+        _ => RevealError::Failed(e.to_string()),
+    })?;
+    let shown = canonical.to_string_lossy();
+    let canonical = match shown.strip_prefix(r"\\?\") {
+        Some(plain) if !plain.starts_with("UNC") => std::path::PathBuf::from(plain),
+        _ => canonical.clone(),
+    };
+    if canonical.is_dir() {
+        return open_dir(&canonical).map_err(RevealError::Failed);
+    }
+    let (program, args) = reveal_command(THIS_OS, &canonical);
+    match run(program, &args, THIS_OS != Os::Windows) {
+        Ok(()) => Ok(()),
+        Err(_) if THIS_OS == Os::Linux => open_dir(canonical.parent().unwrap_or(Path::new("/"))).map_err(RevealError::Failed),
+        Err(e) => Err(RevealError::Failed(e)),
+    }
+}
+
+/// `reveal_path` con el gestor de esta máquina, para quien no es la app de Tauri.
+pub fn reveal(path: &str) -> Result<(), RevealError> {
+    reveal_path(path, &open_dir)
 }
 
 /// Limpia el entorno de un `Command` ya creado.
@@ -146,12 +273,108 @@ mod tests {
         assert_eq!(expand_home("~x/a"), Path::new("~x/a"));
     }
 
-    /// Rotura que detecta: lanzar el abridor con una ruta que no existe (el
-    /// sistema contesta con un aviso suyo o con nada) en vez de decirlo.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cac-reveal-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn reset() {
+        LAUNCHED.with(|l| l.borrow_mut().clear());
+        FAILING.with(|f| f.borrow_mut().clear());
+    }
+
+    fn launched() -> Vec<(String, Vec<String>)> {
+        LAUNCHED.with(|l| l.borrow().clone())
+    }
+
+    /// Un enlace simbólico a un ejecutable se muestra, no se abre: lo que se
+    /// lanza es el comando de mostrar con el destino real, y el abridor de
+    /// carpetas no recibe ni el fichero ni el enlace.
+    ///
+    /// Roturas que detecta: pasarle el fichero (o el enlace) a `xdg-open`,
+    /// `open` o `explorer` sin más, que lo ejecutaría; mostrar el enlace en
+    /// vez de su destino; abrir la carpeta cuando el gestor sí supo mostrarlo.
     #[test]
-    fn a_missing_path_is_reported_instead_of_launched() {
-        let error = open_path("/no/existe/cac-504.txt").unwrap_err();
-        assert!(error.contains("does not exist"), "{error}");
+    #[cfg(unix)]
+    fn a_symlink_to_an_executable_is_revealed_never_opened() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        reset();
+        let dir = scratch("link");
+        let program = dir.join("run.sh");
+        std::fs::write(&program, "#!/bin/sh\necho pwned\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = dir.join("innocent.txt");
+        symlink(&program, &link).unwrap();
+
+        let opened: std::cell::RefCell<Vec<std::path::PathBuf>> = Default::default();
+        reveal_path(&link.to_string_lossy(), &|d| {
+            opened.borrow_mut().push(d.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+
+        let real = std::fs::canonicalize(&program).unwrap();
+        let (expected, args) = reveal_command(THIS_OS, &real);
+        assert_eq!(launched(), vec![(expected.to_string(), args)]);
+        assert!(opened.borrow().is_empty(), "el gestor sí supo mostrarlo: no se abre nada más");
+        assert!(!launched().iter().any(|(_, args)| args.iter().any(|a| a.contains("innocent.txt"))), "el enlace no se muestra: se muestra su destino");
+    }
+
+    /// Sin D-Bus (o sin gestor que sepa seleccionar) se abre la carpeta que lo
+    /// contiene, nunca el fichero. Una carpeta se abre ella misma.
+    ///
+    /// Roturas que detecta: caer a abrir el fichero cuando falla mostrarlo;
+    /// abrir una carpeta que no es la del fichero; no abrir una carpeta.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn when_the_file_manager_cannot_select_the_parent_folder_is_opened() {
+        reset();
+        FAILING.with(|f| f.borrow_mut().push("dbus-send".into()));
+        let dir = scratch("fallback");
+        let file = dir.join("a.jar");
+        std::fs::write(&file, "x").unwrap();
+        let opened: std::cell::RefCell<Vec<std::path::PathBuf>> = Default::default();
+        let record = |d: &Path| {
+            opened.borrow_mut().push(d.to_path_buf());
+            Ok(())
+        };
+        reveal_path(&file.to_string_lossy(), &record).unwrap();
+        let real_dir = std::fs::canonicalize(&dir).unwrap();
+        assert_eq!(*opened.borrow(), vec![real_dir.clone()]);
+        reveal_path(&dir.to_string_lossy(), &record).unwrap();
+        assert_eq!(*opened.borrow(), vec![real_dir.clone(), real_dir], "una carpeta se abre ella misma");
+    }
+
+    /// El comando de mostrar de cada sistema selecciona el fichero y no lo abre.
+    ///
+    /// Roturas que detecta: perder `-R` en macOS o `/select,` en Windows (sin
+    /// ellos, `open` y `explorer` lo ejecutan); un D-Bus que no es ShowItems;
+    /// una ruta con espacios o acentos sin escapar en la URL.
+    #[test]
+    fn each_system_selects_the_file_instead_of_opening_it() {
+        let target = Path::new("/home/ana/mi carpeta/á.jar");
+        assert_eq!(reveal_command(Os::Mac, target), ("open", vec!["-R".to_string(), "/home/ana/mi carpeta/á.jar".to_string()]));
+        assert_eq!(reveal_command(Os::Windows, Path::new(r"C:\x\a.exe")), ("explorer", vec![r"/select,C:\x\a.exe".to_string()]));
+        let (program, args) = reveal_command(Os::Linux, target);
+        assert_eq!(program, "dbus-send");
+        assert!(args.contains(&"org.freedesktop.FileManager1.ShowItems".to_string()));
+        assert!(args.contains(&"array:string:file:///home/ana/mi%20carpeta/%C3%A1.jar".to_string()), "{args:?}");
+    }
+
+    /// Una ruta de red no se mira ni se muestra, y una que no existe se dice.
+    ///
+    /// Roturas que detecta: dejar pasar `//host/…` o `\\host\…` (mirar si
+    /// existe ya contacta al servidor); confundir «no existe» con un fallo.
+    #[test]
+    fn network_paths_are_refused_and_missing_ones_are_reported() {
+        reset();
+        for path in ["//srv/share/x", r"\\srv\share", r"/\srv/x"] {
+            assert_eq!(reveal_path(path, &|_| Ok(())), Err(RevealError::Refused), "{path}");
+        }
+        assert_eq!(reveal_path("/no/existe/cac-504.txt", &|_| Ok(())), Err(RevealError::NotFound));
+        assert!(launched().is_empty());
     }
 
     fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {

@@ -147,15 +147,18 @@ pub async fn open_url(url: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?
 }
 
-/// Abre una ruta que escribió un agente en un pedido. Si no existe contesta
-/// `not-found`, que la página convierte en un aviso en su idioma.
+/// Muestra en el gestor de ficheros una ruta que escribió un agente en un
+/// pedido, con el fichero seleccionado; nunca la abre (ver `reveal_path`). Para
+/// abrir la carpeta usa el mismo mecanismo que los enlaces. Si no existe
+/// contesta `not-found`, que la página convierte en un aviso en su idioma.
 #[tauri::command]
 pub async fn open_local_path(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        if !cac_mcp::host::expand_home(path.trim()).exists() {
-            return Err("not-found".to_string());
-        }
-        cac_mcp::host::open_path(path.trim())
+        cac_mcp::host::reveal_path(&path, &|dir| open_with_system(&dir.to_string_lossy())).map_err(|e| match e {
+            cac_mcp::host::RevealError::NotFound => "not-found".to_string(),
+            cac_mcp::host::RevealError::Refused => "refused".to_string(),
+            cac_mcp::host::RevealError::Failed(why) => why,
+        })
     })
     .await
     .map_err(|e| e.to_string())?

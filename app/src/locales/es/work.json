@@ -680,6 +680,7 @@
     "commandCopied": "Comando copiado",
     "pathMissing": "Esa ruta no existe: {{path}}",
     "pathCopied": "Ruta copiada",
+    "revealPath": "Mostrar en la carpeta",
     "undo": "Para deshacerlo",
     "output": "Salida (pega lo que salió)",
     "done": "Hecho",
