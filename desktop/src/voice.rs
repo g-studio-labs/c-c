@@ -1446,7 +1446,9 @@ mod tests {
         wait_until(cx, "otra vez", |cx| on_screen(window, "voice-incoming-join", cx));
         click(window, "voice-incoming-join", cx);
         wait_until(cx, "en la sala", |cx| on_screen(window, "voice-stage", cx));
-        assert_eq!(engine.calls.lock().unwrap().clone(), ["join t-a"]);
+        // La sala sale al empezar a entrar, antes de que el motor reciba el
+        // «join»: con la caja cargada se miraba antes de que llegara.
+        wait_until(cx, "entra con el motor", |_| *engine.calls.lock().unwrap() == ["join t-a"]);
         stop(cx);
     }
 
