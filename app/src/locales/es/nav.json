@@ -114,5 +114,19 @@
     "copy": "Copiar la orden",
     "copied": "Copiada",
     "updateAvailable": "Hay una versión nueva de cac-mcp"
+  },
+  "updater": {
+    "available": "Hay una versión nueva de cac: v{{version}}",
+    "update": "Actualizar",
+    "later": "Ahora no",
+    "ready": "Actualizada a v{{version}}. Reinicia para usarla.",
+    "restart": "Reiniciar",
+    "diskOpened": "La imagen de disco está abierta: arrastra la app a Aplicaciones para terminar.",
+    "close": "Cerrar",
+    "manual": "Esta instalación se actualiza con el gestor de paquetes o a mano.",
+    "viewRelease": "Ver la descarga",
+    "failed": "No se pudo actualizar, y lo que había sigue intacto.",
+    "retry": "Reintentar",
+    "restartFailed": "No se pudo reiniciar. Cierra la app y ábrela otra vez."
   }
 }

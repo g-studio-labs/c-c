@@ -48,6 +48,7 @@ mod sound;
 mod spike;
 mod task;
 mod theme;
+mod updater;
 #[cfg(test)]
 mod ui_rules;
 mod thumbs;
@@ -157,6 +158,12 @@ fn main() {
         // Para «Conectar Claude Code»: dónde está `cac-mcp` en esta máquina y
         // de dónde se baja. Lo decide el MCP (`cac_mcp::update`).
         cx.set_global(connect::McpSetup { machine: cac_mcp::update::Machine::from_env(), server_url: server_url.clone() });
+
+        // El aviso de versión nueva (`updater.rs`): una vez al arrancar y una
+        // al día. Sin `CAC_DESKTOP_NO_UPDATE_CHECK`, y nada se instala solo.
+        if !cac_mcp::desktop_update::Updater::checks_disabled() {
+            cx.set_global(updater::UpdateSetup(cac_mcp::desktop_update::Updater::from_env(env!("CARGO_PKG_VERSION"))));
+        }
 
         let options = identity::main_window_options(cx);
         if spike {

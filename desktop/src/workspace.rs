@@ -20,6 +20,7 @@ use crate::chat::ChatView;
 use crate::comms::CommsView;
 use crate::connect::{ConnectClosed, ConnectView};
 use crate::theme::Leading as _;
+use crate::updater::UpdateNotice;
 use crate::docs::DocsView;
 use crate::lang::{locale, tr};
 use crate::mywork::MyWorkView;
@@ -136,6 +137,8 @@ pub struct Workspace {
     /// nueva, y eso enciende el punto del menú de la cuenta.
     pub(crate) connect: Entity<ConnectView>,
     connect_open: bool,
+    /// El aviso de versión nueva de la app (`updater.rs`).
+    updater: Entity<UpdateNotice>,
     /// El menú de la cuenta, abierto. Lo lleva esta vista y no el menú para
     /// poder cerrarlo al abrir desde él algo que va encima.
     account_menu_open: bool,
@@ -180,6 +183,7 @@ impl Workspace {
         window.focus(&focus_anchor, cx);
         let on_focus_lost = cx.on_focus_lost(window, |this, window, cx| window.focus(&this.focus_anchor, cx));
         let connect = cx.new(ConnectView::new);
+        let updater = cx.new(UpdateNotice::new);
         let comms = cx.new(|cx| CommsView::new(window, cx));
         // «Nueva conversación» se pinta aquí, encima de todo: al abrirse o
         // cerrarse hay que repintar.
@@ -231,6 +235,7 @@ impl Workspace {
             was_picking: false,
             connect,
             connect_open: false,
+            updater,
             account_menu_open: false,
             _on_connect: on_connect,
         }
@@ -1822,6 +1827,9 @@ impl Render for Workspace {
                     .children(task.map(|task| div().id("task-over").absolute().inset_0().occlude().child(task)))
                     // «Conectar Claude Code», encima de todo lo demás.
                     .children(self.connect_open.then(|| div().id("connect-over").absolute().inset_0().child(self.connect.clone())))
+                    // «Hay una versión nueva», sin tapar nada: una tarjeta en la
+                    // esquina, debajo de lo que se abre encima.
+                    .child(self.updater.clone())
                     .children(picker.map(|picker| div().id("new-conversation-over").absolute().inset_0().child(picker)))
                     .children(guest.map(|guest| div().id("guest-call-over").absolute().inset_0().child(guest)))
                     // Quien te llama, encima de todo, estés donde estés.

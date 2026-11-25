@@ -114,5 +114,19 @@
     "copy": "Copy the command",
     "copied": "Copied",
     "updateAvailable": "A newer cac-mcp is out"
+  },
+  "updater": {
+    "available": "A new version of cac is out: v{{version}}",
+    "update": "Update",
+    "later": "Not now",
+    "ready": "Updated to v{{version}}. Restart to use it.",
+    "restart": "Restart",
+    "diskOpened": "The disk image is open: drag the app to Applications to finish.",
+    "close": "Close",
+    "manual": "This install is updated with your package manager or by hand.",
+    "viewRelease": "View the download",
+    "failed": "It could not be updated, and what was there is untouched.",
+    "retry": "Try again",
+    "restartFailed": "It could not be restarted. Close the app and open it again."
   }
 }
