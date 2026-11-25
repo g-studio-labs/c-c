@@ -41,6 +41,7 @@ mod picture_viewer;
 mod requests;
 mod newtask;
 mod notifier;
+mod organization;
 mod platform;
 mod system;
 mod prompt;

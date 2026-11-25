@@ -69,6 +69,14 @@ struct RailCount {
     warning: bool,
 }
 
+/// Una pantalla que no es de ningún módulo (`isAside` en `AppRail.tsx`):
+/// tapa la vista y deja el panel del módulo en el que se estaba.
+#[derive(Clone, Copy, PartialEq)]
+enum Aside {
+    Organization,
+    Invitations,
+}
+
 /// A qué se le está poniendo nombre en el árbol.
 #[derive(Clone, PartialEq)]
 enum Naming {
@@ -111,6 +119,15 @@ pub struct Workspace {
     /// ese módulo.
     pub(crate) comms: Entity<CommsView>,
     servers: Entity<crate::platform::servers::ServersView>,
+    /// La pantalla de la organización y la de las invitaciones recibidas.
+    organization: Entity<crate::organization::OrgView>,
+    received: Entity<crate::organization::received::ReceivedView>,
+    aside: Option<Aside>,
+    /// Dónde se estaba con la pantalla de al lado abierta: si algo pasa a
+    /// apuntar a otro sitio (un clic en el panel), se ha ido a otra cosa y la
+    /// pantalla se cierra.
+    aside_place: Option<Vec<String>>,
+    _on_organization: Subscription,
     _on_comms: Subscription,
     /// La conversación que se tiene delante.
     pub(crate) chat: Entity<ChatView>,
@@ -202,6 +219,9 @@ impl Workspace {
         let channel_tabs = cx.new(|cx| crate::channel_tabs::ChannelTabsView::new(chat.clone(), window, cx));
         // «Llamar con invitados» se pinta aquí, encima de todo.
         let on_channel_tabs = cx.observe(&channel_tabs, |_, _, cx| cx.notify());
+        let organization = cx.new(|cx| crate::organization::OrgView::new(window, cx));
+        // «Gestionar» en la ficha de un espacio lleva a sus tareas.
+        let on_organization = cx.subscribe(&organization, |this, _, event: &crate::organization::ManageSpace, cx| this.manage_space(event.0.clone(), cx));
         let on_connect = [
             // Lo que sabe cambia desde otro hilo (mirar la máquina, instalar):
             // el punto del menú se repinta con ello.
@@ -221,6 +241,11 @@ impl Workspace {
             requests: cx.new(|cx| crate::requests::RequestsView::new(window, cx)),
             comms,
             servers: cx.new(|_| crate::platform::servers::ServersView::new()),
+            organization,
+            received: cx.new(|_| crate::organization::received::ReceivedView::new()),
+            aside: None,
+            aside_place: None,
+            _on_organization: on_organization,
             _on_comms: on_comms,
             chat,
             channel_tabs,
@@ -961,16 +986,85 @@ impl Workspace {
         )
     }
 
-    /// Un módulo que la app de siempre tiene y ésta todavía no: está en su
-    /// sitio y lo dice al pasar el ratón. Si tiene algo pendiente lo cuenta,
-    /// en su esquina y en lo que dice: «Comunicación (3)».
-    fn pending_module(id: &'static str, icon: Lucide, label_key: &str, count: Option<RailCount>, cx: &App) -> impl IntoElement {
-        let pending = count.as_ref().and_then(|count| count.count);
-        let label = format!("{} · {}", counted_label(&tr(cx, label_key), pending), tr(cx, "common:misc.notInThisApp"));
-        Self::rail_button(id, icon, label.clone(), false, cx)
-            .aria_label(label)
-            .children(count.and_then(|count| Self::rail_badge(count, cx)))
-            .test_support()
+    /// Abre la pantalla de la organización o la de las invitaciones.
+    fn open_aside(&mut self, aside: Aside, cx: &mut Context<Self>) {
+        self.aside = Some(aside);
+        self.aside_place = None;
+        match aside {
+            Aside::Organization => self.organization.update(cx, |view, cx| view.reopened(cx)),
+            Aside::Invitations => self.received.update(cx, |view, cx| view.load(cx)),
+        }
+        cx.notify();
+    }
+
+    fn leave_aside(&mut self) {
+        self.aside = None;
+        self.aside_place = None;
+    }
+
+    /// Lo que dice dónde se está, pieza a pieza, para notar que se fue a
+    /// otra cosa desde el panel. Lo de cada módulo lo cambia su panel; aquí
+    /// sólo se compara.
+    fn place(cx: &App) -> Vec<String> {
+        let snapshot = Backend::snapshot(cx).read(cx);
+        let platform = &snapshot.platform;
+        vec![
+            format!("{:?}", snapshot.comms.selected),
+            format!("{:?}", platform.section),
+            format!("{:?}", platform.open_server),
+            format!("{:?}", snapshot.docs.target),
+            snapshot.requests.on_screen.to_string(),
+            format!("{:?}", snapshot.my_work.scope),
+        ]
+    }
+
+    /// Si de `before` a `now` se fue a otro sitio. Que algo se vacíe no es
+    /// irse: es lo que hace cambiar de organización (se cierra el documento,
+    /// se suelta el ámbito), y eso se hace sin dejar la pantalla.
+    fn went_elsewhere(before: &[String], now: &[String]) -> bool {
+        before.iter().zip(now).any(|(before, now)| before != now && now != "None" && now != "false")
+    }
+
+    /// «Gestionar» un espacio desde la organización: sus tareas, en Trabajo.
+    fn manage_space(&mut self, space_id: String, cx: &mut Context<Self>) {
+        self.leave_aside();
+        let core = Backend::core(cx);
+        core.comms().leave();
+        core.platform().leave();
+        core.show_all_work();
+        core.tree().click(&space_id, cac_core::Looking::Tasks);
+        cx.notify();
+    }
+
+    /// «Invitaciones para ti», al pie del panel, sólo si hay alguna: una fila
+    /// permanente para una lista vacía enseña a ignorarla (`AppPanel.tsx`).
+    fn invitations_row(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let pending = Backend::snapshot(cx).read(cx).counters.invitations.filter(|count| *count > 0)?;
+        let theme = cx.theme();
+        let (border, hover, primary, on_primary) = (theme.sidebar_border, theme.sidebar_accent, theme.primary, theme.primary_foreground);
+        let label = tr(cx, "common:misc.invitationsForYou");
+        let badge = count_badge(Some(pending), RAIL_CAP).unwrap_or_default();
+        Some(
+            div()
+                .id("panel-invitations")
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .border_t_1()
+                .border_color(border)
+                .leading_sm()
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .aria_label(counted_label(&label, Some(pending)))
+                .on_click(cx.listener(|this, _, _, cx| this.open_aside(Aside::Invitations, cx)))
+                .child(Icon::new(Lucide::Mail).size_4().flex_none())
+                .child(div().flex_1().min_w_0().truncate().child(label))
+                .child(div().min_w_5().flex().justify_center().rounded_full().px_1p5().text_xs().font_weight(FontWeight::MEDIUM).bg(primary).text_color(on_primary).child(badge))
+                .test_support(),
+        )
     }
 
     /// Una fila del panel que la app de siempre tiene y ésta todavía no.
@@ -996,13 +1090,15 @@ impl Workspace {
             .when(!active, |this| this.text_color(muted).hover(move |style| style.bg(hover.opacity(0.5)).text_color(foreground)))
             .cursor_pointer()
             .aria_label(counted_label(&label, Some(waiting)))
-            .on_click(|_, _, cx| {
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.leave_aside();
+                cx.notify();
                 Backend::run(cx, |core| async move {
                     if core.requests().show(None) {
                         core.requests().load().await;
                     }
                 })
-            })
+            }))
             .child(Icon::new(Lucide::Hand).size_4())
             .child(div().flex_1().child(label))
             .children(badge.map(|text| {
@@ -1179,6 +1275,7 @@ impl Workspace {
         // lleva a él, no pliega el panel.
         let here = self.module_active(slot, cx);
         self.close_profile(cx);
+        self.leave_aside();
         if here {
             self.toggle_panel(cx);
             return;
@@ -1222,7 +1319,7 @@ impl Workspace {
     /// El módulo del riel en el que se está, por su puesto. Con el perfil
     /// delante, en ninguno: no es de ningún módulo.
     fn current_module(&self, cx: &App) -> Option<usize> {
-        if self.profile.is_some() {
+        if self.profile.is_some() || self.aside.is_some() {
             return None;
         }
         let (on_comms, on_platform, on_docs) = Self::modules(cx);
@@ -1263,6 +1360,8 @@ impl Workspace {
         // En cuál de los módulos con pantalla se está lo dice el core.
         let active = |slot| self.module_active(slot, cx);
         let (on_work, on_docs, on_comms, on_platform) = (active(RAIL_WORK), active(RAIL_DOCS), active(RAIL_COMMS), active(RAIL_PLATFORM));
+        let aside = self.aside.is_some();
+        let organization_label = counted_label(&tr(cx, "nav:rail.organization"), invitations.count);
         let platform_label = counted_label(&tr(cx, "nav:module.platform"), servers.count);
         let comms_label = counted_label(&tr(cx, "nav:module.comms"), comms.count);
         div()
@@ -1314,7 +1413,14 @@ impl Workspace {
             .child(div().flex_1())
             // Con el panel plegado, la llamada en curso queda como un punto.
             .when(!self.panel_pinned, |this| this.children(crate::voice::mini_dot(cx)))
-            .child(Self::pending_module("rail-organization", Lucide::Building2, "nav:rail.organization", Some(invitations), cx))
+            .child(
+                Self::rail_button("rail-organization", Lucide::Building2, organization_label.clone(), aside, cx)
+                    .aria_label(organization_label)
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| this.open_aside(Aside::Organization, cx)))
+                    .children(Self::rail_badge(invitations, cx))
+                    .test_support(),
+            )
             .child(self.render_account(cx))
     }
 
@@ -1485,6 +1591,7 @@ impl Workspace {
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.close_profile(cx);
+                this.leave_aside();
                 Self::click_row(&clicked, cx);
             }))
             // Una lista no se abre: su icono va donde el chevrón de las demás.
@@ -1678,16 +1785,18 @@ impl Workspace {
             return panel
                 .child(div().flex_1().min_h_0().flex().flex_col().child(self.comms.clone()))
                 .children(crate::voice::mini(cx))
+                .children(self.invitations_row(cx))
                 .into_any_element();
         }
         if on_platform {
             return panel
                 .child(div().id("platform-panel").flex_1().min_h_0().overflow_y_scroll().child(crate::platform::panel::panel(cx)))
                 .children(crate::voice::mini(cx))
+                .children(self.invitations_row(cx))
                 .into_any_element();
         }
         if on_docs {
-            return panel.child(crate::docs_module::panel(&self.docs_filter, cx)).children(crate::voice::mini(cx)).into_any_element();
+            return panel.child(crate::docs_module::panel(&self.docs_filter, cx)).children(crate::voice::mini(cx)).children(self.invitations_row(cx)).into_any_element();
         }
         panel
             .child(
@@ -1708,7 +1817,11 @@ impl Workspace {
                     .when(on_my_work, |this| this.bg(hover).font_weight(FontWeight::MEDIUM))
                     .when(!on_my_work, |this| this.text_color(muted).hover(move |style| style.bg(hover.opacity(0.5)).text_color(foreground)))
                     .cursor_pointer()
-                    .on_click(|_, _, cx| Backend::core(cx).show_all_work())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.leave_aside();
+                        Backend::core(cx).show_all_work();
+                        cx.notify();
+                    }))
                     .child(Icon::new(IconName::Inbox).size_4())
                     .child(tr(cx, "nav:item.myWork")),
             )
@@ -1775,6 +1888,7 @@ impl Workspace {
             )
             // La llamada en curso, al pie: se queda al navegar.
             .children(crate::voice::mini(cx))
+            .children(self.invitations_row(cx))
             .into_any_element()
     }
 }
@@ -1864,6 +1978,16 @@ impl Render for Workspace {
         }
         let profile = self.profile.as_ref().map(|(view, _)| view.clone());
         let password = self.password.as_ref().map(|(dialog, _)| dialog.clone());
+        // Un clic en el panel que lleva a otra cosa cierra la pantalla de al
+        // lado; cambiar de organización no.
+        if self.aside.is_some() {
+            let here = Self::place(cx);
+            if self.aside_place.as_ref().is_some_and(|before| Self::went_elsewhere(before, &here)) {
+                self.leave_aside();
+            } else {
+                self.aside_place = Some(here);
+            }
+        }
         let snapshot = Backend::snapshot(cx).read(cx);
         let lasting = snapshot.connection.lasting;
         // Con un documento abierto se lee documentación; si no, las tareas.
@@ -1873,6 +1997,10 @@ impl Render for Workspace {
             stage
         } else if let Some(profile) = profile {
             profile.into_any_element()
+        } else if self.aside == Some(Aside::Organization) {
+            self.organization.clone().into_any_element()
+        } else if self.aside == Some(Aside::Invitations) {
+            self.received.clone().into_any_element()
         } else if snapshot.comms.on_screen {
             crate::comms::conversation(&self.chat, &self.channel_tabs, cx)
         } else if snapshot.platform.on_screen {
@@ -2019,6 +2147,12 @@ mod tests {
     mod docs_module {
         use super::*;
         include!("docs_module_tests.rs");
+    }
+
+    /// La organización y las invitaciones recibidas.
+    mod organization {
+        use super::*;
+        include!("organization/tests.rs");
     }
 
     fn org(id: &str, name: &str) -> serde_json::Value {
@@ -3735,7 +3869,7 @@ mod tests {
         assert_eq!(label(window, "notifications-bell", cx), "Notificaciones (12)");
         assert_eq!(label(window, "rail-comms", cx), "Comunicación (120)");
         assert_eq!(label(window, "rail-platform", cx), "Plataforma (1)");
-        assert_eq!(label(window, "rail-organization", cx), "Organización (3) · Todavía no está en esta app");
+        assert_eq!(label(window, "rail-organization", cx), "Organización (3)");
         assert!(!on_screen(window, "rail-docs-count", cx));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
