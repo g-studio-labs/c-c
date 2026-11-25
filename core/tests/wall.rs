@@ -235,34 +235,183 @@ async fn posting_checks_first_sends_what_was_chosen_and_reloads() {
     assert!(sent(&viewer.server, "POST", "/api/v1/posts").await.is_empty());
 }
 
-/// Un evento sólo vuelve a pedir lo que está en pantalla.
+async fn gets(server: &MockServer, route: &str) -> usize {
+    server.received_requests().await.unwrap().iter().filter(|r| r.method.as_str() == "GET" && r.url.path() == route).count()
+}
+
+/// Un respiro más largo que el de agrupar eventos: lo que iba a pedirse ya se
+/// pidió, y contar después es contar todo.
+async fn past_the_coalescing_window() {
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+}
+
+/// Las reacciones y los comentarios no se piden evento a evento.
 ///
-/// Roturas que atrapa: pedir el muro entero con cada reacción (se perderían
-/// las páginas de «Cargar más»); pedir lo que no se tiene; no quitar lo
-/// borrado; dejar una publicación que ya no se puede ver.
+/// Con el muro fuera, se apuntan y se piden al abrirlo (sólo la publicación
+/// abierta: la lista viene entera). Con el muro delante, una ráfaga es una
+/// lectura por publicación, y lo que no está en pantalla no se pide.
+///
+/// Roturas que atrapa: una petición por evento con el muro fuera, o con el
+/// muro delante; pedir lo que no se tiene; no releer la publicación abierta
+/// al abrir el muro; no quitar lo borrado.
 #[tokio::test]
-async fn an_event_refreshes_only_what_is_on_screen() {
+async fn events_are_read_once_and_only_for_what_is_on_screen() {
     let rig = rig("member", json!([card("a", json!({})), card("b", json!({}))])).await;
-    rig.core.wall().load().await;
-    assert_eq!(listings(&rig.server).await, 1);
-
     get("/api/v1/posts/a").respond_with(ok(detail("a", json!({ "comments": 3, "title": "nuevo" }), json!([])))).mount(&rig.server).await;
-    rig.core.stream().deliver(event("post:comment", "a"));
-    until("la tarjeta se puso al día", || rig.core.wall().state().posts[0].comments == 3).await;
-    assert_eq!(rig.core.wall().state().posts[0].title, "nuevo");
-    assert_eq!(listings(&rig.server).await, 1, "no se pidió el muro entero");
-
+    get("/api/v1/posts/b").respond_with(ok(detail("b", json!({ "comments": 1 }), json!([])))).mount(&rig.server).await;
     get("/api/v1/posts/zzz").respond_with(ok(detail("zzz", json!({}), json!([])))).mount(&rig.server).await;
+    rig.core.wall().load().await;
+    rig.core.wall().open_post("a").await.unwrap();
+    assert_eq!(gets(&rig.server, "/api/v1/posts/a").await, 1);
+
+    // Con el muro fuera: nada se pide por cada evento.
+    for _ in 0..3 {
+        rig.core.stream().deliver(event("post:comment", "a"));
+    }
     rig.core.stream().deliver(event("post:reaction", "zzz"));
+    // Que los eventos se atiendan con el muro todavía fuera.
+    tokio::task::yield_now().await;
+    past_the_coalescing_window().await;
+    assert_eq!(gets(&rig.server, "/api/v1/posts/a").await, 1, "con el muro fuera no se pide nada por los eventos");
+    rig.core.wall().show();
+    rig.server.reset().await;
+    get("/api/v1/posts").respond_with(ok(json!({ "posts": [card("a", json!({})), card("b", json!({}))] }))).mount(&rig.server).await;
+    get("/api/v1/posts/a").respond_with(ok(detail("a", json!({ "comments": 3, "title": "nuevo" }), json!([])))).mount(&rig.server).await;
+    post("/api/v1/posts/seen").respond_with(ok(json!(null))).mount(&rig.server).await;
+    rig.core.wall().opened().await;
+    past_the_coalescing_window().await;
+    assert_eq!(gets(&rig.server, "/api/v1/posts/a").await, 1, "una sola, al abrir el muro");
+    assert_eq!(rig.core.wall().state().open.unwrap().title, "nuevo");
+    assert_eq!(gets(&rig.server, "/api/v1/posts/zzz").await, 0, "lo que no está en pantalla no se pide");
+
+    // Con el muro delante, la ráfaga es una lectura por publicación.
+    get("/api/v1/posts/b").respond_with(ok(detail("b", json!({ "comments": 1 }), json!([])))).mount(&rig.server).await;
+    for _ in 0..3 {
+        rig.core.stream().deliver(event("post:reaction", "a"));
+    }
+    rig.core.stream().deliver(event("post:comment", "b"));
+    rig.core.stream().deliver(event("post:comment", "zzz"));
+    until("se lee b", || rig.core.wall().state().posts[1].comments == 1).await;
+    past_the_coalescing_window().await;
+    assert_eq!((gets(&rig.server, "/api/v1/posts/a").await, gets(&rig.server, "/api/v1/posts/b").await), (2, 1));
+    assert_eq!(gets(&rig.server, "/api/v1/posts/zzz").await, 0);
+
     rig.core.stream().deliver(event("post:deleted", "b"));
     until("se quitó lo borrado", || rig.core.wall().state().posts.len() == 1).await;
-    let asked = rig.server.received_requests().await.unwrap().iter().any(|r| r.url.path() == "/api/v1/posts/zzz");
-    assert!(!asked, "lo que no está en pantalla no se pide");
+}
 
-    // Una publicación que dejó de verse (se acotó su audiencia) se quita.
-    get("/api/v1/posts/a").respond_with(ResponseTemplate::new(404).set_body_json(json!({ "success": false, "error": "not-found" }))).with_priority(1).mount(&rig.server).await;
+/// Una publicación sólo se quita cuando el servidor dice que ya no existe.
+///
+/// Roturas que atrapa: quitar la tarjeta por un fallo de red o un 500; no
+/// quitarla con un 404.
+#[tokio::test]
+async fn a_card_is_dropped_only_when_the_server_says_it_is_gone() {
+    let rig = rig("member", json!([card("a", json!({})), card("b", json!({}))])).await;
+    rig.core.wall().show();
+    rig.core.wall().load().await;
+    get("/api/v1/posts/a").respond_with(ResponseTemplate::new(500).set_body_json(json!({ "success": false, "error": "boom" }))).mount(&rig.server).await;
+    get("/api/v1/posts/b").respond_with(ResponseTemplate::new(404).set_body_json(json!({ "success": false, "error": "not-found" }))).mount(&rig.server).await;
+
     rig.core.stream().deliver(event("post:updated", "a"));
-    until("ya no se ve", || rig.core.wall().state().posts.is_empty()).await;
+    until_asked(&rig.server, "/api/v1/posts/a").await;
+    // Su lectura es anterior a la de b (otro respiro): con b quitada, la de a
+    // ya contestó.
+    rig.core.stream().deliver(event("post:updated", "b"));
+    until("b se quita", || rig.core.wall().state().posts.len() == 1).await;
+    assert_eq!(rig.core.wall().state().posts[0].id, "a", "con un 500 la tarjeta se queda");
+}
+
+async fn until_asked(server: &MockServer, route: &str) {
+    for _ in 0..300 {
+        if gets(server, route).await > 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("no llegó a pedirse {route}");
+}
+
+/// Una página siguiente en camino no se pisa con una publicación nueva.
+///
+/// Roturas que atrapa: que subir lo nuevo con el muro delante le cambie el
+/// cursor a «Cargar más» mientras la página siguiente viene; repetir una
+/// publicación que la página siguiente trae otra vez (la nueva empujó a las
+/// demás).
+#[tokio::test]
+async fn a_new_post_does_not_trample_a_next_page_in_flight() {
+    let rig = rig("member", json!([])).await;
+    let gate = Gate::default();
+    get("/api/v1/posts").and(query_param("cursor", "c1")).respond_with(gate.hold(ok(json!({ "posts": [card("b", json!({})), card("c", json!({}))] })))).with_priority(1).mount(&rig.server).await;
+    get("/api/v1/posts").respond_with(ok(json!({ "posts": [card("a", json!({})), card("b", json!({}))], "nextCursor": "c1" }))).up_to_n_times(1).with_priority(2).mount(&rig.server).await;
+    get("/api/v1/posts").respond_with(ok(json!({ "posts": [card("n", json!({})), card("a", json!({})), card("b", json!({}))], "nextCursor": "otro" }))).with_priority(3).mount(&rig.server).await;
+    get("/api/v1/posts/n").respond_with(ok(detail("n", json!({}), json!([])))).mount(&rig.server).await;
+    rig.core.wall().show();
+    rig.core.wall().load().await;
+    assert_eq!(rig.core.wall().state().next_cursor.as_deref(), Some("c1"));
+
+    let wall = rig.core.wall();
+    let more = tokio::spawn(async move { wall.load_more().await });
+    until("la página siguiente, retenida", || gate.held() == 1).await;
+
+    rig.core.stream().deliver(event("post:new", "n"));
+    until("lo nuevo sube", || rig.core.wall().state().posts.first().is_some_and(|post| post.id == "n")).await;
+    assert_eq!(rig.core.wall().state().next_cursor.as_deref(), Some("c1"), "el cursor es de la página en camino");
+
+    gate.open();
+    more.await.unwrap();
+    let state = rig.core.wall().state();
+    assert_eq!(state.posts.iter().map(|post| post.id.as_str()).collect::<Vec<_>>(), ["n", "a", "b", "c"]);
+    assert_eq!(state.next_cursor, None);
+}
+
+/// Una página siguiente que contesta después de volver a pedir la primera ya
+/// no es la que sigue.
+///
+/// Roturas que atrapa: pegar debajo de la lista nueva lo que era la
+/// continuación de la vieja.
+#[tokio::test]
+async fn a_next_page_that_answers_after_a_reload_is_dropped() {
+    let rig = rig("member", json!([])).await;
+    let gate = Gate::default();
+    get("/api/v1/posts").and(query_param("cursor", "c1")).respond_with(gate.hold(ok(json!({ "posts": [card("viejo", json!({}))] })))).with_priority(1).mount(&rig.server).await;
+    get("/api/v1/posts").respond_with(ok(json!({ "posts": [card("a", json!({}))], "nextCursor": "c1" }))).up_to_n_times(1).with_priority(2).mount(&rig.server).await;
+    get("/api/v1/posts").respond_with(ok(json!({ "posts": [card("z", json!({}))] }))).with_priority(3).mount(&rig.server).await;
+    rig.core.wall().load().await;
+    let wall = rig.core.wall();
+    let more = tokio::spawn(async move { wall.load_more().await });
+    until("la página siguiente, retenida", || gate.held() == 1).await;
+
+    rig.core.wall().load().await;
+    gate.open();
+    more.await.unwrap();
+    let state = rig.core.wall().state();
+    assert_eq!(state.posts.iter().map(|post| post.id.as_str()).collect::<Vec<_>>(), ["z"]);
+    assert!(!state.loading);
+}
+
+/// El punto de «nuevo» tras volver de una caída, y lo nuevo que se ve con el
+/// muro delante se da por visto.
+///
+/// Roturas que atrapa: que releer tras reconectar no encienda el punto por lo
+/// no visto; encenderlo con el muro delante; no avisar al servidor de que lo
+/// que subió ya se vio.
+#[tokio::test]
+async fn after_a_reconnect_the_dot_is_recomputed_and_what_is_merged_in_front_is_seen() {
+    let rig = rig("member", json!([card("a", json!({}))])).await;
+    rig.core.wall().load().await;
+    assert!(!rig.core.wall().state().has_new);
+
+    rig.server.reset().await;
+    get("/api/v1/posts").respond_with(ok(json!({ "posts": [card("x", json!({ "unseen": true })), card("a", json!({}))] }))).mount(&rig.server).await;
+    post("/api/v1/posts/seen").respond_with(ok(json!(null))).mount(&rig.server).await;
+    rig.core.wall().refresh().await;
+    assert!(rig.core.wall().state().has_new, "lo no visto tras reconectar enciende el punto");
+    assert!(sent(&rig.server, "POST", "/api/v1/posts/seen").await.is_empty(), "fuera, no se da por visto");
+
+    rig.core.wall().show();
+    rig.core.wall().refresh().await;
+    assert!(!rig.core.wall().state().has_new);
+    assert_eq!(sent(&rig.server, "POST", "/api/v1/posts/seen").await.len(), 1, "delante, sí");
 }
 
 /// «Cargar más» pone la página que sigue debajo, con el cursor tal cual.
@@ -309,4 +458,23 @@ async fn a_notice_link_opens_the_post_and_choosing_a_channel_takes_the_wall_away
 
     assert!(rig.core.comms().select(Conversation::Channel { space_id: "g".into() }));
     assert!(!rig.core.comms().state().on_wall);
+}
+
+/// Una primera página que contesta tarde no pisa a la de después.
+///
+/// Roturas que atrapa: poner lo que llegue sin mirar si es la última
+/// petición (el muro volvería a lo de antes de la publicación nueva).
+#[tokio::test]
+async fn a_late_first_page_does_not_overwrite_a_newer_one() {
+    let rig = rig("member", json!([])).await;
+    let gate = Gate::default();
+    get("/api/v1/posts").respond_with(gate.hold(ok(json!({ "posts": [card("viejo", json!({}))] })))).up_to_n_times(1).with_priority(1).mount(&rig.server).await;
+    get("/api/v1/posts").respond_with(ok(json!({ "posts": [card("nuevo", json!({}))] }))).with_priority(2).mount(&rig.server).await;
+    let wall = rig.core.wall();
+    let first = tokio::spawn(async move { wall.load().await });
+    until("la primera, retenida", || gate.held() == 1).await;
+    rig.core.wall().load().await;
+    gate.open();
+    first.await.unwrap();
+    assert_eq!(rig.core.wall().state().posts.iter().map(|post| post.id.as_str()).collect::<Vec<_>>(), ["nuevo"]);
 }

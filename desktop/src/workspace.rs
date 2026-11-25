@@ -93,6 +93,9 @@ impl Aside {
 struct Opened {
     task: Option<String>,
     doc: Option<String>,
+    /// La publicación abierta en el muro: un aviso que la abre con el muro ya
+    /// delante también se va del perfil.
+    post: Option<String>,
     /// Comunicación, Plataforma, «Por atender», el resumen y el muro en
     /// pantalla.
     modules: [bool; 5],
@@ -104,6 +107,7 @@ impl Opened {
     fn went_to_something_new(&self, before: &Opened) -> bool {
         (self.task.is_some() && self.task != before.task)
             || (self.doc.is_some() && self.doc != before.doc)
+            || (self.post.is_some() && self.post != before.post)
             || self.modules.iter().zip(before.modules).any(|(now, was)| *now && !was)
     }
 }
@@ -1051,6 +1055,7 @@ impl Workspace {
         Opened {
             task: snapshot.task.task_id.clone(),
             doc: snapshot.docs.target.as_ref().map(|target| target.id.clone()),
+            post: snapshot.wall.open.as_ref().map(|post| post.id.clone()),
             modules: [snapshot.comms.on_screen, snapshot.platform.on_screen, snapshot.requests.on_screen, snapshot.overview.on_screen, snapshot.comms.on_screen && snapshot.comms.on_wall],
         }
     }

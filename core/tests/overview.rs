@@ -152,17 +152,75 @@ async fn it_shares_the_screen_with_the_others() {
     assert!(!rig.core.overview().state().on_screen, "«Mi trabajo» también");
 }
 
-/// Mirando el resumen, lo que cambia fuera lo cambia a él (qué eventos lo
-/// hacen, y que sin estar delante no, lo prueba `rereads_for` en el core).
+/// Mirando el resumen, lo que cambia fuera lo cambia a él, y una ráfaga es una
+/// sola lectura de reportes y tareas, sin volver a preguntar por los
+/// servidores.
 ///
 /// Roturas que atrapa: no releer estando delante; una lectura por cada evento
-/// de una ráfaga.
+/// de una ráfaga; preguntar por los servidores con cada evento de tarea.
 #[tokio::test]
-async fn it_rereads_on_task_events_while_in_front() {
+async fn it_rereads_on_task_events_while_in_front_once_and_without_servers() {
     let rig = rig().await;
     rig.core.overview().show();
     rig.core.stream().deliver(ServerEvent { event: "report:new".into(), data: "{}".into() });
     rig.core.stream().deliver(ServerEvent { event: "task:new".into(), data: json!({ "taskId": "t9" }).to_string() });
     until("se vuelve a leer", || rig.core.overview().state().reports.len() == 2).await;
+    // Pasada la ventana en que se agrupan, lo que iba a pedirse ya se pidió.
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
     assert_eq!(asked(&rig.server, "/api/v1/reports/").await.len(), 1, "una ráfaga es una lectura");
+    assert!(asked(&rig.server, "/api/v1/servers/").await.is_empty(), "un evento de tarea no pregunta por los servidores");
+}
+
+/// Hasta que el servidor contesta, lo de esa organización está «sin cargar».
+///
+/// Roturas que atrapa: dar por cargado lo que no ha llegado (el resumen diría
+/// «no entró nada» en la organización recién elegida); no marcar lo que sí
+/// llegó.
+#[tokio::test]
+async fn what_is_not_read_yet_is_not_loaded() {
+    let rig = rig().await;
+    let before = rig.core.overview().state();
+    assert!(!before.reports_loaded && !before.tasks_loaded);
+    rig.core.overview().load().await;
+    let after = rig.core.overview().state();
+    assert!(after.reports_loaded && after.tasks_loaded);
+    assert!(rig.core.orgs().set_current("o2"));
+    let other = rig.core.overview().state();
+    assert!(!other.reports_loaded && !other.tasks_loaded, "lo cargado es de la otra organización");
+}
+
+/// Abrir una tarea o un documento desde la campana deja atrás el resumen y
+/// «Por atender».
+///
+/// Roturas que atrapa: que el resumen (o «Por atender») siga encendido en el
+/// panel debajo de la tarea o del documento abiertos.
+#[tokio::test]
+async fn opening_a_task_or_a_doc_from_the_bell_leaves_overview_and_requests() {
+    let rig = rig().await;
+    for link in ["/tasks?task=t1", "/tasks?doc=list:l1"] {
+        rig.core.overview().show();
+        assert!(rig.core.overview().state().on_screen);
+        assert!(rig.core.inbox().open(link, "o1").await);
+        assert!(!rig.core.overview().state().on_screen, "{link}: el resumen sigue delante");
+
+        rig.core.requests().show(None);
+        assert!(rig.core.requests().state().on_screen);
+        assert!(rig.core.inbox().open(link, "o1").await);
+        assert!(!rig.core.requests().state().on_screen, "{link}: «Por atender» sigue delante");
+    }
+}
+
+/// Si se deja el resumen dentro del respiro en que se agrupan los eventos, ya
+/// no se lee.
+///
+/// Roturas que atrapa: leer para una pantalla que ya no está delante.
+#[tokio::test]
+async fn a_read_that_was_waiting_is_dropped_if_the_overview_is_left() {
+    let rig = rig().await;
+    rig.core.overview().show();
+    rig.core.stream().deliver(ServerEvent { event: "task:new".into(), data: json!({ "taskId": "t9" }).to_string() });
+    tokio::task::yield_now().await;
+    rig.core.overview().leave();
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    assert!(asked(&rig.server, "/api/v1/reports/").await.is_empty());
 }

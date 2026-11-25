@@ -608,6 +608,12 @@ impl Inbox {
         if self.core.orgs().state().current_org_id.as_deref() != Some(org_id) && !self.core.switch_org(org_id).await {
             return false;
         }
+        // Una tarea o un documento es de «Trabajo»: el resumen y «Por atender»
+        // dejan de estar delante, que si no seguirían encendidos debajo.
+        if matches!(target, InboxTarget::Task { .. } | InboxTarget::Doc { .. }) {
+            self.core.overview().leave();
+            self.core.requests().leave();
+        }
         match target {
             InboxTarget::Task { task_id } => self.core.tasks().open(&task_id).await,
             InboxTarget::Doc { node_id } => {

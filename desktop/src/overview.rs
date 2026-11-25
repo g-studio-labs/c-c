@@ -12,7 +12,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
-use crate::lang::locale;
+use crate::lang::{locale, tr};
 use crate::theme::Leading as _;
 
 /// Lo mínimo de una tarjeta que pinta esta pantalla: el icono y su color.
@@ -146,6 +146,9 @@ impl OverviewScreen {
     }
 
     fn list_body(prefix: &str, list: &OverviewList, cx: &App) -> AnyElement {
+        if list.loading {
+            return Self::empty(format!("{prefix}-loading"), tr(cx, "common:admin.loading"), cx);
+        }
         if list.rows.is_empty() {
             return Self::empty(format!("{prefix}-empty"), list.empty.clone(), cx);
         }
@@ -219,6 +222,7 @@ impl Render for OverviewScreen {
             &Backend::core(cx).overview().state(),
             &snapshot.comms,
             &snapshot.platform.servers,
+            snapshot.platform.loaded,
             &org_name,
             chrono::Local::now().date_naive(),
             &chrono::Local::now(),
@@ -253,7 +257,9 @@ impl Render for OverviewScreen {
             unread_body,
             cx,
         );
-        let infra_body = if view.infra.count == 0 {
+        let infra_body = if view.infra.loading {
+            Self::empty("overview-infra-loading".into(), tr(cx, "common:admin.loading"), cx)
+        } else if view.infra.count == 0 {
             Self::empty("overview-infra-empty".into(), view.infra.empty.clone(), cx)
         } else {
             div()
@@ -403,6 +409,27 @@ mod tests {
 
     fn stop(cx: &mut TestAppContext) {
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Mientras el servidor no contesta se dice «Cargando…», no «No entró
+    /// nada».
+    ///
+    /// Roturas que atrapa: pintar lo vacío antes de tiempo.
+    #[gpui_kit::test]
+    fn what_has_not_arrived_says_loading_not_empty(cx: &mut TestAppContext) {
+        let server = server();
+        let gate = crate::testing::Gate::default();
+        server.mount(get("/api/v1/reports/").respond_with(gate.hold(ok(json!({ "items": [], "total": 0 })))).with_priority(1));
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "panel-overview", cx));
+        click(window, "panel-overview", cx);
+        wait_until(cx, "cargando", |cx| on_screen(window, "overview-reports-loading", cx));
+        assert!(!on_screen(window, "overview-reports-empty", cx), "«no entró nada» antes de tiempo");
+        gate.open();
+        wait_until(cx, "ya contestó", |cx| on_screen(window, "overview-reports-empty", cx));
+        assert!(!on_screen(window, "overview-reports-loading", cx));
+        stop(cx);
     }
 
     /// El resumen pone delante sus cuatro tarjetas con lo de la organización,

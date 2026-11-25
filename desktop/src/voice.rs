@@ -1732,6 +1732,23 @@ mod tests {
         stop(cx);
     }
 
+    /// Con la sala abierta, el muro se pone delante de ella: la sala se
+    /// minimiza y la llamada sigue.
+    ///
+    /// Roturas que atrapa: la fila del muro que deja la sala cubriéndolo.
+    #[gpui_kit::test]
+    fn the_wall_row_minimizes_the_stage(cx: &mut TestAppContext) {
+        let (_server, window, _, _, _) = in_a_call_with_video(cx);
+        assert!(on_screen(window, "voice-grid", cx));
+        // Abrir la sala pliega el panel: se fija desde el riel.
+        click(window, "rail-comms", cx);
+        wait_until(cx, "el panel", |cx| on_screen(window, "comms-wall", cx));
+        click(window, "comms-wall", cx);
+        wait_until(cx, "el muro delante", |cx| on_screen(window, "wall", cx));
+        assert!(!on_screen(window, "voice-grid", cx) && on_screen(window, "voice-mini", cx), "la sala sigue cubriendo el muro");
+        stop(cx);
+    }
+
     /// Lo que compartes tú va al escenario con «Estás compartiendo» y su
     /// botón de parar; pararlo se lo dice al motor y la sala vuelve a la
     /// rejilla. Con una sola pantalla se comparte sin preguntar.

@@ -262,6 +262,9 @@ impl CommsView {
             .cursor_pointer()
             .aria_selected(active)
             .on_click(|_, _, cx| {
+                // Con la sala abierta, el muro se pone delante de ella: la
+                // sala se minimiza y la llamada sigue.
+                Backend::core(cx).voice().close_stage();
                 Backend::core(cx).wall().show();
                 Backend::run(cx, |core| async move { core.wall().opened().await });
             })

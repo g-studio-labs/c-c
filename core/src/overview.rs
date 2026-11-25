@@ -90,6 +90,10 @@ pub struct OverviewState {
     /// Los abiertos, entre los primeros que contestó el servidor.
     pub reports: Vec<OverviewReport>,
     pub tasks: Vec<OpenTask>,
+    /// Ya contestó el servidor (bien o mal) para esta organización: hasta
+    /// entonces «no entró nada» sería mentira.
+    pub reports_loaded: bool,
+    pub tasks_loaded: bool,
 }
 
 #[derive(Default)]
@@ -159,15 +163,23 @@ impl Overview {
     /// Trae lo de la organización que se mira, y los servidores. Lo que falle
     /// deja lo que hubiera: una tarjeta que no carga no es un cero.
     pub async fn load(&self) {
+        self.read(true).await;
+    }
+
+    /// `servers` también vuelve a preguntar por los servidores: al entrar, no
+    /// con cada evento de una tarea.
+    async fn read(&self, servers: bool) {
         let Some(org_id) = self.core.orgs().state().current_org_id.filter(|id| !id.is_empty()) else { return };
         let turn = self.core.inner.overview_reads.fetch_add(1, Ordering::SeqCst) + 1;
-        let platform = {
+        let platform = servers.then(|| {
             let core = self.core.clone();
             tokio::spawn(async move { core.platform().refresh().await })
-        };
+        });
         let (reports_path, tasks_path) = (format!("/api/v1/reports/?limit={PAGE}&orgId={org_id}"), format!("/api/v1/tasks/?limit={PAGE}&orgId={org_id}"));
         let (reports, tasks) = tokio::join!(self.core.get::<ReportPage>(&reports_path), self.core.get_list::<OpenTask>(&tasks_path));
-        let _ = platform.await;
+        if let Some(platform) = platform {
+            let _ = platform.await;
+        }
         // Una lectura que se pidió antes de otra, o de otra organización, no
         // pisa a la de después.
         if self.core.inner.overview_reads.load(Ordering::SeqCst) != turn || self.core.orgs().state().current_org_id.as_deref() != Some(org_id.as_str()) {
@@ -183,6 +195,8 @@ impl Overview {
             if let Ok(tasks) = tasks {
                 state.tasks = tasks;
             }
+            state.reports_loaded = true;
+            state.tasks_loaded = true;
         });
     }
 
@@ -201,8 +215,8 @@ impl Overview {
         let overview = self.core.overview();
         tokio::spawn(async move {
             tokio::time::sleep(COALESCE).await;
-            if overview.core.inner.overview_reloads.load(Ordering::SeqCst) == turn {
-                overview.refresh().await;
+            if overview.core.inner.overview_reloads.load(Ordering::SeqCst) == turn && overview.data().state.on_screen {
+                overview.read(false).await;
             }
         });
     }
@@ -248,6 +262,8 @@ pub struct OverviewRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct OverviewList {
+    /// Todavía no contestó el servidor: se dice «cargando», no «vacío».
+    pub loading: bool,
     pub title: String,
     pub count: i64,
     pub link: String,
@@ -287,6 +303,7 @@ pub struct Figure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct InfraCard {
+    pub loading: bool,
     pub title: String,
     pub count: i64,
     pub link: String,
@@ -370,6 +387,7 @@ pub fn overview_view<Z: TimeZone>(
     state: &OverviewState,
     comms: &CommsState,
     servers: &[Server],
+    servers_loaded: bool,
     org_name: &str,
     today: NaiveDate,
     now: &DateTime<Z>,
@@ -377,6 +395,7 @@ pub fn overview_view<Z: TimeZone>(
 ) -> OverviewView {
     let see_all = text(locale, "common:admin.seeAll");
     let reports = OverviewList {
+        loading: !state.reports_loaded,
         title: text(locale, "common:admin.openReports"),
         count: state.reports.len() as i64,
         link: see_all.clone(),
@@ -396,6 +415,7 @@ pub fn overview_view<Z: TimeZone>(
             .collect(),
     };
     let tasks = OverviewList {
+        loading: !state.tasks_loaded,
         title: text(locale, "common:admin.openTasks"),
         count: state.tasks.len() as i64,
         link: see_all,
@@ -430,6 +450,7 @@ pub fn overview_view<Z: TimeZone>(
             rows: unread_rows,
         },
         infra: InfraCard {
+            loading: !servers_loaded,
             title: text(locale, "common:admin.infrastructure"),
             count: servers.len() as i64,
             link: text(locale, "common:admin.openLink"),
@@ -463,7 +484,7 @@ mod tests {
     }
 
     fn view(state: &OverviewState, comms: &CommsState, servers: &[Server]) -> OverviewView {
-        overview_view(state, comms, servers, "Dwit", today(), &now(), Locale::Es)
+        overview_view(state, comms, servers, true, "Dwit", today(), &now(), Locale::Es)
     }
 
     fn direct(id: &str, name: &str, unread: i64) -> DmSummary {
@@ -541,6 +562,19 @@ mod tests {
         assert_eq!(view.unread.rows[0].when, "hace 1 hora");
         assert_eq!(view.unread.rows[2].when, "");
         assert_eq!(view.unread.rows[2].conversation, Conversation::Channel { space_id: "s1".into() });
+    }
+
+    /// Antes de que conteste el servidor se dice «cargando», no «vacío».
+    /// Roturas que atrapa: pintar «No entró nada» en la organización que
+    /// acaba de elegirse; seguir en «cargando» cuando ya contestó.
+    #[test]
+    fn nothing_is_said_to_be_empty_until_the_server_answered() {
+        let mut state = OverviewState::default();
+        let before = overview_view(&state, &CommsState::default(), &[], false, "Dwit", today(), &now(), Locale::Es);
+        assert!(before.reports.loading && before.tasks.loading && before.infra.loading);
+        state.reports_loaded = true;
+        let after = overview_view(&state, &CommsState::default(), &[], true, "Dwit", today(), &now(), Locale::Es);
+        assert!(!after.reports.loading && after.tasks.loading && !after.infra.loading);
     }
 
     /// La infraestructura. Roturas que atrapa: contar como en línea lo que no

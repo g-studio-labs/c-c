@@ -1369,6 +1369,26 @@ mod tests {
         stop(cx);
     }
 
+    /// Un aviso del muro, con el perfil o la organización encima, los quita.
+    ///
+    /// Roturas que atrapa: abrir la publicación por debajo de la pantalla de
+    /// al lado, sin que se vea nada.
+    #[gpui_kit::test]
+    fn a_wall_notice_closes_the_screen_beside(cx: &mut TestAppContext) {
+        let server = server("member", json!([card("p1", json!({}))]));
+        server.mount(get("/api/v1/posts/p1").respond_with(ok(detail("p1", json!({}), json!([])))));
+        server.install(cx);
+        let window = open(cx);
+        open_wall(window, cx);
+        click(window, "rail-organization", cx);
+        wait_until(cx, "la organización delante", |cx| on_screen(window, "org-page", cx));
+
+        cx.update(|cx| Backend::run(cx, |core| async move { core.inbox().open("/feedback?post=p1", "o1").await; }));
+        wait_until(cx, "la publicación, a la vista", |cx| on_screen(window, "wall-modal", cx));
+        assert!(!on_screen(window, "org-page", cx), "la organización sigue encima");
+        stop(cx);
+    }
+
     #[gpui_kit::test]
     fn a_viewer_sees_the_wall_but_cannot_post(cx: &mut TestAppContext) {
         let server = server("viewer", json!([card("a", json!({}))]));

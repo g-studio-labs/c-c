@@ -95,7 +95,7 @@ pub struct ChatView {
     /// leyendo arriba no se marca leído hasta bajar.
     at_tail: bool,
     /// Lo que se le dijo al core que hay delante la última vez.
-    front: Option<(bool, Option<Conversation>)>,
+    front: Option<(bool, bool, Option<Conversation>)>,
     /// Las imágenes de los mensajes, por su ruta.
     pub(crate) thumbs: Thumbs,
     /// El visor de imágenes, si hay una abierta.
@@ -170,7 +170,7 @@ impl ChatView {
     fn sync(&mut self, cx: &mut Context<Self>) {
         let (front, revision) = {
             let snapshot = Backend::snapshot(cx).read(cx);
-            ((snapshot.comms.on_screen, snapshot.comms.selected.clone()), snapshot.thread_revision)
+            ((snapshot.comms.on_screen, snapshot.comms.on_wall, snapshot.comms.selected.clone()), snapshot.thread_revision)
         };
         // Lo que hay delante cambió: el core decide qué traer.
         if self.front.as_ref() != Some(&front) {
@@ -1524,6 +1524,33 @@ mod tests {
         assert!(gap_below(window, "m041", cx).abs() <= 13.);
         assert!(!on_screen(window, "thread-new-messages", cx), "el aviso no se quitó");
         wait_until(cx, "al bajar se marca leído", |_| server.hits(READ_A) == 3);
+        stop(cx);
+    }
+
+    /// Volver del muro a la misma conversación la relee y la marca leída.
+    ///
+    /// Roturas que atrapa: que la conversación, con el muro encima, no se dé
+    /// por oculta (la clave de lo que hay delante no incluye el muro) y al
+    /// volver no se relea ni se marque leída: se quedaría sin lo que llegó
+    /// mientras tanto.
+    #[gpui_kit::test]
+    fn coming_back_from_the_wall_reads_the_conversation_again(cx: &mut TestAppContext) {
+        let server = server();
+        server.mount(get("/api/v1/posts").respond_with(ok(json!({ "posts": [] }))));
+        let talk = history(numbered(0..10));
+        mount_history(&server, CHAT_A, &talk, Duration::ZERO);
+        let (window, _) = open(&server, cx);
+        enter(window, channel("a"), cx);
+        wait_until(cx, "se abre", |cx| on_screen(window, "thread-line-m009", cx));
+        wait_until(cx, "se marca leída al abrir", |_| server.hits(READ_A) == 1);
+
+        click(window, "comms-wall", cx);
+        wait_until(cx, "el muro delante", |cx| on_screen(window, "wall", cx) && !on_screen(window, "thread-line-m009", cx));
+        talk.lock().unwrap().push(line("m010", "u2", "Luis Mora", "llegó con el muro delante", 5, 10));
+
+        click(window, "comms-channel-a", cx);
+        wait_until(cx, "lo que llegó se ve", |cx| on_screen(window, "thread-line-m010", cx));
+        wait_until(cx, "y se marca leído", |_| server.hits(READ_A) == 2);
         stop(cx);
     }
 

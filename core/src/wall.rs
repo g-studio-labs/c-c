@@ -14,6 +14,9 @@
 //!   misma visita. Las tarjetas siguen marcando lo nuevo durante ella.
 //! - **Reaccionar se ve al momento** y se deshace si el servidor dice que no.
 
+use std::collections::HashSet;
+use std::time::Duration;
+
 use chrono::{DateTime, TimeZone};
 use serde::{Deserialize, Serialize};
 
@@ -284,9 +287,21 @@ fn card_of(post: &WallPost) -> WallPost {
     WallPost { comment_list: Vec::new(), ..post.clone() }
 }
 
+/// Un respiro antes de volver a pedir lo que cambió: una ráfaga de
+/// reacciones o comentarios es una sola lectura por publicación.
+const COALESCE: Duration = Duration::from_millis(400);
+
 #[derive(Default)]
 pub(crate) struct WallData {
     state: WallState,
+    /// Cuántas primeras páginas se han pedido: una página siguiente que se
+    /// pidió antes de la última no se pone.
+    generation: u64,
+    /// Publicaciones que cambiaron con el muro fuera de pantalla: se vuelven a
+    /// pedir al abrirlo, y no una vez por evento.
+    stale: HashSet<String>,
+    /// Las que esperan su lectura mientras se mira.
+    pending: HashSet<String>,
 }
 
 pub struct Wall {
@@ -350,7 +365,18 @@ impl Wall {
     /// Abrir el muro es haberlo visto: se pide y, **después**, se avisa.
     pub async fn opened(&self) {
         self.load().await;
+        self.refresh_stale().await;
         let _ = self.mark_seen().await;
+    }
+
+    /// Lo que cambió mientras el muro estaba fuera: la lista ya vino entera,
+    /// queda la publicación abierta, si es una de ellas.
+    async fn refresh_stale(&self) {
+        let stale = std::mem::take(&mut self.data().stale);
+        let open = self.state().open.map(|open| open.id).filter(|id| stale.contains(id));
+        if let Some(id) = open {
+            self.refresh_one(&id).await;
+        }
     }
 
     /// El enlace de un aviso (`/feedback?post=<id>`): el muro delante con esa
@@ -358,6 +384,7 @@ impl Wall {
     pub async fn open_from_link(&self, post_id: &str) -> bool {
         self.show();
         self.load().await;
+        self.data().stale.clear();
         let opened = self.open_post(post_id).await.is_ok();
         let _ = self.mark_seen().await;
         opened
@@ -365,8 +392,17 @@ impl Wall {
 
     /// La primera página, sustituyendo lo que hubiera.
     pub async fn load(&self) {
+        let generation = {
+            let mut data = self.data();
+            data.generation += 1;
+            data.generation
+        };
         self.change(|state| state.loading = true);
-        match self.core.get::<Page>("/api/v1/posts").await {
+        let answer = self.core.get::<Page>("/api/v1/posts").await;
+        if self.data().generation != generation {
+            return;
+        }
+        match answer {
             Ok(page) => {
                 let viewing = self.core.comms().wall_in_front();
                 self.change(|state| {
@@ -389,10 +425,23 @@ impl Wall {
     pub async fn load_more(&self) {
         let Some(cursor) = self.state().next_cursor.filter(|_| !self.state().loading) else { return };
         self.change(|state| state.loading = true);
+        let generation = self.data().generation;
         let path = format!("/api/v1/posts?cursor={}", encode(&cursor));
-        match self.core.get::<Page>(&path).await {
+        let answer = self.core.get::<Page>(&path).await;
+        // Si mientras tanto se pidió la primera página otra vez, esta ya no es
+        // la que sigue.
+        if self.data().generation != generation {
+            return;
+        }
+        match answer {
             Ok(page) => self.change(|state| {
-                state.posts.extend(page.posts);
+                // Una publicación nueva empuja a las demás: la que ya está no
+                // se repite.
+                for post in page.posts {
+                    if !state.posts.iter().any(|known| known.id == post.id) {
+                        state.posts.push(post);
+                    }
+                }
                 state.next_cursor = page.next_cursor.filter(|cursor| !cursor.is_empty());
                 state.loading = false;
             }),
@@ -621,41 +670,81 @@ impl Wall {
             let state = self.state();
             state.posts.iter().any(|post| post.id == id) || state.open.as_ref().is_some_and(|open| open.id == id)
         };
-        if shown {
-            self.refresh_one(id).await;
+        if !shown {
+            return;
+        }
+        // Con el muro fuera nadie lo mira: se apunta y se pide al abrirlo.
+        if self.core.comms().wall_in_front() {
+            self.refresh_soon(id);
+        } else {
+            self.data().stale.insert(id.to_string());
         }
     }
 
-    /// Vuelve a pedir una publicación que está en pantalla; si ya no se puede
-    /// ver, se quita.
+    /// Vuelve a pedir esa publicación tras un respiro, junto con las que
+    /// cambien en él.
+    fn refresh_soon(&self, id: &str) {
+        let first = {
+            let mut data = self.data();
+            let first = data.pending.is_empty();
+            data.pending.insert(id.to_string());
+            first
+        };
+        // La primera abre la ventana; las que lleguen dentro de ella se
+        // suman a lo que ésta pida.
+        if !first {
+            return;
+        }
+        let wall = self.core.wall();
+        tokio::spawn(async move {
+            tokio::time::sleep(COALESCE).await;
+            let ids = std::mem::take(&mut wall.data().pending);
+            for id in ids {
+                wall.refresh_one(&id).await;
+            }
+        });
+    }
+
+    /// Vuelve a pedir una publicación que está en pantalla; si el servidor
+    /// dice que ya no existe para quien mira, se quita. Cualquier otro fallo
+    /// (sin red, un 500) deja la tarjeta: no es que haya desaparecido.
     async fn refresh_one(&self, id: &str) {
         match self.core.get::<WallPost>(&format!("/api/v1/posts/{id}")).await {
             Ok(detail) => self.replace(id, detail),
-            Err(_) => self.change(|state| {
+            Err(ApiError::Server { status: 404, .. }) => self.change(|state| {
                 state.posts.retain(|post| post.id != id);
                 if state.open.as_ref().is_some_and(|open| open.id == id) {
                     state.open = None;
                 }
             }),
+            Err(_) => {}
         }
     }
 
     /// Lo nuevo arriba, sin perder lo que ya se había cargado debajo.
     async fn merge_first_page(&self) {
         let Ok(page) = self.core.get::<Page>("/api/v1/posts").await else { return };
+        let viewing = self.core.comms().wall_in_front();
+        let unseen = page.posts.iter().any(|post| post.unseen);
         self.change(|state| {
             let rest: Vec<WallPost> = state.posts.iter().filter(|old| !page.posts.iter().any(|fresh| fresh.id == old.id)).cloned().collect();
             let no_rest = rest.is_empty();
             state.posts = page.posts.into_iter().chain(rest).collect();
-            if no_rest {
+            // Con una página siguiente en camino, el cursor es de ella.
+            if no_rest && !state.loading {
                 state.next_cursor = page.next_cursor.filter(|cursor| !cursor.is_empty());
             }
+            state.has_new = !viewing && (state.has_new || unseen);
         });
+        // Lo nuevo que se ve con el muro delante es lo visto.
+        if viewing && unseen {
+            let _ = self.mark_seen().await;
+        }
     }
 
     /// Al entrar, y al volver de una caída: lo publicado mientras no había
     /// stream no llegó por evento.
-    pub(crate) async fn refresh(&self) {
+    pub async fn refresh(&self) {
         if self.state().loaded {
             self.merge_first_page().await;
         } else {
