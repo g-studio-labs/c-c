@@ -382,6 +382,7 @@ impl Platform {
     /// comunicación si se estaba en ella.
     pub fn enter(&self) {
         self.core.comms().leave();
+        self.core.overview().leave();
         self.change(|data| data.on_screen = true);
     }
 

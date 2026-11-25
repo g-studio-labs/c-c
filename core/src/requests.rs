@@ -375,6 +375,7 @@ impl Requests {
         self.core.docs().leave_module();
         self.core.comms().leave();
         self.core.platform().leave();
+        self.core.overview().leave();
         let highlight = highlight.map(|code| code.to_lowercase());
         self.change(|data| {
             data.state.on_screen = true;

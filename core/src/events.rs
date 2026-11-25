@@ -10,6 +10,7 @@ use crate::docs::DocsState;
 use crate::inbox::InboxState;
 use crate::mywork::MyWorkState;
 use crate::notice::Announcement;
+use crate::overview::OverviewState;
 use crate::orgs::OrgsState;
 use crate::platform::PlatformState;
 use crate::requests::RequestsState;
@@ -18,6 +19,7 @@ use crate::session::Session;
 use crate::stream::{ConnectionState, ServerEvent};
 use crate::task::TaskState;
 use crate::voice::VoiceState;
+use crate::wall::WallState;
 
 pub trait Listener: Send + Sync {
     /// La sesión cambió: alguien entró, salió, o el servidor la dio por
@@ -62,6 +64,13 @@ pub trait Listener: Send + Sync {
     /// «Por atender» cambió: llegaron los pedidos, se contestó uno, se movió
     /// el número o las marcas «espera a…», o se entró o se salió de ella.
     fn requests_changed(&self, _state: RequestsState) {}
+
+    /// El muro de feedback cambió: llegó, se abrió una publicación, se
+    /// reaccionó, se comentó o se publicó algo.
+    fn wall_changed(&self, _state: WallState) {}
+
+    /// El resumen cambió: se puso delante o se quitó, o llegó lo suyo.
+    fn overview_changed(&self, _state: OverviewState) {}
 
     /// Un agente pidió que la persona mire ese pedido ya (`request:open`):
     /// «Por atender» ya está delante con él resaltado; la plataforma pone su

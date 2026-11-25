@@ -16,6 +16,10 @@ impl Core {
         // Los pedidos no son de una organización: una vez, aparte.
         let requests = self.requests();
         tokio::spawn(async move { requests.refresh().await });
+        // El muro, una vez: el punto de «nuevo» de su fila no espera a que se
+        // abra comunicación.
+        let wall = self.wall();
+        tokio::spawn(async move { wall.refresh().await });
         self.orgs().load().await;
         self.load_current_org().await;
     }
@@ -98,5 +102,7 @@ impl Core {
         let _ = comms.await;
         // La bandeja es de la organización: si se ha mirado, la de ésta.
         self.inbox().refresh().await;
+        // Y el resumen, si se está mirando.
+        self.overview().refresh().await;
     }
 }

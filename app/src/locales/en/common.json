@@ -529,7 +529,13 @@
     "editUser": "Edit @{{username}}",
     "newPasswordOptional": "New password (optional)",
     "cantChangeOwnRole": "(you can't change your own)",
-    "deleteUserTitle": "Delete user @{{username}}?"
+    "deleteUserTitle": "Delete user @{{username}}?",
+    "seeAll": "See all →",
+    "goToTalk": "Go to Talk →",
+    "openLink": "Open →",
+    "figServers": "servers",
+    "figOnline": "online",
+    "figOrchestrators": "orchestrators"
   },
   "misc": {
     "usernameRequired": "Username is required",

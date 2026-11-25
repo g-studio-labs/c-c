@@ -282,7 +282,7 @@ impl Notices {
         let Some(me) = self.core.session().map(|session| session.id) else { return };
         let comms = self.core.comms();
         let state = comms.state();
-        let open = state.selected.as_ref().filter(|_| state.on_screen);
+        let open = state.selected.as_ref().filter(|_| state.on_screen && !state.on_wall);
         let following = comms.following();
         let viewer = Viewer { me: &me, open, following: following.as_ref() };
         let (announcement, actor_id, message_id) = match event.event.as_str() {

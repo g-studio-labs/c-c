@@ -529,7 +529,13 @@
     "editUser": "Editar a @{{username}}",
     "newPasswordOptional": "Contraseña nueva (opcional)",
     "cantChangeOwnRole": "(el tuyo no lo puedes cambiar)",
-    "deleteUserTitle": "¿Borrar a @{{username}}?"
+    "deleteUserTitle": "¿Borrar a @{{username}}?",
+    "seeAll": "Ver todo →",
+    "goToTalk": "Ir a Comunicación →",
+    "openLink": "Abrir →",
+    "figServers": "servidores",
+    "figOnline": "en línea",
+    "figOrchestrators": "orquestadores"
   },
   "misc": {
     "usernameRequired": "El usuario es obligatorio",

@@ -264,8 +264,10 @@ pub enum InboxTarget {
     Doc { node_id: String },
     /// Un pedido de un agente, en «Por atender» (`/requests?open=req-…`).
     Request { code: String },
-    /// Un sitio que esta app todavía no tiene (el muro, los servidores, una
-    /// llamada), o ninguno.
+    /// Una publicación del muro (`/feedback?post=<id>`).
+    Post { post_id: String },
+    /// Un sitio que esta app todavía no tiene (los servidores, una llamada), o
+    /// ninguno.
     NotHere,
 }
 
@@ -279,6 +281,7 @@ pub fn link_target(link: &str) -> InboxTarget {
             .map(|id| InboxTarget::Task { task_id: id.into() })
             .or_else(|| query_param(link, "doc").and_then(|doc| doc.split_once(':')).map(|(_, id)| InboxTarget::Doc { node_id: id.into() })),
         "/requests" => query_param(link, "open").map(|code| InboxTarget::Request { code: code.into() }),
+        "/feedback" => query_param(link, "post").map(|id| InboxTarget::Post { post_id: id.into() }),
         _ => None,
     }
     .unwrap_or(InboxTarget::NotHere)
@@ -595,6 +598,10 @@ impl Inbox {
             self.core.requests().load().await;
             return true;
         }
+        // Las publicaciones son de la persona, no de una organización.
+        if let InboxTarget::Post { post_id } = target {
+            return self.core.wall().open_from_link(&post_id).await;
+        }
         if let InboxTarget::Conversation { conversation } = target {
             return self.core.notices().open(NoticeTarget { conversation, org_id: Some(org_id.to_string()) }).await;
         }
@@ -752,7 +759,8 @@ mod tests {
         assert_eq!(link_target("/tasks?task=t1"), InboxTarget::Task { task_id: "t1".into() });
         assert_eq!(link_target("/tasks?doc=list:l1"), InboxTarget::Doc { node_id: "l1".into() });
         assert_eq!(link_target("/requests?open=req-ab12"), InboxTarget::Request { code: "req-ab12".into() });
-        for elsewhere in ["/feedback?post=p1", "/servers/x/backups?target=b", "/call/abc", "", "/chat"] {
+        assert_eq!(link_target("/feedback?post=p1"), InboxTarget::Post { post_id: "p1".into() });
+        for elsewhere in ["/feedback", "/servers/x/backups?target=b", "/call/abc", "", "/chat"] {
             assert_eq!(link_target(elsewhere), InboxTarget::NotHere, "{elsewhere}");
         }
     }

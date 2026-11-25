@@ -178,6 +178,8 @@ impl Core {
         self.notices().clear();
         self.inbox().clear();
         self.requests().clear();
+        self.wall().clear();
+        self.overview().clear();
         self.chat().clear();
         self.voice().clear();
         self.inner.listener.session_changed(None);

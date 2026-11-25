@@ -403,7 +403,7 @@ impl Chat {
         let comms = self.core.comms().state();
         let data = self.data();
         data.open.as_ref().is_some_and(|open| {
-            open.turn == turn && open.on_screen && comms.on_screen && comms.selected.as_ref() == Some(&open.conversation)
+            open.turn == turn && open.on_screen && comms.on_screen && !comms.on_wall && comms.selected.as_ref() == Some(&open.conversation)
         })
     }
 
@@ -416,7 +416,7 @@ impl Chat {
     /// tirar lo cargado.
     pub async fn follow(&self) {
         let comms = self.core.comms().state();
-        let target = comms.selected.clone().filter(|_| comms.on_screen);
+        let target = comms.selected.clone().filter(|_| comms.on_screen && !comms.on_wall);
         enum Step {
             Nothing,
             Hidden,

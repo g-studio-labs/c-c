@@ -175,7 +175,7 @@ async fn opening_a_notice_goes_where_it_says() {
     get("/api/v1/dm/").respond_with(ok(json!([]))).mount(&rig.server).await;
     rig.core.open_workspace().await;
 
-    assert!(!rig.core.inbox().open("/feedback?post=p1", "o2").await);
+    assert!(!rig.core.inbox().open("/servers/x/backups?target=b", "o2").await);
     assert_eq!(rig.core.orgs().state().current_org_id.as_deref(), Some("o1"), "un sitio que no está aquí no mueve nada");
 
     assert!(rig.core.inbox().open("/chat?space=z", "o2").await);

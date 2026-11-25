@@ -397,6 +397,7 @@ impl Core {
         // Acotar es pedir tareas: «Por atender» deja de estar delante.
         if matches!(click, TreeClick::ScopeTasks { .. }) {
             self.requests().leave();
+            self.overview().leave();
         }
         if click == TreeClick::OpenDocs {
             self.docs().open(id).await;
@@ -438,6 +439,7 @@ impl Core {
         self.docs().close_now();
         self.docs().leave_module();
         self.requests().leave();
+        self.overview().leave();
         self.my_work().set_scope(None);
     }
 }

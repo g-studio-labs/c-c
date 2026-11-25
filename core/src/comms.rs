@@ -105,6 +105,9 @@ pub struct CommsState {
     /// Se está en comunicación: el panel es su lista y la vista, la
     /// conversación.
     pub on_screen: bool,
+    /// Lo que hay delante en comunicación es el muro de feedback y no una
+    /// conversación: `selected` se queda marcada para la vuelta.
+    pub on_wall: bool,
     /// La sala general delante y luego los espacios, en el orden del árbol.
     pub channels: Vec<Channel>,
     /// Las conversaciones privadas, en el orden del servidor: la del último
@@ -162,6 +165,7 @@ struct ChannelSpace {
 #[derive(Default)]
 pub(crate) struct CommsData {
     on_screen: bool,
+    on_wall: bool,
     /// Los espacios de cada organización cuyo árbol ha llegado. Por
     /// organización, y no «los últimos que llegaron»: el árbol de la que se
     /// dejó, si llega tarde, se apunta en lo suyo y no le quita a la nueva
@@ -210,7 +214,7 @@ impl Comms {
         let (unread, dms) = self.core.counters().conversations();
         let data = self.data();
         let Some(org) = org_id.as_deref() else {
-            return CommsState { on_screen: data.on_screen, ..CommsState::default() };
+            return CommsState { on_screen: data.on_screen, on_wall: data.on_wall, ..CommsState::default() };
         };
         let spaces = data.spaces.get(org).map(Vec::as_slice).unwrap_or_default();
         let channel = |space: &ChannelSpace| Channel {
@@ -234,6 +238,7 @@ impl Comms {
         CommsState {
             org_id,
             on_screen: data.on_screen,
+            on_wall: data.on_wall,
             channels,
             directs,
             selected,
@@ -278,6 +283,7 @@ impl Comms {
         {
             let mut data = self.data();
             data.on_screen = false;
+            data.on_wall = false;
             data.spaces.clear();
             data.latest = None;
             data.following = None;
@@ -290,8 +296,22 @@ impl Comms {
     /// está en pantalla a la vez: deja Plataforma si se estaba en ella.
     pub fn enter(&self) {
         self.core.platform().leave();
+        self.core.overview().leave();
         self.data().on_screen = true;
         self.publish();
+    }
+
+    /// Pone el muro delante de la conversación, dentro de comunicación.
+    pub(crate) fn show_wall(&self) {
+        self.enter();
+        self.data().on_wall = true;
+        self.publish();
+    }
+
+    /// Si lo que se mira ahora es el muro.
+    pub fn wall_in_front(&self) -> bool {
+        let data = self.data();
+        data.on_screen && data.on_wall
     }
 
     /// Volver a lo demás. Lo elegido se queda para la vuelta.
@@ -483,6 +503,8 @@ impl Comms {
         if !here {
             return false;
         }
+        // Elegir una conversación es ir a leerla: el muro se quita de en medio.
+        self.data().on_wall = false;
         self.remember(&org_id, conversation);
         true
     }
@@ -683,7 +705,7 @@ pub fn comms_panel<Viewer: TimeZone>(state: &CommsState, viewer: CommsViewer, qu
     let filtering = !term.is_empty();
     let matches = |name: &str| !filtering || fold(name).contains(&term);
     let badge = |count: i64| count_badge(Some(count), RAIL_CAP);
-    let active = |conversation: &Conversation| state.on_screen && state.selected.as_ref() == Some(conversation);
+    let active = |conversation: &Conversation| state.on_screen && !state.on_wall && state.selected.as_ref() == Some(conversation);
 
     let others = state.channels.iter().filter(|channel| !channel.general && matches(&channel.name)).count();
     let channel_rows: Vec<CommsRow> = state
@@ -978,6 +1000,18 @@ mod tests {
 
         state.channels_folded = false;
         assert_eq!(names(&comms_panel(&state, ANA, "", Locale::Es, &now()).channels), ["General", "Producto", "Diseño"]);
+    }
+
+    /// Con el muro delante, ninguna conversación está marcada. Roturas que
+    /// atrapa: dos cosas marcadas a la vez en el panel (el muro y el canal
+    /// que se tenía abierto antes).
+    #[test]
+    fn with_the_wall_in_front_no_row_is_marked() {
+        let mut state = state();
+        let marked = |state: &CommsState| comms_panel(state, ANA, "", Locale::Es, &now()).channels.rows.iter().filter(|row| row.active).count();
+        assert_eq!(marked(&state), 1);
+        state.on_wall = true;
+        assert_eq!(marked(&state), 0);
     }
 
     /// Lo que se ofrece cuando falta algo.

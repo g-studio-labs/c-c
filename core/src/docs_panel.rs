@@ -449,6 +449,7 @@ impl Docs {
     pub fn enter_module(&self) {
         self.core.comms().leave();
         self.core.platform().leave();
+        self.core.overview().leave();
         if !self.state().in_module {
             self.update(|state| state.in_module = true);
         }

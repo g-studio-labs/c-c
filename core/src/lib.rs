@@ -36,6 +36,7 @@ pub mod org_github;
 pub mod org_integrations;
 pub mod org_meetings;
 pub mod orgs;
+pub mod overview;
 pub mod platform;
 pub mod prefs;
 pub mod prose;
@@ -54,6 +55,7 @@ pub mod tree_rows;
 pub mod ring_tone;
 pub mod voice;
 pub mod voice_ring;
+pub mod wall;
 pub mod workspace;
 
 use std::sync::{Arc, Mutex};
@@ -117,6 +119,13 @@ pub use org_meetings::{
     zone_city, zone_label, zone_offset, Freq, Meeting, MeetingDraft, MeetingForm, MeetingRoom, MeetingWhen, ALL_DAYS, WEEK_ORDER, WORKWEEK,
 };
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
+pub use overview::{
+    is_open_report, long_date, overview_view, Figure, InfraCard, Overview, OverviewList, OverviewReport, OverviewRow, OverviewState, OverviewView, UnreadCard, UnreadRow,
+};
+pub use wall::{
+    audience_label, audience_text, comment_meta, comments_label, edit_payload, post_detail_meta, post_meta, post_payload, NewPost, PostAudience, PostKind, Wall, WallComment, WallPermissions,
+    WallPost, WallState, POST_BODY_MAX, POST_COMMENT_MAX, POST_TITLE_MAX,
+};
 pub use platform::{
     agent_base, agent_update_outcome, platform_sections, server_edit_phrase, server_permissions, server_tabs, servers_of, Agent, AgentAction, AgentIdentity, AgentInstallOutcome, AgentInstallPhase, AgentJob, AgentNote, AgentWait, AGENT_VERSION_LATEST, DeployableSummary, IncidentServerRef, IncidentSummary, ProvisioningRun, ServerOverview, ServerTab, AGENT_VERSION_DEPLOYS, AgentStream, Platform, PlatformSection, PlatformState, Server, ServerEditError, ServerField, ServerForm, ServerHealth, ServerKind, ServerPermissions,
     AGENT_TIMEOUT, PASS_MARGIN, PROBE_TIMEOUT, filter_services, LogLine, LogStatus, ServiceHealth, ServiceLogs, ServiceReplicas, SwarmService, LOG_LINES_KEPT, cpu_load, format_bytes, mem_load, stats_view, cert_warns, cluster_status, days_until, route_links, workloads_failing_first, ClusterBadge, ClusterStatus, Integration, K8sCert, K8sDatastore, K8sGateway, K8sHealth, K8sHub, K8sNode, K8sRoute, K8sRoutes, K8sWorkload, CERT_WARN_DAYS, ContainerStats, Load, StatsColumn, StatsSort, StatsView, SwarmNode,
@@ -265,6 +274,14 @@ pub(crate) struct Inner {
     /// `Inbox::reload_soon`.
     pub(crate) inbox_reloads: std::sync::atomic::AtomicU64,
     pub(crate) requests: Mutex<requests::RequestsData>,
+    pub(crate) wall: Mutex<wall::WallData>,
+    pub(crate) overview: Mutex<overview::OverviewData>,
+    /// Cuántas lecturas del resumen se han pedido: la que llega después de
+    /// otra más nueva no pisa a ésta.
+    pub(crate) overview_reads: std::sync::atomic::AtomicU64,
+    /// Cuántas veces se ha pedido releer el resumen: ver
+    /// `Overview::server_event`.
+    pub(crate) overview_reloads: std::sync::atomic::AtomicU64,
     /// Cuál de las aperturas de una conversación es la vigente: ver
     /// `Chat::open`.
     pub(crate) chat_turn: std::sync::atomic::AtomicU64,
@@ -327,6 +344,10 @@ impl Core {
                 inbox: Mutex::new(inbox::InboxData::default()),
                 inbox_reloads: std::sync::atomic::AtomicU64::new(0),
                 requests: Mutex::new(requests::RequestsData::default()),
+                wall: Mutex::new(wall::WallData::default()),
+                overview: Mutex::new(overview::OverviewData::default()),
+                overview_reads: std::sync::atomic::AtomicU64::new(0),
+                overview_reloads: std::sync::atomic::AtomicU64::new(0),
                 chat_turn: std::sync::atomic::AtomicU64::new(0),
                 chat_reloads: std::sync::atomic::AtomicU64::new(0),
                 chat_reads: std::sync::atomic::AtomicU64::new(0),
