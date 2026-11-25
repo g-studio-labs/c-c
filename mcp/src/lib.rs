@@ -21,6 +21,7 @@
 #![recursion_limit = "512"]
 
 pub mod ansible;
+pub mod desktop_update;
 pub mod dropped;
 pub mod files;
 pub mod hooks_install;

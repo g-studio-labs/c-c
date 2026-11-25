@@ -58,8 +58,9 @@ pub const ENV_CHECK_TIMEOUT: &str = "CAC_MCP_VERSION_TIMEOUT";
 const CHECK_EVERY: u64 = 24 * 60 * 60;
 /// Y si no contestaron (sin red, GitHub caído): antes, pero no en cada arranque.
 const RETRY_AFTER: u64 = 60 * 60;
-/// Un binario de `cac-mcp` ronda los 15 MB. Más que esto no es uno, y no se
-/// guarda entero en memoria lo que mande cualquiera.
+/// Un binario de `cac-mcp` ronda los 15 MB y un instalador de la app nativa
+/// los 100. Más que esto no es ninguno, y no se guarda entero en memoria lo
+/// que mande cualquiera.
 const MAX_DOWNLOAD: u64 = 200 * 1024 * 1024;
 
 /// De dónde se lee la versión y de dónde se baja.
@@ -84,7 +85,13 @@ impl Source {
 
     /// Dónde está un fichero de la release de esa versión.
     pub fn asset_url(&self, version: &str, file: &str) -> String {
-        format!("{}/{}/{file}", self.download_base.trim_end_matches('/'), tag(version))
+        self.asset_url_tagged(&tag(version), file)
+    }
+
+    /// Lo mismo con la etiqueta dicha, para otro producto del repo que reparte
+    /// igual (la app nativa: `desktop-vX.Y.Z`, ver `desktop_update`).
+    pub fn asset_url_tagged(&self, tag: &str, file: &str) -> String {
+        format!("{}/{tag}/{file}", self.download_base.trim_end_matches('/'))
     }
 }
 
@@ -193,10 +200,17 @@ pub enum Progress {
 /// publicado**. Sin suma publicada para ese fichero tampoco se devuelve: un
 /// binario que no se puede comprobar no se instala.
 pub fn download_verified(source: &Source, version: &str, file: &str, progress: &mut dyn FnMut(Progress)) -> Result<Vec<u8>, String> {
+    download_verified_tagged(source, &tag(version), version, file, progress)
+}
+
+/// `download_verified` para la release de otra etiqueta que la del MCP. La
+/// versión se sigue comprobando: la etiqueta la arma quien llama, y esto sale
+/// a la red con ella.
+pub fn download_verified_tagged(source: &Source, tag: &str, version: &str, file: &str, progress: &mut dyn FnMut(Progress)) -> Result<Vec<u8>, String> {
     if parse_version(version).is_none() {
         return Err(format!("`{version}` is not a version (expected X.Y.Z)"));
     }
-    let (sums_url, file_url) = (source.asset_url(version, CHECKSUMS), source.asset_url(version, file));
+    let (sums_url, file_url) = (source.asset_url_tagged(tag, CHECKSUMS), source.asset_url_tagged(tag, file));
     let (sums, bytes) = runtime()?.block_on(async {
         let client = client(Duration::from_secs(600))?;
         let get = |url: String| {
@@ -217,7 +231,7 @@ pub fn download_verified(source: &Source, version: &str, file: &str, progress: &
         while let Some(chunk) = res.chunk().await.map_err(|e| format!("the download of {file_url} was cut: {e}"))? {
             bytes.extend_from_slice(&chunk);
             if bytes.len() as u64 > MAX_DOWNLOAD {
-                return Err(format!("{file_url} is larger than a cac-mcp binary can be; nothing was installed"));
+                return Err(format!("{file_url} is larger than anything this repo publishes; nothing was installed"));
             }
             progress(Progress::Downloading { received: bytes.len() as u64, total });
         }
@@ -380,14 +394,26 @@ pub fn state_dir() -> Option<PathBuf> {
 }
 
 fn state_dir_from(os: &str, env: &dyn Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
-    if let Some(dir) = env(ENV_STATE_DIR) {
+    state_dir_in(os, env, "cac-mcp", ENV_STATE_DIR)
+}
+
+/// La carpeta de lo que recuerda un programa de este repo: su nombre, y la
+/// variable con la que se cambia (las pruebas). Una por programa: el MCP y la
+/// app nativa no se pisan el `update.json`.
+fn state_dir_in(os: &str, env: &dyn Fn(&str) -> Option<PathBuf>, app: &str, override_var: &str) -> Option<PathBuf> {
+    if let Some(dir) = env(override_var) {
         return Some(dir);
     }
     match os {
-        "windows" => Some(env("LOCALAPPDATA")?.join("cac-mcp")),
-        "macos" => Some(env("HOME")?.join("Library").join("Application Support").join("cac-mcp")),
-        _ => Some(env("XDG_STATE_HOME").or_else(|| env("HOME").map(|home| home.join(".local").join("state")))?.join("cac-mcp")),
+        "windows" => Some(env("LOCALAPPDATA")?.join(app)),
+        "macos" => Some(env("HOME")?.join("Library").join("Application Support").join(app)),
+        _ => Some(env("XDG_STATE_HOME").or_else(|| env("HOME").map(|home| home.join(".local").join("state")))?.join(app)),
     }
+}
+
+/// Lo mismo que `state_dir`, para otro programa del repo.
+pub fn state_dir_for(app: &str, override_var: &str) -> Option<PathBuf> {
+    state_dir_in(std::env::consts::OS, &|name| std::env::var_os(name).map(PathBuf::from).filter(|p| !p.as_os_str().is_empty()), app, override_var)
 }
 
 /// Lo que se supo la última vez que se preguntó.
@@ -693,6 +719,28 @@ pub mod fake {
                 sums.push_str(&format!("{}  {asset}\n", super::sha256_hex(binary)));
             }
             self.put(&format!("/download/mcp-v{version}/SHA256SUMS"), sums);
+        }
+
+        /// De dónde sale la app nativa: su `VERSION` y sus releases, en este
+        /// mismo servidor (`desktop-vX.Y.Z`).
+        pub fn desktop_source(&self) -> Source {
+            Source { version_url: format!("{}/desktop/VERSION", self.base), download_base: format!("{}/download", self.base) }
+        }
+
+        /// La versión que `desktop/VERSION` dice que es la última.
+        pub fn announce_desktop(&self, version: &str) {
+            self.put("/desktop/VERSION", format!("{version}\n"));
+        }
+
+        /// Publica una release de la app nativa con esos ficheros (nombre,
+        /// contenido) y su `SHA256SUMS`.
+        pub fn publish_desktop(&self, version: &str, files: &[(&str, &[u8])]) {
+            let mut sums = String::new();
+            for (name, body) in files {
+                self.put(&format!("/download/desktop-v{version}/{name}"), *body);
+                sums.push_str(&format!("{}  {name}\n", super::sha256_hex(body)));
+            }
+            self.put(&format!("/download/desktop-v{version}/SHA256SUMS"), sums);
         }
 
         /// Las rutas que se pidieron, en orden.
