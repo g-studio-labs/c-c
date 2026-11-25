@@ -832,7 +832,7 @@ impl Render for RequestsView {
         // puesto va la resaltada, contando lo de encima (título, error, estado)
         // y el pliegue «Resueltos».
         let resolved_open = self.resolved_open;
-        let before_open = 2 + usize::from(state.failed);
+        let before_open = 2 + usize::from(state.failed) + state.elsewhere.len();
         let shown: Vec<&str> = state.open.iter().chain(state.closed.iter().filter(|_| resolved_open)).map(|request| request.code.as_str()).collect();
         let at = highlight.as_deref().and_then(|code| {
             let n = shown.iter().position(|shown| *shown == code)?;
@@ -904,6 +904,33 @@ impl Render for RequestsView {
                 .test_support()
                 .into_any_element()
         });
+        let language = locale(cx);
+        let elsewhere: Vec<AnyElement> = state
+            .elsewhere
+            .iter()
+            .map(|other| {
+                let org_id = other.org_id.clone();
+                div()
+                    .id(SharedString::from(format!("requests-elsewhere-{}", other.org_id)))
+                    .px_3()
+                    .py_2()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(border)
+                    .leading_sm()
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(muted.opacity(0.1)))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        let org_id = org_id.clone();
+                        Backend::run(cx, move |core| async move {
+                            core.switch_org(&org_id).await;
+                        });
+                    }))
+                    .child(cac_core::elsewhere_label(other, language))
+                    .test_support()
+                    .into_any_element()
+            })
+            .collect();
         let said = self.said.clone();
 
         div()
@@ -929,6 +956,7 @@ impl Render for RequestsView {
                     .mx_auto()
                     .p_6()
                     .child(header)
+                    .children(elsewhere)
                     .when(state.failed, |this| this.child(div().id("requests-error").leading_sm().text_color(danger).child(tr(cx, "work:requests.errLoad")).test_support()))
                     .child(status_line)
                     .children(open)
@@ -1129,6 +1157,43 @@ mod tests {
 
         click(window, "tree-everything", cx);
         wait_until(cx, "vuelven las tareas", |cx| on_screen(window, "work-row-t1", cx));
+        stop(cx);
+    }
+
+    /// Los pedidos de otra organización no salen ni cuentan, se avisa de ellos,
+    /// y el aviso lleva a esa organización (command-and-control-527).
+    ///
+    /// Roturas que atrapa: pintar o contar los de la otra organización; no
+    /// avisar de ellos; un aviso que no cambia de organización; que tras
+    /// cambiar sigan saliendo los de la de antes.
+    #[gpui_kit::test]
+    fn the_other_organizations_are_announced_not_listed(cx: &mut TestAppContext) {
+        let server = server();
+        let org = |id: &str, name: &str| json!({ "id": id, "name": name, "slug": id, "role": "member", "memberCount": 2, "createdAt": "2026-06-09T12:00:00Z", "timezone": "" });
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/organizations/")).respond_with(ok(json!([org("o1", "G Studio"), org("o2", "Otra org")]))).with_priority(1));
+        let mut elsewhere = request("req-g1", "decide", "t9", ("u1", "Ana Ruiz"), true, json!({ "question": "¿Cuál?", "options": [{ "label": "A", "consequence": "rápido" }] }));
+        elsewhere["orgId"] = json!("o2");
+        let with_it = |mut list: Vec<Value>| {
+            list.push(elsewhere.clone());
+            Value::Array(list)
+        };
+        let list = |scope: &str, status: &str| {
+            Mock::given(method("GET")).and(path("/api/v1/requests")).and(query_param("scope", scope.to_string())).and(query_param("status", status.to_string())).with_priority(1)
+        };
+        server.mount(list("team", "open").respond_with(ok(with_it(mine()))));
+        server.mount(list("mine", "open").respond_with(ok(with_it(mine()))));
+        let window = open(&server, cx);
+        wait_until(cx, "el número de «Por atender»", |cx| on_screen(window, "panel-requests-count", cx));
+        assert_eq!(label(window, "panel-requests-count", cx), "2", "el de la otra organización no cuenta");
+
+        show_requests(window, cx);
+        assert!(!on_screen(window, "request-req-g1", cx), "el de la otra organización no se pinta");
+        assert_eq!(label(window, "requests-elsewhere-o2", cx), "1 pedido más en Otra org");
+
+        click(window, "requests-elsewhere-o2", cx);
+        wait_until(cx, "los de la otra organización", |cx| on_screen(window, "request-req-g1", cx));
+        assert!(!on_screen(window, "request-req-a1", cx), "los de la de antes ya no");
+        assert_eq!(label(window, "requests-elsewhere-o1", cx), "2 pedidos más en G Studio");
         stop(cx);
     }
 
