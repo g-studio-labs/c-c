@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -287,13 +288,22 @@ func TestAvisoDeRol(t *testing.T) {
 		}
 	})
 
-	t.Run("un cambio que el servidor niega no avisa", func(t *testing.T) {
-		err := svc.UpdateMemberRole("admin", "org-1", "admin", domain.UpdateMemberRequest{Role: domain.OrgRoleMember}, false)
-		if !errors.Is(err, ErrLastAdmin) {
-			t.Fatalf("se esperaba ErrLastAdmin: %v", err)
+	// Las guardas ya pasaron (ana es miembro y el papel cambia): lo que falla
+	// es la escritura. Se escucha en el canal de **ana**, que es adonde iría el
+	// aviso, para que publicar antes de escribir, o sin haber escrito, se vea.
+	t.Run("una escritura que falla no avisa", func(t *testing.T) {
+		tooLong := domain.OrgRole(strings.Repeat("x", 25)) // varchar(20)
+		if err := svc.UpdateMemberRole("admin", "org-1", "ana", domain.UpdateMemberRequest{Role: tooLong}, false); err == nil {
+			t.Fatal("la base debía negar un papel de 25 letras")
 		}
 		if e := recibe(deAna); e != nil {
-			t.Fatal("avisó de un cambio que no ocurrió")
+			t.Fatalf("avisó de un cambio que no se escribió: %v", e.Data)
+		}
+		if err := svc.UpdateMemberRole("admin", "org-1", "ghost", domain.UpdateMemberRequest{Role: domain.OrgRoleViewer}, false); !errors.Is(err, repository.ErrMembershipNotFound) {
+			t.Fatalf("se esperaba ErrMembershipNotFound: %v", err)
+		}
+		if e := recibe(deAna); e != nil {
+			t.Fatal("avisó de alguien que ni es miembro")
 		}
 	})
 }
