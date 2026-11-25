@@ -191,8 +191,8 @@ async fn deleting_the_current_organization_closes_its_doc_even_if_the_list_fails
     assert!(core.docs().state().target.is_none(), "el documento de la borrada sigue abierto");
 }
 
-/// Quitarte tú mismo de la que miras te lleva a otra, como si la
-/// hubieras dejado.
+/// Quitarte tú mismo de la que miras te lleva a otra, aunque releer la
+/// lista falle.
 ///
 /// Rotura que atrapa: seguir mirando una organización a la que ya no
 /// perteneces, con su documento abierto.
@@ -200,7 +200,7 @@ async fn deleting_the_current_organization_closes_its_doc_even_if_the_list_fails
 async fn leaving_the_current_organization_moves_to_another() {
     let (server, core) = rig(json!([org("o1", "admin"), org("o2", "member")])).await;
     reading_a_doc(&server, &core).await;
-    Mock::given(method("GET")).and(path("/api/v1/organizations/")).respond_with(ok(json!([org("o2", "member")]))).mount(&server).await;
+    Mock::given(method("GET")).and(path("/api/v1/organizations/")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
     core.orgs().left("o1").await;
     assert_eq!(core.orgs().state().current_org_id.as_deref(), Some("o2"));
     assert!(core.docs().state().target.is_none());
