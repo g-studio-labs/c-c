@@ -65,6 +65,10 @@ pub struct OrgView {
     deleting: Option<Entity<InputState>>,
     // Espacios: el nombre del nuevo, mientras se escribe.
     new_space: Option<Entity<InputState>>,
+    /// Las del campo de borrar y del espacio nuevo: una cada vez, la que se
+    /// abre sustituye a la anterior.
+    _on_deleting: Option<Subscription>,
+    _on_new_space: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -140,6 +144,8 @@ impl OrgView {
             zone_input,
             deleting: None,
             new_space: None,
+            _on_deleting: None,
+            _on_new_space: None,
             _subscriptions: subscriptions,
         }
     }
@@ -164,6 +170,15 @@ impl OrgView {
         let org = snapshot.orgs.current()?.clone();
         let manage = can_manage_org(&org, superadmin);
         Some((org, manage))
+    }
+
+    /// Los espacios, si el árbol ya es el de la organización que se mira. Al
+    /// cambiar de una a otra, el de la anterior sigue un rato en el snapshot.
+    pub(crate) fn current_spaces(cx: &App) -> Option<Vec<cac_core::SpaceTree>> {
+        let snapshot = Backend::snapshot(cx).read(cx);
+        let tree = &snapshot.tree;
+        let ours = tree.org_id.is_some() && tree.org_id == snapshot.orgs.current_org_id;
+        (ours && !(tree.loading && tree.spaces.is_empty())).then(|| tree.spaces.clone())
     }
 
     pub(crate) fn say(&mut self, text: String, problem: bool, cx: &mut Context<Self>) {
@@ -263,10 +278,16 @@ impl OrgView {
         self.notice = None;
         cx.notify();
         let answer = Backend::ask(cx, work);
+        let asked_for = self.loaded_for.clone();
         cx.spawn(async move |this, cx| {
             let Ok(result) = answer.await else { return };
             this.update(cx, |this, cx| {
                 this.busy = false;
+                // Lo que contesta tras cambiar de organización es de la otra.
+                if this.loaded_for != asked_for {
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok(()) => done(this, cx),
                     Err(error) => this.notice = Some(Notice { text: crate::lang::error_text(cx, &error, fallback_key), problem: true }),
@@ -282,7 +303,7 @@ impl OrgView {
         let theme = cx.theme();
         let (primary, muted) = (theme.primary, theme.muted_foreground);
         let superadmin = Backend::snapshot(cx).read(cx).session.as_ref().is_some_and(|session| session.superadmin);
-        let spaces = Backend::snapshot(cx).read(cx).tree.spaces.len();
+        let spaces = Self::current_spaces(cx).map_or(0, |spaces| spaces.len());
         let summary = org_summary(org, superadmin, spaces, locale(cx));
         let initial: String = org.name.chars().take(1).flat_map(char::to_uppercase).collect();
         div()
@@ -309,7 +330,7 @@ impl OrgView {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(div().id("org-page-title").truncate().text_size(rems(1.25)).line_height(rems(1.75)).font_weight(FontWeight::SEMIBOLD).child(org.name.clone()).test_support())
+                    .child(div().id("org-page-title").aria_label(org.name.clone()).truncate().text_size(rems(1.25)).line_height(rems(1.75)).font_weight(FontWeight::SEMIBOLD).child(org.name.clone()).test_support())
                     .child(div().id("org-page-summary").leading_xs().text_color(muted).aria_label(summary.clone()).child(summary).test_support()),
             )
             .when(manage, |this| {
@@ -326,13 +347,13 @@ impl OrgView {
     fn render_tabs(&self, manage: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (border, primary, muted, foreground) = (theme.border, theme.primary, theme.muted_foreground, theme.foreground);
-        let spaces = Backend::snapshot(cx).read(cx).tree.spaces.len();
+        let spaces = Self::current_spaces(cx).map(|spaces| spaces.len());
         // Cuentan las pestañas que son listas; al lado de un formulario, un
         // «0» es ruido.
         let count = |tab: OrgTab| match tab {
             OrgTab::Members => self.members.as_ref().map(|members| members.len()),
             OrgTab::Invites => Some(self.invites.len()),
-            OrgTab::Spaces => Some(spaces),
+            OrgTab::Spaces => spaces,
             _ => None,
         };
         div().flex().flex_none().gap_4().border_b_1().border_color(border).children(org_tabs(manage).into_iter().map(|tab| {

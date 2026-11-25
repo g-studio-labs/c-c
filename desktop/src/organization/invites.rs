@@ -99,10 +99,15 @@ impl OrgView {
                 core.orgs().invite(&id, &user, &role).await.map(|()| AddOutcome::Invited)
             }
         });
+        let asked_for = self.loaded_for.clone();
         cx.spawn_in(window, async move |this, cx| {
             let Ok(result) = answer.await else { return };
             this.update_in(cx, |this, window, cx| {
                 this.busy = false;
+                if this.loaded_for != asked_for {
+                    cx.notify();
+                    return;
+                }
                 let lang = locale(cx);
                 let (who, org_name) = (person.username.as_str(), org.name.as_str());
                 match result {
@@ -187,10 +192,15 @@ impl OrgView {
         let id = org.id.clone();
         let (sent_name, sent_email) = (name.clone(), email.clone());
         let answer = Backend::ask(cx, move |core| async move { core.orgs().create_account(&id, &sent_name, &sent_email, &role).await });
+        let asked_for = self.loaded_for.clone();
         cx.spawn_in(window, async move |this, cx| {
             let Ok(result) = answer.await else { return };
             this.update_in(cx, |this, window, cx| {
                 this.busy = false;
+                if this.loaded_for != asked_for {
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok(out) => {
                         match account_notice(&out, &name, &email, &org.name, locale(cx)) {
@@ -440,6 +450,7 @@ impl OrgView {
                                     .text_color(danger)
                                     .icon(Icon::new(Lucide::X))
                                     .label(tr(cx, "org:revoke"))
+                                    .disabled(busy)
                                     .on_click(cx.listener(move |this, _, window, cx| this.ask_revoke(revoking.clone(), window, cx))),
                             )
                         })

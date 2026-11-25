@@ -29,7 +29,6 @@ pub(super) enum Field {
 enum Rule {
     ClientsOwnSpace,
     GuestsDevTools,
-    DoneNeedsSubtasks,
 }
 
 impl OrgView {
@@ -77,7 +76,6 @@ impl OrgView {
         let patch = match rule {
             Rule::ClientsOwnSpace => OrgPatch { clients_see_only_their_space: Some(!org.clients_see_only_their_space), ..Default::default() },
             Rule::GuestsDevTools => OrgPatch { guests_can_use_dev_tools: Some(!org.guests_can_use_dev_tools), ..Default::default() },
-            Rule::DoneNeedsSubtasks => OrgPatch { done_needs_subtasks_done: Some(!org.done_needs_subtasks_done), ..Default::default() },
         };
         self.save(org.id.clone(), patch, cx);
     }
@@ -92,7 +90,7 @@ impl OrgView {
                 cx.notify();
             }
         });
-        self._subscriptions.push(subscription);
+        self._on_deleting = Some(subscription);
         self.deleting = Some(input);
         self.notice = None;
         cx.notify();
@@ -263,7 +261,8 @@ impl OrgView {
             )
             .child(switch("org-rule-clients", "org:clientsOwnSpace", org.clients_see_only_their_space, Some(Rule::ClientsOwnSpace), cx))
             .child(switch("org-rule-guests", "org:guestsDevTools", org.guests_can_use_dev_tools, Some(Rule::GuestsDevTools), cx))
-            .child(switch("org-rule-subtasks", "org:doneNeedsSubtasks", org.done_needs_subtasks_done, Some(Rule::DoneNeedsSubtasks), cx))
+            // Sin «terminar las subtareas antes de dar por hecha»: desde el
+            // 17-nov-2026 lo exige siempre el servidor y el campo ya no decide.
             // Apagado y no escondido: está en el plan, y un control que falta
             // se lee como «no se puede» y uno gris como «todavía no».
             .child(switch("org-rule-2fa", "org:require2fa", false, None, cx))

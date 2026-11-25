@@ -77,6 +77,25 @@ enum Aside {
     Invitations,
 }
 
+/// Lo abierto, para notar que se abrió algo nuevo (ver `aside_seen`).
+#[derive(Default, PartialEq)]
+struct Opened {
+    task: Option<String>,
+    doc: Option<String>,
+    /// Comunicación, Plataforma y «Por atender» en pantalla.
+    modules: [bool; 3],
+}
+
+impl Opened {
+    /// Cerrar algo, o que el core lo suelte al cambiar de organización, no
+    /// es irse; abrir algo que no estaba, sí.
+    fn went_to_something_new(&self, before: &Opened) -> bool {
+        (self.task.is_some() && self.task != before.task)
+            || (self.doc.is_some() && self.doc != before.doc)
+            || self.modules.iter().zip(before.modules).any(|(now, was)| *now && !was)
+    }
+}
+
 /// A qué se le está poniendo nombre en el árbol.
 #[derive(Clone, PartialEq)]
 enum Naming {
@@ -123,10 +142,10 @@ pub struct Workspace {
     organization: Entity<crate::organization::OrgView>,
     received: Entity<crate::organization::received::ReceivedView>,
     aside: Option<Aside>,
-    /// Dónde se estaba con la pantalla de al lado abierta: si algo pasa a
-    /// apuntar a otro sitio (un clic en el panel), se ha ido a otra cosa y la
-    /// pantalla se cierra.
-    aside_place: Option<Vec<String>>,
+    /// Lo que había abierto la última vez que se miró con la pantalla de al
+    /// lado delante: abrir otra tarea u otro documento, o entrar en un
+    /// módulo (desde la campana, desde un enlace), es irse a ello.
+    aside_seen: Opened,
     _on_organization: Subscription,
     _on_comms: Subscription,
     /// La conversación que se tiene delante.
@@ -244,7 +263,7 @@ impl Workspace {
             organization,
             received: cx.new(|_| crate::organization::received::ReceivedView::new()),
             aside: None,
-            aside_place: None,
+            aside_seen: Opened::default(),
             _on_organization: on_organization,
             _on_comms: on_comms,
             chat,
@@ -989,7 +1008,7 @@ impl Workspace {
     /// Abre la pantalla de la organización o la de las invitaciones.
     fn open_aside(&mut self, aside: Aside, cx: &mut Context<Self>) {
         self.aside = Some(aside);
-        self.aside_place = None;
+        self.aside_seen = Self::opened(cx);
         match aside {
             Aside::Organization => self.organization.update(cx, |view, cx| view.reopened(cx)),
             Aside::Invitations => self.received.update(cx, |view, cx| view.load(cx)),
@@ -997,32 +1016,31 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Se cierra sólo con un gesto de quien mira (el riel, el árbol, un clic
+    /// en el panel, abrir una tarea o un documento), nunca porque cambie lo
+    /// que el core resuelve por su cuenta: cambiar de organización vuelve a
+    /// elegir conversación, y eso no es irse.
     fn leave_aside(&mut self) {
         self.aside = None;
-        self.aside_place = None;
     }
 
-    /// Lo que dice dónde se está, pieza a pieza, para notar que se fue a
-    /// otra cosa desde el panel. Lo de cada módulo lo cambia su panel; aquí
-    /// sólo se compara.
-    fn place(cx: &App) -> Vec<String> {
+    fn opened(cx: &App) -> Opened {
         let snapshot = Backend::snapshot(cx).read(cx);
-        let platform = &snapshot.platform;
-        vec![
-            format!("{:?}", snapshot.comms.selected),
-            format!("{:?}", platform.section),
-            format!("{:?}", platform.open_server),
-            format!("{:?}", snapshot.docs.target),
-            snapshot.requests.on_screen.to_string(),
-            format!("{:?}", snapshot.my_work.scope),
-        ]
+        Opened {
+            task: snapshot.task.task_id.clone(),
+            doc: snapshot.docs.target.as_ref().map(|target| target.id.clone()),
+            modules: [snapshot.comms.on_screen, snapshot.platform.on_screen, snapshot.requests.on_screen],
+        }
     }
 
-    /// Si de `before` a `now` se fue a otro sitio. Que algo se vacíe no es
-    /// irse: es lo que hace cambiar de organización (se cierra el documento,
-    /// se suelta el ámbito), y eso se hace sin dejar la pantalla.
-    fn went_elsewhere(before: &[String], now: &[String]) -> bool {
-        before.iter().zip(now).any(|(before, now)| before != now && now != "None" && now != "false")
+    /// El cuerpo del panel de un módulo: pulsar en él es ir a lo pulsado.
+    fn leaves_aside(body: impl IntoElement, cx: &mut Context<Self>) -> Div {
+        div().flex_1().min_h_0().flex().flex_col().capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+            if this.aside.is_some() {
+                this.leave_aside();
+                cx.notify();
+            }
+        })).child(body)
     }
 
     /// «Gestionar» un espacio desde la organización: sus tareas, en Trabajo.
@@ -1783,20 +1801,21 @@ impl Workspace {
             );
         if on_comms {
             return panel
-                .child(div().flex_1().min_h_0().flex().flex_col().child(self.comms.clone()))
+                .child(Self::leaves_aside(self.comms.clone(), cx))
                 .children(crate::voice::mini(cx))
                 .children(self.invitations_row(cx))
                 .into_any_element();
         }
         if on_platform {
             return panel
-                .child(div().id("platform-panel").flex_1().min_h_0().overflow_y_scroll().child(crate::platform::panel::panel(cx)))
+                .child(Self::leaves_aside(div().id("platform-panel").flex_1().min_h_0().overflow_y_scroll().child(crate::platform::panel::panel(cx)), cx))
                 .children(crate::voice::mini(cx))
                 .children(self.invitations_row(cx))
                 .into_any_element();
         }
         if on_docs {
-            return panel.child(crate::docs_module::panel(&self.docs_filter, cx)).children(crate::voice::mini(cx)).children(self.invitations_row(cx)).into_any_element();
+            let body = crate::docs_module::panel(&self.docs_filter, cx);
+            return panel.child(Self::leaves_aside(body, cx)).children(crate::voice::mini(cx)).children(self.invitations_row(cx)).into_any_element();
         }
         panel
             .child(
@@ -1981,11 +2000,11 @@ impl Render for Workspace {
         // Un clic en el panel que lleva a otra cosa cierra la pantalla de al
         // lado; cambiar de organización no.
         if self.aside.is_some() {
-            let here = Self::place(cx);
-            if self.aside_place.as_ref().is_some_and(|before| Self::went_elsewhere(before, &here)) {
+            let now = Self::opened(cx);
+            if now.went_to_something_new(&self.aside_seen) {
                 self.leave_aside();
             } else {
-                self.aside_place = Some(here);
+                self.aside_seen = now;
             }
         }
         let snapshot = Backend::snapshot(cx).read(cx);

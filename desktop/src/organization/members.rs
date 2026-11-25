@@ -42,11 +42,16 @@ impl OrgView {
         if member.role == role {
             return;
         }
+        let myself = Backend::snapshot(cx).read(cx).session.as_ref().is_some_and(|session| session.id == member.user_id);
         let (id, user) = (org.id, member.user_id.clone());
         let picked = role.clone();
         self.act(
             move |core| async move { core.orgs().set_member_role(&id, &user, &picked).await },
             move |this, cx| {
+                // El papel propio lo dice la organización: se vuelve a leer.
+                if myself {
+                    Backend::run(cx, |core| async move { core.orgs().reload_membership().await });
+                }
                 if let Some(slot) = this.members.as_mut().and_then(|members| members.iter_mut().find(|candidate| candidate.user_id == member.user_id)) {
                     slot.role = role;
                 }
@@ -60,7 +65,11 @@ impl OrgView {
     /// Quitar a alguien pregunta nombrándolo: pierde el acceso a todo.
     fn ask_remove(&mut self, member: OrgMember, window: &mut Window, cx: &mut Context<Self>) {
         let Some((org, _)) = Self::current(cx) else { return };
-        let title = text_with(locale(cx), "org:removeTitle", &[("who", &member.username)]);
+        // Quien no terminó el registro se nombra como se le enseña, nunca por
+        // su usuario provisional.
+        let who = if member.setup_pending { member_face(&member).0 } else { format!("@{}", member.username) };
+        let myself = Backend::snapshot(cx).read(cx).session.as_ref().is_some_and(|session| session.id == member.user_id);
+        let title = text_with(locale(cx), "org:removeTitle", &[("who", &who)]);
         let body = text_with(locale(cx), "org:removeBody", &[("org", &org.name)]);
         let (confirm, cancel) = (tr(cx, "org:remove"), tr(cx, "org:cancel"));
         let answer = window.prompt(PromptLevel::Warning, &title, Some(&body), &[confirm.as_str(), cancel.as_str()], cx);
@@ -70,15 +79,19 @@ impl OrgView {
             }
             this.update(cx, |this, cx| {
                 let (id, user) = (org.id.clone(), member.user_id.clone());
-                let username = member.username.clone();
+                let left = org.id.clone();
                 this.act(
                     move |core| async move { core.orgs().remove_member(&id, &user).await },
                     move |this, cx| {
                         if let Some(members) = this.members.as_mut() {
                             members.retain(|candidate| candidate.user_id != member.user_id);
                         }
-                        let text = text_with(locale(cx), "common:last.memberRemoved", &[("name", &username)]);
+                        let text = text_with(locale(cx), "org:memberRemoved", &[("who", &who)]);
                         this.say(text, false, cx);
+                        // Quitarte a ti es dejarla: a otra, como al borrarla.
+                        if myself {
+                            Backend::run(cx, move |core| async move { core.orgs().left(&left).await });
+                        }
                     },
                     "org:errRemove",
                     cx,
@@ -99,11 +112,16 @@ impl OrgView {
         self.busy = true;
         cx.notify();
         let (id, user) = (org.id, member.user_id.clone());
+        let asked_for = self.loaded_for.clone();
         let answer = Backend::ask(cx, move |core| async move { core.orgs().resend_account_link(&id, &user).await });
         cx.spawn(async move |this, cx| {
             let Ok(result) = answer.await else { return };
             this.update(cx, |this, cx| {
                 this.busy = false;
+                if this.loaded_for != asked_for {
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok(out) if out.email_sent => this.say(tr(cx, "common:account.resent"), false, cx),
                     Ok(out) => {

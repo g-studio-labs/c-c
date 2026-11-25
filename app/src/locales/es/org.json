@@ -188,7 +188,7 @@
   "invitedBy": "invitada por @{{who}} · {{when}}",
   "resend": "Reenviar",
   "revokeTitle": "¿Revocar la invitación a @{{who}}?",
-  "removeTitle": "¿Quitar a @{{who}}?",
+  "removeTitle": "¿Quitar a {{who}}?",
   "removeBody": "Perderá el acceso a {{org}} y a lo que tiene dentro.",
   "you": "tú",
   "rolesExplain": "admin administra · member escribe · viewer sólo lee",
@@ -202,5 +202,6 @@
   "typeToConfirm": "Escribe {{phrase}} para confirmar.",
   "badZone": "Eso no es una zona horaria. Escríbela como America/Mexico_City, o déjala vacía.",
   "saved": "Guardado",
-  "joinedRenew": "Ya estás en {{name}}. Cierra sesión y vuelve a entrar para terminar de tener acceso."
+  "joinedRenew": "Ya estás en {{name}}. Cierra sesión y vuelve a entrar para terminar de tener acceso.",
+  "memberRemoved": "{{who}} quitado"
 }

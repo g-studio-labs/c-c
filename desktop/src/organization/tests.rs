@@ -4,13 +4,15 @@
 
 /// Una organización `o1` en la que Ana tiene `role`, con el espacio `a`,
 /// dos miembros (Ana y Bob) y una invitación enviada a Caro, ya caducada.
+/// Y otra, `o2` («Cliente»), de la que Ana es miembro.
 fn org_server(role: &str) -> FakeServer {
     let server = FakeServer::start();
     let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
     let mut organization = org("o1", "G Studio");
     organization["role"] = json!(role);
     organization["defaultInviteRole"] = json!("member");
-    server.mount(get("/api/v1/organizations/").respond_with(ok(json!([organization]))));
+    server.mount(get("/api/v1/organizations/").respond_with(ok(json!([organization, org("o2", "Cliente")]))));
+    server.mount(get("/api/v1/organizations/o2/members").respond_with(ok(json!([{ "userId": "u1", "username": "ana", "role": "member" }]))));
     server.mount(get("/api/v1/task-spaces/").respond_with(ok(json!([space("a", "Producto")]))));
     server.mount(get("/api/v1/docs/").respond_with(ok(json!({}))));
     server.mount(get("/api/v1/tasks/").respond_with(ok(json!([]))));
@@ -251,5 +253,72 @@ fn an_invitation_for_you_is_accepted_from_the_panel(cx: &mut TestAppContext) {
     wait_until(cx, "sale de la lista", |cx| !on_screen(window, "invitation-i9", cx));
     wait_until(cx, "el riel deja de contarla", |cx| !on_screen(window, "rail-organization-count", cx));
     assert!(!on_screen(window, "panel-invitations", cx), "la fila sigue sin invitaciones");
+    stop_stream(cx);
+}
+
+/// Cambiar de organización con su pantalla delante la deja delante, con
+/// lo de la otra.
+///
+/// Rotura que atrapa: cerrar la pantalla porque el core vuelve a elegir
+/// conversación, ámbito o documento al cambiar de organización.
+#[gpui_kit::test]
+fn switching_organization_keeps_its_screen(cx: &mut TestAppContext) {
+    let (_server, window) = open_org("admin", cx);
+    cx.update(|cx| Backend::run(cx, |core| async move { core.switch_org("o2").await; }));
+    wait_until(cx, "pasa a la otra", |cx| on_screen(window, "org-page-title", cx) && label(window, "org-page-title", cx) == "Cliente");
+    cx.run_until_parked();
+    assert!(on_screen(window, "org-page", cx), "cambiar de organización cerró la pantalla");
+    stop_stream(cx);
+}
+
+/// Quitarte a ti mismo te lleva a otra organización.
+///
+/// Rotura que atrapa: seguir en la que dejaste, con un papel que ya no
+/// tienes.
+#[gpui_kit::test]
+fn removing_yourself_moves_you_to_another_organization(cx: &mut TestAppContext) {
+    let (server, window) = open_org("admin", cx);
+    server.mount(Mock::given(method("DELETE")).and(path("/api/v1/organizations/o1/members/u1")).respond_with(ok(json!(null))));
+    click(window, "org-member-remove-u1", cx);
+    cx.simulate_prompt_answer("Quitar");
+    wait_until(cx, "pasa a la otra", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).orgs.current_org_id.as_deref() == Some("o2")));
+    stop_stream(cx);
+}
+
+/// Bajarte el papel a ti mismo vuelve a leer tu papel: dejan de salir las
+/// invitaciones.
+///
+/// Rotura que atrapa: seguir viendo lo de admin tras dejar de serlo.
+#[gpui_kit::test]
+fn demoting_yourself_rereads_your_role(cx: &mut TestAppContext) {
+    let server = FakeServer::start();
+    let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+    let mut admin = org("o1", "G Studio");
+    admin["role"] = json!("admin");
+    let mut viewer = admin.clone();
+    viewer["role"] = json!("viewer");
+    server.mount(get("/api/v1/organizations/").respond_with(ok(json!([admin]))).up_to_n_times(1));
+    server.mount(get("/api/v1/organizations/").respond_with(ok(json!([viewer]))));
+    for mock in [
+        get("/api/v1/task-spaces/").respond_with(ok(json!([space("a", "Producto")]))),
+        get("/api/v1/docs/").respond_with(ok(json!({}))),
+        get("/api/v1/tasks/").respond_with(ok(json!([]))),
+        get("/api/v1/report-projects/").respond_with(ok(json!([]))),
+        get("/api/v1/organizations/o1/invitations").respond_with(ok(json!([]))),
+        get("/api/v1/organizations/o1/members").respond_with(ok(json!([{ "userId": "u1", "username": "ana", "role": "admin" }, { "userId": "u2", "username": "bob", "role": "viewer" }]))),
+        Mock::given(method("PATCH")).and(path("/api/v1/organizations/o1/members/u1")).respond_with(ok(json!(null))),
+    ] {
+        server.mount(mock);
+    }
+    server.install(cx);
+    let window = open(cx);
+    wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+    click(window, "rail-organization", cx);
+    wait_until(cx, "llegan los miembros", |cx| on_screen(window, "org-member-u2", cx));
+    assert!(on_screen(window, "org-tab-invites", cx));
+    click(window, "org-member-role-u1", cx);
+    wait_until(cx, "se abre el menú del papel", |cx| on_screen(window, "org-member-role-u1-viewer", cx));
+    click(window, "org-member-role-u1-viewer", cx);
+    wait_until(cx, "deja de ser admin", |cx| !on_screen(window, "org-tab-invites", cx));
     stop_stream(cx);
 }

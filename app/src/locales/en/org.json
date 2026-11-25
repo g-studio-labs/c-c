@@ -188,7 +188,7 @@
   "invitedBy": "invited by @{{who}} · {{when}}",
   "resend": "Resend",
   "revokeTitle": "Revoke the invitation to @{{who}}?",
-  "removeTitle": "Remove @{{who}}?",
+  "removeTitle": "Remove {{who}}?",
   "removeBody": "They will lose access to {{org}} and its resources.",
   "you": "you",
   "rolesExplain": "admin manages · member writes · viewer only reads",
@@ -202,5 +202,6 @@
   "typeToConfirm": "Type {{phrase}} to confirm.",
   "badZone": "That is not a time zone. Write it like America/Mexico_City, or leave it empty.",
   "saved": "Saved",
-  "joinedRenew": "Joined {{name}}. Sign out and back in to finish getting access."
+  "joinedRenew": "Joined {{name}}. Sign out and back in to finish getting access.",
+  "memberRemoved": "Removed {{who}}"
 }

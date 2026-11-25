@@ -33,7 +33,7 @@ impl OrgView {
                 this.create_space(window, cx);
             }
         });
-        self._subscriptions.push(subscription);
+        self._on_new_space = Some(subscription);
         self.new_space = Some(input);
         cx.notify();
     }
@@ -68,8 +68,8 @@ impl OrgView {
     pub(super) fn render_spaces(&mut self, manage: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (border, muted, primary, chip, card_bg) = (theme.border, theme.muted_foreground, theme.primary, theme.muted, theme.group_box);
-        let spaces = Backend::snapshot(cx).read(cx).tree.spaces.clone();
-        let cards = space_cards(&spaces, &self.projects);
+        let spaces = Self::current_spaces(cx);
+        let cards = space_cards(spaces.as_deref().unwrap_or_default(), &self.projects);
         let lang = locale(cx);
         let busy = self.busy;
 
@@ -88,7 +88,9 @@ impl OrgView {
                 .test_support()
         });
 
-        let grid: AnyElement = if cards.is_empty() {
+        let grid: AnyElement = if spaces.is_none() {
+            div().id("org-spaces-loading").py_8().text_center().text_color(muted).child(tr(cx, "common:servers.loading")).test_support().into_any_element()
+        } else if cards.is_empty() {
             div().id("org-spaces-none").px_3().py_8().rounded(px(12.)).border_1().border_dashed().border_color(border).text_center().text_color(muted).child(tr(cx, "common:misc.noSpaces")).test_support().into_any_element()
         } else {
             div()
