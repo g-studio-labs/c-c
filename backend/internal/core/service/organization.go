@@ -71,6 +71,28 @@ func (s *OrganizationService) avisarDeMembresia(orgID, userID string, dentro boo
 	})
 }
 
+// avisarDeRol le cuenta a alguien que su papel cambió. Va aparte de
+// `org:membership`, que quien lo recibe lee como «te han añadido». Dirigido a
+// la persona por lo mismo que aquél: su token todavía dice el papel de antes.
+func (s *OrganizationService) avisarDeRol(orgID, userID string, role domain.OrgRole) {
+	if s.hub == nil || orgID == "" || userID == "" {
+		return
+	}
+	nombre := ""
+	if o, err := s.repo.FindByID(orgID); err == nil && o != nil {
+		nombre = o.Name
+	}
+	s.hub.Publish(events.Event{
+		Type:   "org:role",
+		UserID: userID,
+		Data: map[string]any{
+			"orgId":   orgID,
+			"orgName": nombre,
+			"role":    string(role),
+		},
+	})
+}
+
 var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
 
 func slugify(s string) string {
@@ -265,7 +287,18 @@ func (s *OrganizationService) UpdateMemberRole(callerID, orgID, targetID string,
 			return err
 		}
 	}
-	return s.repo.UpdateMemberRole(orgID, targetID, req.Role)
+	before, err := s.repo.GetMembership(orgID, targetID)
+	if err != nil && !errors.Is(err, repository.ErrMembershipNotFound) {
+		return err
+	}
+	if err := s.repo.UpdateMemberRole(orgID, targetID, req.Role); err != nil {
+		return err
+	}
+	// Guardar el mismo rol no cambia nada que contar.
+	if before != nil && before.Role != req.Role {
+		s.avisarDeRol(orgID, targetID, req.Role)
+	}
+	return nil
 }
 
 func (s *OrganizationService) RemoveMember(callerID, orgID, targetID string, superadmin bool) error {

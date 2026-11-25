@@ -208,3 +208,92 @@ func TestStrangersAreInvitedNotAdded(t *testing.T) {
 		t.Errorf("un superadmin → %v", err)
 	}
 }
+
+// Que te cambien el papel te llega a ti, y sólo si cambió.
+//
+// Sin esto la app de quien cambió de papel seguía enseñando el de antes (botones
+// que el servidor niega, o pestañas que ya podría ver) hasta que recargaba.
+// Roturas que atrapa: no avisar; avisar a la organización entera en vez de a la
+// persona; avisar al guardar el mismo papel; reutilizar `org:membership`, que la
+// app lee como «te han añadido»; un aviso sin papel o sin nombre.
+func TestAvisoDeRol(t *testing.T) {
+	db, cerrar := membresiaDB(t)
+	defer cerrar()
+
+	ahora := time.Now()
+	for _, id := range []string{"admin", "ana", "bea"} {
+		if err := db.Exec(`INSERT INTO users (id, username, email, password, created_at, updated_at)
+			VALUES (?, ?, ?, 'x', ?, ?)`, id, id, id+"@x.io", ahora, ahora).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	org := &domain.Organization{Name: "Portento", Slug: "portento"}
+	org.ID = "org-1"
+	if err := db.Create(org).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []domain.OrgMembership{
+		{OrgID: "org-1", UserID: "admin", Role: domain.OrgRoleAdmin},
+		{OrgID: "org-1", UserID: "ana", Role: domain.OrgRoleMember},
+		{OrgID: "org-1", UserID: "bea", Role: domain.OrgRoleMember},
+	} {
+		if err := db.Create(&m).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	hub := events.NewHub()
+	svc := NewOrganizationService(repository.NewOrganizationRepository(db)).WithHub(hub)
+	deAna, cerrarAna := hub.Subscribe("ana", []string{"org-1"})
+	defer cerrarAna()
+	deBea, cerrarBea := hub.Subscribe("bea", []string{"org-1"})
+	defer cerrarBea()
+
+	recibe := func(ch <-chan events.Event) *events.Event {
+		select {
+		case e := <-ch:
+			return &e
+		case <-time.After(300 * time.Millisecond):
+			return nil
+		}
+	}
+
+	t.Run("guardar el mismo papel no avisa", func(t *testing.T) {
+		if err := svc.UpdateMemberRole("admin", "org-1", "ana", domain.UpdateMemberRequest{Role: domain.OrgRoleMember}, false); err != nil {
+			t.Fatal(err)
+		}
+		if e := recibe(deAna); e != nil {
+			t.Fatalf("avisó de un cambio que no lo fue: %v", e.Type)
+		}
+	})
+
+	t.Run("cambiarlo le llega a esa persona, con el papel nuevo", func(t *testing.T) {
+		if err := svc.UpdateMemberRole("admin", "org-1", "ana", domain.UpdateMemberRequest{Role: domain.OrgRoleViewer}, false); err != nil {
+			t.Fatal(err)
+		}
+		e := recibe(deAna)
+		if e == nil {
+			t.Fatal("su app sigue con el papel de antes")
+		}
+		if e.Type != "org:role" {
+			t.Fatalf("tipo %q: org:membership la app lo lee como «te han añadido»", e.Type)
+		}
+		datos, _ := e.Data.(map[string]any)
+		if datos["role"] != "viewer" || datos["orgId"] != "org-1" || datos["orgName"] != "Portento" {
+			t.Fatalf("falta lo que hay que enseñar: %v", datos)
+		}
+		if e := recibe(deBea); e != nil {
+			t.Fatal("le llegó a otro miembro: es asunto de una persona")
+		}
+	})
+
+	t.Run("un cambio que el servidor niega no avisa", func(t *testing.T) {
+		err := svc.UpdateMemberRole("admin", "org-1", "admin", domain.UpdateMemberRequest{Role: domain.OrgRoleMember}, false)
+		if !errors.Is(err, ErrLastAdmin) {
+			t.Fatalf("se esperaba ErrLastAdmin: %v", err)
+		}
+		if e := recibe(deAna); e != nil {
+			t.Fatal("avisó de un cambio que no ocurrió")
+		}
+	})
+}
