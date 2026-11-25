@@ -495,6 +495,7 @@
     "leaveBlankKeep": "Déjalo en blanco para conservar la actual.",
     "changeFailed": "Falló el cambio",
     "passwordChanged": "Contraseña cambiada",
+    "passwordChangedNotStored": "Tu contraseña se cambió, pero la sesión no se pudo guardar en este equipo: cuando vuelvas a abrir cac tendrás que entrar de nuevo.",
     "currentPassword": "Contraseña actual",
     "newPassword": "Contraseña nueva",
     "confirmNewPassword": "Repite la contraseña nueva",

@@ -4,7 +4,9 @@
 //! Qué se manda, cuándo se puede mandar y qué pasa con la sesión después lo
 //! decide el core (`account.rs`). Aquí se recoge lo escrito y se pinta.
 
-use cac_core::{check_new_password, DocTarget, FormCheck, WorkScope};
+use std::rc::Rc;
+
+use cac_core::{check_new_password, FormCheck, PasswordChanged};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -20,20 +22,21 @@ const PROFILE_WIDTH: f32 = 512.;
 /// El ancho del diálogo: el `sm:max-w-lg` de `DialogContent`.
 const DIALOG_WIDTH: f32 = 512.;
 
-/// Lo que se tiene delante, para saber cuándo se ha ido a otro sitio.
+/// La pantalla que se tiene delante, para saber si algo puso otra sin
+/// pasar por la app: un aviso que abre una tarea, un agente que trae «Por
+/// atender». Lo que se pide a mano (el riel, el árbol) cierra el perfil al
+/// pedirlo, aunque lleve adonde ya se estaba.
 ///
-/// El perfil es una página como las del riel, pero a ella no se llega por el
-/// core sino desde el menú: cualquier cosa que cambie lo que se mira (un
-/// módulo, un nodo del árbol, «Por atender» desde un aviso) la cierra, igual
-/// que en la app de siempre cambia la ruta.
+/// Sólo qué pantalla, no qué hay en ella: que alguien renombre el nodo que
+/// se miraba no es irse a otro sitio.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Whereabouts {
     comms: bool,
     platform: bool,
     docs_module: bool,
-    doc: Option<DocTarget>,
+    doc: bool,
     requests: bool,
-    scope: Option<WorkScope>,
+    task: bool,
 }
 
 impl Whereabouts {
@@ -42,9 +45,27 @@ impl Whereabouts {
             comms: snapshot.comms.on_screen,
             platform: snapshot.platform.on_screen,
             docs_module: snapshot.docs.in_module,
-            doc: snapshot.docs.target.clone(),
+            doc: snapshot.docs.target.is_some(),
             requests: snapshot.requests.on_screen,
-            scope: snapshot.my_work.scope.clone(),
+            task: snapshot.task.task_id.is_some(),
+        }
+    }
+}
+
+/// Lo que se dice junto a la cuenta después de hacer algo desde su menú.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccountNotice {
+    /// La clave del catálogo.
+    pub key: &'static str,
+    /// Si se va sola. Lo que pide hacer algo se queda hasta que se quita.
+    pub fades: bool,
+}
+
+impl AccountNotice {
+    pub fn password(outcome: PasswordChanged) -> Self {
+        match outcome {
+            PasswordChanged::Done => Self { key: "common:admin.passwordChanged", fades: true },
+            PasswordChanged::NotStored => Self { key: "common:admin.passwordChangedNotStored", fades: false },
         }
     }
 }
@@ -80,8 +101,8 @@ impl ProfileView {
         let placeholder = tr(cx, "nav:profile.namePlaceholder");
         let name = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).default_value(name));
         let email = cx.new(|cx| InputState::new(window, cx).default_value(email));
-        let on_event = |this: &mut Self, _: &Entity<InputState>, event: &InputEvent, _: &mut Window, cx: &mut Context<Self>| match event {
-            InputEvent::PressEnter { .. } => this.save(cx),
+        let on_event = |this: &mut Self, _: &Entity<InputState>, event: &InputEvent, window: &mut Window, cx: &mut Context<Self>| match event {
+            InputEvent::PressEnter { .. } => this.save(window, cx),
             InputEvent::Change => {
                 // Lo de «guardado» es de lo que se guardó, no de lo que se
                 // está escribiendo ahora.
@@ -95,7 +116,7 @@ impl ProfileView {
         Self { name, email, busy: false, saved: false, error: None, _subscriptions: subscriptions }
     }
 
-    fn save(&mut self, cx: &mut Context<Self>) {
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
@@ -105,13 +126,20 @@ impl ProfileView {
         self.saved = false;
         self.error = None;
         cx.notify();
-        let answer = Backend::ask(cx, move |core| async move { core.update_profile(&name, &email).await.map(|_| ()) });
-        cx.spawn(async move |this, cx| {
+        let answer = Backend::ask(cx, move |core| async move { core.update_profile(&name, &email).await });
+        cx.spawn_in(window, async move |this, cx| {
             let Ok(result) = answer.await else { return };
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 match result {
-                    Ok(()) => this.saved = true,
+                    Ok(session) => {
+                        // Con lo que quedó guardado, como la otra app: sin los
+                        // espacios que se colaron.
+                        let (name, email) = (session.name.unwrap_or_default(), session.email.unwrap_or_default());
+                        this.name.update(cx, |field, cx| field.set_value(name, window, cx));
+                        this.email.update(cx, |field, cx| field.set_value(email, window, cx));
+                        this.saved = true;
+                    }
                     Err(error) => this.error = Some(error_text(cx, &error, "nav:profile.errSave")),
                 }
                 cx.notify();
@@ -195,7 +223,7 @@ impl Render for ProfileView {
                                     .loading(self.busy)
                                     .disabled(self.busy)
                                     .label(tr(cx, if self.busy { "nav:profile.saving" } else { "nav:profile.save" }))
-                                    .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+                                    .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                             )
                             // Esta app no tiene avisos flotantes: lo que en la
                             // otra es un toast se dice junto al botón.
@@ -204,6 +232,10 @@ impl Render for ProfileView {
                             })),
                     )
                     .children(self.error.clone().map(|error| {
+                        // Sin frase propia del fallo, el detalle sería el
+                        // mismo título otra vez.
+                        let title = tr(cx, "nav:profile.errSave");
+                        let detail = (error != title).then_some(error);
                         div()
                             .id("profile-error")
                             .test_support()
@@ -212,8 +244,8 @@ impl Render for ProfileView {
                             .gap_0p5()
                             .leading_sm()
                             .text_color(danger)
-                            .child(tr(cx, "nav:profile.errSave"))
-                            .child(div().leading_xs().child(error))
+                            .child(title)
+                            .children(detail.map(|detail| div().leading_xs().child(detail)))
                     })),
             )
     }
@@ -233,6 +265,9 @@ pub struct PasswordDialog {
     busy: bool,
     error: Option<String>,
     focus: FocusHandle,
+    /// A quién decirle que se cambió. No a este diálogo: pudo cerrarse
+    /// mientras la petición estaba en camino.
+    changed: Rc<dyn Fn(PasswordChanged, &mut App)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -245,7 +280,7 @@ impl Focusable for PasswordDialog {
 }
 
 impl PasswordDialog {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(changed: impl Fn(PasswordChanged, &mut App) + 'static, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let masked = |window: &mut Window, cx: &mut Context<Self>| cx.new(|cx| InputState::new(window, cx).masked(true));
         let (current, confirm) = (masked(window, cx), masked(window, cx));
         let hint = tr(cx, "common:admin.min8chars");
@@ -261,7 +296,7 @@ impl PasswordDialog {
             cx.subscribe_in(&confirm, window, on_event),
         ];
         current.update(cx, |state, cx| state.focus(window, cx));
-        Self { current, next, confirm, busy: false, error: None, focus: cx.focus_handle(), _subscriptions: subscriptions }
+        Self { current, next, confirm, busy: false, error: None, focus: cx.focus_handle(), changed: Rc::new(changed), _subscriptions: subscriptions }
     }
 
     fn check(&self, cx: &App) -> FormCheck {
@@ -277,13 +312,18 @@ impl PasswordDialog {
         self.busy = true;
         self.error = None;
         cx.notify();
-        let answer = Backend::ask(cx, move |core| async move { core.change_password(&current, &next).await.map(|_| ()) });
+        let answer = Backend::ask(cx, move |core| async move { core.change_password(&current, &next).await });
+        let changed = self.changed.clone();
         cx.spawn(async move |this, cx| {
             let Ok(result) = answer.await else { return };
+            if let Ok(outcome) = &result {
+                let outcome = *outcome;
+                cx.update(|cx| changed(outcome, cx));
+            }
             this.update(cx, |this, cx| {
                 this.busy = false;
                 match result {
-                    Ok(()) => cx.emit(PasswordClosed),
+                    Ok(_) => cx.emit(PasswordClosed),
                     Err(error) => this.error = Some(error_text(cx, &error, "common:admin.changeFailed")),
                 }
                 cx.notify();
@@ -373,9 +413,17 @@ impl Render for PasswordDialog {
             .size_full()
             .track_focus(&self.focus)
             .occlude()
+            // Las teclas de la app (⌘B, ⌘1–⌘9) no siguen hasta la pantalla de
+            // detrás. No todas: cortar una tecla aquí también corta que se
+            // escriba, y AltGr (Ctrl+Alt en Linux) es como se escribe la @.
             .on_key_down(cx.listener(|_, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
+                let key = &event.keystroke.key;
+                let held = event.keystroke.modifiers;
+                let held = cac_core::KeysHeld { secondary: held.secondary(cx), shift: held.shift, alt: held.alt };
+                if key == "escape" {
                     cx.emit(PasswordClosed);
+                    cx.stop_propagation();
+                } else if cac_core::folds_panel(key, held) || cac_core::rail_slot(key, held).is_some() {
                     cx.stop_propagation();
                 }
             }))
@@ -392,8 +440,8 @@ impl Render for PasswordDialog {
 mod tests {
     // Sin `use super::*`: ver la nota en `shell.rs`.
     use crate::backend::Backend;
-    use crate::testing::{ok, server_with_tasks, sign_in, wait_until};
-    use crate::workspace::Workspace;
+    use crate::testing::{ok, server_with_tasks, sign_in, wait_until, Gate};
+    use crate::workspace::{Workspace, RAIL_WORK};
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{px, size, AnyWindowHandle, AppContext, Bounds, Entity, Point, SharedString, TestAppContext, WindowBounds, WindowOptions};
     use serde_json::json;
@@ -429,6 +477,11 @@ mod tests {
         .unwrap();
     }
 
+    fn press(window: AnyWindowHandle, key: &str, cx: &mut TestAppContext) {
+        cx.update_window(window, |_, window, cx| window.press(key, cx)).unwrap();
+        cx.run_until_parked();
+    }
+
     fn type_in(window: AnyWindowHandle, id: &str, text: &str, cx: &mut TestAppContext) {
         let id = SharedString::from(id.to_string());
         cx.update_window(window, |_, window, cx| {
@@ -454,12 +507,14 @@ mod tests {
     }
 
     /// El perfil llega con lo que ya tienes puesto, guarda sin mandar el
-    /// usuario, y el nombre nuevo es el de la sesión sin reabrir la app.
+    /// usuario, se rellena con lo guardado, y el nombre nuevo es el de la
+    /// sesión sin reabrir la app.
     ///
     /// Roturas que atrapa: una entrada del menú que no abre nada; abrir el
     /// perfil con los campos vacíos; mandar el usuario; guardar y seguir
-    /// viendo el nombre de antes en el menú; no decir que se guardó, o
-    /// seguir diciéndolo cuando ya se ha vuelto a escribir.
+    /// viendo el nombre de antes en el menú; dejar en el campo lo escrito con
+    /// sus espacios en vez de lo guardado; no decir que se guardó, o seguir
+    /// diciéndolo cuando ya se ha vuelto a escribir.
     #[gpui_kit::test]
     fn the_profile_saves_your_name_and_the_menu_shows_it_at_once(cx: &mut TestAppContext) {
         let server = server_with_tasks(vec![]);
@@ -480,7 +535,7 @@ mod tests {
         cx.update_window(window, |_, window, cx| {
             profile.update(cx, |profile, cx| {
                 profile.name.update(cx, |name, cx| name.set_value("Ana García", window, cx));
-                profile.email.update(cx, |email, cx| email.set_value("ana@cac.dev ", window, cx));
+                profile.email.update(cx, |email, cx| email.set_value("  ana@cac.dev ", window, cx));
             })
         })
         .unwrap();
@@ -492,32 +547,55 @@ mod tests {
         assert_eq!(body, json!({ "name": "Ana García", "email": "ana@cac.dev" }));
         let name = cx.update(|cx| Backend::snapshot(cx).read(cx).session.as_ref().and_then(|session| session.name.clone()));
         assert_eq!(name.as_deref(), Some("Ana García"), "el menú sigue con el nombre de antes");
+        assert_eq!(cx.update(|cx| profile.read(cx).email.read(cx).value().to_string()), "ana@cac.dev", "el campo no se rellenó con lo guardado");
 
         type_in(window, "profile-name", "!", cx);
         assert!(!on_screen(window, "profile-saved", cx), "dice «guardado» de algo que se está escribiendo");
         stop(cx);
     }
 
-    /// El perfil se va en cuanto se mira otra cosa, por el riel o porque algo
-    /// pone otra vista delante.
+    /// El perfil se va en cuanto se pide otra cosa, aunque lleve adonde ya
+    /// se estaba, y devuelve el foco a la app; con él delante el riel no
+    /// marca ningún módulo.
     ///
-    /// Roturas que atrapa: un perfil que se queda delante al pulsar el módulo
-    /// en el que se estaba (pliega el panel en vez de llevar a él); uno que
-    /// tapa «Por atender» cuando un aviso lo pone delante; un riel que marca
-    /// «Trabajo» con el perfil a la vista.
+    /// Roturas que atrapa: un «Trabajo» que pliega el panel en vez de salir
+    /// del perfil; pulsar en el árbol el nodo que ya estaba elegido y seguir
+    /// en el perfil; un perfil que tapa «Por atender» cuando un aviso lo pone
+    /// delante; un riel que marca «Trabajo» con el perfil a la vista; dejar
+    /// el foco en un campo que ya no se pinta (las teclas no llegarían a
+    /// nada).
     #[gpui_kit::test]
     fn the_profile_goes_away_when_you_look_elsewhere(cx: &mut TestAppContext) {
         let server = server_with_tasks(vec![]);
         server.install(cx);
         let (window, workspace) = open(cx);
         let in_profile = |cx: &mut TestAppContext| cx.update(|cx| workspace.read(cx).profile.is_some());
+        let work_lit = |cx: &mut TestAppContext| cx.update(|cx| workspace.read(cx).module_active(RAIL_WORK, cx));
+        let anchored = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| workspace.read(cx).focus_anchor.is_focused(window)).unwrap()
+        };
 
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        assert!(work_lit(cx));
         from_the_menu(window, "account-profile", cx);
         assert!(in_profile(cx));
+        assert!(!work_lit(cx), "el riel marca «Trabajo» con el perfil delante");
+        assert!(!anchored(cx), "el perfil no se lleva el foco a su campo");
         click(window, "rail-work", cx);
         cx.run_until_parked();
         assert!(!in_profile(cx) && !on_screen(window, "profile", cx), "«Trabajo» no saca del perfil");
         assert!(cx.update(|cx| workspace.read(cx).panel_pinned), "«Trabajo» desde el perfil plegó el panel");
+        assert!(work_lit(cx));
+        assert!(anchored(cx), "el foco se quedó en un campo que ya no se pinta");
+
+        // El nodo que ya estaba elegido: no cambia nada de lo que se mira, y
+        // aun así es irse del perfil.
+        click(window, "tree-a", cx);
+        wait_until(cx, "se acota al espacio", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).my_work.scope.is_some()));
+        from_the_menu(window, "account-profile", cx);
+        click(window, "tree-a", cx);
+        cx.run_until_parked();
+        assert!(!in_profile(cx), "pulsar en el árbol no saca del perfil");
 
         from_the_menu(window, "account-profile", cx);
         assert!(on_screen(window, "profile", cx));
@@ -528,13 +606,14 @@ mod tests {
     }
 
     /// «Cambiar contraseña» del menú: no manda lo que no vale, dice lo que
-    /// rechaza el servidor, y al cambiarla se cierra con la sesión nueva.
+    /// rechaza el servidor, se queda con las teclas mientras está abierto, y
+    /// al cambiarla se cierra con la sesión nueva y lo dice.
     ///
     /// Roturas que atrapa: una entrada que no abre nada; mandar una
     /// repetición que no coincide; un rechazo del servidor (la actual no es
     /// ésa) que no llega a la pantalla o que cierra el diálogo como si se
-    /// hubiera cambiado; quedarse con el par revocado; un Escape que no
-    /// cierra; abrirlo otra vez con lo escrito la vez anterior.
+    /// hubiera cambiado; quedarse con el par revocado; cambiarla sin decirlo;
+    /// que ⌘B o ⌘2 obren en la pantalla de detrás; un Escape que no cierra.
     #[gpui_kit::test]
     fn changing_the_password_from_the_menu_keeps_you_in(cx: &mut TestAppContext) {
         let server = server_with_tasks(vec![]);
@@ -559,14 +638,24 @@ mod tests {
 
         from_the_menu(window, "account-password", cx);
         assert!(on_screen(window, "password-dialog", cx), "el diálogo no se abre");
+        let dialog = cx.update(|cx| workspace.read(cx).password.as_ref().map(|(dialog, _)| dialog.clone())).unwrap();
+
+        // Las teclas de la app no pasan del diálogo.
+        press(window, "secondary-b", cx);
+        press(window, "secondary-2", cx);
+        assert!(cx.update(|cx| workspace.read(cx).panel_pinned), "⌘B plegó el panel de detrás");
+        assert!(cx.update(|cx| workspace.read(cx).module_active(RAIL_WORK, cx)), "⌘2 cambió de módulo detrás");
+        assert!(dialog_open(cx));
+
         type_in(window, "password-current", "la-de-antes", cx);
         type_in(window, "password-next", "la-mia-propia", cx);
         type_in(window, "password-confirm", "la-mia-propio", cx);
         assert!(on_screen(window, "password-error", cx), "no reprocha la repetición");
-        cx.update_window(window, |_, window, cx| window.press("enter", cx)).unwrap();
+        press(window, "enter", cx);
         click(window, "password-submit", cx);
-        cx.run_until_parked();
-        assert_eq!(server.hits("/api/v1/auth/change-password"), 0, "se mandó una repetición que no coincide");
+        // Mandar pone el diálogo a esperar en el acto: si no lo está, no se
+        // mandó nada, sin depender de cuándo conteste el servidor.
+        assert!(!cx.update(|cx| dialog.read(cx).busy), "se mandó una repetición que no coincide");
 
         // Ahora coincide, y el servidor dice que la actual no es ésa.
         cx.update_window(window, |_, window, cx| {
@@ -577,19 +666,55 @@ mod tests {
         click(window, "password-submit", cx);
         wait_until(cx, "el rechazo llega", |cx| on_screen(window, "password-refused", cx));
         assert!(dialog_open(cx), "un rechazo cerró el diálogo");
+        assert!(!on_screen(window, "account-notice", cx), "un rechazo dice que se cambió");
 
         click(window, "password-submit", cx);
         wait_until(cx, "se cierra al cambiarla", |cx| !dialog_open(cx));
         assert_eq!(cx.update(|cx| Backend::core(cx).access_token()).as_deref(), Some("new-access"));
         assert!(!on_screen(window, "password-dialog", cx));
+        assert!(on_screen(window, "account-notice", cx), "se cambió y no lo dice");
+        click(window, "account-notice-close", cx);
+        assert!(!on_screen(window, "account-notice", cx));
 
         // Otra vez: vacío, y Escape lo cierra.
         from_the_menu(window, "account-password", cx);
         let dialog = cx.update(|cx| workspace.read(cx).password.as_ref().map(|(dialog, _)| dialog.clone())).unwrap();
         assert!(cx.update(|cx| dialog.read(cx).current.read(cx).value().is_empty()), "sigue lo escrito la vez anterior");
-        cx.update_window(window, |_, window, cx| window.press("escape", cx)).unwrap();
-        cx.run_until_parked();
+        press(window, "escape", cx);
         assert!(!dialog_open(cx), "Escape no lo cierra");
+        stop(cx);
+    }
+
+    /// Cerrar el diálogo con el cambio en camino no calla que se cambió.
+    ///
+    /// Rotura que atrapa: decirlo desde el diálogo, que ya no está cuando
+    /// llega la respuesta (la contraseña cambia y nadie se entera).
+    #[gpui_kit::test]
+    fn a_password_changed_after_closing_the_dialog_is_still_said(cx: &mut TestAppContext) {
+        let server = server_with_tasks(vec![]);
+        let answer = Gate::default();
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path("/api/v1/auth/change-password"))
+                .respond_with(answer.hold(ok(json!({ "accessToken": "new-access", "refreshToken": "new-refresh" })))),
+        );
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/auth/me")).respond_with(ok(json!({ "id": "u1", "username": "ana" }))));
+        server.install(cx);
+        let (window, workspace) = open(cx);
+
+        from_the_menu(window, "account-password", cx);
+        type_in(window, "password-current", "la-de-antes", cx);
+        type_in(window, "password-next", "la-mia-propia", cx);
+        type_in(window, "password-confirm", "la-mia-propia", cx);
+        click(window, "password-submit", cx);
+        wait_until(cx, "el cambio está en camino", |_| answer.held() == 1);
+        press(window, "escape", cx);
+        assert!(cx.update(|cx| workspace.read(cx).password.is_none()), "Escape no lo cierra");
+
+        answer.open();
+        wait_until(cx, "se dice que se cambió", |cx| on_screen(window, "account-notice", cx));
+        let said = cx.update(|cx| workspace.read(cx).account_notice.as_ref().map(|notice| notice.key));
+        assert_eq!(said, Some("common:admin.passwordChanged"));
         stop(cx);
     }
 }

@@ -15,7 +15,7 @@ use gpui_kit::component::{ActiveTheme, Icon, IconName, Side, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use crate::account::{PasswordClosed, PasswordDialog, ProfileView, Whereabouts};
+use crate::account::{AccountNotice, PasswordClosed, PasswordDialog, ProfileView, Whereabouts};
 use crate::backend::Backend;
 use crate::chat::ChatView;
 use crate::comms::CommsView;
@@ -30,7 +30,7 @@ use crate::task::TaskView;
 /// Las medidas de la app de siempre: el riel y el panel.
 const RAIL_WIDTH: f32 = 48.;
 /// El puesto de cada módulo en el riel, para ⌘1–⌘9 (`AppRail.tsx`).
-const RAIL_WORK: usize = 1;
+pub(crate) const RAIL_WORK: usize = 1;
 const RAIL_DOCS: usize = 2;
 const RAIL_COMMS: usize = 3;
 const RAIL_PLATFORM: usize = 4;
@@ -127,7 +127,7 @@ pub struct Workspace {
     /// Dónde está el foco cuando no lo tiene nada: sin nadie enfocado, una
     /// tecla no llega a ningún elemento de la app y Ctrl+B no haría nada
     /// hasta pulsar algo con el ratón.
-    focus_anchor: FocusHandle,
+    pub(crate) focus_anchor: FocusHandle,
     _on_focus_lost: Subscription,
     /// El nombre que se está escribiendo en el árbol, si alguno.
     naming: Option<NameField>,
@@ -150,6 +150,9 @@ pub struct Workspace {
     /// «Cambiar contraseña», abierto encima de todo. Uno nuevo cada vez: lo
     /// escrito en una vez no sigue en la siguiente.
     pub(crate) password: Option<(Entity<PasswordDialog>, Subscription)>,
+    /// Lo que dice el menú de la cuenta de lo último que se hizo desde él
+    /// (la contraseña cambiada): esta app no tiene avisos flotantes.
+    pub(crate) account_notice: Option<AccountNotice>,
     /// El panel de la campana.
     pub(crate) inbox: crate::inbox::InboxPanelState,
     /// Mientras se está en comunicación se pregunta quién anda por la voz
@@ -247,6 +250,7 @@ impl Workspace {
             _on_connect: on_connect,
             profile: None,
             password: None,
+            account_notice: None,
         }
     }
 
@@ -271,10 +275,24 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Quita el perfil de delante. El foco vuelve solo a `focus_anchor`: el
+    /// campo que lo tenía deja de pintarse (`_on_focus_lost`).
+    fn close_profile(&mut self, cx: &mut Context<Self>) {
+        if self.profile.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// Abre «Cambiar contraseña» encima de todo, y cierra el menú.
     fn open_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.account_menu_open = false;
-        let dialog = cx.new(|cx| PasswordDialog::new(window, cx));
+        // Lo dice aquí y no el diálogo: cerrarlo con la petición en camino no
+        // calla que la contraseña se cambió.
+        let workspace = cx.entity().downgrade();
+        let changed = move |outcome, cx: &mut App| {
+            workspace.update(cx, |this, cx| this.say(AccountNotice::password(outcome), cx)).ok();
+        };
+        let dialog = cx.new(|cx| PasswordDialog::new(changed, window, cx));
         let closed = cx.subscribe_in(&dialog, window, |this, _, _: &PasswordClosed, window, cx| {
             this.password = None;
             window.focus(&this.focus_anchor, cx);
@@ -282,6 +300,27 @@ impl Workspace {
         });
         self.password = Some((dialog, closed));
         cx.notify();
+    }
+
+    /// Pone un aviso junto a la cuenta; el que no hace falta leer con calma se
+    /// va solo.
+    fn say(&mut self, notice: AccountNotice, cx: &mut Context<Self>) {
+        let fades = notice.fades;
+        self.account_notice = Some(notice.clone());
+        cx.notify();
+        if fades {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_secs(5)).await;
+                this.update(cx, |this, cx| {
+                    if this.account_notice.as_ref() == Some(&notice) {
+                        this.account_notice = None;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
     }
 
     /// Abre el campo para nombrar algo en el árbol, con el foco puesto. Al
@@ -773,6 +812,48 @@ impl Workspace {
         })
     }
 
+    /// El aviso de la cuenta, al pie y junto al riel, donde está la cuenta:
+    /// el icono de su clase, lo que dice y la X para quitarlo.
+    fn render_account_notice(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let notice = self.account_notice.clone()?;
+        let theme = cx.theme();
+        let (popover, border, foreground, success, warning) = (theme.popover, theme.border, theme.foreground, theme.success, theme.warning);
+        let (icon, tint) = if notice.fades { (Lucide::CircleCheck, success) } else { (Lucide::TriangleAlert, warning) };
+        Some(
+            div()
+                .id("account-notice")
+                .test_support()
+                .absolute()
+                .bottom(px(12.))
+                .left(px(RAIL_WIDTH + 8.))
+                .max_w(px(360.))
+                .flex()
+                .items_start()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(border)
+                .bg(popover)
+                .text_color(foreground)
+                .shadow_lg()
+                .leading_sm()
+                .child(Icon::new(icon).size_4().flex_none().mt(px(2.)).text_color(tint))
+                .child(div().flex_1().child(tr(cx, notice.key)))
+                .child(
+                    Button::new("account-notice-close")
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::new(Lucide::X))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.account_notice = None;
+                            cx.notify();
+                        })),
+                ),
+        )
+    }
+
     /// Qué hace el clic (acotar las tareas o abrir la documentación) lo
     /// decide el core con lo que se esté mirando.
     fn click_row(row: &TreeRow, cx: &App) {
@@ -1091,17 +1172,13 @@ impl Workspace {
     /// Pulsar el puesto `slot` del riel, con el ratón o con ⌘N: el módulo
     /// en el que se está fija el panel o lo suelta; otro lleva a él.
     fn press_rail(&mut self, slot: usize, cx: &mut Context<Self>) {
-        let (on_comms, on_platform, on_docs) = Self::modules(cx);
+        if !(RAIL_WORK..=RAIL_PLATFORM).contains(&slot) {
+            return;
+        }
         // Desde el perfil no se está en ningún módulo: pulsar cualquiera
         // lleva a él, no pliega el panel.
-        let in_profile = self.profile.take().is_some();
-        let here = !in_profile && match slot {
-            RAIL_WORK => !on_comms && !on_platform && !on_docs,
-            RAIL_DOCS => on_docs,
-            RAIL_COMMS => on_comms,
-            RAIL_PLATFORM => on_platform,
-            _ => return,
-        };
+        let here = self.module_active(slot, cx);
+        self.close_profile(cx);
         if here {
             self.toggle_panel(cx);
             return;
@@ -1142,6 +1219,29 @@ impl Workspace {
         }
     }
 
+    /// El módulo del riel en el que se está, por su puesto. Con el perfil
+    /// delante, en ninguno: no es de ningún módulo.
+    fn current_module(&self, cx: &App) -> Option<usize> {
+        if self.profile.is_some() {
+            return None;
+        }
+        let (on_comms, on_platform, on_docs) = Self::modules(cx);
+        Some(if on_comms {
+            RAIL_COMMS
+        } else if on_platform {
+            RAIL_PLATFORM
+        } else if on_docs {
+            RAIL_DOCS
+        } else {
+            RAIL_WORK
+        })
+    }
+
+    /// Si el riel marca ese módulo como en el que se está.
+    pub(crate) fn module_active(&self, slot: usize, cx: &App) -> bool {
+        self.current_module(cx) == Some(slot)
+    }
+
     /// En qué módulo con pantalla propia se está: comunicación, Plataforma o
     /// Documentación (las dos primeras se pintan por delante). Si en
     /// ninguno, en «Trabajo». Lo dice el core.
@@ -1161,11 +1261,8 @@ impl Workspace {
         let servers = RailCount { id: "rail-platform-count", count: counters.servers, warning: true };
         let invitations = RailCount { id: "rail-organization-count", count: counters.invitations, warning: false };
         // En cuál de los módulos con pantalla se está lo dice el core.
-        let (on_comms, on_platform, on_docs) = Self::modules(cx);
-        // Con el perfil delante no se está en ningún módulo.
-        let in_profile = self.profile.is_some();
-        let (on_comms, on_platform, on_docs) = (on_comms && !in_profile, on_platform && !in_profile, on_docs && !in_profile);
-        let on_work = !in_profile && !on_comms && !on_platform && !on_docs;
+        let active = |slot| self.module_active(slot, cx);
+        let (on_work, on_docs, on_comms, on_platform) = (active(RAIL_WORK), active(RAIL_DOCS), active(RAIL_COMMS), active(RAIL_PLATFORM));
         let platform_label = counted_label(&tr(cx, "nav:module.platform"), servers.count);
         let comms_label = counted_label(&tr(cx, "nav:module.comms"), comms.count);
         div()
@@ -1386,7 +1483,10 @@ impl Workspace {
             .when(folder && row.active, |this| this.rounded(px(4.)).bg(active_bg))
             .hover(move |style| style.bg(hover))
             .cursor_pointer()
-            .on_click(move |_, _, cx| Self::click_row(&clicked, cx))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.close_profile(cx);
+                Self::click_row(&clicked, cx);
+            }))
             // Una lista no se abre: su icono va donde el chevrón de las demás.
             .when(!list, |this| {
                 this.child(
@@ -1756,9 +1856,11 @@ impl Render for Workspace {
             None
         };
         let incoming = self.render_incoming(&voice, cx);
-        // El perfil se va en cuanto se mira otra cosa.
+        // Lo que se pide a mano (el riel, el árbol) cierra el perfil al pedirlo;
+        // esto es para lo que pone otra pantalla delante sin pasar por aquí:
+        // un aviso que abre una tarea, un agente que trae «Por atender».
         if self.profile.as_ref().is_some_and(|(_, opened)| *opened != Whereabouts::of(Backend::snapshot(cx).read(cx))) {
-            self.profile = None;
+            self.close_profile(cx);
         }
         let profile = self.profile.as_ref().map(|(view, _)| view.clone());
         let password = self.password.as_ref().map(|(dialog, _)| dialog.clone());
@@ -1883,6 +1985,7 @@ impl Render for Workspace {
                     // «Hay una versión nueva», sin tapar nada: una tarjeta en la
                     // esquina, debajo de lo que se abre encima.
                     .child(self.updater.clone())
+                    .children(self.render_account_notice(cx))
                     .children(password.map(|dialog| div().id("password-over").absolute().inset_0().child(dialog)))
                     .children(picker.map(|picker| div().id("new-conversation-over").absolute().inset_0().child(picker)))
                     .children(guest.map(|guest| div().id("guest-call-over").absolute().inset_0().child(guest)))
