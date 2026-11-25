@@ -13,6 +13,8 @@ import { useT } from "@/lib/i18n";
 export interface ConfirmOptions {
   title: string;
   description?: string;
+  /** Lo que se va con la acción, resaltado aparte: una frase más del cuerpo no se lee. */
+  warning?: string;
   confirmText?: string;
   cancelText?: string;
   destructive?: boolean;
@@ -71,6 +73,14 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
           <DialogHeader>
             <DialogTitle>{opts.title}</DialogTitle>
             {opts.description && <DialogDescription>{opts.description}</DialogDescription>}
+            {opts.warning && (
+              <p
+                data-testid="confirm-warning"
+                className="rounded border border-warning/40 bg-warning/10 px-2 py-1.5 text-sm font-medium text-warning-foreground"
+              >
+                {opts.warning}
+              </p>
+            )}
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => settle(false)}>

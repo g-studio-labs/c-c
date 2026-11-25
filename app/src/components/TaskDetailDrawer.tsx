@@ -1313,6 +1313,10 @@ function Content() {
             const ok = await confirm({
               title: t("work:task.deleteTaskTitle", { name: task.title }),
               description: t("work:task.deleteTaskBody"),
+              warning:
+                detail.subtasks.length > 0
+                  ? t("work:task.deleteTaskTakesSubtasks", { count: detail.subtasks.length })
+                  : undefined,
               confirmText: t("work:task.delete"),
               destructive: true,
             });
