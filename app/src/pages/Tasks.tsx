@@ -11,6 +11,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ListChecks,
+  Hand,
   Plus,
   MessageSquare,
   Paperclip,
@@ -455,6 +456,7 @@ function ListView({
                       #{t.seq}
                     </span>
                     <span className="min-w-0 flex-1 truncate">{t.title}</span>
+                    {t.waitingOn && t.waitingOn.length > 0 && <WaitingOnChip names={t.waitingOn} />}
                     {t.tags.slice(0, 3).map((g) => (
                       <TagChip key={g.id} name={g.name} color={g.color} className="hidden sm:inline-flex" />
                     ))}
@@ -493,6 +495,17 @@ function ListView({
   );
 }
 
+/** «Espera a Ana»: la tarea tiene pedidos abiertos a una persona. */
+export function WaitingOnChip({ names, className }: { names: string[]; className?: string }) {
+  const { t } = useT();
+  return (
+    <span className={cn("inline-flex shrink-0 items-center gap-1 rounded bg-warning/15 px-1.5 py-0.5 text-xs text-warning", className)}>
+      <Hand className="size-3" />
+      {t("work:board.waitingOn", { names: names.join(", ") })}
+    </span>
+  );
+}
+
 function TaskCardView({
   card,
   dragging,
@@ -515,6 +528,7 @@ function TaskCardView({
       )}
     >
       <p className="line-clamp-3 text-sm">{card.title}</p>
+      {card.waitingOn && card.waitingOn.length > 0 && <WaitingOnChip names={card.waitingOn} className="mt-1.5" />}
 
       {card.tags.length > 0 && (
         <div className="mt-1.5 flex flex-wrap gap-1">

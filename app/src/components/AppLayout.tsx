@@ -22,6 +22,7 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { isWebBuild } from "@/lib/platform";
 import { viaMediaScheme } from "@/lib/media";
 import { useOpenedFromPush } from "@/hooks/use-opened-from-push";
+import { usePendingRequestOpen } from "@/hooks/use-pending-request-open";
 import { useMediaTicket } from "@/lib/url-ticket";
 import { useOrgsStore } from "@/store/orgs.store";
 import { useVoice } from "@/store/voice.store";
@@ -56,6 +57,8 @@ export default function AppLayout() {
   // invitations for the sidebar badge. Skipped for guests (no token → 401).
   // Abierta desde un aviso del teléfono: esa fila, leída (W2).
   useOpenedFromPush();
+  // Un agente pidió enseñar un pedido (`open_request`).
+  usePendingRequestOpen();
 
   useEffect(() => {
     if (authed) {

@@ -3,6 +3,7 @@ import {
   BookOpen,
   Briefcase,
   FileText,
+  Hand,
   Hash,
   ImageDown,
   Inbox,
@@ -36,6 +37,8 @@ export const NAV_ITEMS: {
 }[] = [
   { labelKey: "nav:item.overview", path: "/overview", icon: LayoutDashboard, guest: false },
   { labelKey: "nav:item.myWork", path: "/my-work", icon: Inbox, guest: false },
+  // Lo que los agentes esperan de ti, con su botón (command-and-control-504).
+  { labelKey: "nav:item.requests", path: "/requests", icon: Hand, guest: false },
   // Sin entrada para tareas: el árbol de espacios del panel de Trabajo **es**
   // esa navegación. Una fila «Tareas» que lleva a la última lista abierta
   // compite con el árbol por el mismo trabajo y deja al usuario sin saber cuál
@@ -137,7 +140,7 @@ export interface NavModule {
 export const MODULES: NavModule[] = [
   // Notas cae en Trabajo porque es trabajo (su fila está en `NAV_ITEMS` bajo
   // `work`), y conserva su propia barra en `/notes` hasta la siguiente tanda.
-  { key: "work", icon: Briefcase, labelKey: "nav:module.work", routes: ["/my-work", "/overview", "/tasks", "/notes"], home: "/my-work", guest: false },
+  { key: "work", icon: Briefcase, labelKey: "nav:module.work", routes: ["/my-work", "/requests", "/overview", "/tasks", "/notes"], home: "/my-work", guest: false },
   { key: "docs", icon: BookOpen, labelKey: "nav:module.docs", routes: ["/docs"], home: "/docs", guest: false },
   { key: "comms", icon: MessagesSquare, labelKey: "nav:module.comms", routes: ["/chat", "/dm", "/call", "/feedback"], home: "/chat", guest: false },
   {

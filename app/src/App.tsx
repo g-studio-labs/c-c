@@ -16,6 +16,7 @@ import DocIndexPage from "@/pages/DocIndexPage";
 import Notes from "@/pages/Notes";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import MyWork from "@/pages/MyWork";
+import AgentRequests from "@/pages/AgentRequests";
 import Channels from "@/pages/Channels";
 import Feedback from "@/pages/Feedback";
 import DirectMessages from "@/pages/DirectMessages";
@@ -118,6 +119,7 @@ export default function App() {
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/docs" element={<DocIndexPage />} />
           <Route path="/my-work" element={<MyWork />} />
+          <Route path="/requests" element={<AgentRequests />} />
           <Route path="/chat" element={<Channels />} />
           <Route path="/dm" element={<DirectMessages />} />
           <Route path="/feedback" element={<Feedback />} />

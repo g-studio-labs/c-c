@@ -192,6 +192,8 @@ export interface TaskCard {
   flow?: ItemFlow;
   /** El resumen de GitHub de la tarjeta, para el chip de PR. */
   git?: GitSummary;
+  /** A quién esperan sus pedidos abiertos (`domain/request.go`). */
+  waitingOn?: string[];
 }
 
 /** Ramas, PRs y commits de GitHub enlazados a una tarea. */

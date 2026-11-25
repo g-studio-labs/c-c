@@ -59,6 +59,15 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("el panel de Trabajo", () => {
+  // Rotura que atrapa: «Por atender» sin su contador, o contando los del equipo.
+  it("«Por atender» lleva cuántos pedidos te esperan", async () => {
+    const { useAgentRequestsStore } = await import("@/store/agent-requests.store");
+    useAgentRequestsStore.setState({ mineCount: 3, refreshCount: async () => {} });
+    mount();
+    const row = screen.getByRole("button", { name: /Waiting on you/ });
+    expect(row.textContent).toContain("3");
+  });
+
   it("«Mi trabajo» quita el filtro de lista", () => {
     mount();
     fireEvent.click(screen.getByText("My work"));

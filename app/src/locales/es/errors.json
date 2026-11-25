@@ -272,5 +272,12 @@
   "provisioning-request-state": "La petición ya no está en ese paso: alguien se adelantó. Recarga la bandeja.",
   "provisioning-request-expired": "La petición caducó: hay que ensayar y pedir otra vez.",
   "grant-mismatch": "La autorización no casa con lo que se quiere correr: hay que pedirla otra vez.",
-  "in-person-only": "Esto lo decide una persona en la app, no un token."
+  "in-person-only": "Esto lo decide una persona en la app, no un token.",
+  "request-kind": "Ese tipo de pedido no existe.",
+  "request-invalid": "Al pedido o a la respuesta le falta algo de su tipo.",
+  "request-not-yours": "Este pedido es para otra persona: sólo ella lo contesta.",
+  "request-not-open": "Este pedido ya no está abierto: lo contestaron, lo retiraron o lo rehicieron.",
+  "request-not-publishable": "Sólo se publica un mensaje aprobado.",
+  "request-scope": "El filtro es «míos» o «equipo».",
+  "request-status": "Ese estado de pedido no existe."
 }

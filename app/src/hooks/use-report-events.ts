@@ -37,6 +37,8 @@ import { useMeetingsStore, type ReunionEntrante } from "@/store/meetings.store";
 import { useMyWorkStore } from "@/store/mywork.store";
 import { useRepoDocs } from "@/store/repo-docs.store";
 import { usePostsStore } from "@/store/posts.store";
+import { useAgentRequestsStore } from "@/store/agent-requests.store";
+import { bringToFront } from "@/lib/window-front";
 
 type Payload = {
   reportId?: string;
@@ -741,6 +743,24 @@ export function useReportEvents() {
           notify("agent:notice", a.title, a.body ?? "");
           break;
         }
+        // Los pedidos de los agentes (command-and-control-504): la bandeja y su
+        // contador se repintan solos.
+        case "request:created":
+        case "request:updated":
+        case "request:answered":
+        case "request:withdrawn":
+          useAgentRequestsStore.getState().onChange();
+          break;
+        // Un agente pide que la persona mire un pedido ya: la ventana al
+        // frente y «Por atender» con él abierto. El «lo abrí» lo manda la
+        // pantalla al enseñarlo (`usePendingRequestOpen`).
+        case "request:open": {
+          const o = parse(data) as { code?: string; nonce?: string } | null;
+          if (!o?.code || !o.nonce) break;
+          useAgentRequestsStore.getState().askToOpen(o.code, o.nonce);
+          void bringToFront();
+          break;
+        }
         case "meeting:reminder": {
           const t = parse(data) as unknown as ReunionEntrante | null;
           if (!t?.meetingId) break;
@@ -942,6 +962,11 @@ export function useReportEvents() {
         "agent:notice",
         "backup:status",
         "backup:log",
+        "request:created",
+        "request:updated",
+        "request:answered",
+        "request:withdrawn",
+        "request:open",
       ]) {
         es.addEventListener(kind, (e) => {
           seen();

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import PanelFilter from "@/components/sidebar/PanelFilter";
@@ -7,6 +7,7 @@ import SpacesNavigator from "@/components/tree/SpacesNavigator";
 import { useT } from "@/lib/i18n";
 import { navItem } from "@/lib/nav";
 import { useMyWorkStore } from "@/store/mywork.store";
+import { useAgentRequestsStore } from "@/store/agent-requests.store";
 
 /**
  * Trabajo: lo tuyo, el resumen, las notas y el árbol de espacios.
@@ -16,7 +17,7 @@ import { useMyWorkStore } from "@/store/mywork.store";
  * propósito: es trabajo, y un quinto icono por una pantalla que va a cambiar
  * de sitio en la siguiente tanda sería un icono que luego hay que quitar.
  */
-const ROWS = ["/my-work", "/overview", "/notes"].map(navItem);
+const ROWS = ["/my-work", "/requests", "/overview", "/notes"].map(navItem);
 
 export default function WorkPanel() {
   const { t } = useT();
@@ -24,6 +25,13 @@ export default function WorkPanel() {
   const { pathname } = useLocation();
   const setScope = useMyWorkStore((s) => s.setScope);
   const [query, setQuery] = useState("");
+  // Cuántos pedidos te esperan, en «Por atender». Se lee al montar y luego lo
+  // mueven los eventos `request:*`.
+  const waiting = useAgentRequestsStore((s) => s.mineCount);
+  const refreshCount = useAgentRequestsStore((s) => s.refreshCount);
+  useEffect(() => {
+    void refreshCount();
+  }, [refreshCount]);
 
   return (
     <div className="flex flex-col">
@@ -33,6 +41,7 @@ export default function WorkPanel() {
             key={item.path}
             icon={<item.icon />}
             label={t(item.labelKey)}
+            badge={item.path === "/requests" ? waiting : undefined}
             active={pathname === item.path || pathname.startsWith(item.path + "/")}
             onClick={() => {
               // Entrar por aquí es pedir «mi trabajo», todo él. El filtro lo
