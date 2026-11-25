@@ -7,7 +7,9 @@ import SpacesNavigator from "@/components/tree/SpacesNavigator";
 import { useT } from "@/lib/i18n";
 import { navItem } from "@/lib/nav";
 import { useMyWorkStore } from "@/store/mywork.store";
+import { inOrg } from "@/lib/requests";
 import { useAgentRequestsStore } from "@/store/agent-requests.store";
+import { useOrgsStore } from "@/store/orgs.store";
 
 /**
  * Trabajo: lo tuyo, el resumen, las notas y el árbol de espacios.
@@ -27,7 +29,8 @@ export default function WorkPanel() {
   const [query, setQuery] = useState("");
   // Cuántos pedidos te esperan, en «Por atender». Se lee al montar y luego lo
   // mueven los eventos `request:*`.
-  const waiting = useAgentRequestsStore((s) => s.mineCount);
+  const currentOrgId = useOrgsStore((s) => s.currentOrgId);
+  const waiting = useAgentRequestsStore((s) => inOrg(s.mineOpen, currentOrgId).length);
   const refreshCount = useAgentRequestsStore((s) => s.refreshCount);
   useEffect(() => {
     void refreshCount();

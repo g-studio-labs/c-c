@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import RequestCard from "@/components/requests/RequestCard";
@@ -6,7 +6,10 @@ import DisclosureChevron from "@/components/ui/disclosure-chevron";
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
+import { enterOrg } from "@/lib/ir-en-org";
+import { inOrg, inOtherOrgs } from "@/lib/requests";
 import { useAgentRequestsStore } from "@/store/agent-requests.store";
+import { useOrgsStore } from "@/store/orgs.store";
 
 /**
  * «Por atender»: lo que los agentes esperan de una persona, con su botón
@@ -19,7 +22,15 @@ import { useAgentRequestsStore } from "@/store/agent-requests.store";
  */
 export default function AgentRequests() {
   const { t } = useT();
-  const { scope, open, closed, loading, loaded, error, setScope, load } = useAgentRequestsStore();
+  const { scope, loading, loaded, error, setScope, load } = useAgentRequestsStore();
+  const orgId = useOrgsStore((s) => s.currentOrgId);
+  const orgs = useOrgsStore((s) => s.orgs);
+  const allOpen = useAgentRequestsStore((s) => s.open);
+  const allClosed = useAgentRequestsStore((s) => s.closed);
+  const mineOpen = useAgentRequestsStore((s) => s.mineOpen);
+  const open = useMemo(() => inOrg(allOpen, orgId), [allOpen, orgId]);
+  const closed = useMemo(() => inOrg(allClosed, orgId), [allClosed, orgId]);
+  const elsewhere = useMemo(() => inOtherOrgs(mineOpen, orgId), [mineOpen, orgId]);
   const [params] = useSearchParams();
   const highlight = params.get("open")?.toLowerCase() ?? null;
   const [showResolved, setShowResolved] = useState(false);
@@ -100,6 +111,18 @@ export default function AgentRequests() {
           ))}
         </div>
       </header>
+
+      {elsewhere.map(({ orgId: other, count }) => (
+        <button
+          key={other}
+          type="button"
+          data-testid="requests-elsewhere"
+          className="rounded-lg border bg-muted/40 px-3 py-2 text-left text-sm hover:bg-muted"
+          onClick={() => enterOrg(other)}
+        >
+          {t("work:requests.elsewhere", { count, org: orgs.find((o) => o.id === other)?.name ?? other })}
+        </button>
+      ))}
 
       {error && <p className="text-sm text-destructive">{t("work:requests.errLoad")}</p>}
 

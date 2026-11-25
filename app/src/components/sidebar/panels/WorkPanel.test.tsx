@@ -62,10 +62,16 @@ describe("el panel de Trabajo", () => {
   // Rotura que atrapa: «Por atender» sin su contador, o contando los del equipo.
   it("«Por atender» lleva cuántos pedidos te esperan", async () => {
     const { useAgentRequestsStore } = await import("@/store/agent-requests.store");
-    useAgentRequestsStore.setState({ mineCount: 3, refreshCount: async () => {} });
+    const mine = (code: string, orgId: string) => ({ code, orgId }) as never;
+    // Dos de la org que se mira y uno de otra: el número cuenta sólo los primeros.
+    useAgentRequestsStore.setState({
+      mineOpen: [mine("a", "org-1"), mine("b", "org-1"), mine("c", "org-2")],
+      refreshCount: async () => {},
+    });
     mount();
     const row = screen.getByRole("button", { name: /Waiting on you/ });
-    expect(row.textContent).toContain("3");
+    expect(row.textContent).toContain("2");
+    expect(row.textContent).not.toContain("3");
   });
 
   it("«Mi trabajo» quita el filtro de lista", () => {

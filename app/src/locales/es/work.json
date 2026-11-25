@@ -640,6 +640,8 @@
     "empty": "Nada te espera.",
     "emptyTeam": "Nadie espera nada del equipo.",
     "loading": "Cargando…",
+    "elsewhere_one": "{{count}} pedido más en {{org}}",
+    "elsewhere_other": "{{count}} pedidos más en {{org}}",
     "errLoad": "No se pudieron cargar los pedidos.",
     "resolved": "Resueltos ({{count}})",
     "kind": {

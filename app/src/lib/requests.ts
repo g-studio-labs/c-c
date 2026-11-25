@@ -90,6 +90,22 @@ export async function listRequests(scope: RequestScope, status: "open" | "closed
   return res.data ?? [];
 }
 
+/**
+ * «Por atender» enseña los de la organización que se mira (command-and-control-527).
+ * El servidor, sin `orgId`, devuelve los de todas las organizaciones de la
+ * persona, y se reparte aquí: así un pedido de otra no se pierde, se avisa.
+ */
+export function inOrg(list: AgentRequest[], orgId: string | null): AgentRequest[] {
+  return list.filter((r) => r.orgId === orgId);
+}
+
+/** Cuántos pedidos hay en cada otra organización, en el orden en que aparecen. */
+export function inOtherOrgs(list: AgentRequest[], orgId: string | null): { orgId: string; count: number }[] {
+  const counts = new Map<string, number>();
+  for (const r of list) if (r.orgId !== orgId) counts.set(r.orgId, (counts.get(r.orgId) ?? 0) + 1);
+  return [...counts].map(([id, count]) => ({ orgId: id, count }));
+}
+
 export async function answerRequest(code: string, answer: RequestAnswer): Promise<AgentRequest> {
   const res = await api.post<APIResponse<AgentRequest>>(
     `/api/v1/requests/${encodeURIComponent(code)}/answer`,

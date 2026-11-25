@@ -15,12 +15,16 @@ import {
  * El contador va aparte de la lista a propósito: con el filtro «Equipo» la
  * lista enseña los de todos, y el número de la barra tiene que seguir diciendo
  * cuántos son **tuyos**.
+ *
+ * Las listas son las de **todas** tus organizaciones; quien pinta las parte
+ * con `inOrg` según la que se mira (command-and-control-527).
  */
 interface AgentRequestsState {
   scope: RequestScope;
   open: AgentRequest[];
   closed: AgentRequest[];
-  mineCount: number;
+  /** Los abiertos pedidos a quien mira, de todas sus organizaciones. */
+  mineOpen: AgentRequest[];
   loaded: boolean;
   loading: boolean;
   error: string | null;
@@ -40,7 +44,7 @@ export const useAgentRequestsStore = create<AgentRequestsState>()((set, get) => 
   scope: "mine",
   open: [],
   closed: [],
-  mineCount: 0,
+  mineOpen: [],
   loaded: false,
   loading: false,
   error: null,
@@ -59,7 +63,7 @@ export const useAgentRequestsStore = create<AgentRequestsState>()((set, get) => 
       // Si mientras tanto cambiaron de filtro, esta respuesta ya no es la suya.
       if (get().scope !== scope) return;
       set({ open, closed, loaded: true, loading: false });
-      if (scope === "mine") set({ mineCount: open.length });
+      if (scope === "mine") set({ mineOpen: open });
     } catch (e) {
       set({ loading: false, error: e instanceof Error ? e.message : String(e) });
     }
@@ -68,7 +72,7 @@ export const useAgentRequestsStore = create<AgentRequestsState>()((set, get) => 
   refreshCount: async () => {
     try {
       const mine = await listRequests("mine", "open");
-      set({ mineCount: mine.length });
+      set({ mineOpen: mine });
     } catch {
       // El contador es un extra: sin red se queda el último.
     }
@@ -85,7 +89,7 @@ export const useAgentRequestsStore = create<AgentRequestsState>()((set, get) => 
     set((s) => ({
       open: s.open.filter((r) => r.code !== code),
       closed: [done, ...s.closed.filter((r) => r.code !== code)],
-      mineCount: s.open.some((r) => r.code === code && r.canAnswer) ? Math.max(0, s.mineCount - 1) : s.mineCount,
+      mineOpen: s.mineOpen.filter((r) => r.code !== code),
     }));
     return done;
   },

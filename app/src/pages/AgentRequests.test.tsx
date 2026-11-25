@@ -25,6 +25,7 @@ vi.mock("@/lib/api", () => ({
 const { MemoryRouter } = await import("react-router-dom");
 const { default: AgentRequests } = await import("@/pages/AgentRequests");
 const { useAgentRequestsStore } = await import("@/store/agent-requests.store");
+const { useOrgsStore } = await import("@/store/orgs.store");
 // El estado con el que arranca la app: el filtro por defecto es parte de lo que se prueba.
 const initial = useAgentRequestsStore.getState();
 
@@ -44,6 +45,10 @@ beforeEach(() => {
     return { success: true, data: [req("req-cccccc", "answered")] };
   });
   useAgentRequestsStore.setState(initial, true);
+  useOrgsStore.setState({
+    currentOrgId: "o1",
+    orgs: [{ id: "o1", name: "DWIT" }, { id: "o2", name: "G Studio" }] as never,
+  });
 });
 afterEach(cleanup);
 
@@ -116,5 +121,37 @@ describe("Por atender", () => {
     act(() => useAgentRequestsStore.setState({ open: [req("req-eeeeee", "open"), req("req-ffffff", "open"), req("req-aaaaaa", "open"), req("req-bbbbbb", "open")] }));
     expect(scroller.scrollTop).toBe(300);
     spy.mockRestore();
+  });
+
+  // Rotura que atrapa: pintar o contar los pedidos de otra organización, o no
+  // avisar de ellos (command-and-control-527).
+  describe("varias organizaciones", () => {
+    const other = (code: string) => ({ ...req(code, "open"), orgId: "o2" });
+    const withOtherOrg = () =>
+      get.mockImplementation(async (p: string) =>
+        p.includes("status=open")
+          ? { success: true, data: [req("req-aaaaaa", "open"), other("req-gggggg"), other("req-hhhhhh")] }
+          : { success: true, data: [req("req-cccccc", "answered"), { ...req("req-iiiiii", "answered"), orgId: "o2" }] },
+      );
+
+    it("sólo enseña los de la org que se mira, y avisa de los de las otras", async () => {
+      withOtherOrg();
+      mount();
+      await screen.findByText("Pedido req-aaaaaa");
+      expect(screen.queryByText("Pedido req-gggggg")).toBeNull();
+      expect(screen.getByTestId("requests-elsewhere").textContent).toBe("2 more requests in G Studio");
+      expect(screen.getByRole("button", { name: /Resolved \(1\)/ })).toBeTruthy();
+    });
+
+    it("pulsar el aviso cambia de organización y enseña los de allí", async () => {
+      withOtherOrg();
+      mount();
+      await screen.findByText("Pedido req-aaaaaa");
+      fireEvent.click(screen.getByTestId("requests-elsewhere"));
+      await screen.findByText("Pedido req-gggggg");
+      expect(useOrgsStore.getState().currentOrgId).toBe("o2");
+      expect(screen.queryByText("Pedido req-aaaaaa")).toBeNull();
+      expect(screen.getByTestId("requests-elsewhere").textContent).toBe("1 more request in DWIT");
+    });
   });
 });

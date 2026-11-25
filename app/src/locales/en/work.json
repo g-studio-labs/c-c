@@ -640,6 +640,8 @@
     "empty": "Nothing is waiting on you.",
     "emptyTeam": "Nothing is waiting on the team.",
     "loading": "Loading…",
+    "elsewhere_one": "{{count}} more request in {{org}}",
+    "elsewhere_other": "{{count}} more requests in {{org}}",
     "errLoad": "Couldn't load the requests.",
     "resolved": "Resolved ({{count}})",
     "kind": {
