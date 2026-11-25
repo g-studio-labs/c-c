@@ -120,6 +120,8 @@
     "update": "Update",
     "later": "Not now",
     "ready": "Updated to v{{version}}. Restart to use it.",
+    "installReady": "v{{version}} is downloaded. The app closes to install it; save what you are doing first.",
+    "installAndClose": "Install and close",
     "restart": "Restart",
     "diskOpened": "The disk image is open: drag the app to Applications to finish.",
     "close": "Close",

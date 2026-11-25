@@ -120,6 +120,8 @@
     "update": "Actualizar",
     "later": "Ahora no",
     "ready": "Actualizada a v{{version}}. Reinicia para usarla.",
+    "installReady": "v{{version}} está bajada. La app se cierra para instalarla; guarda antes lo que estés haciendo.",
+    "installAndClose": "Instalar y cerrar",
     "restart": "Reiniciar",
     "diskOpened": "La imagen de disco está abierta: arrastra la app a Aplicaciones para terminar.",
     "close": "Cerrar",
