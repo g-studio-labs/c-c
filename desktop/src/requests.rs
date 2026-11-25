@@ -7,9 +7,11 @@
 //! es lo que se está escribiendo en cada tarjeta y qué modo tiene abierto
 //! (editar, rechazar, «no funciona»).
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
-use cac_core::{AgentRequest, AnswerDraft, InboxTarget, RequestKind, RequestScope, RequestStatus};
+use cac_core::{AgentRequest, AnswerDraft, InboxTarget, LinkSegment, RequestKind, RequestScope, RequestStatus};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
@@ -57,7 +59,20 @@ pub struct RequestsView {
     scroll: ScrollHandle,
     /// El pedido resaltado al que todavía no se ha llevado la vista.
     scroll_to: Option<String>,
+    /// El resaltado ya atendido: se atiende una sola vez, la primera vez que su
+    /// pedido aparece en la lista.
     shown_highlight: Option<String>,
+    /// Las tarjetas en el orden en que quedaron pintadas, para saber si la
+    /// lista cambió.
+    order: Vec<String>,
+    /// Dónde quedó pintada cada tarjeta en el último cuadro, que cada una
+    /// anota al pintarse (el `ScrollHandle` de esta versión no da las de sus
+    /// hijos).
+    tops: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
+    /// La primera tarjeta que se veía y a cuántos píxeles del borde de arriba,
+    /// anotada cuando la lista cambió. La corrige esa misma tarjeta al pintarse
+    /// en su sitio nuevo.
+    anchor: Rc<RefCell<Option<(String, Pixels)>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -73,6 +88,9 @@ impl RequestsView {
             scroll: ScrollHandle::new(),
             scroll_to: None,
             shown_highlight: None,
+            order: Vec::new(),
+            tops: Rc::default(),
+            anchor: Rc::default(),
             _subscriptions: Vec::new(),
         }
     }
@@ -167,6 +185,85 @@ impl RequestsView {
         });
     }
 
+    /// Lo que llega no mueve lo que se lee: si la lista cambia (un pedido
+    /// nuevo entra por encima, se contesta uno, se abre «Resueltos»), la primera
+    /// tarjeta que se veía se queda a la misma altura. Se anota antes de que se
+    /// pinte la lista nueva y esa tarjeta, al pintarse, corrige lo que se
+    /// desliza (`AgentRequests.tsx` lo hace con el anclaje del navegador).
+    fn keep_reading(&mut self, shown: Vec<String>) {
+        let changed = self.order != shown;
+        let area = self.scroll.bounds();
+        let mut anchor = self.anchor.borrow_mut();
+        // Si la tarjeta anotada se fue (se contestó), no hay a quién corregir.
+        if anchor.as_ref().is_some_and(|(code, _)| !shown.contains(code)) {
+            *anchor = None;
+        }
+        if self.scroll_to.is_some() {
+            *anchor = None;
+        } else if changed && anchor.is_none() && area.size.height > px(0.) {
+            let tops = self.tops.borrow();
+            *anchor = self.order.iter().find_map(|code| {
+                let card = tops.get(code)?;
+                (card.bottom() > area.top()).then(|| (code.clone(), card.top() - area.top()))
+            });
+        }
+        drop(anchor);
+        self.order = shown;
+    }
+
+    /// Un enlace dentro de un texto del pedido: la web, al navegador; una
+    /// pantalla de la app, dentro; una ruta, con el sistema, y si no existe se
+    /// dice.
+    fn follow(&mut self, target: LinkSegment, org_id: String, cx: &mut Context<Self>) {
+        match target {
+            LinkSegment::Url(url) => cx.open_url(&url),
+            LinkSegment::AppRoute { route, .. } => self.open_link(route, org_id, cx),
+            LinkSegment::Path { path, .. } => {
+                let language = locale(cx);
+                if !cac_mcp::host::expand_home(&path).exists() {
+                    self.said = Some(cac_core::text_with(language, "work:requests.pathMissing", &[("path", &path)]));
+                } else if launch_path(&path).is_err() {
+                    self.said = Some(tr(cx, "common:last.openLinkFailed"));
+                }
+                cx.notify();
+            }
+            LinkSegment::Text(_) => {}
+        }
+    }
+
+    /// Un texto del pedido con sus enlaces pintados y pulsables. Sin enlaces,
+    /// texto corriente.
+    fn rich(&self, id: String, text: &str, org_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let segments = cac_core::link_segments(text);
+        if segments.iter().all(|segment| matches!(segment, LinkSegment::Text(_))) {
+            return div().id(SharedString::from(id)).child(text.to_string()).test_support().into_any_element();
+        }
+        let primary = cx.theme().primary;
+        let (mut shown, mut highlights, mut ranges, mut targets) = (String::new(), Vec::new(), Vec::new(), Vec::new());
+        for segment in segments {
+            let start = shown.len();
+            match &segment {
+                LinkSegment::Text(text) => shown.push_str(text),
+                LinkSegment::Url(url) => shown.push_str(url),
+                LinkSegment::Path { shown: written, .. } | LinkSegment::AppRoute { shown: written, .. } => shown.push_str(written),
+            }
+            if !matches!(segment, LinkSegment::Text(_)) {
+                let range = start..shown.len();
+                let style = HighlightStyle { color: Some(primary), underline: Some(UnderlineStyle { thickness: px(1.), color: Some(primary), wavy: false }), ..Default::default() };
+                highlights.push((range.clone(), style));
+                ranges.push(range);
+                targets.push(segment);
+            }
+        }
+        let (view, org_id) = (cx.entity().downgrade(), org_id.to_string());
+        let text = InteractiveText::new(SharedString::from(format!("{id}-text")), StyledText::new(shown).with_highlights(highlights)).on_click(ranges, move |at, _, cx| {
+            let target = targets[at].clone();
+            let org_id = org_id.clone();
+            view.update(cx, |this, cx| this.follow(target, org_id, cx)).ok();
+        });
+        div().id(SharedString::from(id)).child(text).test_support().into_any_element()
+    }
+
     fn copy(&mut self, text: String, code: Option<String>, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.copied = code;
@@ -245,8 +342,34 @@ impl RequestsView {
                     .on_click(cx.listener(move |this, _, _, cx| this.copy(copy_code.clone(), Some(copy_code.clone()), cx))),
             );
 
+        let summary = self.rich(format!("request-summary-{code}"), &request.summary, &request.org_id, cx);
+        let (tops, anchor, scroll, noted) = (self.tops.clone(), self.anchor.clone(), self.scroll.clone(), code.clone());
         let mut column = div()
             .id(SharedString::from(format!("request-{code}")))
+            .relative()
+            .child(
+                canvas(
+                    move |bounds, window, _| {
+                        tops.borrow_mut().insert(noted.clone(), bounds);
+                        // Si esta es la tarjeta que se leía, y la lista nueva
+                        // la dejó en otro sitio, se sube o baja lo que se desliza
+                        // lo que se movió y se pinta otra vez.
+                        let was = anchor.borrow().as_ref().filter(|(code, _)| *code == noted).map(|(_, was)| *was);
+                        if let Some(was) = was {
+                            anchor.borrow_mut().take();
+                            let moved = (bounds.top() - scroll.bounds().top()) - was;
+                            if moved.abs() > px(0.5) {
+                                let offset = scroll.offset();
+                                scroll.set_offset(point(offset.x, offset.y - moved));
+                                window.refresh();
+                            }
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
             .flex()
             .flex_col()
             .gap_3()
@@ -260,7 +383,7 @@ impl RequestsView {
             .bg(crate::theme::css_color("raised", cx))
             .leading_sm()
             .child(header)
-            .child(div().whitespace_normal().child(request.summary.clone()))
+            .child(div().whitespace_normal().child(summary))
             .child(div().leading_xs().text_color(muted).child(asked))
             .child(self.render_body(request, cx));
         column = if open {
@@ -289,8 +412,22 @@ impl RequestsView {
         div().leading_xs().font_weight(FontWeight::MEDIUM).text_color(cx.theme().muted_foreground).child(label)
     }
 
-    fn block(id: String, text: String, mono: bool, cx: &App) -> Stateful<Div> {
-        let theme = cx.theme();
+    /// Un bloque de texto en caja (el borrador, el comando, lo que salió). Con
+    /// enlaces pintados si `org_id` viene: copiar sigue copiando el texto crudo,
+    /// que no pasa por aquí.
+    fn block(&self, id: String, text: String, mono: bool, org_id: Option<&str>, cx: &mut Context<Self>) -> Stateful<Div> {
+        let theme = cx.theme().clone();
+        let lines: Vec<AnyElement> = text
+            .lines()
+            .enumerate()
+            .map(|(n, line)| {
+                let content = match org_id {
+                    Some(org) => self.rich(format!("{id}-line-{n}"), line, org, cx),
+                    None => div().child(line.to_string()).into_any_element(),
+                };
+                div().when(mono, |this| this.whitespace_nowrap()).child(content).into_any_element()
+            })
+            .collect();
         div()
             .id(SharedString::from(id))
             .w_full()
@@ -299,7 +436,7 @@ impl RequestsView {
             .rounded(px(6.))
             .bg(theme.muted)
             .when(mono, |this| this.font_family(theme.mono_font_family.clone()).overflow_x_scroll())
-            .children(text.lines().map(|line| div().when(mono, |this| this.whitespace_nowrap()).child(line.to_string())).collect::<Vec<_>>())
+            .children(lines)
     }
 
     /// Lo que el agente dejó, según el tipo.
@@ -307,9 +444,11 @@ impl RequestsView {
         let code = request.code.clone();
         let body = &request.body;
         let primary = cx.theme().primary;
+        let org = request.org_id.clone();
         let column = div().flex().flex_col().gap_2();
         match request.kind {
             RequestKind::ApproveMessage => {
+                let draft_block = self.block(format!("request-draft-{code}"), body.draft.clone(), false, Some(&org), cx);
                 let destination: AnyElement = if body.destination_url.is_empty() {
                     div().child(body.destination.clone()).into_any_element()
                 } else {
@@ -325,11 +464,17 @@ impl RequestsView {
                 };
                 column
                     .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.destination"), cx)).child(destination))
-                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.draft"), cx)).child(Self::block(format!("request-draft-{code}"), body.draft.clone(), false, cx).test_support()))
+                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.draft"), cx)).child(draft_block.test_support()))
                     .into_any_element()
             }
             RequestKind::Test => {
-                let steps = body.steps.iter().enumerate().map(|(n, step)| div().flex().gap_1p5().child(div().flex_none().child(format!("{}.", n + 1))).child(div().child(step.clone())));
+                let steps: Vec<AnyElement> = body
+                    .steps
+                    .iter()
+                    .enumerate()
+                    .map(|(n, step)| div().flex().gap_1p5().child(div().flex_none().child(format!("{}.", n + 1))).child(div().min_w_0().child(self.rich(format!("request-step-{code}-{n}"), step, &org, cx))).into_any_element())
+                    .collect();
+                let expected = self.rich(format!("request-expected-{code}"), &body.expected, &org, cx);
                 let (url, org) = (body.url.clone(), request.org_id.clone());
                 column
                     .when(!body.url.is_empty(), |this| {
@@ -344,22 +489,31 @@ impl RequestsView {
                             ),
                         )
                     })
-                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.steps"), cx)).children(steps.collect::<Vec<_>>()))
-                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.expected"), cx)).child(body.expected.clone()))
+                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.steps"), cx)).children(steps))
+                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.expected"), cx)).child(expected))
                     .into_any_element()
             }
-            RequestKind::Decide => column.when(!body.question.is_empty(), |this| this.child(div().font_weight(FontWeight::MEDIUM).child(body.question.clone()))).into_any_element(),
+            RequestKind::Decide => {
+                let question = self.rich(format!("request-question-{code}"), &body.question, &org, cx);
+                column.when(!body.question.is_empty(), |this| this.child(div().font_weight(FontWeight::MEDIUM).child(question))).into_any_element()
+            }
             RequestKind::Run => {
                 let command = body.command.clone();
+                let (where_, expected, undo) = (
+                    self.rich(format!("request-where-{code}"), &body.where_, &org, cx),
+                    self.rich(format!("request-expected-{code}"), &body.expected, &org, cx),
+                    self.rich(format!("request-undo-{code}"), &body.undo, &org, cx),
+                );
+                let command_block = self.block(format!("request-command-{code}"), body.command.clone(), true, Some(&org), cx);
                 column
-                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.where"), cx)).child(body.where_.clone()))
+                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.where"), cx)).child(where_))
                     .child(
                         div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.command"), cx)).child(
                             div()
                                 .flex()
                                 .items_start()
                                 .gap_2()
-                                .child(Self::block(format!("request-command-{code}"), body.command.clone(), true, cx).flex_1().test_support())
+                                .child(command_block.flex_1().test_support())
                                 .child(
                                     Button::new(SharedString::from(format!("request-copy-command-{code}")))
                                         .outline()
@@ -373,14 +527,17 @@ impl RequestsView {
                                 ),
                         ),
                     )
-                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.expected"), cx)).child(body.expected.clone()))
-                    .when(!body.undo.is_empty(), |this| this.child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.undo"), cx)).child(body.undo.clone())))
+                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.expected"), cx)).child(expected))
+                    .when(!body.undo.is_empty(), |this| this.child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.undo"), cx)).child(undo)))
                     .into_any_element()
             }
-            RequestKind::Obtain => column
-                .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.what"), cx)).child(body.what.clone()))
-                .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.from"), cx)).child(body.from.clone()))
-                .into_any_element(),
+            RequestKind::Obtain => {
+                let (what, from) = (self.rich(format!("request-what-{code}"), &body.what, &org, cx), self.rich(format!("request-from-{code}"), &body.from, &org, cx));
+                column
+                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.what"), cx)).child(what))
+                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.from"), cx)).child(from))
+                    .into_any_element()
+            }
             RequestKind::Unknown => column.into_any_element(),
         }
     }
@@ -565,6 +722,7 @@ impl RequestsView {
             line
         });
         let (published, org) = (request.published_url.clone(), request.org_id.clone());
+        let output_block = (!answer.output.is_empty()).then(|| self.block(format!("request-outcome-output-{code}"), answer.output.clone(), true, None, cx));
         div()
             .flex()
             .flex_col()
@@ -574,7 +732,7 @@ impl RequestsView {
             .bg(theme.muted)
             .child(div().id(SharedString::from(format!("request-outcome-{code}"))).font_weight(FontWeight::MEDIUM).child(cac_core::request_outcome(request, language)).test_support())
             .when(!answer.note.is_empty() && request.kind != RequestKind::Test, |this| this.child(div().child(answer.note.clone())))
-            .when(!answer.output.is_empty(), |this| this.child(Self::block(format!("request-outcome-output-{code}"), answer.output.clone(), true, cx)))
+            .children(output_block)
             .when(answer.edited && !answer.final_text.is_empty(), |this| this.child(div().leading_xs().child(answer.final_text.clone())))
             .children(by.map(|line| div().leading_xs().text_color(theme.muted_foreground).child(line)))
             .when(!published.is_empty(), |this| {
@@ -614,21 +772,36 @@ impl RequestsView {
     }
 }
 
+/// Abrir una ruta con el sistema. En las pruebas sólo se anota: no se lanza
+/// nada de verdad.
+fn launch_path(path: &str) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        tests::OPENED.with(|opened| opened.borrow_mut().push(path.to_string()));
+        Ok(())
+    }
+    #[cfg(not(test))]
+    cac_mcp::host::open_path(path)
+}
+
 impl Render for RequestsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = Backend::snapshot(cx).read(cx).requests.clone();
         let theme = cx.theme().clone();
         let (background, foreground, muted, border, danger) = (theme.background, theme.foreground, theme.muted_foreground, theme.border, theme.danger);
-        // Un resaltado nuevo: se lleva la vista a él, y si ya está resuelto,
-        // «Resueltos» se abre.
-        if state.highlight != self.shown_highlight {
-            self.shown_highlight = state.highlight.clone();
-            self.scroll_to = state.highlight.clone();
-        }
-        if let Some(code) = self.scroll_to.clone() {
-            if state.closed.iter().any(|request| request.code == code) {
-                self.resolved_open = true;
+        // El enlace se atiende una vez, cuando su pedido aparece: se lleva la
+        // vista a él, y «Resueltos» se abre sólo si ya estaba resuelto. Que
+        // luego se conteste (y pase a resueltos) o lleguen otros no lo vuelve
+        // a abrir ni a mover.
+        if let Some(code) = state.highlight.as_ref().filter(|code| self.shown_highlight.as_ref() != Some(code)) {
+            let closed = state.closed.iter().any(|request| &request.code == code);
+            if closed || state.open.iter().any(|request| &request.code == code) {
+                self.shown_highlight = Some(code.clone());
+                self.scroll_to = Some(code.clone());
+                self.resolved_open |= closed;
             }
+        } else if state.highlight.is_none() {
+            self.shown_highlight = None;
         }
         // Lo escrito en un pedido que ya no está abierto no tiene a dónde ir.
         self.cards.retain(|code, _| state.open.iter().any(|request| &request.code == code));
@@ -640,16 +813,17 @@ impl Render for RequestsView {
         } else {
             Vec::new()
         };
-        // Las tarjetas son hijas directas de lo que se desliza (para
-        // `scroll_to_item`): en qué puesto va la resaltada, contando lo de
-        // encima.
+        // `scroll_to_item` cuenta hijos directos de lo que se desliza: en qué
+        // puesto va la resaltada, contando lo de encima (título, error, estado)
+        // y el pliegue «Resueltos».
         let resolved_open = self.resolved_open;
-        let before_open = 1 + usize::from(state.failed) + usize::from(state.loaded && state.open.is_empty() || !state.loaded);
+        let before_open = 2 + usize::from(state.failed);
+        let shown: Vec<&str> = state.open.iter().chain(state.closed.iter().filter(|_| resolved_open)).map(|request| request.code.as_str()).collect();
         let at = highlight.as_deref().and_then(|code| {
-            state.open.iter().position(|request| request.code == code).map(|n| before_open + n).or_else(|| {
-                state.closed.iter().position(|request| request.code == code).filter(|_| resolved_open).map(|n| before_open + state.open.len() + 1 + n)
-            })
+            let n = shown.iter().position(|shown| *shown == code)?;
+            Some(before_open + n + usize::from(n >= state.open.len()))
         });
+        self.keep_reading(shown.iter().map(|code| code.to_string()).collect());
         if let (Some(_), Some(at)) = (self.scroll_to.as_ref(), at) {
             // Un `ScrollHandle` que aún no se pintó no sabe su alto y tira la
             // petición sin moverse: se pide cuando la lista ya se pintó.
@@ -731,6 +905,7 @@ impl Render for RequestsView {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
+                    .test_support()
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -747,6 +922,7 @@ impl Render for RequestsView {
                     .children(said.map(|said| {
                         div()
                             .id("requests-said")
+                            .aria_label(said.clone())
                             .leading_xs()
                             .text_color(muted)
                             .cursor_pointer()
@@ -795,10 +971,17 @@ mod tests {
     use crate::testing::{contract_task, ok, server_with_tasks, sign_in, wait_until, FakeServer, Gate};
     use crate::workspace::Workspace;
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{px, size, AnyWindowHandle, AppContext, Bounds, Point, TestAppContext, WindowBounds, WindowOptions};
+    use gpui_kit::{point, px, size, AnyWindowHandle, AppContext, Bounds, Pixels, Point, ScrollDelta, TestAppContext, WindowBounds, WindowOptions};
     use serde_json::{json, Value};
+    use std::cell::RefCell;
+    use std::sync::{Arc, Mutex};
     use wiremock::matchers::{method, path, query_param};
-    use wiremock::Mock;
+    use wiremock::{Mock, ResponseTemplate};
+
+    thread_local! {
+        /// Las rutas que la pantalla habría abierto con el sistema.
+        pub(super) static OPENED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
 
     fn request(code: &str, kind: &str, task: &str, of: (&str, &str), mine: bool, body: Value) -> Value {
         json!({
@@ -836,11 +1019,15 @@ mod tests {
     }
 
     fn open(server: &FakeServer, cx: &mut TestAppContext) -> AnyWindowHandle {
+        open_sized(server, 1400., cx)
+    }
+
+    fn open_sized(server: &FakeServer, height: f32, cx: &mut TestAppContext) -> AnyWindowHandle {
         server.install(cx);
         sign_in(cx);
         cx.update(|cx| {
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds { origin: Point::default(), size: size(px(1200.), px(1400.)) })),
+                window_bounds: Some(WindowBounds::Windowed(Bounds { origin: Point::default(), size: size(px(1200.), px(height)) })),
                 ..WindowOptions::default()
             };
             gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx))).expect("open test window").0
@@ -1012,5 +1199,182 @@ mod tests {
         wait_until(cx, "el «lo enseñé»", |_| server.hits("/api/v1/requests/req-a2/opened") == 1);
         assert_eq!(cx.update(|cx| Backend::snapshot(cx).read(cx).requests.highlight.clone()).as_deref(), Some("req-a2"));
         stop(cx);
+    }
+
+    type Shared = Arc<Mutex<Vec<Value>>>;
+
+    /// Un servidor cuyas listas de «mine» y «team» se cambian en plena prueba.
+    fn live_server(open: &Shared, closed: &Shared) -> FakeServer {
+        let server = server_with_tasks(vec![contract_task("t1", "a", |task| task["title"] = json!("Subir el backend"))]);
+        for scope in ["mine", "team"] {
+            for (status, list) in [("open", open), ("closed", closed)] {
+                let list = list.clone();
+                server.mount(
+                    Mock::given(method("GET"))
+                        .and(path("/api/v1/requests"))
+                        .and(query_param("scope", scope.to_string()))
+                        .and(query_param("status", status.to_string()))
+                        .respond_with(move |_: &wiremock::Request| ResponseTemplate::new(200).set_body_json(json!({ "success": true, "data": list.lock().unwrap().clone() }))),
+                );
+            }
+        }
+        server
+    }
+
+    fn approve(code: &str, summary: &str) -> Value {
+        let mut value = request(code, "approve_message", "t1", ("u1", "Ana Ruiz"), true, json!({ "draft": "Hola", "destination": "Basecamp" }));
+        value["summary"] = json!(summary);
+        value
+    }
+
+    fn bounds(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> Option<Bounds<Pixels>> {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find(id).map(|found| found.bounds())
+        })
+        .unwrap()
+    }
+
+    fn click_start(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) {
+        let id = gpui_kit::SharedString::from(id.to_string());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click_at(id, point(px(3.), px(3.)), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// Una dirección, una ruta que existe, una que no y una pantalla de la app
+    /// escritas en el texto de un pedido se pulsan, y cada una hace lo suyo.
+    ///
+    /// Roturas que atrapa: la dirección que no llega al navegador; la ruta
+    /// que no llega al sistema, o que se abre sin existir; una ruta que no
+    /// existe y no dice nada; una pantalla de la app que sale al navegador en
+    /// vez de abrirse dentro.
+    #[gpui_kit::test]
+    fn links_in_a_request_open_what_they_point_at(cx: &mut TestAppContext) {
+        let here = std::env::temp_dir().to_string_lossy().to_string();
+        let listed: Shared = Arc::new(Mutex::new(vec![
+            approve("req-u1", "https://supabase.example/sql/new y listo"),
+            approve("req-p1", &format!("{here} existe")),
+            approve("req-p2", "/no/existe/cac-504.sql no está"),
+            approve("req-r1", "/app/tasks?task=t1 es la tarea"),
+        ]));
+        let server = live_server(&listed, &Arc::new(Mutex::new(Vec::new())));
+        let window = open_sized(&server, 2400., cx);
+        show_list(window, "req-u1", cx);
+        wait_until(cx, "el último pedido", |cx| on_screen(window, "request-summary-req-r1", cx));
+        OPENED.with(|opened| opened.borrow_mut().clear());
+
+        click_start(window, "request-summary-req-u1", cx);
+        assert_eq!(cx.opened_url().as_deref(), Some("https://supabase.example/sql/new"));
+        assert!(OPENED.with(|opened| opened.borrow().is_empty()), "una dirección no es una ruta");
+
+        click_start(window, "request-summary-req-p1", cx);
+        assert_eq!(OPENED.with(|opened| opened.borrow().clone()), [here.clone()]);
+
+        click_start(window, "request-summary-req-p2", cx);
+        assert_eq!(OPENED.with(|opened| opened.borrow().len()), 1, "una ruta que no existe no se abre");
+        wait_until(cx, "el aviso de que no existe", |cx| label(window, "requests-said", cx).contains("/no/existe/cac-504.sql"));
+
+        click_start(window, "request-summary-req-r1", cx);
+        assert_eq!(cx.opened_url().as_deref(), Some("https://supabase.example/sql/new"), "la pantalla de la app no se le da al navegador");
+        wait_until(cx, "la tarea se abre dentro", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).task.task_id.clone()).as_deref() == Some("t1"));
+        stop(cx);
+    }
+
+    /// Lo que entra por encima no mueve lo que se lee: con la lista deslizada,
+    /// un pedido nuevo (que ordena primero) deja la primera tarjeta visible
+    /// donde estaba.
+    ///
+    /// Rotura que atrapa: no corregir el desplazamiento tras pintar la lista
+    /// nueva (todo baja lo que mide el pedido que entró).
+    #[gpui_kit::test]
+    fn a_request_arriving_above_does_not_move_what_is_read(cx: &mut TestAppContext) {
+        let codes = ["req-b1", "req-b2", "req-b3", "req-b4", "req-b5", "req-b6"];
+        let listed: Shared = Arc::new(Mutex::new(codes.iter().map(|code| approve(code, "uno")).collect()));
+        let server = live_server(&listed, &Arc::new(Mutex::new(Vec::new())));
+        let window = open_sized(&server, 560., cx);
+        show_list(window, "req-b1", cx);
+        scroll_down(window, 420., cx);
+        let (code, was) = first_visible(window, &codes, cx);
+        assert_ne!(code, "req-b1", "la lista tenía que estar deslizada");
+
+        listed.lock().unwrap().insert(0, approve("req-b0", "nuevo"));
+        cx.update(|cx| {
+            Backend::run(cx, |core| async move {
+                core.stream().deliver(cac_core::ServerEvent { event: "request:created".into(), data: json!({ "code": "req-b0" }).to_string() });
+            })
+        });
+        wait_until(cx, "el nuevo en la lista", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).requests.open.len()) == 7);
+        wait_until(cx, "la tarjeta de antes, donde estaba", |cx| bounds(window, &format!("request-{code}"), cx).is_some_and(|now| (f32::from(now.top()) - was).abs() < 1.));
+        stop(cx);
+    }
+
+    /// Contestar el pedido resaltado no abre «Resueltos»: sólo se abre si el
+    /// enlace llegó cuando ya estaba resuelto.
+    ///
+    /// Rotura que atrapa: abrir «Resueltos» cada vez que el pedido resaltado
+    /// cae en resueltos, que es lo que desplegaba la lista bajo quien estaba
+    /// contestando.
+    #[gpui_kit::test]
+    fn answering_the_highlighted_request_does_not_open_resolved(cx: &mut TestAppContext) {
+        let listed: Shared = Arc::new(Mutex::new(vec![approve("req-a1", "uno"), approve("req-a2", "dos")]));
+        let closed: Shared = Arc::new(Mutex::new(Vec::new()));
+        let server = live_server(&listed, &closed);
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/requests/req-a1/opened")).respond_with(ok(json!(null))));
+        let mut done = approve("req-a1", "uno");
+        done["status"] = json!("answered");
+        done["answer"] = json!({ "approved": true });
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/requests/req-a1/answer")).respond_with(ok(done.clone())));
+        let window = open(&server, cx);
+        wait_until(cx, "las tareas", |cx| on_screen(window, "work-row-t1", cx));
+        cx.update(|cx| {
+            Backend::run(cx, |core| async move {
+                core.stream().deliver(cac_core::ServerEvent { event: "request:open".into(), data: json!({ "code": "req-a1", "nonce": "n1" }).to_string() });
+            })
+        });
+        wait_until(cx, "el pedido resaltado", |cx| on_screen(window, "request-req-a1", cx));
+
+        *listed.lock().unwrap() = vec![approve("req-a2", "dos")];
+        *closed.lock().unwrap() = vec![done];
+        click(window, "request-approve-req-a1", cx);
+        wait_until(cx, "pasa a «Resueltos»", |cx| on_screen(window, "requests-resolved", cx) && !on_screen(window, "request-req-a1", cx));
+        for _ in 0..5 {
+            cx.run_until_parked();
+            assert!(!on_screen(window, "request-outcome-req-a1", cx), "«Resueltos» no se abre solo");
+        }
+        stop(cx);
+    }
+
+    fn show_list(window: AnyWindowHandle, first: &str, cx: &mut TestAppContext) {
+        wait_until(cx, "el número de «Por atender»", |cx| on_screen(window, "panel-requests-count", cx));
+        click(window, "panel-requests", cx);
+        let wanted = format!("request-{first}");
+        wait_until(cx, "los pedidos", |cx| on_screen(window, &wanted, cx));
+    }
+
+    fn scroll_down(window: AnyWindowHandle, by: f32, cx: &mut TestAppContext) {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll("requests", ScrollDelta::Pixels(point(px(0.), px(-by))), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// La primera tarjeta que aún se ve, y a qué altura de la ventana.
+    fn first_visible(window: AnyWindowHandle, codes: &[&str], cx: &mut TestAppContext) -> (String, f32) {
+        let area = bounds(window, "requests", cx).expect("la lista");
+        for code in codes {
+            if let Some(card) = bounds(window, &format!("request-{code}"), cx) {
+                if card.bottom() > area.top() {
+                    return (code.to_string(), f32::from(card.top()));
+                }
+            }
+        }
+        panic!("no se ve ninguna tarjeta");
     }
 }
