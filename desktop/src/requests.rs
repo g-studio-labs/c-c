@@ -1178,10 +1178,10 @@ mod tests {
             Value::Array(list)
         };
         let list = |scope: &str, status: &str| {
-            Mock::given(method("GET")).and(path("/api/v1/requests")).and(query_param("scope", scope.to_string())).and(query_param("status", status.to_string())).with_priority(1)
+            Mock::given(method("GET")).and(path("/api/v1/requests")).and(query_param("scope", scope.to_string())).and(query_param("status", status.to_string()))
         };
-        server.mount(list("team", "open").respond_with(ok(with_it(mine()))));
-        server.mount(list("mine", "open").respond_with(ok(with_it(mine()))));
+        server.mount(list("team", "open").respond_with(ok(with_it(mine()))).with_priority(1));
+        server.mount(list("mine", "open").respond_with(ok(with_it(mine()))).with_priority(1));
         let window = open(&server, cx);
         wait_until(cx, "el número de «Por atender»", |cx| on_screen(window, "panel-requests-count", cx));
         assert_eq!(label(window, "panel-requests-count", cx), "2", "el de la otra organización no cuenta");
