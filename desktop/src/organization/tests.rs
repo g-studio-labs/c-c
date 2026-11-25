@@ -6,6 +6,11 @@
 /// dos miembros (Ana y Bob) y una invitación enviada a Caro, ya caducada.
 /// Y otra, `o2` («Cliente»), de la que Ana es miembro.
 fn org_server(role: &str) -> FakeServer {
+    org_server_with(role, json!([]))
+}
+
+/// Lo mismo, con estos proyectos de reportes (las integraciones).
+fn org_server_with(role: &str, projects: serde_json::Value) -> FakeServer {
     let server = FakeServer::start();
     let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
     let mut organization = org("o1", "G Studio");
@@ -16,7 +21,7 @@ fn org_server(role: &str) -> FakeServer {
     server.mount(get("/api/v1/task-spaces/").respond_with(ok(json!([space("a", "Producto")]))));
     server.mount(get("/api/v1/docs/").respond_with(ok(json!({}))));
     server.mount(get("/api/v1/tasks/").respond_with(ok(json!([]))));
-    server.mount(get("/api/v1/report-projects/").respond_with(ok(json!([]))));
+    server.mount(get("/api/v1/report-projects/").respond_with(ok(projects)));
     server.mount(get("/api/v1/organizations/o1/members").respond_with(ok(json!([
         { "userId": "u1", "username": "ana", "name": "Ana Ruiz", "email": "ana@x.com", "role": role, "lastSeenAt": null },
         { "userId": "u2", "username": "bob", "email": "bob@acme.io", "role": "viewer" },
@@ -372,5 +377,296 @@ fn the_profile_and_the_organization_exclude_each_other(cx: &mut TestAppContext) 
     cx.run_until_parked();
     assert_eq!(shown(cx), (false, false));
     assert_eq!(lit(cx), (1, false));
+    stop_stream(cx);
+}
+
+fn open_org_with(server: FakeServer, cx: &mut TestAppContext) -> (FakeServer, AnyWindowHandle) {
+    server.install(cx);
+    let window = open_sized(1100., cx);
+    wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+    click(window, "rail-organization", cx);
+    wait_until(cx, "llegan los miembros", |cx| on_screen(window, "org-member-u2", cx));
+    (server, window)
+}
+
+fn request_body(server: &FakeServer, verb: &str, route: &str) -> serde_json::Value {
+    let sent = server.requests().into_iter().find(|request| request.method.as_str() == verb && request.url.path() == route).unwrap_or_else(|| panic!("no hubo {verb} {route}"));
+    serde_json::from_slice(&sent.body).unwrap_or(json!(null))
+}
+
+fn count_of(server: &FakeServer, verb: &str, route: &str) -> usize {
+    server.requests().iter().filter(|request| request.method.as_str() == verb && request.url.path() == route).count()
+}
+
+fn a_meeting() -> serde_json::Value {
+    json!({
+        "id": "m1", "orgId": "o1", "title": "Daily", "wallTime": "09:30", "timezone": "America/Mexico_City", "freq": "weekly",
+        "interval": 1, "weekdays": "1,2,3,4,5", "nextFireAt": "2026-10-05T15:30:00Z", "paused": false, "excludedUserIds": ["u2"],
+    })
+}
+
+fn meetings_server(role: &str) -> FakeServer {
+    let server = org_server(role);
+    server.mount(Mock::given(method("GET")).and(path("/api/v1/organizations/o1/meetings/")).respond_with(ok(json!([a_meeting()]))));
+    server.mount(Mock::given(method("PATCH")).and(path("/api/v1/meetings/m1/")).respond_with(ok(json!(null))));
+    server.mount(Mock::given(method("DELETE")).and(path("/api/v1/meetings/m1/")).respond_with(ok(json!(null))));
+    server.mount(Mock::given(method("PUT")).and(path("/api/v1/meetings/m1/recipients")).respond_with(ok(json!(null))));
+    server.mount(Mock::given(method("POST")).and(path("/api/v1/organizations/o1/meetings/")).respond_with(ok(json!(null))));
+    server
+}
+
+/// La ficha de una reunión dice su regla, a qué hora suena con su ciudad y
+/// a cuántos les llega; quitar a alguien manda la lista de excluidos
+/// entera; pausar manda sólo la bandera; borrar pregunta nombrándola.
+///
+/// Roturas que atrapa: una regla sin sus días; la hora sin la ciudad; contar
+/// como convocado a quien se quitó; pausar mandando la reunión entera;
+/// borrar sin preguntar o al cancelar; olvidar releer tras cada cambio.
+#[gpui_kit::test]
+fn a_meeting_card_says_when_and_who_and_its_buttons_change_it(cx: &mut TestAppContext) {
+    let (server, window) = open_org_with(meetings_server("admin"), cx);
+    click(window, "org-tab-meetings", cx);
+    wait_until(cx, "sale la reunión", |cx| on_screen(window, "org-meeting-m1", cx));
+    assert_eq!(label(window, "org-meeting-rule-m1", cx), "Semanal · lun, mar, mié, jue, vie");
+    assert!(label(window, "org-meeting-when-m1", cx).starts_with("09:30 en Mexico City"), "{}", label(window, "org-meeting-when-m1", cx));
+    assert_eq!(label(window, "org-meeting-reaches-m1", cx), "1 de 2");
+
+    click(window, "org-meeting-people-m1", cx);
+    wait_until(cx, "salen los miembros", |cx| on_screen(window, "org-meeting-person-m1-u1", cx));
+    click(window, "org-meeting-person-m1-u2", cx);
+    wait_until(cx, "manda quién queda excluido", |_| count_of(&server, "PUT", "/api/v1/meetings/m1/recipients") == 1);
+    assert_eq!(request_body(&server, "PUT", "/api/v1/meetings/m1/recipients"), json!({ "excludedUserIds": [] }));
+
+    let reads = server.hits("/api/v1/organizations/o1/meetings/");
+    click(window, "org-meeting-pause-m1", cx);
+    wait_until(cx, "pausa y relee", |_| count_of(&server, "PATCH", "/api/v1/meetings/m1/") == 1 && server.hits("/api/v1/organizations/o1/meetings/") > reads);
+    assert_eq!(request_body(&server, "PATCH", "/api/v1/meetings/m1/"), json!({ "paused": true }));
+
+    click(window, "org-meeting-delete-m1", cx);
+    let (title, _) = cx.pending_prompt().expect("borró sin preguntar");
+    assert_eq!(title, "¿Borrar Daily?");
+    cx.simulate_prompt_answer("Cancelar");
+    cx.run_until_parked();
+    assert_eq!(count_of(&server, "DELETE", "/api/v1/meetings/m1/"), 0, "borró al cancelar");
+    click(window, "org-meeting-delete-m1", cx);
+    cx.simulate_prompt_answer("Borrar");
+    wait_until(cx, "la borra", |_| count_of(&server, "DELETE", "/api/v1/meetings/m1/") == 1);
+    stop_stream(cx);
+}
+
+/// Crear una reunión manda la regla entera —entre semana, la hora y la zona
+/// escritas— y no se puede guardar sin nombre.
+///
+/// Roturas que atrapa: guardar sin nombre; los días de entre semana que no
+/// viajan; la hora que no llega como se escribió; no cerrar el formulario ni
+/// releer al guardar.
+#[gpui_kit::test]
+fn creating_a_meeting_sends_the_whole_rule(cx: &mut TestAppContext) {
+    let (server, window) = open_org_with(meetings_server("admin"), cx);
+    click(window, "org-tab-meetings", cx);
+    wait_until(cx, "sale la reunión", |cx| on_screen(window, "org-meeting-m1", cx));
+    click(window, "org-meeting-new", cx);
+    wait_until(cx, "sale el formulario", |cx| on_screen(window, "org-meeting-form", cx));
+    click(window, "org-meeting-save", cx);
+    cx.run_until_parked();
+    assert_eq!(count_of(&server, "POST", "/api/v1/organizations/o1/meetings/"), 0, "guardó sin nombre");
+
+    type_into(window, "org-meeting-title", "Retro", cx);
+    wait_until(cx, "la vista previa dice la hora", |cx| on_screen(window, "org-meeting-preview", cx));
+    click(window, "org-meeting-save", cx);
+    wait_until(cx, "la manda", |_| count_of(&server, "POST", "/api/v1/organizations/o1/meetings/") == 1);
+    let body = request_body(&server, "POST", "/api/v1/organizations/o1/meetings/");
+    assert_eq!((body["title"].as_str(), body["wallTime"].as_str(), body["freq"].as_str(), body["weekdays"].as_str()), (Some("Retro"), Some("09:00"), Some("weekly"), Some("1,2,3,4,5")), "{body}");
+    assert!(cac_core::is_zone(body["timezone"].as_str().unwrap_or_default()), "{body}");
+    wait_until(cx, "se cierra el formulario", |cx| !on_screen(window, "org-meeting-form", cx));
+    stop_stream(cx);
+}
+
+/// Quien sólo es miembro ve las reuniones pero ni las crea ni las cambia.
+///
+/// Rotura que atrapa: ofrecer a un miembro crear, editar, pausar o quitar.
+#[gpui_kit::test]
+fn a_member_sees_meetings_but_cannot_change_them(cx: &mut TestAppContext) {
+    let (_server, window) = open_org_with(meetings_server("member"), cx);
+    click(window, "org-tab-meetings", cx);
+    wait_until(cx, "sale la reunión", |cx| on_screen(window, "org-meeting-m1", cx));
+    for id in ["org-meeting-new", "org-meeting-edit-m1", "org-meeting-pause-m1", "org-meeting-delete-m1", "org-meeting-people-m1"] {
+        assert!(!on_screen(window, id, cx), "{id}");
+    }
+    stop_stream(cx);
+}
+
+fn github_status(configured: bool, unbound: serde_json::Value) -> serde_json::Value {
+    json!({
+        "configured": configured,
+        "installations": [{ "id": "i1", "installationId": 5, "accountLogin": "dwit", "orgId": "o1" }],
+        "repos": [{ "id": "r1", "installationId": 5, "repoId": 100, "fullName": "dwit/api", "orgId": "o1", "spaceId": "", "bareRefs": false, "showDocs": false }],
+        "unbound": unbound,
+    })
+}
+
+fn github_server(role: &str, status: serde_json::Value) -> FakeServer {
+    let server = org_server(role);
+    server.mount(Mock::given(method("GET")).and(path("/api/v1/organizations/o1/github/")).respond_with(ok(status)));
+    server.mount(Mock::given(method("POST")).and(path("/api/v1/organizations/o1/github/link")).respond_with(ok(json!({ "url": "https://github.com/apps/cac/installations/new?state=s" }))));
+    server.mount(Mock::given(method("PATCH")).and(path("/api/v1/organizations/o1/github/repos/r1")).respond_with(ok(json!({
+        "id": "r1", "installationId": 5, "repoId": 100, "fullName": "dwit/api", "orgId": "o1", "spaceId": "a", "bareRefs": false, "showDocs": false,
+    }))));
+    server.mount(Mock::given(method("POST")).and(path("/api/v1/organizations/o1/github/installations/9/adopt")).respond_with(ok(json!(null))));
+    server
+}
+
+/// Sin la App en el servidor se dice, y no hay botón que no lleve a nada.
+///
+/// Rotura que atrapa: ofrecer conectar un GitHub que el servidor no tiene.
+#[gpui_kit::test]
+fn without_the_github_app_the_tab_says_so(cx: &mut TestAppContext) {
+    let (_server, window) = open_org_with(github_server("admin", github_status(false, json!([]))), cx);
+    click(window, "org-tab-github", cx);
+    wait_until(cx, "lo dice", |cx| on_screen(window, "org-github-off", cx));
+    assert!(!on_screen(window, "org-github-connect", cx));
+    stop_stream(cx);
+}
+
+/// Conectar abre en el navegador la dirección del servidor; un repo se
+/// enlaza a un espacio de esta organización y sólo entonces ofrece sus docs.
+///
+/// Roturas que atrapa: conectar sin pedir la dirección o sin abrirla; el
+/// cuerpo del cambio sin el resto del repo (el servidor reemplaza); los docs
+/// de un repo sin enlazar.
+#[gpui_kit::test]
+fn connecting_opens_the_browser_and_a_repo_links_to_a_space(cx: &mut TestAppContext) {
+    let (server, window) = open_org_with(github_server("admin", github_status(true, json!([]))), cx);
+    click(window, "org-tab-github", cx);
+    wait_until(cx, "sale el repo", |cx| on_screen(window, "org-github-repo-r1", cx));
+    assert!(!on_screen(window, "org-github-docs-r1", cx), "docs en un repo sin enlazar");
+
+    click(window, "org-github-connect", cx);
+    wait_until(cx, "se abre fuera", |cx| cx.opened_url().is_some());
+    assert_eq!(cx.opened_url().as_deref(), Some("https://github.com/apps/cac/installations/new?state=s"));
+    assert_eq!(request_body(&server, "POST", "/api/v1/organizations/o1/github/link"), json!({}));
+
+    click(window, "org-github-space-r1", cx);
+    wait_until(cx, "se abre el menú", |cx| on_screen(window, "org-github-space-r1-a", cx));
+    click(window, "org-github-space-r1-a", cx);
+    wait_until(cx, "lo guarda", |_| count_of(&server, "PATCH", "/api/v1/organizations/o1/github/repos/r1") == 1);
+    assert_eq!(request_body(&server, "PATCH", "/api/v1/organizations/o1/github/repos/r1"), json!({ "spaceId": "a", "bareRefs": false, "showDocs": false }));
+    wait_until(cx, "ya hay docs que ofrecer", |cx| on_screen(window, "org-github-docs-r1", cx));
+    stop_stream(cx);
+}
+
+/// Una instalación sin organización se ata preguntando antes y con sus
+/// repos a la vista; quien no administra ni la ve ni conecta.
+///
+/// Roturas que atrapa: atar sin preguntar o al cancelar; una pregunta sin
+/// los repos; enseñar la sección o el botón a quien no administra.
+#[gpui_kit::test]
+fn an_unbound_installation_is_linked_only_after_asking(cx: &mut TestAppContext) {
+    let unbound = json!([{ "installationId": 9, "accountLogin": "Crossfire", "repos": ["Crossfire/app"] }]);
+    let (server, window) = open_org_with(github_server("admin", github_status(true, unbound.clone())), cx);
+    click(window, "org-tab-github", cx);
+    wait_until(cx, "sale la sección", |cx| on_screen(window, "org-github-adopt-9", cx));
+    click(window, "org-github-adopt-9", cx);
+    let (title, body) = cx.pending_prompt().expect("ató sin preguntar");
+    assert!(title.contains("Crossfire") && body.contains("Crossfire/app"), "{title} / {body}");
+    cx.simulate_prompt_answer("Cancelar");
+    cx.run_until_parked();
+    assert_eq!(count_of(&server, "POST", "/api/v1/organizations/o1/github/installations/9/adopt"), 0, "ató al cancelar");
+    click(window, "org-github-adopt-9", cx);
+    cx.simulate_prompt_answer("Atar a esta organización");
+    wait_until(cx, "la ata", |_| count_of(&server, "POST", "/api/v1/organizations/o1/github/installations/9/adopt") == 1);
+    stop_stream(cx);
+
+    let (_server, window) = open_org_with(github_server("member", github_status(true, unbound)), cx);
+    click(window, "org-tab-github", cx);
+    wait_until(cx, "sale el repo", |cx| on_screen(window, "org-github-repo-r1", cx));
+    assert!(!on_screen(window, "org-github-unbound", cx) && !on_screen(window, "org-github-connect", cx));
+    stop_stream(cx);
+}
+
+fn a_project() -> serde_json::Value {
+    json!({
+        "id": "p1", "orgId": "o1", "name": "boaty", "slug": "boaty", "rateLimitPerHour": 500, "rateLimitPerReporterPerHour": 7, "isActive": true,
+        "webhookUrl": "", "webhookConfigured": false, "createdAt": "2026-08-01T00:00:00Z", "reportsThisMonth": 12, "listId": "in-a",
+    })
+}
+
+fn integrations_server(projects: serde_json::Value) -> FakeServer {
+    let server = org_server_with("admin", projects);
+    server.mount(Mock::given(method("PATCH")).and(path("/api/v1/report-projects/p1")).respond_with(ok(json!(null))));
+    server.mount(Mock::given(method("DELETE")).and(path("/api/v1/report-projects/p1")).respond_with(ok(json!(null))));
+    server.mount(Mock::given(method("POST")).and(path("/api/v1/report-projects/p1/rotate-key")).respond_with(ok(json!({ "ingestKey": "k-rotated" }))));
+    server.mount(Mock::given(method("POST")).and(path("/api/v1/report-projects/")).respond_with(ok(json!({ "project": a_project(), "ingestKey": "k-new" }))));
+    server
+}
+
+/// La ficha dice dónde caen los reportes con el nombre de la lista (no el
+/// uuid), y avisa cuando no caen en ninguna parte o la lista es de otro sitio.
+///
+/// Roturas que atrapa: pintar el uuid; callar que lo que manda se pierde;
+/// llamar «ninguna» a una lista que existe pero no es de aquí.
+#[gpui_kit::test]
+fn an_integration_says_where_its_reports_land(cx: &mut TestAppContext) {
+    let mut lost = a_project();
+    lost["id"] = json!("p2");
+    lost["listId"] = json!(null);
+    let mut elsewhere = a_project();
+    elsewhere["id"] = json!("p3");
+    elsewhere["listId"] = json!("de-otra-org");
+    let (_server, window) = open_org_with(integrations_server(json!([a_project(), lost, elsewhere])), cx);
+    click(window, "org-tab-integrations", cx);
+    wait_until(cx, "salen las fichas", |cx| on_screen(window, "org-project-p1", cx));
+    wait_until(cx, "llega el árbol", |cx| label(window, "org-project-list-p1", cx) == "Producto · Carpeta · En carpeta");
+    assert_eq!(label(window, "org-project-list-p2", cx), "en ningún sitio: lo que mande se está perdiendo");
+    assert_eq!(label(window, "org-project-list-p3", cx), "una lista de otra organización");
+    stop_stream(cx);
+}
+
+/// Crear entrega la llave una sola vez y se queda a la vista hasta decir que
+/// ya se guardó; rotar pregunta nombrándola y entrega otra; abrir y cerrar
+/// el formulario no escribe nada, y pausar manda sólo la bandera.
+///
+/// Roturas que atrapa: la llave que no se enseña o se va sola; rotar sin
+/// preguntar o al cancelar; un PATCH sin cambios; pausar con la ficha entera.
+#[gpui_kit::test]
+fn an_integration_shows_its_key_once_and_changes_only_what_was_asked(cx: &mut TestAppContext) {
+    let (server, window) = open_org_with(integrations_server(json!([a_project()])), cx);
+    click(window, "org-tab-integrations", cx);
+    wait_until(cx, "salen las fichas", |cx| on_screen(window, "org-project-p1", cx));
+
+    click(window, "org-project-new-button", cx);
+    wait_until(cx, "sale el campo", |cx| on_screen(window, "org-project-new-name", cx));
+    click(window, "org-project-create", cx);
+    cx.run_until_parked();
+    assert_eq!(count_of(&server, "POST", "/api/v1/report-projects/"), 0, "creó sin nombre");
+    type_into(window, "org-project-new-name", "Latinet", cx);
+    click(window, "org-project-create", cx);
+    wait_until(cx, "la crea", |_| count_of(&server, "POST", "/api/v1/report-projects/") == 1);
+    assert_eq!(request_body(&server, "POST", "/api/v1/report-projects/"), json!({ "orgId": "o1", "name": "Latinet" }));
+    wait_until(cx, "enseña la llave", |cx| on_screen(window, "org-key", cx));
+    assert_eq!(label(window, "org-key", cx), "k-new");
+    click(window, "org-key-saved", cx);
+    assert!(!on_screen(window, "org-key", cx));
+
+    click(window, "org-project-rotate-p1", cx);
+    let (title, _) = cx.pending_prompt().expect("rotó sin preguntar");
+    assert_eq!(title, "¿Rotar la llave de boaty?");
+    cx.simulate_prompt_answer("Cancelar");
+    cx.run_until_parked();
+    assert_eq!(count_of(&server, "POST", "/api/v1/report-projects/p1/rotate-key"), 0, "rotó al cancelar");
+    click(window, "org-project-rotate-p1", cx);
+    cx.simulate_prompt_answer("Rotar");
+    wait_until(cx, "enseña la llave nueva", |cx| label(window, "org-key", cx) == "k-rotated");
+
+    click(window, "org-project-edit-p1", cx);
+    wait_until(cx, "sale el formulario", |cx| on_screen(window, "org-project-save", cx));
+    click(window, "org-project-save", cx);
+    cx.run_until_parked();
+    assert_eq!(count_of(&server, "PATCH", "/api/v1/report-projects/p1"), 0, "escribió sin cambios");
+    assert!(!on_screen(window, "org-project-save", cx));
+
+    click(window, "org-project-pause-p1", cx);
+    wait_until(cx, "pausa", |_| count_of(&server, "PATCH", "/api/v1/report-projects/p1") == 1);
+    assert_eq!(request_body(&server, "PATCH", "/api/v1/report-projects/p1"), json!({ "isActive": false }));
     stop_stream(cx);
 }

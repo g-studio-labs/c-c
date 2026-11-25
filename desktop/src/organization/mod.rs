@@ -7,8 +7,12 @@
 //! `received.rs`: otra pantalla, que se abre desde el pie del panel.
 
 mod general;
+mod github;
+mod integrations;
 mod invites;
+mod meetings;
 mod members;
+mod pickers;
 pub mod received;
 mod spaces;
 
@@ -69,6 +73,13 @@ pub struct OrgView {
     /// abre sustituye a la anterior.
     _on_deleting: Option<Subscription>,
     _on_new_space: Option<Subscription>,
+    // Reuniones, GitHub e Integraciones: lo de cada pestaña.
+    meetings: meetings::MeetingsTab,
+    github: github::GitHubTab,
+    integrations: integrations::IntegrationsTab,
+    repo_filter: Entity<InputState>,
+    /// La zona de la máquina, para decir a qué hora suena cada reunión «para ti».
+    viewer_zone: String,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -82,7 +93,13 @@ impl OrgView {
         let name_input = input(String::new(), window, cx);
         let domain_input = input("example.com".into(), window, cx);
         let zone_input = input(tr(cx, "org:timeZonePlaceholder"), window, cx);
+        let repo_filter = input(tr(cx, "org:github.filter"), window, cx);
         let subscriptions = vec![
+            cx.subscribe_in(&repo_filter, window, |_, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
             cx.subscribe_in(&search, window, |_, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
@@ -146,6 +163,11 @@ impl OrgView {
             new_space: None,
             _on_deleting: None,
             _on_new_space: None,
+            meetings: Default::default(),
+            github: Default::default(),
+            integrations: Default::default(),
+            repo_filter,
+            viewer_zone: cac_core::local_zone_name(),
             _subscriptions: subscriptions,
         }
     }
@@ -199,6 +221,10 @@ impl OrgView {
         self.account_link = None;
         self.deleting = None;
         self.new_space = None;
+        // Lo de las demás pestañas es de la organización anterior.
+        self.meetings = Default::default();
+        self.github = Default::default();
+        self.integrations = Default::default();
         let (name, domain, zone) = (org.name.clone(), org.domain.clone().unwrap_or_default(), org.timezone.clone());
         self.name_input.update(cx, |input, cx| input.set_value(name, window, cx));
         self.domain_input.update(cx, |input, cx| input.set_value(domain, window, cx));
@@ -271,6 +297,16 @@ impl OrgView {
         F: FnOnce(cac_core::Core) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<(), cac_core::ApiError>> + Send + 'static,
     {
+        self.act_with(work, move |this, (), cx| done(this, cx), fallback_key, cx);
+    }
+
+    /// Lo mismo cuando el servidor devuelve algo que hace falta.
+    pub(crate) fn act_with<T, F, Fut>(&mut self, work: F, done: impl FnOnce(&mut Self, T, &mut Context<Self>) + 'static, fallback_key: &'static str, cx: &mut Context<Self>)
+    where
+        T: Send + 'static,
+        F: FnOnce(cac_core::Core) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, cac_core::ApiError>> + Send + 'static,
+    {
         if self.busy {
             return;
         }
@@ -289,7 +325,7 @@ impl OrgView {
                     return;
                 }
                 match result {
-                    Ok(()) => done(this, cx),
+                    Ok(value) => done(this, value, cx),
                     Err(error) => this.notice = Some(Notice { text: crate::lang::error_text(cx, &error, fallback_key), problem: true }),
                 }
                 cx.notify();
@@ -403,10 +439,6 @@ impl OrgView {
                 .test_support(),
         )
     }
-
-    fn render_pending(cx: &App) -> AnyElement {
-        div().id("org-tab-pending").py_8().text_center().leading_sm().text_color(cx.theme().muted_foreground).child(tr(cx, "common:misc.notInThisApp")).test_support().into_any_element()
-    }
 }
 
 impl Render for OrgView {
@@ -424,7 +456,9 @@ impl Render for OrgView {
             OrgTab::Invites => self.render_invites(&org, manage, cx),
             OrgTab::Spaces => self.render_spaces(manage, cx),
             OrgTab::General => self.render_general(&org, manage, cx),
-            OrgTab::Integrations | OrgTab::GitHub | OrgTab::Meetings => Self::render_pending(cx),
+            OrgTab::Integrations => self.render_integrations(&org, manage, cx),
+            OrgTab::GitHub => self.render_github(manage, cx),
+            OrgTab::Meetings => self.render_meetings(manage, cx),
         };
         let dialog = self.render_delete_dialog(&org, window, cx);
         let account_link = self.render_account_link(window, cx);
