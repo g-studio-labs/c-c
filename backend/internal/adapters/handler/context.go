@@ -16,6 +16,7 @@ type contextSource interface {
 	FindSpace(id string) (*domain.TaskSpace, error)
 	ResolveRepo(fullName string, orgIDs []string) (spaceID, orgID string, err error)
 	MapWith(orgID, spaceID string, repo *domain.ContextRepo, opts domain.ContextOptions) (domain.ContextMap, error)
+	MyRequests(orgIDs []string, userID string) domain.MyOpenRequests
 }
 
 type ContextHandler struct{ svc contextSource }
@@ -108,6 +109,12 @@ func (h *ContextHandler) Get(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		SendErrorResponse(w, http.StatusInternalServerError, "Context failed", err.Error())
 		return
+	}
+	// Lo que espera a quien pregunta, de todas sus organizaciones y no sólo de
+	// este espacio: la sesión que arranca es de la persona, no del repo.
+	if opts.Wants("inProgress") {
+		mine := h.svc.MyRequests(MemberOrgs(user), user.UserID)
+		m.MyRequests = &mine
 	}
 	SendResult(w, http.StatusOK, domain.APIResponse[domain.ContextMap]{Success: true, Data: m})
 }

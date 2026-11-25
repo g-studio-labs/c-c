@@ -27,6 +27,11 @@ var catalogo = map[string]map[Locale]string{
 		EN: "Review requested · {{doc}}",
 		ES: "Revisión pedida · {{doc}}",
 	},
+	// Un agente dejó un pedido para esta persona (domain/request.go).
+	"notify.request.new": {
+		EN: "Waiting on you · {{task}}",
+		ES: "Te espera · {{task}}",
+	},
 	"notify.report.new": {
 		EN: "New report · {{folio}}",
 		ES: "Reporte nuevo · {{folio}}",

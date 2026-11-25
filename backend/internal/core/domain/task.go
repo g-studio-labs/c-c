@@ -1085,6 +1085,9 @@ type TaskCard struct {
 	Git *GitSummary `json:"git,omitempty"`
 	// Keys: las claves de fuera que nombra (`PROTEUS-165`). Ver TaskExternalKey.
 	Keys []string `json:"keys,omitempty"`
+	// WaitingOn: a quién esperan sus pedidos abiertos (ver domain/request.go),
+	// para la marca «espera a…» de la tarjeta.
+	WaitingOn []string `json:"waitingOn,omitempty"`
 }
 
 type BoardResponse struct {
@@ -1253,4 +1256,7 @@ type TaskDetail struct {
 	// Git: las ramas, PRs y commits de GitHub enlazados a la tarea. Va en el
 	// detalle que la app y el MCP (`get_task`) ya piden, sin viaje aparte.
 	Git *TaskGitLinks `json:"git,omitempty"`
+	// OpenRequests: los pedidos abiertos de la tarea y a quién esperan. Nulo
+	// sin ninguno. Ver domain/request.go.
+	OpenRequests *TaskOpenRequests `json:"openRequests,omitempty"`
 }

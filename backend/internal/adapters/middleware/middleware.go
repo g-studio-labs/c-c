@@ -313,6 +313,13 @@ var patWritable = []struct {
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/task-spaces/[^/]+/lists/?$`), domain.ScopeTasksWrite},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/task-lists/[^/]+/tasks/?$`), domain.ScopeTasksWrite},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/tasks/[^/]+/comments/?$`), domain.ScopeTasksWrite},
+	// Los pedidos a una persona (domain/request.go). Todo con `tasks:write`:
+	// dejar, rehacer o retirar un pedido no toca lo que otro escribió en la
+	// tarea, y contestar con un token sólo vale para la persona del token (el
+	// servicio lo exige), que es quien lo dijo en la terminal.
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/requests/?$`), domain.ScopeTasksWrite},
+	{http.MethodPatch, regexp.MustCompile(`^/api/v1/requests/[^/]+$`), domain.ScopeTasksWrite},
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/requests/[^/]+/(answer|withdraw|published|open)$`), domain.ScopeTasksWrite},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/agents/shown$`), scopeSelfReport},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/notes/?$`), domain.ScopeNotesWrite},
 	// Attaching a file to a page is adding, not overwriting — the same append

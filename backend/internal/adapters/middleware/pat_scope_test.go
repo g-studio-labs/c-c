@@ -309,3 +309,30 @@ func TestATokenConfiguresButNeverDeploys(t *testing.T) {
 		}
 	}
 }
+
+// Los pedidos a una persona: un agente los deja, los rehace, los retira, apunta
+// la respuesta que la persona dio en la terminal y pide abrirlos en su app,
+// todo con `tasks:write`. El «lo abrí» es de la app y un token no lo finge: si
+// pudiera, el MCP diría que la app enseñó un pedido que nadie vio.
+//
+// Roturas que atrapa: una ruta de pedidos que el MCP no puede usar
+// (endpoint-not-scoped); pedir otro permiso; dejar que un token conteste «lo
+// abrí».
+func TestRequestsAreWrittenWithTasksWrite(t *testing.T) {
+	for _, r := range []*http.Request{
+		req(http.MethodPost, "/api/v1/requests"),
+		req(http.MethodPost, "/api/v1/requests/"),
+		req(http.MethodPatch, "/api/v1/requests/req-7k2m9x"),
+		req(http.MethodPost, "/api/v1/requests/req-7k2m9x/answer"),
+		req(http.MethodPost, "/api/v1/requests/req-7k2m9x/withdraw"),
+		req(http.MethodPost, "/api/v1/requests/req-7k2m9x/published"),
+		req(http.MethodPost, "/api/v1/requests/req-7k2m9x/open"),
+	} {
+		if got, ok := patScopeFor(r); !ok || got != domain.ScopeTasksWrite {
+			t.Errorf("%s %s → %q %v, want tasks:write", r.Method, r.URL.Path, got, ok)
+		}
+	}
+	if _, ok := patScopeFor(req(http.MethodPost, "/api/v1/requests/req-7k2m9x/opened")); ok {
+		t.Error("«lo abrí» es de la app: un token no lo puede decir")
+	}
+}

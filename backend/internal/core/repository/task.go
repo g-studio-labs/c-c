@@ -1536,6 +1536,9 @@ func (r *TaskRepository) GitLinks(itemID string) (*domain.TaskGitLinks, error) {
 	return GitLinksOf(r.db, itemID)
 }
 
+// RequestRepo: los pedidos, con la misma base (para el detalle y el tablero).
+func (r *TaskRepository) RequestRepo() *RequestRepository { return NewRequestRepository(r.db) }
+
 // Decisions: las decisiones enlazadas a una tarea (ver DocRepository.TaskDecisions).
 func (r *TaskRepository) Decisions(taskID string) ([]domain.DecisionRef, error) {
 	return NewDocRepository(r.db).TaskDecisions(taskID)

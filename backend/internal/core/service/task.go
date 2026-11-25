@@ -460,6 +460,17 @@ func (s *TaskService) Board(listID string) (*domain.BoardResponse, error) {
 	if err != nil {
 		return nil, err
 	}
+	// La marca «espera a…». Un extra: si falla, el tablero sale sin ella.
+	ids := make([]string, len(cards))
+	for i := range cards {
+		ids[i] = cards[i].ID
+	}
+	waiting := OpenRequestsOfTasks(s.repo.RequestRepo(), ids)
+	for i := range cards {
+		if w := waiting[cards[i].ID]; w != nil {
+			cards[i].WaitingOn = w.WaitingOn
+		}
+	}
 	return &domain.BoardResponse{
 		List:     domain.ListSummary{ID: list.ID, Name: list.Name, TaskCount: int64(len(cards))},
 		Statuses: statuses,
@@ -1052,6 +1063,7 @@ func (s *TaskService) Detail(id string) (*domain.TaskDetail, error) {
 	if git, err := s.repo.GitLinks(id); err == nil {
 		detail.Git = git
 	}
+	detail.OpenRequests = OpenRequestsOfTasks(s.repo.RequestRepo(), []string{id})[id]
 	// What this card is when it arrived through a client's channel. Guarded on
 	// ProjectID rather than on the fields being non-empty: an internal task must
 	// never be handed a folio, because a folio names a number in a client's

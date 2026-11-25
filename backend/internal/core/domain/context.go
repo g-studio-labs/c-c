@@ -115,6 +115,9 @@ type ContextMap struct {
 	// Truncated dice qué se recortó por tamaño, para no confundirlo con «no hay».
 	// Lo recortado se pide con `only` y `node`.
 	Truncated []string `json:"truncated,omitempty"`
+	// MyRequests: los pedidos abiertos a quien pregunta, en todas sus
+	// organizaciones, para que la sesión que arranca diga «tienes N».
+	MyRequests *MyOpenRequests `json:"myRequests,omitempty"`
 }
 
 type ContextSpace struct {
@@ -260,6 +263,8 @@ type ContextTask struct {
 	// ellas el hook `cac-prompt` trae su «dónde quedó» cuando el prompt nombra
 	// el ticket y no la tarea (command-and-control-319). Sólo en `InProgress`.
 	Keys []string `json:"keys,omitempty"`
+	// OpenRequests: sus pedidos abiertos a una persona (domain/request.go).
+	OpenRequests *TaskOpenRequests `json:"openRequests,omitempty"`
 }
 
 // externalKey: una clave de tracker en mayúsculas, `PROTEUS-224`. Una ref de

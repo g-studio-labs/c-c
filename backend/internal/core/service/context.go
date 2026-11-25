@@ -32,6 +32,11 @@ func NewContextService(db *gorm.DB) *ContextService {
 	}
 }
 
+// MyRequests: los pedidos abiertos a esta persona y los cinco primeros.
+func (s *ContextService) MyRequests(orgIDs []string, userID string) domain.MyOpenRequests {
+	return NewRequestService(s.tasks.RequestRepo(), s.tasks, s.docs, nil, nil).MyOpen(orgIDs, userID, 5)
+}
+
 // ErrContextRepoNotLinked: el repo no está atado a ningún espacio de las
 // organizaciones de quien pregunta (o no existe para él, que es lo mismo).
 var ErrContextRepoNotLinked = errors.New("context-repo-not-linked")
@@ -193,6 +198,7 @@ func (s *ContextService) decorateTasks(spaceKey string, tasks []domain.ContextTa
 	// Las que ya salieron enteras en una release: la sesión las cierra (un
 	// extra: si falla, el mapa sale sin ello).
 	shipped, _ := s.github.ShippedOfTasks(ids)
+	waiting := OpenRequestsOfTasks(s.tasks.RequestRepo(), ids)
 	keys := map[string]string{} // espacio → clave, para las dependencias de otro espacio
 	ref := func(spaceID, projectID string, seq int) string {
 		if projectID != "" {
@@ -218,6 +224,7 @@ func (s *ContextService) decorateTasks(spaceKey string, tasks []domain.ContextTa
 			t.Ref = domain.Folio(slug, t.Seq)
 		}
 		t.Assignees = assignees[t.ID]
+		t.OpenRequests = waiting[t.ID]
 		t.Shipped = shipped[t.ID]
 		if t.HandoffByID != "" {
 			t.HandoffBy = s.repo.DisplayName(t.HandoffByID)

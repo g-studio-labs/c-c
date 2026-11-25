@@ -16,6 +16,7 @@ import (
 type fakeContext struct {
 	resolvedWith []string
 	mapped       string
+	askedFor     string
 }
 
 func (f *fakeContext) FindSpace(id string) (*domain.TaskSpace, error) {
@@ -34,6 +35,11 @@ func (f *fakeContext) ResolveRepo(name string, orgIDs []string) (string, string,
 		return "sp-1", "org-1", nil
 	}
 	return "", "", service.ErrContextRepoNotLinked
+}
+
+func (f *fakeContext) MyRequests(orgIDs []string, userID string) domain.MyOpenRequests {
+	f.askedFor = userID + "@" + strings.Join(orgIDs, ",")
+	return domain.MyOpenRequests{Count: 2, Top: []domain.MyOpenRequestLine{{Code: "req-7k2m9x"}}}
 }
 
 func (f *fakeContext) MapWith(orgID, spaceID string, repo *domain.ContextRepo, _ domain.ContextOptions) (domain.ContextMap, error) {
@@ -77,5 +83,27 @@ func TestWhoGetsTheContextMap(t *testing.T) {
 	}
 	if rec := contextReq(t, h, "", ana); rec.Code != http.StatusBadRequest {
 		t.Fatalf("sin destino: %d", rec.Code)
+	}
+}
+
+// El mapa trae los pedidos abiertos a **quien pregunta**, de todas sus
+// organizaciones, para que la sesión que arranca diga «tienes N pendientes»;
+// y no cuando se pidió un recorte que no los incluye.
+//
+// Roturas que atrapa: no traerlos; traer los de otra persona o sólo los de
+// la org del espacio; traerlos en un `only` que no los pidió.
+func TestTheContextMapSaysWhatWaitsOnWhoAsks(t *testing.T) {
+	ana := &domain.ClaimsJWT{UserID: "u-ana", Orgs: []domain.OrgMembershipClaim{
+		{OrgID: "org-1", Role: domain.OrgRoleMember}, {OrgID: "org-2", Role: domain.OrgRoleMember}}}
+	f := &fakeContext{}
+	h := &ContextHandler{svc: f}
+	rec := contextReq(t, h, "spaceId=sp-1", ana)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"myRequests":{"count":2`) || f.askedFor != "u-ana@org-1,org-2" {
+		t.Fatalf("%d %s (%q)", rec.Code, rec.Body.String(), f.askedFor)
+	}
+	f.askedFor = ""
+	rec = contextReq(t, h, "spaceId=sp-1&only=docs", ana)
+	if strings.Contains(rec.Body.String(), "myRequests") || f.askedFor != "" {
+		t.Fatalf("un recorte sin inProgress no los trae: %s", rec.Body.String())
 	}
 }

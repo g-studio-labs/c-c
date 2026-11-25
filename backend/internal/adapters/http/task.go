@@ -279,6 +279,8 @@ func InitTaskRoutes(db *gorm.DB, r *chi.Mux, hub *events.Hub, calls *service.Cal
 	// Outside the JWT group: an <img> can't send the Authorization header.
 	r.Get("/api/v1/docs/{id}/attachments/{attachmentId}/raw", docH.RawAttachment)
 	mountDocShareRoutes(r, shareH)
+	mountRequestRoutes(r, handler.NewRequestHandler(service.NewRequestService(
+		repository.NewRequestRepository(db), taskRepo, repository.NewDocRepository(db), hub, inbox)))
 
 	r.Route("/api/v1/task-tags", func(r chi.Router) {
 		r.Use(middleware.AuthMiddleware)
