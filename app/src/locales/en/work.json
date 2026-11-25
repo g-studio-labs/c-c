@@ -273,6 +273,7 @@
     "conflictTitle": "Saved as a conflict copy",
     "conflictBody": "Another device changed this page first — your edit is safe in \"{{name}}\".",
     "open": "Open",
+    "restore": "Restore",
     "exportTitle": "Export all pages as markdown",
     "exportNeedsDesktop": "Export needs the desktop app",
     "exportNeedsDesktopBody": "A browser tab can't write a folder to disk.",

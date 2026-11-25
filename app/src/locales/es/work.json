@@ -273,6 +273,7 @@
     "conflictTitle": "Guardada como copia en conflicto",
     "conflictBody": "Otro dispositivo cambió esta página antes — tu edición está a salvo en «{{name}}».",
     "open": "Abrir",
+    "restore": "Recuperar",
     "exportTitle": "Exportar todas las páginas a markdown",
     "exportNeedsDesktop": "Exportar necesita la app de escritorio",
     "exportNeedsDesktopBody": "Una pestaña del navegador no puede escribir una carpeta en el disco.",

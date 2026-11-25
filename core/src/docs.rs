@@ -398,6 +398,7 @@ impl Core {
         if matches!(click, TreeClick::ScopeTasks { .. }) {
             self.requests().leave();
             self.overview().leave();
+            self.notes().leave();
         }
         if click == TreeClick::OpenDocs {
             self.docs().open(id).await;
@@ -440,6 +441,7 @@ impl Core {
         self.docs().leave_module();
         self.requests().leave();
         self.overview().leave();
+        self.notes().leave();
         self.my_work().set_scope(None);
     }
 }

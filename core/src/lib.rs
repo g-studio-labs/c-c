@@ -29,6 +29,7 @@ pub mod docs_panel;
 pub mod events;
 pub mod mywork;
 pub mod nav;
+pub mod notes;
 pub mod notice;
 pub mod notice_sound;
 pub mod org_admin;
@@ -83,6 +84,7 @@ pub use counters::{count_badge, counted_label, rings_bell, Counters, CountersSta
 pub use dates::{date_and_time, due_day, due_state, short_date, today_in, zone_hint, DueState};
 pub use doc_edit::{close_window_question, doc_editor_side_by_side, DocAsk, DocConflict, DocEdit, DocEditError, DocEditWhat, DocLeave, SIDE_BY_SIDE_FROM};
 pub use doc_header::{DocHeader, DocInfo};
+pub use notes::{note_link_target, note_rows, Note, NoteAsk, NoteAttachment, NoteConflict, NoteDetail, NoteEdit, NoteLeave, NoteLink, NoteProblem, NoteRow, NoteSearch, NoteTrash, NoteTrashItem, NoteTreeItem, Notes, NotesState};
 pub use doc_share::{shared_doc_link, DocShare, DocShares, DOC_SHARE_TTLS};
 pub use doc_links::{doc_link, heading_slug, DocJump, DocLink, DocLinkFailure};
 pub use doc_pages::{DocBacklink, DocBacklinkRow, DocPage, DocPageCrumb, DocPageItem, DocPageLink, DocPageRow, DocPageView};
@@ -252,6 +254,7 @@ pub(crate) struct Inner {
     pub(crate) orgs: Mutex<OrgsState>,
     pub(crate) tree: Mutex<TreeState>,
     pub(crate) docs: Mutex<DocsState>,
+    pub(crate) notes: Mutex<notes::NotesData>,
     /// Cuándo se leyó del servidor el documento abierto: ver
     /// `Docs::came_back`.
     pub(crate) doc_read_at: Mutex<Option<std::time::Instant>>,
@@ -332,6 +335,7 @@ impl Core {
                 orgs: Mutex::new(OrgsState::default()),
                 tree: Mutex::new(TreeState::default()),
                 docs: Mutex::new(DocsState::default()),
+                notes: Mutex::new(notes::NotesData::default()),
                 doc_read_at: Mutex::new(None),
                 doc_saves: std::sync::atomic::AtomicU64::new(0),
                 task: Mutex::new(TaskState::default()),

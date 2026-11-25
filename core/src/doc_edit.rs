@@ -61,6 +61,10 @@ pub fn doc_editor_side_by_side(width: f32) -> bool {
 /// número.
 static SESSIONS: AtomicU64 = AtomicU64::new(1);
 
+pub(crate) fn next_session() -> u64 {
+    SESSIONS.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Qué se está escribiendo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
@@ -141,7 +145,7 @@ pub struct DocEditError {
 }
 
 impl DocEditError {
-    fn from(error: &ApiError) -> Self {
+    pub(crate) fn from(error: &ApiError) -> Self {
         match error {
             ApiError::Server { code, message, .. } => Self { offline: false, code: code.clone(), message: message.clone() },
             ApiError::Network(_) => Self { offline: true, ..Self::default() },

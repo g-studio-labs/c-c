@@ -9,6 +9,7 @@ use crate::counters::CountersState;
 use crate::docs::DocsState;
 use crate::inbox::InboxState;
 use crate::mywork::MyWorkState;
+use crate::notes::NotesState;
 use crate::notice::Announcement;
 use crate::overview::OverviewState;
 use crate::orgs::OrgsState;
@@ -40,6 +41,10 @@ pub trait Listener: Send + Sync {
     /// La documentación abierta cambió: se abrió, llegó, se cambió de
     /// pestaña o se cerró.
     fn docs_changed(&self, _state: DocsState) {}
+
+    /// Notas cambió: llegó el árbol o una nota, se escribe en una, se
+    /// abrió o se cerró la pantalla.
+    fn notes_changed(&self, _state: NotesState) {}
 
     /// La tarea abierta cambió: se abrió, llegó, se editó o se cerró.
     fn task_changed(&self, _state: TaskState) {}

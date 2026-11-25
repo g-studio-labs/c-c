@@ -180,6 +180,7 @@ impl Core {
         self.requests().clear();
         self.wall().clear();
         self.overview().clear();
+        self.notes().clear();
         self.chat().clear();
         self.voice().clear();
         self.inner.listener.session_changed(None);
@@ -259,7 +260,7 @@ impl Core {
     /// Con documentación a medio escribir no se sale: se pregunta antes
     /// (`doc_edit`), y salir es lo que se hace si contestan que sí.
     pub async fn logout(&self) {
-        if self.docs().held_back(crate::doc_edit::DocLeave::LogOut) {
+        if self.docs().held_back(crate::doc_edit::DocLeave::LogOut) || self.notes().held_back(crate::notes::NoteLeave::LogOut) {
             return;
         }
         if let Some(held) = self.held() {
