@@ -50,6 +50,11 @@ func (h *IncidentHandler) Record(w http.ResponseWriter, r *http.Request) {
 		SendErrorResponse(w, http.StatusNotFound, "Not found", "not-found")
 		return
 	}
+	// El registro de lo que mordió es documentación del nodo: un lector lo lee,
+	// no lo escribe (ver refuseReader).
+	if refuseReader(w, user, orgID) {
+		return
+	}
 	req, err := ValidateRequest[domain.IncidentRequest](r)
 	if err != nil {
 		SendErrorResponse(w, http.StatusBadRequest, "Invalid request", err.Error())
@@ -79,7 +84,7 @@ func (h *IncidentHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 // Add: POST /api/v1/incidents/{id}/additions. Sólo añade.
 func (h *IncidentHandler) Add(w http.ResponseWriter, r *http.Request) {
-	id, ok := h.scope(w, r)
+	id, ok := h.writableScope(w, r)
 	if !ok {
 		return
 	}
@@ -99,7 +104,7 @@ func (h *IncidentHandler) Add(w http.ResponseWriter, r *http.Request) {
 
 // SetStatus: PATCH /api/v1/incidents/{id} con `status`.
 func (h *IncidentHandler) SetStatus(w http.ResponseWriter, r *http.Request) {
-	id, ok := h.scope(w, r)
+	id, ok := h.writableScope(w, r)
 	if !ok {
 		return
 	}
@@ -191,6 +196,19 @@ func (h *IncidentHandler) scope(w http.ResponseWriter, r *http.Request) (string,
 	org, err := h.svc.OrgOf(id)
 	if err != nil || !memberOf(user, org) {
 		SendErrorResponse(w, http.StatusNotFound, "Incident not found", "not-found")
+		return "", false
+	}
+	return id, true
+}
+
+// writableScope: scope, y además que quien llama no sea un lector.
+func (h *IncidentHandler) writableScope(w http.ResponseWriter, r *http.Request) (string, bool) {
+	id, ok := h.scope(w, r)
+	if !ok {
+		return "", false
+	}
+	org, _ := h.svc.OrgOf(id)
+	if user, _ := currentUser(r); refuseReader(w, user, org) {
 		return "", false
 	}
 	return id, true

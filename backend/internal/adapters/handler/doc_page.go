@@ -12,7 +12,8 @@ import (
 )
 
 // Las páginas de un documento. Todas pasan por `resolveOwner` —miembro de la
-// organización del nodo, 404 a los demás— y el servicio comprueba además que la
+// organización del nodo, 404 a los demás; las que escriben, además, por
+// `resolveOwnerToWrite`, 403 a un lector— y el servicio comprueba además que la
 // página es **del documento de ese nodo**: un id de página de otra organización
 // puesto bajo una URL propia no abre nada.
 
@@ -46,7 +47,7 @@ func (h *docHandler) PageTree(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *docHandler) CreatePage(w http.ResponseWriter, r *http.Request) {
-	kind, id, orgID, ok := h.resolveOwner(w, r)
+	kind, id, orgID, ok := h.resolveOwnerToWrite(w, r)
 	if !ok {
 		return
 	}
@@ -81,7 +82,7 @@ func (h *docHandler) GetPage(w http.ResponseWriter, r *http.Request) {
 // necesita el cuerpo y el hash vigentes para fundir, y pedirlos aparte es un
 // viaje más en el que puede volver a cambiar.
 func (h *docHandler) SavePage(w http.ResponseWriter, r *http.Request) {
-	kind, id, _, ok := h.resolveOwner(w, r)
+	kind, id, _, ok := h.resolveOwnerToWrite(w, r)
 	if !ok {
 		return
 	}
@@ -112,7 +113,7 @@ func (h *docHandler) SavePage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *docHandler) AppendPage(w http.ResponseWriter, r *http.Request) {
-	kind, id, _, ok := h.resolveOwner(w, r)
+	kind, id, _, ok := h.resolveOwnerToWrite(w, r)
 	if !ok {
 		return
 	}
@@ -131,7 +132,7 @@ func (h *docHandler) AppendPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *docHandler) MovePage(w http.ResponseWriter, r *http.Request) {
-	kind, id, _, ok := h.resolveOwner(w, r)
+	kind, id, _, ok := h.resolveOwnerToWrite(w, r)
 	if !ok {
 		return
 	}
@@ -149,7 +150,7 @@ func (h *docHandler) MovePage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *docHandler) TrashPage(w http.ResponseWriter, r *http.Request) {
-	kind, id, _, ok := h.resolveOwner(w, r)
+	kind, id, _, ok := h.resolveOwnerToWrite(w, r)
 	if !ok {
 		return
 	}
@@ -162,7 +163,7 @@ func (h *docHandler) TrashPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *docHandler) RestorePage(w http.ResponseWriter, r *http.Request) {
-	kind, id, _, ok := h.resolveOwner(w, r)
+	kind, id, _, ok := h.resolveOwnerToWrite(w, r)
 	if !ok {
 		return
 	}
@@ -187,7 +188,7 @@ func (h *docHandler) PageVersions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *docHandler) RestorePageVersion(w http.ResponseWriter, r *http.Request) {
-	kind, id, _, ok := h.resolveOwner(w, r)
+	kind, id, _, ok := h.resolveOwnerToWrite(w, r)
 	if !ok {
 		return
 	}

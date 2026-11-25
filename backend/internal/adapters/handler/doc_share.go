@@ -114,6 +114,11 @@ func (h *docShareHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Compartir es publicar fuera de la org: no lo hace un lector. Revocar sí
+	// (ver Revoke).
+	if refuseReader(w, user, d.OrgID) {
+		return
+	}
 	req, err := ValidateRequest[domain.CreateDocShareRequest](r)
 	if err != nil {
 		SendErrorResponse(w, http.StatusBadRequest, "Invalid request", err.Error())
@@ -142,6 +147,8 @@ func (h *docShareHandler) List(w http.ResponseWriter, r *http.Request) {
 
 // Revoke: cualquiera que pueda leer el documento, no sólo quien lo compartió.
 // Un enlace que se filtró lo tiene que poder cerrar quien se entere primero.
+// También un lector, a propósito: cerrar no cambia la documentación, y es la
+// excepción que nombra `TestAReaderCannotChangeDocumentation`.
 func (h *docShareHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 	var sh *domain.DocShare
 	_, ok := h.readableDoc(w, r, func() (string, bool) {

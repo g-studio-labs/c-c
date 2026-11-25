@@ -86,6 +86,58 @@ func (h *docHandler) resolveOwner(w http.ResponseWriter, r *http.Request) (domai
 	return domain.DocOwnerKind(kind), id, orgID, true
 }
 
+// resolveOwnerToWrite: resolveOwner, y además que quien llama pueda cambiar
+// documentación en esa org. Ver refuseReader.
+func (h *docHandler) resolveOwnerToWrite(w http.ResponseWriter, r *http.Request) (domain.DocOwnerKind, string, string, bool) {
+	kind, id, orgID, ok := h.resolveOwner(w, r)
+	if !ok {
+		return "", "", "", false
+	}
+	if user, _ := currentUser(r); refuseReader(w, user, orgID) {
+		return "", "", "", false
+	}
+	return kind, id, orgID, true
+}
+
+// refuseReader contesta 403 a un lector que intenta cambiar documentación, y
+// dice que lo es. Va **después** de la pertenencia: a quien no es de la org se
+// le sigue contestando 404, sin confirmarle que el nodo existe.
+//
+// El rol sale de los claims, que para un token personal se leen de la base en
+// cada petición (`TokenService.Authenticate`): el token de un lector es un
+// lector aunque lleve `docs:write`. Hasta el 25-nov-2026 sólo se miraba la
+// pertenencia, y un lector escribía con un token o con la app de Tauri, que no
+// le esconde los botones (command-and-control-392).
+// → Guardián: `http.TestAReaderCannotChangeDocumentation`, que recorre las rutas.
+func refuseReader(w http.ResponseWriter, user *domain.ClaimsJWT, orgID string) bool {
+	if user == nil {
+		SendErrorResponse(w, http.StatusUnauthorized, "Unauthorized", "no-claims")
+		return true
+	}
+	if user.Superadmin {
+		return false
+	}
+	if role, _ := user.RoleInOrg(orgID); role.CanWrite() {
+		return false
+	}
+	SendErrorResponse(w, http.StatusForbidden,
+		"A reader can read this documentation but not change it", "viewer-read-only")
+	return true
+}
+
+// writableDoc: lo mismo para las rutas por id de documento, que sólo escriben
+// (los adjuntos; leer uno va por RawAttachment).
+func (h *docHandler) writableDoc(w http.ResponseWriter, r *http.Request) (*domain.Doc, bool) {
+	d, ok := h.resolveDoc(w, r)
+	if !ok {
+		return nil, false
+	}
+	if user, _ := currentUser(r); refuseReader(w, user, d.OrgID) {
+		return nil, false
+	}
+	return d, true
+}
+
 // resolveDoc is the same check for routes addressed by document id.
 func (h *docHandler) resolveDoc(w http.ResponseWriter, r *http.Request) (*domain.Doc, bool) {
 	d, err := h.svc.FindByID(chi.URLParam(r, "id"))
@@ -171,7 +223,7 @@ func (h *docHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 // SaveTab guarda una sola sección.
 func (h *docHandler) SaveTab(w http.ResponseWriter, r *http.Request) {
-	kind, id, orgID, ok := h.resolveOwner(w, r)
+	kind, id, orgID, ok := h.resolveOwnerToWrite(w, r)
 	if !ok {
 		return
 	}
@@ -211,7 +263,7 @@ func (h *docHandler) SaveTab(w http.ResponseWriter, r *http.Request) {
 
 // AppendTab añade al final de una sección, sin pisar a quien la esté editando.
 func (h *docHandler) AppendTab(w http.ResponseWriter, r *http.Request) {
-	kind, id, orgID, ok := h.resolveOwner(w, r)
+	kind, id, orgID, ok := h.resolveOwnerToWrite(w, r)
 	if !ok {
 		return
 	}
@@ -237,7 +289,7 @@ func (h *docHandler) AppendTab(w http.ResponseWriter, r *http.Request) {
 // RequestReview deja pedida la revisión de un documento y avisa a quien puede
 // firmarla (#92). Pedir no es firmar: esto lo puede hacer un token.
 func (h *docHandler) RequestReview(w http.ResponseWriter, r *http.Request) {
-	kind, id, orgID, ok := h.resolveOwner(w, r)
+	kind, id, orgID, ok := h.resolveOwnerToWrite(w, r)
 	if !ok {
 		return
 	}
@@ -312,6 +364,9 @@ func (h *docHandler) LinkDecision(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if user, _ := currentUser(r); refuseReader(w, user, doc.OrgID) {
+		return
+	}
 	req, err := ValidateRequest[domain.DecisionLinksRequest](r)
 	if err != nil {
 		SendErrorResponse(w, http.StatusBadRequest, "Invalid request", err.Error())
@@ -334,6 +389,9 @@ func (h *docHandler) LinkDecision(w http.ResponseWriter, r *http.Request) {
 func (h *docHandler) UnlinkDecision(w http.ResponseWriter, r *http.Request) {
 	d, doc, ok := h.decisionHere(w, r)
 	if !ok {
+		return
+	}
+	if user, _ := currentUser(r); refuseReader(w, user, doc.OrgID) {
 		return
 	}
 	user, _ := currentUser(r)
@@ -385,7 +443,7 @@ func (h *docHandler) Sections(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *docHandler) AddDecision(w http.ResponseWriter, r *http.Request) {
-	kind, id, orgID, ok := h.resolveOwner(w, r)
+	kind, id, orgID, ok := h.resolveOwnerToWrite(w, r)
 	if !ok {
 		return
 	}
@@ -467,7 +525,7 @@ func (h *docHandler) Versions(w http.ResponseWriter, r *http.Request) {
 
 // Restore devuelve una sección a un estado anterior.
 func (h *docHandler) Restore(w http.ResponseWriter, r *http.Request) {
-	kind, id, orgID, ok := h.resolveOwner(w, r)
+	kind, id, orgID, ok := h.resolveOwnerToWrite(w, r)
 	if !ok {
 		return
 	}
@@ -492,7 +550,7 @@ func (h *docHandler) Restore(w http.ResponseWriter, r *http.Request) {
 // clic sobre algo que no se ha tocado, y meterlo en la misma llamada que el
 // cuerpo obligaría a mandar el markdown entero para decir «sigue siendo verdad».
 func (h *docHandler) Patch(w http.ResponseWriter, r *http.Request) {
-	kind, id, orgID, ok := h.resolveOwner(w, r)
+	kind, id, orgID, ok := h.resolveOwnerToWrite(w, r)
 	if !ok {
 		return
 	}
@@ -543,7 +601,7 @@ func (h *docHandler) Patch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *docHandler) Save(w http.ResponseWriter, r *http.Request) {
-	kind, id, orgID, ok := h.resolveOwner(w, r)
+	kind, id, orgID, ok := h.resolveOwnerToWrite(w, r)
 	if !ok {
 		return
 	}
@@ -587,7 +645,7 @@ func (h *docHandler) Index(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *docHandler) UploadAttachment(w http.ResponseWriter, r *http.Request) {
-	d, ok := h.resolveDoc(w, r)
+	d, ok := h.writableDoc(w, r)
 	if !ok {
 		return
 	}
@@ -648,7 +706,7 @@ func (h *docHandler) UploadAttachment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *docHandler) DeleteAttachment(w http.ResponseWriter, r *http.Request) {
-	d, ok := h.resolveDoc(w, r)
+	d, ok := h.writableDoc(w, r)
 	if !ok {
 		return
 	}
