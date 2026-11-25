@@ -176,7 +176,6 @@ export default function App() {
               the guest flow, and a dead link is a worse greeting than a hop. */}
           <Route path="/image-tool" element={<Navigate to="/devtools/image" replace />} />
           <Route path="/crypto" element={<Navigate to="/devtools/tokens" replace />} />
-          <Route path="/requests" element={<Navigate to="/devtools/requests" replace />} />
         </Route>
         )}
         <Route path="*" element={<RootRedirect />} />
