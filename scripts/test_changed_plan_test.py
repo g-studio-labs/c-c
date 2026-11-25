@@ -11,12 +11,13 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLANNER = os.path.join(HERE, "test_changed_plan.py")
+GUARD = os.path.join(HERE, "cargo_guard.py")
 
 FILES = {
     "core/Cargo.toml": "",
     "core/src/lib.rs": "pub mod dates;\npub mod chat;\n\npub fn shared() {}\n",
     "core/src/dates.rs": "",
-    "core/src/chat.rs": "",
+    "core/src/chat.rs": "#[cfg(test)]\nmod tests {\n    #[test]\n    fn one() {}\n}\n",
     "core/tests/chat.rs": "",
     "mcp/src/lib.rs": "",
     "ops/src/lib.rs": "",
@@ -97,7 +98,7 @@ class Planner(unittest.TestCase):
     def test_a_failure_makes_the_whole_run_fail(self):
         plan = self.plan("desktop/src/chat.rs")
         self.assertIn("|| fail=1", plan)
-        self.assertIn("PIPESTATUS[0]", plan)
+        self.assertIn("PIPESTATUS", plan)
         self.assertTrue(plan.rstrip().endswith('exit "$fail"'))
 
     def test_nothing_native_plans_nothing_in_the_box(self):
@@ -117,6 +118,80 @@ class Planner(unittest.TestCase):
 
     def test_the_go_domain_runs_the_core_test_files(self):
         self.assertIn("cargo test --quiet --tests", self.crate(self.plan("backend/internal/core/domain/task.go"), "core"))
+
+    def test_a_filter_over_a_file_with_tests_is_guarded(self):
+        self.assertIn("cac_guard --expect-tests", self.crate(self.plan("core/src/chat.rs"), "core"))
+
+    def test_a_filter_over_a_file_without_tests_is_not_guarded(self):
+        line = self.crate(self.plan("core/src/dates.rs"), "core")
+        self.assertIn("cac_guard;", line)
+        self.assertNotIn("--expect-tests", line)
+
+    def run_plan(self, plan, cargo_output, cargo_status=0):
+        """Corre el guion de verdad, con un `cargo` falso que escribe esa salida."""
+        for crate in ("core", "desktop"):
+            os.makedirs(os.path.join(self.dir.name, crate), exist_ok=True)
+        bin_dir = os.path.join(self.dir.name, "fakebin")
+        os.makedirs(bin_dir, exist_ok=True)
+        with open(os.path.join(bin_dir, "cargo"), "w", encoding="utf-8") as handle:
+            handle.write(f"#!/bin/sh\ncat <<'EOF'\n{cargo_output}\nEOF\nexit {cargo_status}\n")
+        os.chmod(os.path.join(bin_dir, "cargo"), 0o755)
+        env = dict(os.environ, PATH=bin_dir + os.pathsep + os.environ["PATH"])
+        return subprocess.run(["bash", "-c", plan], capture_output=True, text=True, cwd=self.dir.name, env=env)
+
+    def test_a_stale_binary_fails_the_run_with_a_reason(self):
+        plan = self.plan("core/src/chat.rs")
+        stale = "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 236 filtered out; finished in 0.00s"
+        done = self.run_plan(plan, stale)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("el filtro no corrió ninguna prueba", done.stdout)
+
+    def test_a_filter_that_ran_something_passes(self):
+        plan = self.plan("core/src/chat.rs")
+        done = self.run_plan(plan, "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 229 filtered out; finished in 0.00s")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_cargo_failure_still_fails_the_run(self):
+        plan = self.plan("core/src/chat.rs")
+        done = self.run_plan(plan, "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s", cargo_status=101)
+        self.assertNotEqual(done.returncode, 0)
+
+
+def load_guard():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cargo_guard", GUARD)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class Guard(unittest.TestCase):
+    def setUp(self):
+        self.verdict = load_guard().verdict
+
+    def test_nothing_run_with_something_filtered_out_is_a_stale_binary(self):
+        self.assertIsNotNone(self.verdict(["test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 236 filtered out"], True))
+
+    def test_a_binary_that_ran_tests_is_fine(self):
+        self.assertIsNone(self.verdict(["test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 229 filtered out"], True))
+
+    def test_a_failing_test_counts_as_having_run(self):
+        self.assertIsNone(self.verdict(["test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out"], True))
+
+    def test_one_binary_with_nothing_is_fine_if_another_ran(self):
+        lines = [
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out",
+            "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
+        ]
+        self.assertIsNone(self.verdict(lines, True))
+        self.assertIsNone(self.verdict(lines[::-1], True))
+
+    def test_without_the_expectation_nothing_is_demanded(self):
+        self.assertIsNone(self.verdict(["test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 236 filtered out"], False))
+
+    def test_no_result_lines_at_all_is_left_to_cargo(self):
+        self.assertIsNone(self.verdict(["error: could not compile"], True))
 
 
 if __name__ == "__main__":

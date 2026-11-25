@@ -13,6 +13,15 @@
 # allí es de usar y tirar: lo que el comando cambie en ella (las roturas de
 # `/mutar`) no vuelve, y la siguiente sincronización lo pisa.
 #
+# `target/` es uno solo para todos los worktrees (CARGO_TARGET_DIR), y cargo
+# nombra la unidad de un crate del workspace por su ruta RELATIVA: el `core/` de
+# dos worktrees es la misma unidad. La frescura se decide por fechas, así que
+# lo que un worktree compiló más tarde daba por bueno el código de otro (25-nov-2026,
+# command-and-control-514: «0 passed; 236 filtered out» y un `org_admin` contra
+# un core sin el método nuevo). `RUSTC_WORKSPACE_WRAPPER` (un enlace a `env`, que sólo ejecuta lo que recibe) entra en el hash sólo
+# de los crates del workspace, no de las dependencias: cada worktree tiene el
+# suyo y comparte lo caro.
+#
 # Una corrida nueva corta antes lo que quede de otra del mismo worktree: dos
 # sobre la misma copia se pisan las roturas, y una que se dejó colgada seguía
 # horas comiendo CPU (23-nov-2026: una prueba colgada, 4 h viva).
@@ -163,6 +172,10 @@ kube exec -i "$POD" -- setsid --wait bash -c "
   trap 'rm -f /work/tmp/$run.pid' EXIT
   rm -rf $(printf %q "$remote_out") && mkdir -p $(printf %q "$remote_out")
   export CAC_OUT=$(printf %q "$remote_out")
+  # Cada worktree compila con su propio envoltorio de rustc: ver la cabecera.
+  mkdir -p /work/tmp/rustc-wrap
+  ln -sfn /usr/bin/env $(printf %q "/work/tmp/rustc-wrap/$name")
+  export RUSTC_WORKSPACE_WRAPPER=$(printf %q "/work/tmp/rustc-wrap/$name")
   cd $(printf %q "$src/$here")
   $command
 " || status=$?
