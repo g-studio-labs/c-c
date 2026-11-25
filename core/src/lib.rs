@@ -144,8 +144,8 @@ pub use ansi::{ansi_spans, AnsiColor, AnsiSpan};
 pub use prose::prose_for_painting;
 pub use request_links::{link_segments, LinkSegment};
 pub use requests::{
-    build_answer, request_outcome, waiting_label, AgentRequest, AnswerDraft, RequestAnswer, RequestBody, RequestKind, RequestOption, RequestPerson, RequestScope, RequestStatus,
-    RequestTask, Requests, RequestsState,
+    build_answer, elsewhere_label, request_outcome, waiting_label, AgentRequest, AnswerDraft, RequestAnswer, RequestBody, RequestKind, RequestOption, RequestPerson, RequestScope, RequestStatus,
+    RequestTask, Requests, RequestsElsewhere, RequestsState,
 };
 pub use prefs::{first_spoken, folds_panel, is_dark, rail_slot, shortcut_text, KeysHeld, ThemePreference, WorkLayout};
 pub use session::Session;

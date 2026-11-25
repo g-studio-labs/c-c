@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use cac_core::{AnswerDraft, Config, Core, Listener, RequestScope, ServerEvent, Session, Storage};
+use cac_core::{elsewhere_label, AnswerDraft, Config, Core, Listener, Locale, RequestScope, ServerEvent, Session, Storage};
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -74,11 +74,27 @@ async fn rig() -> Rig {
     list("mine", "open").respond_with(ok(json!([request("req-a1", "t1", ana, true), request("req-a2", "t2", ana, true)]))).mount(&server).await;
     list("mine", "closed").respond_with(ok(json!([]))).mount(&server).await;
     list("team", "closed").respond_with(ok(json!([]))).mount(&server).await;
+    mount_orgs(&server).await;
     let recorder = Arc::new(Recorder::default());
     let core = Core::new(Config::new(front(&server.uri())), Arc::new(MemoryStorage::default()), recorder.clone()).unwrap();
     let ana = serde_json::from_value(json!({ "id": "u1", "username": "ana", "name": "Ana Ruiz" })).unwrap();
     core.sign_in(ana, "access".into(), "refresh".into()).unwrap();
+    core.orgs().load().await;
     Rig { server, core, recorder }
+}
+
+/// Dos organizaciones; se mira la primera (`o1`, «DWIT»).
+async fn mount_orgs(server: &MockServer) {
+    let org = |id: &str, name: &str| {
+        json!({ "id": id, "name": name, "slug": id, "role": "member", "memberCount": 2, "createdAt": "2026-06-09T12:00:00Z",
+            "clientsSeeOnlyTheirSpace": false, "guestsCanUseDevTools": false, "doneNeedsSubtasksDone": false, "timezone": "" })
+    };
+    Mock::given(method("GET")).and(path("/api/v1/organizations/")).respond_with(ok(json!([org("o1", "DWIT"), org("o2", "G Studio")]))).mount(server).await;
+}
+
+fn in_org(org: &str, mut request: Value) -> Value {
+    request["orgId"] = json!(org);
+    request
 }
 
 async fn posted(server: &MockServer, route: &str) -> Vec<Value> {
@@ -200,4 +216,45 @@ async fn an_agent_asking_to_open_brings_it_and_says_it_was_shown() {
     rig.core.stream().deliver(ServerEvent { event: "request:answered".into(), data: json!({ "code": "req-a1" }).to_string() });
     until("la cuenta, de nuevo", || rig.core.requests().state().mine_count == 1).await;
     assert!(team_loads(&rig.server).await > before);
+}
+
+/// «Por atender» es de la organización que se mira: ni la lista, ni «Resueltos»
+/// ni el número llevan pedidos de otra, y de los tuyos en las otras se avisa
+/// por organización. Al cambiar de organización se reparte lo mismo, sin
+/// volver a pedirlo (command-and-control-527).
+///
+/// Roturas que atrapa: pintar o contar los de otra organización (en la lista,
+/// en «Resueltos» o en el número); no avisar de ellos; contar en el aviso los
+/// de otra persona o los de la organización que se mira; no repartir de nuevo
+/// al cambiar de organización; decir el aviso sin su organización o sin plural.
+#[tokio::test]
+async fn only_the_organization_being_looked_at_is_listed_and_the_others_are_announced() {
+    let rig = rig().await;
+    let ana = ("u1", "Ana Ruiz");
+    let g = |code: &str, mine: bool| in_org("o2", request(code, "t9", if mine { ana } else { ("u2", "Luis") }, mine));
+    let team = json!([request("req-a1", "t1", ana, true), g("req-g1", true), g("req-g2", true), g("req-g3", false)]);
+    list("team", "open").respond_with(ok(team)).with_priority(1).mount(&rig.server).await;
+    list("mine", "open").respond_with(ok(json!([request("req-a1", "t1", ana, true), g("req-g1", true), g("req-g2", true)]))).with_priority(1).mount(&rig.server).await;
+    list("mine", "closed").respond_with(ok(json!([in_org("o2", request("req-g9", "t9", ana, false)), request("req-a9", "t1", ana, false)]))).with_priority(1).mount(&rig.server).await;
+
+    rig.core.requests().refresh_marks().await;
+    rig.core.requests().load().await;
+    let state = rig.core.requests().state();
+    let codes = |list: &[cac_core::AgentRequest]| list.iter().map(|r| r.code.clone()).collect::<Vec<_>>();
+    assert_eq!(codes(&state.open), ["req-a1"]);
+    assert_eq!(codes(&state.closed), ["req-a9"]);
+    assert_eq!(state.mine_count, 1, "el número no cuenta los de G Studio");
+    assert_eq!(state.elsewhere.len(), 1);
+    assert_eq!((state.elsewhere[0].org_id.as_str(), state.elsewhere[0].org_name.as_str(), state.elsewhere[0].count), ("o2", "G Studio", 2), "los de Luis no son tuyos");
+    assert_eq!(elsewhere_label(&state.elsewhere[0], Locale::En), "2 more requests in G Studio");
+    assert_eq!(elsewhere_label(&cac_core::RequestsElsewhere { count: 1, ..state.elsewhere[0].clone() }, Locale::Es), "1 pedido más en G Studio");
+
+    let loads = team_loads(&rig.server).await;
+    assert!(rig.core.switch_org("o2").await);
+    let state = rig.core.requests().state();
+    assert_eq!(codes(&state.open), ["req-g1", "req-g2"]);
+    assert_eq!(codes(&state.closed), ["req-g9"]);
+    assert_eq!(state.mine_count, 2);
+    assert_eq!((state.elsewhere.len(), state.elsewhere[0].org_name.as_str(), state.elsewhere[0].count), (1, "DWIT", 1));
+    assert_eq!(team_loads(&rig.server).await, loads, "cambiar de organización reparte, no vuelve a pedir");
 }

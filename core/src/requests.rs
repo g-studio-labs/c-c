@@ -6,9 +6,12 @@
 //! backend (`domain/request.go`): aquí se describe, se pide y se decide qué
 //! se manda al contestar.
 //!
-//! - **Los pedidos no son de una organización**: el servidor contesta los de
-//!   todas las de quien pregunta, como en la app de siempre. Un pedido trae
-//!   la suya, y abrir su tarea cambia a ella si hace falta.
+//! - **El servidor contesta los pedidos de todas las organizaciones** de quien
+//!   pregunta, y aquí se reparten (command-and-control-527): la lista, el
+//!   número y «Resueltos» son de la organización que se mira, y de los
+//!   abiertos tuyos en las otras se avisa (`elsewhere`) para que no se pierda
+//!   ninguno. Lo de fuera se guarda entero y se reparte al cambiar de
+//!   organización, sin volver a pedir.
 //! - **El número es tuyo aunque mires «Equipo»**: se cuenta aparte de la
 //!   lista, sobre los abiertos de todos, con `canAnswer`.
 //! - **«Espera a Ana» sale de los mismos abiertos de todos**: la lista de
@@ -201,6 +204,21 @@ impl RequestScope {
     }
 }
 
+/// Los pedidos abiertos que te esperan en una organización que no se mira.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct RequestsElsewhere {
+    pub org_id: String,
+    pub org_name: String,
+    pub count: i64,
+}
+
+/// «N pedidos más en G Studio».
+pub fn elsewhere_label(elsewhere: &RequestsElsewhere, locale: Locale) -> String {
+    let phrase = crate::texts::text_count(locale, "work:requests.elsewhere", elsewhere.count);
+    phrase.replace("{{org}}", &elsewhere.org_name)
+}
+
 /// «Por atender», como lo pinta una pantalla.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -215,6 +233,8 @@ pub struct RequestsState {
     pub failed: bool,
     /// Cuántos abiertos te esperan **a ti**, mires el filtro que mires.
     pub mine_count: i64,
+    /// Lo tuyo abierto en las otras organizaciones, para el aviso de arriba.
+    pub elsewhere: Vec<RequestsElsewhere>,
     /// A quién espera cada tarea con pedidos abiertos, por id de tarea.
     pub waiting_on: HashMap<String, Vec<String>>,
     /// Si es la pantalla que se tiene delante.
@@ -326,7 +346,12 @@ struct OpenAsk {
 /// Lo que hay detrás de la pantalla.
 #[derive(Default)]
 pub(crate) struct RequestsData {
+    /// Lo que se pinta: sale de lo de abajo y de la organización que se mira
+    /// (`project`), nunca se escribe a mano.
     state: RequestsState,
+    /// La lista de este filtro, de todas las organizaciones.
+    all_open: Vec<AgentRequest>,
+    all_closed: Vec<AgentRequest>,
     /// Los abiertos de todos: de aquí salen el número y las marcas.
     team_open: Vec<AgentRequest>,
     /// Cuál de las cargas de la lista es la vigente: una que llega tarde (de
@@ -355,12 +380,43 @@ impl Requests {
     }
 
     fn change(&self, edit: impl FnOnce(&mut RequestsData)) {
+        // La organización se lee antes de coger el candado: así no hay dos
+        // candados anidados en ningún orden.
+        let orgs = self.core.orgs().state();
         let state = {
             let mut data = self.data();
             edit(&mut data);
+            Self::project(&mut data, &orgs);
             data.state.clone()
         };
         self.core.inner.listener.requests_changed(state);
+    }
+
+    /// Se cambió de organización (o llegaron las organizaciones): lo mismo
+    /// guardado, repartido de otra manera.
+    pub(crate) fn org_changed(&self) {
+        self.change(|_| {});
+    }
+
+    /// Reparte lo guardado según la organización que se mira.
+    fn project(data: &mut RequestsData, orgs: &crate::orgs::OrgsState) {
+        let here = orgs.current_org_id.as_deref();
+        let mine_here = |request: &&AgentRequest| Some(request.org_id.as_str()) == here;
+        data.state.open = data.all_open.iter().filter(mine_here).cloned().collect();
+        data.state.closed = data.all_closed.iter().filter(mine_here).cloned().collect();
+        data.state.mine_count = data.team_open.iter().filter(mine_here).filter(|request| request.can_answer).count() as i64;
+        let mut elsewhere: Vec<RequestsElsewhere> = Vec::new();
+        for request in data.team_open.iter().filter(|request| request.can_answer && Some(request.org_id.as_str()) != here) {
+            match elsewhere.iter_mut().find(|entry| entry.org_id == request.org_id) {
+                Some(entry) => entry.count += 1,
+                None => {
+                    let org_name = orgs.orgs.iter().find(|org| org.id == request.org_id).map(|org| org.name.clone()).unwrap_or_else(|| request.org_id.clone());
+                    elsewhere.push(RequestsElsewhere { org_id: request.org_id.clone(), org_name, count: 1 });
+                }
+            }
+        }
+        data.state.elsewhere = elsewhere;
+        data.state.waiting_on = waiting_of(&data.team_open);
     }
 
     /// Pone «Por atender» delante, con ese pedido resaltado si se da. Es de
@@ -403,8 +459,8 @@ impl Requests {
         }
         self.change(|data| {
             data.state.scope = scope;
-            data.state.open.clear();
-            data.state.closed.clear();
+            data.all_open.clear();
+            data.all_closed.clear();
             data.state.loaded = false;
         });
         self.load().await;
@@ -426,8 +482,8 @@ impl Requests {
             }
             match (open, closed) {
                 (Ok(open), Ok(closed)) => {
-                    data.state.open = open;
-                    data.state.closed = closed;
+                    data.all_open = open;
+                    data.all_closed = closed;
                     data.state.loaded = true;
                     data.state.failed = false;
                 }
@@ -450,13 +506,7 @@ impl Requests {
                 return;
             }
             data.team_open = open;
-            Self::recount(data);
         });
-    }
-
-    fn recount(data: &mut RequestsData) {
-        data.state.mine_count = data.team_open.iter().filter(|request| request.can_answer).count() as i64;
-        data.state.waiting_on = waiting_of(&data.team_open);
     }
 
     /// Contesta. Sale bien → pasa a «Resueltos» en el acto, y baja el número
@@ -469,11 +519,10 @@ impl Requests {
         let body = serde_json::to_value(&answer).unwrap_or_default();
         let done: AgentRequest = self.core.call("POST", &format!("/api/v1/requests/{code}/answer"), Some(body)).await?;
         self.change(|data| {
-            data.state.open.retain(|request| request.code != done.code);
-            data.state.closed.retain(|request| request.code != done.code);
-            data.state.closed.insert(0, done.clone());
+            data.all_open.retain(|request| request.code != done.code);
+            data.all_closed.retain(|request| request.code != done.code);
+            data.all_closed.insert(0, done.clone());
             data.team_open.retain(|request| request.code != done.code);
-            Self::recount(data);
         });
         Ok(done)
     }

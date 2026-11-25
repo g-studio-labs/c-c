@@ -68,6 +68,8 @@ impl Core {
     /// la vez.
     pub(crate) async fn load_current_org(&self) {
         let org_id = self.orgs().state().current_org_id;
+        // Los pedidos ya están todos: sólo se reparten de otra manera.
+        self.requests().org_changed();
         // Los servidores son la misma lista, filtrada por otra organización.
         self.platform().org_changed();
         // Quién anda por la voz es de una organización: la de ahora.
