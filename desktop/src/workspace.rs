@@ -15,6 +15,7 @@ use gpui_kit::component::{ActiveTheme, Icon, IconName, Side, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
+use crate::account::{PasswordClosed, PasswordDialog, ProfileView, Whereabouts};
 use crate::backend::Backend;
 use crate::chat::ChatView;
 use crate::comms::CommsView;
@@ -143,6 +144,12 @@ pub struct Workspace {
     /// poder cerrarlo al abrir desde él algo que va encima.
     account_menu_open: bool,
     _on_connect: [Subscription; 2],
+    /// El perfil, si está delante, con dónde se estaba al abrirlo: en cuanto
+    /// se mira otra cosa, se cierra.
+    pub(crate) profile: Option<(Entity<ProfileView>, Whereabouts)>,
+    /// «Cambiar contraseña», abierto encima de todo. Uno nuevo cada vez: lo
+    /// escrito en una vez no sigue en la siguiente.
+    pub(crate) password: Option<(Entity<PasswordDialog>, Subscription)>,
     /// El panel de la campana.
     pub(crate) inbox: crate::inbox::InboxPanelState,
     /// Mientras se está en comunicación se pregunta quién anda por la voz
@@ -238,6 +245,8 @@ impl Workspace {
             updater,
             account_menu_open: false,
             _on_connect: on_connect,
+            profile: None,
+            password: None,
         }
     }
 
@@ -251,6 +260,27 @@ impl Workspace {
             connect.focus_handle(cx)
         });
         window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Pone el perfil delante, en el sitio de la vista, y cierra el menú.
+    fn open_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.account_menu_open = false;
+        let here = Whereabouts::of(Backend::snapshot(cx).read(cx));
+        self.profile = Some((cx.new(|cx| ProfileView::new(window, cx)), here));
+        cx.notify();
+    }
+
+    /// Abre «Cambiar contraseña» encima de todo, y cierra el menú.
+    fn open_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.account_menu_open = false;
+        let dialog = cx.new(|cx| PasswordDialog::new(window, cx));
+        let closed = cx.subscribe_in(&dialog, window, |this, _, _: &PasswordClosed, window, cx| {
+            this.password = None;
+            window.focus(&this.focus_anchor, cx);
+            cx.notify();
+        });
+        self.password = Some((dialog, closed));
         cx.notify();
     }
 
@@ -524,13 +554,6 @@ impl Workspace {
             .child(label)
     }
 
-    /// Una entrada que la app de siempre tiene y ésta todavía no: se pinta
-    /// igual, y al pasar el ratón dice que aún no está en vez de callar.
-    fn pending_row(id: &'static str, icon: impl Into<Icon>, label: String, cx: &App) -> impl IntoElement {
-        let not_yet = tr(cx, "common:misc.notInThisApp");
-        Self::account_row(id, icon, label, false, cx).tooltip(move |window, cx| Tooltip::new(not_yet.clone()).build(window, cx)).test_support()
-    }
-
     /// El avatar de quien está dentro, al pie del riel, con el punto del
     /// flujo en vivo y su menú: quién es, tema, idioma, lo suyo y salir.
     /// Las medidas son las de `AccountMenu.tsx`.
@@ -659,8 +682,24 @@ impl Workspace {
                 .child(rule())
                 .child(Self::options_row("account-theme", Lucide::Moon, cac_core::text(here, "nav:account.theme"), themes, cx))
                 .child(Self::options_row("account-language", Lucide::Languages, cac_core::text(here, "nav:account.language"), languages, cx))
-                .child(Self::pending_row("account-profile", Lucide::UserRound, tr(cx, "nav:profile.title"), cx))
-                .child(Self::pending_row("account-password", Lucide::KeyRound, tr(cx, "nav:account.changePassword"), cx))
+                .child({
+                    let opener = opener.clone();
+                    Self::account_row("account-profile", Lucide::UserRound, tr(cx, "nav:profile.title"), false, cx)
+                        .cursor_pointer()
+                        .on_click(move |_, window, cx| {
+                            opener.update(cx, |this, cx| this.open_profile(window, cx)).ok();
+                        })
+                        .test_support()
+                })
+                .child({
+                    let opener = opener.clone();
+                    Self::account_row("account-password", Lucide::KeyRound, tr(cx, "nav:account.changePassword"), false, cx)
+                        .cursor_pointer()
+                        .on_click(move |_, window, cx| {
+                            opener.update(cx, |this, cx| this.open_password(window, cx)).ok();
+                        })
+                        .test_support()
+                })
                 .child(
                     Self::account_row("account-connect", Lucide::Bot, tr(cx, "nav:account.connectMcp"), false, cx)
                         .cursor_pointer()
@@ -1053,7 +1092,10 @@ impl Workspace {
     /// en el que se está fija el panel o lo suelta; otro lleva a él.
     fn press_rail(&mut self, slot: usize, cx: &mut Context<Self>) {
         let (on_comms, on_platform, on_docs) = Self::modules(cx);
-        let here = match slot {
+        // Desde el perfil no se está en ningún módulo: pulsar cualquiera
+        // lleva a él, no pliega el panel.
+        let in_profile = self.profile.take().is_some();
+        let here = !in_profile && match slot {
             RAIL_WORK => !on_comms && !on_platform && !on_docs,
             RAIL_DOCS => on_docs,
             RAIL_COMMS => on_comms,
@@ -1120,7 +1162,10 @@ impl Workspace {
         let invitations = RailCount { id: "rail-organization-count", count: counters.invitations, warning: false };
         // En cuál de los módulos con pantalla se está lo dice el core.
         let (on_comms, on_platform, on_docs) = Self::modules(cx);
-        let on_work = !on_comms && !on_platform && !on_docs;
+        // Con el perfil delante no se está en ningún módulo.
+        let in_profile = self.profile.is_some();
+        let (on_comms, on_platform, on_docs) = (on_comms && !in_profile, on_platform && !in_profile, on_docs && !in_profile);
+        let on_work = !in_profile && !on_comms && !on_platform && !on_docs;
         let platform_label = counted_label(&tr(cx, "nav:module.platform"), servers.count);
         let comms_label = counted_label(&tr(cx, "nav:module.comms"), comms.count);
         div()
@@ -1711,6 +1756,12 @@ impl Render for Workspace {
             None
         };
         let incoming = self.render_incoming(&voice, cx);
+        // El perfil se va en cuanto se mira otra cosa.
+        if self.profile.as_ref().is_some_and(|(_, opened)| *opened != Whereabouts::of(Backend::snapshot(cx).read(cx))) {
+            self.profile = None;
+        }
+        let profile = self.profile.as_ref().map(|(view, _)| view.clone());
+        let password = self.password.as_ref().map(|(dialog, _)| dialog.clone());
         let snapshot = Backend::snapshot(cx).read(cx);
         let lasting = snapshot.connection.lasting;
         // Con un documento abierto se lee documentación; si no, las tareas.
@@ -1718,6 +1769,8 @@ impl Render for Workspace {
         // volver a «Trabajo» deja lo que se estuviera mirando allí.
         let main: AnyElement = if let Some(stage) = stage {
             stage
+        } else if let Some(profile) = profile {
+            profile.into_any_element()
         } else if snapshot.comms.on_screen {
             crate::comms::conversation(&self.chat, &self.channel_tabs, cx)
         } else if snapshot.platform.on_screen {
@@ -1830,6 +1883,7 @@ impl Render for Workspace {
                     // «Hay una versión nueva», sin tapar nada: una tarjeta en la
                     // esquina, debajo de lo que se abre encima.
                     .child(self.updater.clone())
+                    .children(password.map(|dialog| div().id("password-over").absolute().inset_0().child(dialog)))
                     .children(picker.map(|picker| div().id("new-conversation-over").absolute().inset_0().child(picker)))
                     .children(guest.map(|guest| div().id("guest-call-over").absolute().inset_0().child(guest)))
                     // Quien te llama, encima de todo, estés donde estés.
