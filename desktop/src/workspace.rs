@@ -15,7 +15,7 @@ use gpui_kit::component::{ActiveTheme, Icon, IconName, Side, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use crate::account::{AccountNotice, PasswordClosed, PasswordDialog, ProfileView, Whereabouts};
+use crate::account::{AccountNotice, PasswordClosed, PasswordDialog, ProfileView};
 use crate::backend::Backend;
 use crate::chat::ChatView;
 use crate::comms::CommsView;
@@ -70,11 +70,22 @@ struct RailCount {
 }
 
 /// Una pantalla que no es de ningún módulo (`isAside` en `AppRail.tsx`):
-/// tapa la vista y deja el panel del módulo en el que se estaba.
-#[derive(Clone, Copy, PartialEq)]
+/// tapa la vista y deja el panel del módulo en el que se estaba. Una sola a
+/// la vez: abrir una cierra la otra, y el riel marca la organización o
+/// ningún módulo, nunca dos cosas.
+#[derive(Clone)]
 enum Aside {
     Organization,
     Invitations,
+    /// El perfil, uno nuevo cada vez: lo escrito sin guardar no vuelve.
+    Profile(Entity<ProfileView>),
+}
+
+impl Aside {
+    /// La organización y sus invitaciones encienden su botón del riel.
+    fn lights_organization(&self) -> bool {
+        matches!(self, Aside::Organization | Aside::Invitations)
+    }
 }
 
 /// Lo abierto, para notar que se abrió algo nuevo (ver `aside_seen`).
@@ -180,9 +191,6 @@ pub struct Workspace {
     /// poder cerrarlo al abrir desde él algo que va encima.
     account_menu_open: bool,
     _on_connect: [Subscription; 2],
-    /// El perfil, si está delante, con dónde se estaba al abrirlo: en cuanto
-    /// se mira otra cosa, se cierra.
-    pub(crate) profile: Option<(Entity<ProfileView>, Whereabouts)>,
     /// «Cambiar contraseña», abierto encima de todo. Uno nuevo cada vez: lo
     /// escrito en una vez no sigue en la siguiente.
     pub(crate) password: Option<(Entity<PasswordDialog>, Subscription)>,
@@ -292,7 +300,6 @@ impl Workspace {
             updater,
             account_menu_open: false,
             _on_connect: on_connect,
-            profile: None,
             password: None,
             account_notice: None,
         }
@@ -314,16 +321,20 @@ impl Workspace {
     /// Pone el perfil delante, en el sitio de la vista, y cierra el menú.
     fn open_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.account_menu_open = false;
-        let here = Whereabouts::of(Backend::snapshot(cx).read(cx));
-        self.profile = Some((cx.new(|cx| ProfileView::new(window, cx)), here));
-        cx.notify();
+        let view = cx.new(|cx| ProfileView::new(window, cx));
+        self.open_aside(Aside::Profile(view), cx);
     }
 
-    /// Quita el perfil de delante. El foco vuelve solo a `focus_anchor`: el
-    /// campo que lo tenía deja de pintarse (`_on_focus_lost`).
-    fn close_profile(&mut self, cx: &mut Context<Self>) {
-        if self.profile.take().is_some() {
-            cx.notify();
+    /// Si el riel enciende el botón de la organización.
+    pub(crate) fn organization_lit(&self) -> bool {
+        self.aside.as_ref().is_some_and(Aside::lights_organization)
+    }
+
+    /// El perfil, si está delante.
+    pub(crate) fn profile(&self) -> Option<Entity<ProfileView>> {
+        match &self.aside {
+            Some(Aside::Profile(view)) => Some(view.clone()),
+            _ => None,
         }
     }
 
@@ -1007,12 +1018,13 @@ impl Workspace {
 
     /// Abre la pantalla de la organización o la de las invitaciones.
     fn open_aside(&mut self, aside: Aside, cx: &mut Context<Self>) {
-        self.aside = Some(aside);
-        self.aside_seen = Self::opened(cx);
-        match aside {
+        match &aside {
             Aside::Organization => self.organization.update(cx, |view, cx| view.reopened(cx)),
             Aside::Invitations => self.received.update(cx, |view, cx| view.load(cx)),
+            Aside::Profile(_) => {}
         }
+        self.aside = Some(aside);
+        self.aside_seen = Self::opened(cx);
         cx.notify();
     }
 
@@ -1020,6 +1032,9 @@ impl Workspace {
     /// en el panel, abrir una tarea o un documento), nunca porque cambie lo
     /// que el core resuelve por su cuenta: cambiar de organización vuelve a
     /// elegir conversación, y eso no es irse.
+    ///
+    /// El foco vuelve solo a `focus_anchor`: el campo que lo tenía (el del
+    /// perfil) deja de pintarse (`_on_focus_lost`).
     fn leave_aside(&mut self) {
         self.aside = None;
     }
@@ -1292,7 +1307,6 @@ impl Workspace {
         // Desde el perfil no se está en ningún módulo: pulsar cualquiera
         // lleva a él, no pliega el panel.
         let here = self.module_active(slot, cx);
-        self.close_profile(cx);
         self.leave_aside();
         if here {
             self.toggle_panel(cx);
@@ -1337,7 +1351,7 @@ impl Workspace {
     /// El módulo del riel en el que se está, por su puesto. Con el perfil
     /// delante, en ninguno: no es de ningún módulo.
     fn current_module(&self, cx: &App) -> Option<usize> {
-        if self.profile.is_some() || self.aside.is_some() {
+        if self.aside.is_some() {
             return None;
         }
         let (on_comms, on_platform, on_docs) = Self::modules(cx);
@@ -1378,7 +1392,7 @@ impl Workspace {
         // En cuál de los módulos con pantalla se está lo dice el core.
         let active = |slot| self.module_active(slot, cx);
         let (on_work, on_docs, on_comms, on_platform) = (active(RAIL_WORK), active(RAIL_DOCS), active(RAIL_COMMS), active(RAIL_PLATFORM));
-        let aside = self.aside.is_some();
+        let aside = self.organization_lit();
         let organization_label = counted_label(&tr(cx, "nav:rail.organization"), invitations.count);
         let platform_label = counted_label(&tr(cx, "nav:module.platform"), servers.count);
         let comms_label = counted_label(&tr(cx, "nav:module.comms"), comms.count);
@@ -1608,7 +1622,6 @@ impl Workspace {
             .hover(move |style| style.bg(hover))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.close_profile(cx);
                 this.leave_aside();
                 Self::click_row(&clicked, cx);
             }))
@@ -1989,13 +2002,6 @@ impl Render for Workspace {
             None
         };
         let incoming = self.render_incoming(&voice, cx);
-        // Lo que se pide a mano (el riel, el árbol) cierra el perfil al pedirlo;
-        // esto es para lo que pone otra pantalla delante sin pasar por aquí:
-        // un aviso que abre una tarea, un agente que trae «Por atender».
-        if self.profile.as_ref().is_some_and(|(_, opened)| *opened != Whereabouts::of(Backend::snapshot(cx).read(cx))) {
-            self.close_profile(cx);
-        }
-        let profile = self.profile.as_ref().map(|(view, _)| view.clone());
         let password = self.password.as_ref().map(|(dialog, _)| dialog.clone());
         // Un clic en el panel que lleva a otra cosa cierra la pantalla de al
         // lado; cambiar de organización no.
@@ -2014,12 +2020,12 @@ impl Render for Workspace {
         // volver a «Trabajo» deja lo que se estuviera mirando allí.
         let main: AnyElement = if let Some(stage) = stage {
             stage
-        } else if let Some(profile) = profile {
-            profile.into_any_element()
-        } else if self.aside == Some(Aside::Organization) {
-            self.organization.clone().into_any_element()
-        } else if self.aside == Some(Aside::Invitations) {
-            self.received.clone().into_any_element()
+        } else if let Some(aside) = &self.aside {
+            match aside {
+                Aside::Organization => self.organization.clone().into_any_element(),
+                Aside::Invitations => self.received.clone().into_any_element(),
+                Aside::Profile(view) => view.clone().into_any_element(),
+            }
         } else if snapshot.comms.on_screen {
             crate::comms::conversation(&self.chat, &self.channel_tabs, cx)
         } else if snapshot.platform.on_screen {

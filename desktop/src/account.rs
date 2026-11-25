@@ -13,7 +13,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable};
 use gpui_kit::*;
 
-use crate::backend::{Backend, Snapshot};
+use crate::backend::Backend;
 use crate::lang::{error_text, tr};
 use crate::theme::Leading as _;
 
@@ -21,36 +21,6 @@ use crate::theme::Leading as _;
 const PROFILE_WIDTH: f32 = 512.;
 /// El ancho del diálogo: el `sm:max-w-lg` de `DialogContent`.
 const DIALOG_WIDTH: f32 = 512.;
-
-/// La pantalla que se tiene delante, para saber si algo puso otra sin
-/// pasar por la app: un aviso que abre una tarea, un agente que trae «Por
-/// atender». Lo que se pide a mano (el riel, el árbol) cierra el perfil al
-/// pedirlo, aunque lleve adonde ya se estaba.
-///
-/// Sólo qué pantalla, no qué hay en ella: que alguien renombre el nodo que
-/// se miraba no es irse a otro sitio.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Whereabouts {
-    comms: bool,
-    platform: bool,
-    docs_module: bool,
-    doc: bool,
-    requests: bool,
-    task: bool,
-}
-
-impl Whereabouts {
-    pub fn of(snapshot: &Snapshot) -> Self {
-        Self {
-            comms: snapshot.comms.on_screen,
-            platform: snapshot.platform.on_screen,
-            docs_module: snapshot.docs.in_module,
-            doc: snapshot.docs.target.is_some(),
-            requests: snapshot.requests.on_screen,
-            task: snapshot.task.task_id.is_some(),
-        }
-    }
-}
 
 /// Lo que se dice junto a la cuenta después de hacer algo desde su menú.
 #[derive(Clone, Debug, PartialEq)]
@@ -529,7 +499,7 @@ mod tests {
 
         from_the_menu(window, "account-profile", cx);
         assert!(on_screen(window, "profile", cx), "el perfil no se abre");
-        let profile = cx.update(|cx| workspace.read(cx).profile.as_ref().map(|(view, _)| view.clone())).unwrap();
+        let profile = cx.update(|cx| workspace.read(cx).profile()).unwrap();
         assert_eq!(cx.update(|cx| profile.read(cx).name.read(cx).value().to_string()), "Ana Ruiz");
 
         cx.update_window(window, |_, window, cx| {
@@ -569,7 +539,7 @@ mod tests {
         let server = server_with_tasks(vec![]);
         server.install(cx);
         let (window, workspace) = open(cx);
-        let in_profile = |cx: &mut TestAppContext| cx.update(|cx| workspace.read(cx).profile.is_some());
+        let in_profile = |cx: &mut TestAppContext| cx.update(|cx| workspace.read(cx).profile().is_some());
         let work_lit = |cx: &mut TestAppContext| cx.update(|cx| workspace.read(cx).module_active(RAIL_WORK, cx));
         let anchored = |cx: &mut TestAppContext| {
             cx.update_window(window, |_, window, cx| workspace.read(cx).focus_anchor.is_focused(window)).unwrap()

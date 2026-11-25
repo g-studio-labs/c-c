@@ -87,19 +87,20 @@ fn the_organization_rail_opens_its_people_and_the_tree_leaves_it(cx: &mut TestAp
 }
 
 /// Desde la organización, un clic en el panel de otro módulo (aquí, un
-/// documento en el de Documentación) lleva a lo pulsado.
+/// canal en el de comunicación, que no abre tarea ni documento) lleva a lo
+/// pulsado.
 ///
 /// Rotura que atrapa: la pantalla de la organización que se queda encima
-/// de lo que se abrió desde el panel.
+/// de lo que se eligió en el panel.
 #[gpui_kit::test]
 fn a_click_in_another_modules_panel_leaves_the_organization(cx: &mut TestAppContext) {
     let (_server, window) = open_org("member", cx);
-    click(window, "rail-docs", cx);
-    wait_until(cx, "sale el panel de Documentación", |cx| on_screen(window, "docs-node-a", cx));
+    click(window, "rail-comms", cx);
+    wait_until(cx, "sale el panel de comunicación", |cx| on_screen(window, "comms-channel-a", cx));
     click(window, "rail-organization", cx);
     wait_until(cx, "vuelve la organización", |cx| on_screen(window, "org-page", cx));
-    assert!(on_screen(window, "docs-node-a", cx), "el panel deja de ser el del módulo");
-    click(window, "docs-node-a", cx);
+    assert!(on_screen(window, "comms-channel-a", cx), "el panel deja de ser el del módulo");
+    click(window, "comms-channel-a", cx);
     wait_until(cx, "abre lo pulsado", |cx| !on_screen(window, "org-page", cx));
     stop_stream(cx);
 }
@@ -259,11 +260,18 @@ fn an_invitation_for_you_is_accepted_from_the_panel(cx: &mut TestAppContext) {
 /// Cambiar de organización con su pantalla delante la deja delante, con
 /// lo de la otra.
 ///
-/// Rotura que atrapa: cerrar la pantalla porque el core vuelve a elegir
-/// conversación, ámbito o documento al cambiar de organización.
+/// Rotura que atrapa: cerrar la pantalla porque el core suelta o vuelve a
+/// elegir conversación, ámbito o documento al cambiar de organización.
 #[gpui_kit::test]
 fn switching_organization_keeps_its_screen(cx: &mut TestAppContext) {
-    let (_server, window) = open_org("admin", cx);
+    let (server, window) = open_org("admin", cx);
+    // Con un documento abierto: cambiar de organización lo cierra, y eso no
+    // es irse de la pantalla.
+    server.mount(Mock::given(method("GET")).and(path("/api/v1/docs/space/a")).respond_with(ok(json!({ "doc": null, "orgId": "o1", "tabs": [], "decisions": [] }))));
+    cx.update(|cx| Backend::run(cx, |core| async move { core.docs().open("a").await }));
+    wait_until(cx, "se abre el documento", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).docs.target.is_some()));
+    click(window, "rail-organization", cx);
+    wait_until(cx, "vuelve la organización", |cx| on_screen(window, "org-page", cx));
     cx.update(|cx| Backend::run(cx, |core| async move { core.switch_org("o2").await; }));
     wait_until(cx, "pasa a la otra", |cx| on_screen(window, "org-page-title", cx) && label(window, "org-page-title", cx) == "Cliente");
     cx.run_until_parked();
@@ -320,5 +328,49 @@ fn demoting_yourself_rereads_your_role(cx: &mut TestAppContext) {
     wait_until(cx, "se abre el menú del papel", |cx| on_screen(window, "org-member-role-u1-viewer", cx));
     click(window, "org-member-role-u1-viewer", cx);
     wait_until(cx, "deja de ser admin", |cx| !on_screen(window, "org-tab-invites", cx));
+    stop_stream(cx);
+}
+
+/// El perfil y la organización no se pisan: abrir uno cierra el otro, y el
+/// riel enciende la organización, o nada con el perfil, nunca dos cosas.
+///
+/// Roturas que atrapa: el perfil pintado debajo de la organización (o al
+/// revés); la organización encendida en el riel con el perfil delante; un
+/// módulo encendido a la vez que la organización.
+#[gpui_kit::test]
+fn the_profile_and_the_organization_exclude_each_other(cx: &mut TestAppContext) {
+    let server = org_server("admin");
+    server.install(cx);
+    let (window, workspace) = open_with_view(1100., cx);
+    wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+    let lit = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let workspace = workspace.read(cx);
+            let modules = (1..=4).filter(|slot| workspace.module_active(*slot, cx)).count();
+            (modules, workspace.organization_lit())
+        })
+    };
+    let shown = |cx: &mut TestAppContext| (on_screen(window, "org-page", cx), on_screen(window, "profile", cx));
+
+    click(window, "rail-organization", cx);
+    wait_until(cx, "sale la organización", |cx| on_screen(window, "org-page", cx));
+    assert_eq!(lit(cx), (0, true));
+
+    click(window, "account-menu", cx);
+    wait_until(cx, "el menú se abre", |cx| on_screen(window, "account-profile", cx));
+    click(window, "account-profile", cx);
+    cx.run_until_parked();
+    assert_eq!(shown(cx), (false, true), "el perfil no tapa la organización");
+    assert_eq!(lit(cx), (0, false), "el riel sigue encendiendo algo con el perfil delante");
+
+    click(window, "rail-organization", cx);
+    cx.run_until_parked();
+    assert_eq!(shown(cx), (true, false), "la organización no cierra el perfil");
+    assert_eq!(lit(cx), (0, true));
+
+    click(window, "rail-work", cx);
+    cx.run_until_parked();
+    assert_eq!(shown(cx), (false, false));
+    assert_eq!(lit(cx), (1, false));
     stop_stream(cx);
 }
