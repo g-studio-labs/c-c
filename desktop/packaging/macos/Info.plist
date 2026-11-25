@@ -34,6 +34,13 @@
          `MACOSX_DEPLOYMENT_TARGET`. -->
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
+    <!-- Sin estas dos, macOS cierra la app o deniega la captura al primer
+         intento de abrir el micrófono o la cámara en una llamada. El mismo
+         texto que la app de Tauri. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>cac usa el micrófono para los canales de voz.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>cac usa la cámara para el vídeo de los canales de voz.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <!-- En un portátil con dos gráficas, no obligar a encender la dedicada. -->

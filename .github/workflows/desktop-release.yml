@@ -3,21 +3,37 @@ name: desktop release
 # Los instaladores de la app de escritorio nativa (`desktop/`, en GPUI), para
 # Linux, macOS y Windows.
 #
-# **Sólo a mano, y no publica nada.** No hay disparador por tag ni por push, y
-# no crea ninguna release de GitHub: deja los instaladores como artefactos de
-# la ejecución, para bajarlos y probarlos. Cortar una release es una decisión
-# que se toma cada vez; este workflow sólo construye lo que se repartiría.
+# **Sólo a mano, y por defecto no publica nada.** No hay disparador por tag ni
+# por push. Sin más, deja los instaladores como artefactos de la ejecución,
+# para bajarlos y probarlos: cortar una release es una decisión que se toma
+# cada vez. Con `publish=true` (`gh workflow run desktop-release.yml -f
+# publish=true`, desde `main`) además crea la release de GitHub
+# `desktop-vX.Y.Z` con esos ficheros y su `SHA256SUMS`, que es de donde se
+# actualiza la app (`mcp/src/desktop_update.rs`).
 #
-# Se lanza con `gh workflow run desktop-release.yml` (o desde la pestaña
-# Actions). Los sistemas se eligen: los minutos de macOS son los caros y sus
-# máquinas a veces no están, así que una ejecución puede ir sin él
+# La versión es la de `desktop/VERSION`, que es también lo que leen las apps
+# instaladas para saber que hay una nueva: se sube ahí y en `desktop/Cargo.toml`,
+# se empuja a `main`, y se lanza esto. Publicar pide los tres sistemas: el
+# actualizador de cada uno baja su fichero de la misma release.
+#
+# **Nunca se marca como «latest».** El actualizador de la app de Tauri lee
+# `releases/latest/download/latest.json`: si esta release fuese la última, esa
+# dirección daría 404 y nadie actualizaría la app de siempre. Por eso el único
+# paso que publica lleva `--latest=false`.
+# Guardián: `mcp/tests/desktop_release.rs`.
+#
+# **Una versión publicada no se re-corta.** Si la etiqueta o la release ya
+# existen, esto se niega antes de compilar nada.
+#
+# Se elige qué sistemas se construyen: los minutos de macOS son los caros y sus
+# máquinas a veces no están, así que una ejecución sin publicar puede ir sin él
 # (`-f macos=false`).
 #
-# Nada va firmado: en este proyecto no hay certificados de Apple ni de
-# Windows, y aquí no entra ningún secreto. macOS (Gatekeeper) y Windows
-# (SmartScreen) avisarán al abrir lo que sale de aquí. Dónde iría la firma
-# está señalado en `desktop/packaging/macos/package.sh` y en
-# `desktop/packaging/windows/installer.nsi`.
+# Firma: macOS va con el certificado autofirmado de la casa (sólo para que el
+# permiso del micrófono se conserve; no es de Apple, Gatekeeper avisa). Windows
+# no va firmado: no hay certificado (SmartScreen avisará). La suma protege de
+# una descarga rota o cambiada por el camino, no de alguien que pueda publicar
+# en este repo.
 on:
   workflow_dispatch:
     inputs:
@@ -33,9 +49,13 @@ on:
         description: "macOS (.dmg, Apple Silicon)"
         type: boolean
         default: true
+      publish:
+        description: "Publicar la release desktop-vX.Y.Z (nunca como latest)"
+        type: boolean
+        default: false
 
-# Sólo leer el repo. Sin permiso de escritura, este workflow no puede publicar
-# una release ni aunque alguien le añada el paso.
+# Sólo leer el repo. El permiso de escritura lo tiene un único trabajo, el que
+# publica, y sólo corre con `publish`.
 permissions:
   contents: read
 
@@ -46,6 +66,54 @@ jobs:
   # mentira.
   test:
     uses: ./.github/workflows/desktop.yml
+
+  # Qué versión sale, y si puede salir. Sin `publish` no hace nada.
+  version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: read
+        name: Read desktop/VERSION and refuse a version that is already out
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LINUX: ${{ inputs.linux }}
+          WINDOWS: ${{ inputs.windows }}
+          MACOS: ${{ inputs.macos }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "Las releases de la app salen de main (esto corre en $GITHUB_REF): desktop/VERSION se lee de main." >&2
+            exit 1
+          fi
+          if [ "$LINUX" != "true" ] || [ "$WINDOWS" != "true" ] || [ "$MACOS" != "true" ]; then
+            echo "Publicar pide los tres sistemas: cada app baja su fichero de la misma release." >&2
+            exit 1
+          fi
+          version="$(tr -d ' \t\r\n' < desktop/VERSION)"
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "desktop/VERSION no es X.Y.Z: '$version'" >&2
+            exit 1
+          fi
+          manifest="$(sed -n 's/^version = "\(.*\)"$/\1/p' desktop/Cargo.toml | head -n 1)"
+          if [ "$manifest" != "$version" ]; then
+            echo "desktop/VERSION dice $version y desktop/Cargo.toml dice $manifest." >&2
+            exit 1
+          fi
+          tag="desktop-v$version"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "La etiqueta $tag ya existe. Una versión publicada no se re-corta: sube desktop/VERSION." >&2
+            exit 1
+          fi
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "La release $tag ya existe. Una versión publicada no se re-corta: sube desktop/VERSION." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   # Qué sistemas se construyen en esta ejecución, a partir de las casillas.
   plan:
@@ -75,7 +143,7 @@ jobs:
           echo "os=[$list]" >> "$GITHUB_OUTPUT"
 
   build:
-    needs: [test, plan]
+    needs: [test, plan, version]
     strategy:
       # Que falle un sistema no tira los instaladores de los otros dos.
       fail-fast: false
@@ -126,10 +194,48 @@ jobs:
         run: bash packaging/linux/package.sh
 
       # --- macOS ------------------------------------------------------------
-      # Sólo con lo que trae el sistema, y firma «ad hoc»: ni certificados ni
-      # notarización (no los hay). Ver `packaging/macos/package.sh`.
+      # Firmada con el mismo certificado autofirmado que la app de Tauri
+      # (`app-release.yml` explica por qué: el permiso del micrófono y la
+      # cámara se ata a la identidad de la firma). No es de Apple y no se
+      # notariza. El certificado va a un llavero propio del runner y se marca
+      # de confianza para firmar; los secretos no se imprimen.
+      - name: Import the signing certificate (macOS)
+        if: runner.os == 'macOS'
+        working-directory: .
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/cac-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -passin pass:"$MACOS_CERTIFICATE_PASSWORD" \
+            -nokeys -clcerts -legacy -out "$RUNNER_TEMP/cert.pem" 2>/dev/null \
+            || openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -passin pass:"$MACOS_CERTIFICATE_PASSWORD" \
+              -nokeys -clcerts -out "$RUNNER_TEMP/cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          # Si la identidad no sale como válida, que reviente ahora y no
+          # después de compilar.
+          security find-identity -v -p codesigning "$KEYCHAIN" | grep -Fq "$MACOS_SIGNING_IDENTITY"
+
+      # Sólo con lo que trae el sistema. Ver `packaging/macos/package.sh`:
+      # con `REQUIRE_SIGNING_IDENTITY` no sale nada firmado ad hoc.
       - name: Package (macOS)
         if: runner.os == 'macOS'
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          REQUIRE_SIGNING_IDENTITY: "1"
         run: bash packaging/macos/package.sh
 
       # --- Windows ----------------------------------------------------------
@@ -156,3 +262,48 @@ jobs:
           path: desktop/target/packaging/out/*
           if-no-files-found: error
           retention-days: 14
+
+  publish:
+    if: inputs.publish
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # El único trabajo que puede escribir en el repo.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Los tres ficheros que bajan las apps instaladas tienen que estar, con
+      # estos nombres (los fabrican los empaquetadores y los pide
+      # `desktop_update::asset_name`), y todo lo que se sube lleva su suma.
+      - name: Checksums
+        working-directory: dist
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          for asset in "cac-desktop-$VERSION-linux-x86_64" "cac-desktop-$VERSION-macos-arm64.dmg" "cac-desktop-$VERSION-windows-x86_64-setup.exe"; do
+            test -s "$asset" || { echo "falta $asset" >&2; exit 1; }
+          done
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
+          cat SHA256SUMS
+
+      # `--latest=false` no es un detalle: ver la cabecera. Y sin etiqueta
+      # previa: la crea la propia release, en el commit que se compiló.
+      - name: Publish the release, never as latest
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="desktop-v$VERSION"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "La release $tag ya existe. Una versión publicada no se re-corta." >&2
+            exit 1
+          fi
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false --title "CAC Nativa $VERSION" --notes "La app de escritorio nativa de cac. Sin firmar: macOS y Windows avisarán al abrirla. La app instalada avisa sola de las versiones nuevas." ./*

@@ -41,6 +41,10 @@ done
 for license in "$CRATE_DIR"/assets/fonts/LICENSE-*.txt; do
   install -Dm644 "$license" "$ROOT/share/doc/$APP_BINARY/licenses/$(basename "$license")"
 done
+# El binario suelto, sin empaquetar: es lo que baja el actualizador de la app
+# (`mcp/src/desktop_update.rs`) para ponerlo donde está el que corre. Va con el
+# nombre que ese módulo espera; `mcp/tests/desktop_release.rs` lo comprueba.
+install -Dm755 "$ROOT/bin/$APP_BINARY" "$OUT_DIR/$NAME"
 # Sin dueño ni fecha de esta máquina: el mismo binario da el mismo archivo.
 tar --owner=0 --group=0 --numeric-owner -C "$STAGE_DIR" -czf "$OUT_DIR/$NAME.tar.gz" "$NAME"
 

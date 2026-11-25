@@ -42,16 +42,31 @@ fi
 plutil -lint "$APP/Contents/Info.plist"
 
 # --- Firma ------------------------------------------------------------------
-# Ad hoc (`-`): no usa ningún certificado ni ningún secreto.
+# Con la identidad fija de `MACOS_SIGNING_IDENTITY` (el mismo certificado
+# autofirmado que la app de Tauri, ver `app-release.yml`): macOS ata el permiso
+# del micrófono y la cámara a la identidad de la firma, y con la firma ad hoc
+# cambiaba en cada build, así que el aviso volvía en cada llamada y con cada
+# actualización. No es una firma de Apple: Gatekeeper sigue avisando.
 #
-# CUANDO HAYA CERTIFICADOS DE APPLE, es aquí:
-#   1. importar el «Developer ID Application» a un llavero temporal
-#      (secretos: el .p12 en base64 y su contraseña);
-#   2. firmar con `--sign "Developer ID Application: …" --options runtime
-#      --timestamp` en vez de `--sign -`;
-#   3. después de crear el .dmg, `xcrun notarytool submit … --wait` (secretos:
-#      la clave de App Store Connect) y `xcrun stapler staple` sobre el .dmg.
-codesign --force --sign - "$APP"
+# **Sin `--options runtime`, a propósito.** Con el runtime reforzado y sin
+# entitlements macOS deniega el micrófono sin preguntar; sólo hace falta para
+# notarizar, que aquí no hay. Guardián: `mcp/tests/desktop_release.rs`.
+#
+# En la release (`REQUIRE_SIGNING_IDENTITY=1`, lo pone el workflow) sin
+# identidad se aborta: nunca sale una release firmada ad hoc sin decirlo.
+# Sin eso (a mano, en local) se firma ad hoc (`-`), que basta para arrancar.
+#
+# CUANDO HAYA CERTIFICADOS DE APPLE: «Developer ID Application» con
+# `--options runtime --timestamp` y entitlements de audio y cámara, y después
+# `xcrun notarytool submit … --wait` y `xcrun stapler staple` sobre el .dmg.
+if [ -z "${MACOS_SIGNING_IDENTITY:-}" ]; then
+  if [ "${REQUIRE_SIGNING_IDENTITY:-}" = "1" ]; then
+    echo "packaging: falta MACOS_SIGNING_IDENTITY y esto es una release: no se firma ad hoc en silencio" >&2
+    exit 1
+  fi
+  MACOS_SIGNING_IDENTITY="-"
+fi
+codesign --force --deep --sign "$MACOS_SIGNING_IDENTITY" "$APP"
 codesign --verify --strict "$APP"
 
 # --- .dmg -------------------------------------------------------------------
