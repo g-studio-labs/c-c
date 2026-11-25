@@ -343,6 +343,7 @@ impl Stream {
             }
         }
         self.core.counters().server_event(&event);
+        self.core.orgs().server_event(&event);
         self.core.comms().server_event(&event);
         // Después de la lista: es ella quien apunta hasta dónde leyó el otro.
         self.core.chat().server_event(&event);

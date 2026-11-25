@@ -31,11 +31,17 @@ impl Core {
         if !self.orgs().set_current(org_id) {
             return false;
         }
+        self.current_org_changed().await;
+        true
+    }
+
+    /// Lo que se hace al pasar a otra organización, venga de donde venga
+    /// (elegirla, borrar la que se miraba, que te saquen, aceptar la primera).
+    pub(crate) async fn current_org_changed(&self) {
         // El documento y la tarea abiertos son de la organización que se deja.
         self.docs().close_now();
         self.tasks().close();
         self.load_current_org().await;
-        true
     }
 
     /// Cambia de lente («asignado a mí», «siguiendo»…) y trae sus tareas si

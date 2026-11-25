@@ -229,8 +229,10 @@ pub fn members_matching(members: &[OrgMember], query: &str, role: &str) -> Vec<O
         .iter()
         .filter(|member| role.is_empty() || member.role == role)
         .filter(|member| {
+            // El usuario provisional (`pending-…`) de quien no terminó el
+            // registro no se enseña, así que tampoco se busca por él.
             query.is_empty()
-                || member.username.to_lowercase().contains(&query)
+                || (!member.setup_pending && member.username.to_lowercase().contains(&query))
                 || member.email.as_deref().unwrap_or("").to_lowercase().contains(&query)
         })
         .cloned()
@@ -529,12 +531,13 @@ impl Orgs {
             return Err(ApiError::Server { status: 404, code: String::new(), message: "Organization not found".into() });
         };
         let answer: serde_json::Value = self.core.call("PATCH", &Self::base(org_id), Some(patch.body(&current.name))).await?;
-        // La respuesta no trae el papel de quien mira: se mezcla sobre lo que
-        // había en vez de sustituirlo.
+        // Se mezcla sobre lo que había en vez de sustituirlo, y el papel no
+        // se toma de ahí: a un superadmin el servidor le contesta «admin»
+        // aunque no sea miembro.
         let mut merged = serde_json::to_value(&current).unwrap_or_default();
         if let (Some(target), Some(fields)) = (merged.as_object_mut(), answer.as_object()) {
             for (key, value) in fields {
-                if !value.is_null() && !(key == "role" && value.as_str().is_some_and(str::is_empty)) {
+                if !value.is_null() && key != "role" {
                     target.insert(key.clone(), value.clone());
                 }
             }
@@ -549,12 +552,60 @@ impl Orgs {
     /// se pasa a otra con lo suyo.
     pub async fn delete(&self, org_id: &str) -> Result<(), ApiError> {
         self.core.call_ok("DELETE", &Self::base(org_id), None).await?;
-        let was_current = self.state().current_org_id.as_deref() == Some(org_id);
+        let before = self.state().current_org_id;
+        // Fuera de la lista ya, aunque releerla falle: ya no existe.
+        self.forget(org_id);
         self.load().await;
-        if was_current {
-            self.core.load_current_org().await;
-        }
+        self.follow_current(before).await;
         Ok(())
+    }
+
+    /// Quita una organización de la lista y, si era la que se miraba, pasa a
+    /// la primera que quede.
+    fn forget(&self, org_id: &str) {
+        self.update(|state| {
+            state.orgs.retain(|org| org.id != org_id);
+            if state.current_org_id.as_deref() == Some(org_id) {
+                state.current_org_id = state.orgs.first().map(|org| org.id.clone());
+            }
+        });
+    }
+
+    /// Si la organización que se mira ya no es `before`, se hace lo mismo
+    /// que al elegir otra.
+    async fn follow_current(&self, before: Option<String>) {
+        if self.state().current_org_id != before {
+            self.core.current_org_changed().await;
+        }
+    }
+
+    /// Vuelve a leer a qué organizaciones perteneces y con qué papel: tras
+    /// quitarte o cambiarte el papel a ti mismo, o cuando el servidor avisa
+    /// de que entraste o saliste de una.
+    pub async fn reload_membership(&self) {
+        let before = self.state().current_org_id;
+        // El token lleva dentro a qué perteneces.
+        self.core.refresh_access_token().await;
+        self.load().await;
+        self.follow_current(before).await;
+    }
+
+    /// Te quitaste tú mismo de esta organización: fuera de la lista aunque
+    /// releerla falle, y a otra si era la que mirabas.
+    pub async fn left(&self, org_id: &str) {
+        let before = self.state().current_org_id;
+        self.forget(org_id);
+        self.core.refresh_access_token().await;
+        self.load().await;
+        self.follow_current(before).await;
+    }
+
+    /// `org:membership` va dirigido a quien entra o sale.
+    pub(crate) fn server_event(&self, event: &crate::stream::ServerEvent) {
+        if event.event == "org:membership" {
+            let orgs = self.core.orgs();
+            tokio::spawn(async move { orgs.reload_membership().await });
+        }
     }
 
     /// Las invitaciones que esperan a quien mira. Pone su número en el riel.
@@ -573,9 +624,7 @@ impl Orgs {
         let renewed = self.core.refresh_access_token().await.is_some();
         let before = self.state().current_org_id;
         self.load().await;
-        if self.state().current_org_id != before {
-            self.core.load_current_org().await;
-        }
+        self.follow_current(before).await;
         let _ = self.my_invitations().await;
         Ok(renewed)
     }
@@ -614,7 +663,8 @@ mod tests {
 
     /// Roturas que atrapa: buscar sólo en el usuario (no en el correo);
     /// distinguir mayúsculas; que el filtro de papel no filtre, o que
-    /// «cualquiera» deje fuera a alguien.
+    /// «cualquiera» deje fuera a alguien; encontrar a alguien por un usuario
+    /// provisional que no se enseña.
     #[test]
     fn members_are_found_by_username_or_email_and_by_role() {
         let all = [member("ana", "ana@x.com", "admin"), member("bob", "BOB@Acme.io", "viewer"), member("caro", "c@x.com", "member")];
@@ -624,6 +674,9 @@ mod tests {
         assert_eq!(names(members_matching(&all, "", "member")), ["caro"]);
         assert_eq!(names(members_matching(&all, "", "")).len(), 3);
         assert!(members_matching(&all, "ana", "viewer").is_empty());
+        let pending = OrgMember { username: "pending-7f3a".into(), setup_pending: true, ..member("x", "dan@x.com", "member") };
+        assert!(members_matching(&[pending.clone()], "pending", "").is_empty(), "se busca por el usuario provisional");
+        assert_eq!(members_matching(&[pending], "dan@", "").len(), 1);
     }
 
     /// Roturas que atrapa: enseñar el usuario provisional `pending-…` de

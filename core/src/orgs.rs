@@ -110,7 +110,7 @@ impl Orgs {
         self.core.inner.orgs.lock().expect("orgs lock").clone()
     }
 
-    fn update(&self, change: impl FnOnce(&mut OrgsState)) {
+    pub(crate) fn update(&self, change: impl FnOnce(&mut OrgsState)) {
         let state = {
             let mut state = self.core.inner.orgs.lock().expect("orgs lock");
             change(&mut state);

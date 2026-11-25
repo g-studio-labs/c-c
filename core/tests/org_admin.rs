@@ -82,13 +82,14 @@ async fn adding_someone_who_is_not_yours_invites_them() {
 /// Guardar una regla manda el nombre con ella, y lo que contesta el
 /// servidor queda en la organización sin perder el papel de quien mira.
 ///
-/// Roturas que atrapa: sustituir la organización por la respuesta (el
-/// papel se pierde y deja de administrarla); no ponerla al día (el
-/// interruptor vuelve a su sitio).
+/// Roturas que atrapa: tomar el papel de la respuesta (a un superadmin le
+/// dice «admin» y pasaría a administrarla como miembro); no ponerla al día
+/// (el interruptor vuelve a su sitio).
 #[tokio::test]
 async fn a_saved_rule_stays_and_keeps_your_role() {
-    let (server, core) = rig(json!([org("o1", "admin")])).await;
-    let mut answer = org("o1", "");
+    let (server, core) = rig(json!([org("o1", "member")])).await;
+    // Lo que contesta a un superadmin: «admin» aunque no sea miembro.
+    let mut answer = org("o1", "admin");
     answer["guestsCanUseDevTools"] = json!(true);
     Mock::given(method("PATCH"))
         .and(path("/api/v1/organizations/o1"))
@@ -100,7 +101,7 @@ async fn a_saved_rule_stays_and_keeps_your_role() {
     core.orgs().save("o1", &OrgPatch { guests_can_use_dev_tools: Some(true), ..Default::default() }).await.unwrap();
     let now = core.orgs().state().current().cloned().unwrap();
     assert!(now.guests_can_use_dev_tools);
-    assert_eq!(now.role, "admin");
+    assert_eq!(now.role, "member");
 }
 
 /// Aceptar renueva la sesión (la pertenencia viaja en el token), trae la
@@ -157,4 +158,69 @@ async fn deleting_the_current_organization_moves_to_another() {
     // importa aquí.
     core.orgs().delete("o1").await.unwrap();
     assert_eq!(core.orgs().state().current_org_id.as_deref(), Some("o2"));
+}
+
+fn space(id: &str) -> Value {
+    json!({ "id": id, "orgId": "o1", "name": "Producto", "color": "#888", "folders": [], "lists": [], "people": [] })
+}
+
+/// Con un documento abierto de la organización que se mira.
+async fn reading_a_doc(server: &MockServer, core: &Core) {
+    Mock::given(method("GET")).and(path("/api/v1/task-spaces/")).respond_with(ok(json!([space("a")]))).up_to_n_times(1).mount(server).await;
+    core.tree().load("o1").await;
+    core.docs().open("a").await;
+    assert!(core.docs().state().target.is_some(), "no llegó a abrirse");
+}
+
+/// Borrar la que se mira hace lo mismo que elegir otra: cierra su
+/// documento; y aunque releer la lista falle, la borrada sale de ella.
+///
+/// Roturas que atrapa: dejar abierto un documento de la organización
+/// borrada; seguir mirándola (o listándola) porque la lista no se pudo
+/// releer.
+#[tokio::test]
+async fn deleting_the_current_organization_closes_its_doc_even_if_the_list_fails() {
+    let (server, core) = rig(json!([org("o1", "admin"), org("o2", "member")])).await;
+    reading_a_doc(&server, &core).await;
+    Mock::given(method("DELETE")).and(path("/api/v1/organizations/o1")).respond_with(ok(json!({}))).mount(&server).await;
+    Mock::given(method("GET")).and(path("/api/v1/organizations/")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+    core.orgs().delete("o1").await.unwrap();
+    let state = core.orgs().state();
+    assert_eq!(state.current_org_id.as_deref(), Some("o2"));
+    assert!(state.orgs.iter().all(|org| org.id != "o1"), "la borrada sigue en la lista");
+    assert!(core.docs().state().target.is_none(), "el documento de la borrada sigue abierto");
+}
+
+/// Quitarte tú mismo de la que miras te lleva a otra, como si la
+/// hubieras dejado.
+///
+/// Rotura que atrapa: seguir mirando una organización a la que ya no
+/// perteneces, con su documento abierto.
+#[tokio::test]
+async fn leaving_the_current_organization_moves_to_another() {
+    let (server, core) = rig(json!([org("o1", "admin"), org("o2", "member")])).await;
+    reading_a_doc(&server, &core).await;
+    Mock::given(method("GET")).and(path("/api/v1/organizations/")).respond_with(ok(json!([org("o2", "member")]))).mount(&server).await;
+    core.orgs().left("o1").await;
+    assert_eq!(core.orgs().state().current_org_id.as_deref(), Some("o2"));
+    assert!(core.docs().state().target.is_none());
+}
+
+/// El aviso `org:membership` (te añadieron o te quitaron) vuelve a leer
+/// tus organizaciones, no sólo el número de invitaciones.
+///
+/// Rotura que atrapa: seguir mirando la organización de la que te sacó
+/// otro admin hasta reiniciar.
+#[tokio::test]
+async fn a_membership_event_reloads_your_organizations() {
+    let (server, core) = rig(json!([org("o1", "admin"), org("o2", "member")])).await;
+    Mock::given(method("GET")).and(path("/api/v1/organizations/")).respond_with(ok(json!([org("o2", "member")]))).mount(&server).await;
+    core.stream().deliver(cac_core::ServerEvent { event: "org:membership".into(), data: json!({ "orgId": "o1", "joined": false }).to_string() });
+    for _ in 0..300 {
+        if core.orgs().state().current_org_id.as_deref() == Some("o2") {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("no volvió a leer las organizaciones");
 }
