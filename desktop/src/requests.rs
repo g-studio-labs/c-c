@@ -910,6 +910,7 @@ impl Render for RequestsView {
             .iter()
             .map(|other| {
                 let org_id = other.org_id.clone();
+                let text = cac_core::elsewhere_label(other, language);
                 div()
                     .id(SharedString::from(format!("requests-elsewhere-{}", other.org_id)))
                     .px_3()
@@ -926,7 +927,8 @@ impl Render for RequestsView {
                             core.switch_org(&org_id).await;
                         });
                     }))
-                    .child(cac_core::elsewhere_label(other, language))
+                    .aria_label(text.clone())
+                    .child(text)
                     .test_support()
                     .into_any_element()
             })

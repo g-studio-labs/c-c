@@ -117,7 +117,7 @@ export default function AgentRequests() {
           key={other}
           type="button"
           data-testid="requests-elsewhere"
-          className="rounded-lg border bg-muted/40 px-3 py-2 text-left text-sm hover:bg-muted"
+          className="motion-press rounded-lg border bg-muted/40 px-3 py-2 text-left text-sm hover:bg-muted"
           onClick={() => enterOrg(other)}
         >
           {t("work:requests.elsewhere", { count, org: orgs.find((o) => o.id === other)?.name ?? other })}
