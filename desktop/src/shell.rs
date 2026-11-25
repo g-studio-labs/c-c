@@ -139,7 +139,7 @@ impl Render for Shell {
             Screen::NewPassword(view) => div().size_full().child(view.clone()),
             Screen::Open(view) => div().size_full().child(view.clone()),
         };
-        screen.children(asking)
+        screen.child(crate::drop_wake::drop_wake()).children(asking)
     }
 }
 
@@ -207,6 +207,31 @@ mod tests {
             window.try_find(id).is_some()
         })
         .unwrap()
+    }
+
+    /// La ventana despierta el hover cuando entra un fichero de fuera tras
+    /// teclear, para que el `drop` de cualquier pantalla llegue.
+    ///
+    /// Rotura que atrapa: quitar `drop_wake` de la raíz (el destino de un
+    /// fichero soltado tras escribir no recibe nada hasta mover el ratón).
+    #[gpui_kit::test]
+    fn the_window_wakes_hover_when_a_file_enters_after_typing(cx: &mut TestAppContext) {
+        use gpui_kit::{ExternalPaths, FileDropEvent, PlatformInput};
+        let server = FakeServer::start();
+        server.install(cx);
+        let (window, _) = open(cx);
+        cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.press("a", cx);
+                let position = Point::new(px(5.), px(5.));
+                let paths = ExternalPaths(vec![std::path::PathBuf::from("/tmp/notes.txt")].into());
+                assert!(window.last_input_was_keyboard());
+                window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Entered { position, paths }), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let keyboard_after = cx.update_window(window, |_, window, _| window.last_input_was_keyboard()).unwrap();
+        assert!(!keyboard_after, "el hover sigue apagado");
     }
 
     /// Escribir usuario y contraseña y pulsar «Entrar» abre la app.

@@ -2024,10 +2024,9 @@ mod tests {
             window.render_frame(cx);
             let position = window.find("thread-composer").bounds().center();
             let paths = ExternalPaths(vec![notes.clone()].into());
-            // El ratón pasa por la ventana camino del gestor de ficheros:
-            // tras escribir, GPUI no ve nada «bajo el ratón» hasta que se
-            // mueve, y un `FileDrop` no cuenta como movimiento (trampa
-            // abierta en cac: soltar sin haber movido el ratón no llega).
+            // Esta vista se prueba sin `Shell`, que es quien despierta el
+            // hover al entrar un fichero tras teclear (`drop_wake`): aquí el
+            // ratón pasa antes por la caja.
             window.dispatch_event(PlatformInput::MouseMove(gpui_kit::MouseMoveEvent { position, pressed_button: None, modifiers: Default::default() }), cx);
             window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Entered { position, paths }), cx);
             window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Submit { position }), cx);
