@@ -3424,7 +3424,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "create_request",
-            "description": "Leave a request for a person on a task, when you need them and cannot go on alone: it waits in their «Por atender» inbox in the app (with a notification) and survives this session. Returns its short `code` (req-…): tell the user, who can answer with a button or here. Kinds and their `body`: approve_message {draft: the exact text, destination, destinationUrl?} — you may only publish the approved `finalText`; test {url?, steps[], expected}; decide {question?, options: 2-4 of {label, consequence, recommended?}} — the recommended one goes first; run {command, where, expected, undo?}; obtain {what, from}. One request goes to ONE person; for two people, make two. Then park the task and follow it with wait_request or get_request. Needs `tasks:write`.",
+            "description": "Leave a request for a person on a task, when you need them and cannot go on alone: it waits in their «Por atender» inbox in the app (with a notification) and survives this session. Returns its short `code` (req-…): tell the user, who can answer with a button or here. Kinds and their `body`: approve_message {draft: the exact text, destination, destinationUrl?} — you may only publish the approved `finalText`; test {url?, steps[], expected}; decide {question?, options: 2-4 of {label, consequence, recommended?}} — the recommended one goes first; run {command, where, expected, undo?}; obtain {what, from}. One request goes to ONE person; for two people, make two. Links are clickable in the app: write full URLs (https://…), ABSOLUTE file paths (/home/…, ~/…, C:\\…) and cac links (/app/tasks?task=…) in any text field; never relative paths, one path per mention, no wrapping quotes needed. Then park the task and follow it with wait_request or get_request. Needs `tasks:write`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3460,7 +3460,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "update_request",
-            "description": "Re-issue an open request after talking it over with the user: new summary, body, kind or person; the previous version stays in its history and the person is notified again. Also, once you published an approved message, `publishedUrl` records where it went. Needs `tasks:write`.",
+            "description": "Re-issue an open request after talking it over with the user: new summary, body, kind or person; the previous version stays in its history and the person is notified again. Also, once you published an approved message, `publishedUrl` records where it went. Needs `tasks:write`. In the new text, links are clickable in the app: write full URLs (https://…), ABSOLUTE file paths (/home/…, ~/…, C:\\…) and cac links (/app/tasks?task=…) in any text field; never relative paths, one path per mention, no wrapping quotes needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -8460,6 +8460,14 @@ mod tests {
         let said = tool(&defs, "create_request")["description"].as_str().unwrap();
         for kind in ["approve_message", "test", "decide", "run", "obtain", "ONE person", "finalText"] {
             assert!(said.contains(kind), "{kind}: {said}");
+        }
+        // Un agente que escribe una ruta relativa o la envuelve en comillas se
+        // queda sin enlace en la app: la herramienta tiene que decirlo.
+        for name in ["create_request", "update_request"] {
+            let said = tool(&defs, name)["description"].as_str().unwrap();
+            for hint in ["clickable", "ABSOLUTE file paths", "never relative", "one path per mention", "/app/tasks?task="] {
+                assert!(said.contains(hint), "{name} {hint}: {said}");
+            }
         }
         assert!(tool(&defs, "list_requests").is_object());
         assert_eq!(tool(&defs, "wait_request")["annotations"]["readOnlyHint"], true);
