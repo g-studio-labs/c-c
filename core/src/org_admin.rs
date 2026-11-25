@@ -600,9 +600,11 @@ impl Orgs {
         self.follow_current(before).await;
     }
 
-    /// `org:membership` va dirigido a quien entra o sale.
+    /// `org:membership` va dirigido a quien entra o sale, y `org:role` a
+    /// quien cambia de papel: el token lleva el papel, así que los dos
+    /// piden lo mismo.
     pub(crate) fn server_event(&self, event: &crate::stream::ServerEvent) {
-        if event.event == "org:membership" {
+        if matches!(event.event.as_str(), "org:membership" | "org:role") {
             let orgs = self.core.orgs();
             tokio::spawn(async move { orgs.reload_membership().await });
         }

@@ -224,3 +224,25 @@ async fn a_membership_event_reloads_your_organizations() {
     }
     panic!("no volvió a leer las organizaciones");
 }
+
+/// El aviso `org:role` (te cambiaron el papel) vuelve a leer tus
+/// organizaciones, y el papel que se ve es el nuevo.
+///
+/// Roturas que atrapa: no escuchar `org:role` (la pantalla sigue con los
+/// botones de un admin que ya no lo es); sacarte de la organización por
+/// haberte cambiado el papel.
+#[tokio::test]
+async fn a_role_event_brings_your_new_role() {
+    let (server, core) = rig(json!([org("o1", "admin"), org("o2", "member")])).await;
+    Mock::given(method("GET")).and(path("/api/v1/organizations/")).respond_with(ok(json!([org("o1", "viewer"), org("o2", "member")]))).mount(&server).await;
+    core.stream().deliver(cac_core::ServerEvent { event: "org:role".into(), data: json!({ "orgId": "o1", "orgName": "G Studio", "role": "viewer" }).to_string() });
+    let role = || core.orgs().state().orgs.iter().find(|org| org.id == "o1").map(|org| org.role.clone());
+    for _ in 0..300 {
+        if role().as_deref() == Some("viewer") {
+            assert_eq!(core.orgs().state().current_org_id.as_deref(), Some("o1"));
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("su papel sigue siendo el de antes");
+}
