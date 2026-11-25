@@ -652,6 +652,24 @@ export function useReportEvents() {
           );
           break;
         }
+        /**
+         * Te han cambiado el papel en una organización.
+         *
+         * Va aparte de `org:membership`: aquél se lee como «te han añadido».
+         * Lo que se hace es lo mismo —renovar el token, que lleva el papel, y
+         * releer las organizaciones— y por eso comparte `adoptarMembresia`.
+         */
+        case "org:role": {
+          const p = parse(data) as Payload & { orgName?: string; role?: string };
+          void adoptarMembresia();
+          toast.info(
+            i18next.t("org:membership.roleChanged", {
+              org: p.orgName || i18next.t("common:misc.organization"),
+              role: p.role ?? "",
+            }),
+          );
+          break;
+        }
         // Un mensaje en el chat de una llamada. Sin texto: si es la llamada en
         // la que estás, se vuelve a pedir el chat; si no, nada.
         case "call:message": {
@@ -942,6 +960,7 @@ export function useReportEvents() {
         "chat:reaction",
         "dm:reaction",
         "org:membership",
+        "org:role",
         "call:status",
         // Faltaban también: en la web no sonaba ningún timbre. Daba igual
         // mientras la web no tenía voz (W3).

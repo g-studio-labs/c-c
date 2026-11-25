@@ -123,7 +123,8 @@
   "reportsArriveInShort": "Reports arrive in",
   "membership": {
     "added": "You were added to {{org}}",
-    "removed": "You no longer belong to {{org}}"
+    "removed": "You no longer belong to {{org}}",
+    "roleChanged": "Your role in {{org}} is now {{role}}"
   },
   "doneNeedsSubtasks": "Finish subtasks before marking a task done",
   "github": {
