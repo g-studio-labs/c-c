@@ -13,6 +13,9 @@ impl Core {
     pub async fn open_workspace(&self) {
         // El stream primero: lo que cambie mientras llega lo demás ya se oye.
         self.stream().start();
+        // Los pedidos no son de una organización: una vez, aparte.
+        let requests = self.requests();
+        tokio::spawn(async move { requests.refresh().await });
         self.orgs().load().await;
         self.load_current_org().await;
     }

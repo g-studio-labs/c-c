@@ -177,6 +177,7 @@ impl Core {
         self.platform().clear();
         self.notices().clear();
         self.inbox().clear();
+        self.requests().clear();
         self.chat().clear();
         self.voice().clear();
         self.inner.listener.session_changed(None);

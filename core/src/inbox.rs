@@ -181,6 +181,7 @@ fn kind_of(kind: &str) -> (InboxTab, Option<&'static str>, InboxIcon, InboxTone)
         "report:new" => (T::System, Some("report"), I::Report, C::Warning),
         "doc:review" => (T::Tasks, Some("review"), I::Review, C::Primary),
         "agent:notice" => (T::Tasks, Some("agent"), I::Agent, C::Primary),
+        "request:new" => (T::Tasks, Some("agent"), I::Agent, C::Primary),
         "meeting:reminder" => (T::Talk, Some("meeting"), I::Meeting, C::Primary),
         "ci:run" => (T::System, Some("ci"), I::Ci, C::Muted),
         "deploy:done" => (T::System, Some("deploy"), I::Deploy, C::Primary),
@@ -261,6 +262,8 @@ pub enum InboxTarget {
     Task { task_id: String },
     /// La documentación de un nodo (`/tasks?doc=<clase>:<id>`).
     Doc { node_id: String },
+    /// Un pedido de un agente, en «Por atender» (`/requests?open=req-…`).
+    Request { code: String },
     /// Un sitio que esta app todavía no tiene (el muro, los servidores, una
     /// llamada), o ninguno.
     NotHere,
@@ -275,6 +278,7 @@ pub fn link_target(link: &str) -> InboxTarget {
         "/tasks" => query_param(link, "task")
             .map(|id| InboxTarget::Task { task_id: id.into() })
             .or_else(|| query_param(link, "doc").and_then(|doc| doc.split_once(':')).map(|(_, id)| InboxTarget::Doc { node_id: id.into() })),
+        "/requests" => query_param(link, "open").map(|code| InboxTarget::Request { code: code.into() }),
         _ => None,
     }
     .unwrap_or(InboxTarget::NotHere)
@@ -583,6 +587,14 @@ impl Inbox {
         if target == InboxTarget::NotHere {
             return false;
         }
+        // Los pedidos no son de una organización: no se cambia de ninguna.
+        if let InboxTarget::Request { code } = target {
+            if !self.core.requests().show(Some(code)) {
+                return false;
+            }
+            self.core.requests().load().await;
+            return true;
+        }
         if let InboxTarget::Conversation { conversation } = target {
             return self.core.notices().open(NoticeTarget { conversation, org_id: Some(org_id.to_string()) }).await;
         }
@@ -739,6 +751,7 @@ mod tests {
         assert_eq!(link_target("/dm?c=c1"), InboxTarget::Conversation { conversation: Conversation::Direct { conversation_id: "c1".into() } });
         assert_eq!(link_target("/tasks?task=t1"), InboxTarget::Task { task_id: "t1".into() });
         assert_eq!(link_target("/tasks?doc=list:l1"), InboxTarget::Doc { node_id: "l1".into() });
+        assert_eq!(link_target("/requests?open=req-ab12"), InboxTarget::Request { code: "req-ab12".into() });
         for elsewhere in ["/feedback?post=p1", "/servers/x/backups?target=b", "/call/abc", "", "/chat"] {
             assert_eq!(link_target(elsewhere), InboxTarget::NotHere, "{elsewhere}");
         }

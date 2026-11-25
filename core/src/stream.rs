@@ -313,6 +313,9 @@ impl Stream {
         // Y la bandeja, si se ha mirado.
         let core = self.core.clone();
         tokio::spawn(async move { core.inbox().refresh().await });
+        // Y los pedidos de los agentes: un pedido nuevo sólo llega por evento.
+        let core = self.core.clone();
+        tokio::spawn(async move { core.requests().refresh().await });
     }
 
     /// Un evento que llegó por otro camino que este stream: un push al
@@ -347,6 +350,7 @@ impl Stream {
         // y con lo que se sigue.
         self.core.notices().server_event(&event);
         self.core.inbox().server_event(&event);
+        self.core.requests().server_event(&event);
         self.core.voice().server_event(&event);
         self.core.platform().deploy_event(&event);
         self.core.platform().backup_event(&event);

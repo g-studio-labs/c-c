@@ -35,6 +35,7 @@ pub mod orgs;
 pub mod platform;
 pub mod prefs;
 pub mod prose;
+pub mod requests;
 pub mod session;
 pub mod storage;
 pub mod stream;
@@ -113,6 +114,10 @@ pub use platform::provision_run::*;
 pub use platform::{detect_databases, is_age_public_key, Backup, BackupEngine, BackupKind, BackupRecipient, BackupStatus, BackupTarget, BackupTargetForm, BackupsState, BackupsStatus, DetectedDatabase, DEFAULT_BACKUP_TIMEZONE};
 pub use ansi::{ansi_spans, AnsiColor, AnsiSpan};
 pub use prose::prose_for_painting;
+pub use requests::{
+    build_answer, request_outcome, waiting_label, AgentRequest, AnswerDraft, RequestAnswer, RequestBody, RequestKind, RequestOption, RequestPerson, RequestScope, RequestStatus,
+    RequestTask, Requests, RequestsState,
+};
 pub use prefs::{first_spoken, folds_panel, is_dark, rail_slot, shortcut_text, KeysHeld, ThemePreference, WorkLayout};
 pub use session::Session;
 pub use tree::{
@@ -241,6 +246,7 @@ pub(crate) struct Inner {
     /// Cuántas veces se ha pedido volver a traer la bandeja: ver
     /// `Inbox::reload_soon`.
     pub(crate) inbox_reloads: std::sync::atomic::AtomicU64,
+    pub(crate) requests: Mutex<requests::RequestsData>,
     /// Cuál de las aperturas de una conversación es la vigente: ver
     /// `Chat::open`.
     pub(crate) chat_turn: std::sync::atomic::AtomicU64,
@@ -302,6 +308,7 @@ impl Core {
                 notices: Mutex::new(notice::NoticeData::default()),
                 inbox: Mutex::new(inbox::InboxData::default()),
                 inbox_reloads: std::sync::atomic::AtomicU64::new(0),
+                requests: Mutex::new(requests::RequestsData::default()),
                 chat_turn: std::sync::atomic::AtomicU64::new(0),
                 chat_reloads: std::sync::atomic::AtomicU64::new(0),
                 chat_reads: std::sync::atomic::AtomicU64::new(0),

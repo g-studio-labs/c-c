@@ -12,6 +12,7 @@ use crate::mywork::MyWorkState;
 use crate::notice::Announcement;
 use crate::orgs::OrgsState;
 use crate::platform::PlatformState;
+use crate::requests::RequestsState;
 use crate::tree::TreeState;
 use crate::session::Session;
 use crate::stream::{ConnectionState, ServerEvent};
@@ -57,6 +58,15 @@ pub trait Listener: Send + Sync {
     /// La bandeja de la campana cambió: llegó, se leyó algo, o se cambió de
     /// organización.
     fn inbox_changed(&self, _state: InboxState) {}
+
+    /// «Por atender» cambió: llegaron los pedidos, se contestó uno, se movió
+    /// el número o las marcas «espera a…», o se entró o se salió de ella.
+    fn requests_changed(&self, _state: RequestsState) {}
+
+    /// Un agente pidió que la persona mire ese pedido ya (`request:open`):
+    /// «Por atender» ya está delante con él resaltado; la plataforma pone su
+    /// ventana al frente.
+    fn show_request(&self, _code: String) {}
 
     /// La voz cambió: la sala en la que estás, quién habla, el timbre, o
     /// quién anda por los canales.

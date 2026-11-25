@@ -394,6 +394,10 @@ impl Core {
     /// con lo que se está mirando y, si toca, abre la documentación.
     pub async fn click_node(&self, id: &str) -> Option<TreeClick> {
         let click = self.tree().click(id, self.looking())?;
+        // Acotar es pedir tareas: «Por atender» deja de estar delante.
+        if matches!(click, TreeClick::ScopeTasks { .. }) {
+            self.requests().leave();
+        }
         if click == TreeClick::OpenDocs {
             self.docs().open(id).await;
         }
@@ -433,6 +437,7 @@ impl Core {
         }
         self.docs().close_now();
         self.docs().leave_module();
+        self.requests().leave();
         self.my_work().set_scope(None);
     }
 }
