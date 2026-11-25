@@ -615,23 +615,47 @@ func (r *TaskRepository) MoveTask(id string, status domain.ReportStatus, newRank
 	return r.db.Model(&domain.Item{}).Where("id = ?", id).Updates(fields).Error
 }
 
+// DeleteTask takes the task's subtasks with it: they are its checklist, they
+// live in its list and the board only shows them under their parent, so left
+// behind they would be invisible rows pointing at nothing. Deleting a list
+// already takes its subtasks along; this is the same rule one level down
+// (command-and-control-386).
 func (r *TaskRepository) DeleteTask(id string) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
+		ids := []string{id}
+		seen := map[string]bool{id: true}
+		frontier := []string{id}
+		for len(frontier) > 0 {
+			var children []string
+			if err := tx.Model(&domain.Item{}).Where("parent_id IN ?", frontier).
+				Pluck("id", &children).Error; err != nil {
+				return err
+			}
+			frontier = nil
+			// Un ciclo en parent_id no debe colgar el borrado.
+			for _, c := range children {
+				if !seen[c] {
+					seen[c] = true
+					ids = append(ids, c)
+					frontier = append(frontier, c)
+				}
+			}
+		}
 		// Tag links and assignees are pure links, so they go for real — each with
 		// its own column since the assignee table moved.
-		if err := tx.Where("task_id = ?", id).Delete(&domain.TaskTagLink{}).Error; err != nil {
+		if err := tx.Where("task_id IN ?", ids).Delete(&domain.TaskTagLink{}).Error; err != nil {
 			return err
 		}
-		if err := tx.Where("item_id = ?", id).Delete(&domain.ItemAssignee{}).Error; err != nil {
+		if err := tx.Where("item_id IN ?", ids).Delete(&domain.ItemAssignee{}).Error; err != nil {
 			return err
 		}
 		// What somebody wrote is only hidden — see deleteListsCascade.
 		for _, m := range []any{&domain.ItemComment{}, &domain.ItemAttachment{}} {
-			if err := tx.Where("item_id = ?", id).Delete(m).Error; err != nil {
+			if err := tx.Where("item_id IN ?", ids).Delete(m).Error; err != nil {
 				return err
 			}
 		}
-		return tx.Delete(&domain.Item{}, "id = ?", id).Error
+		return tx.Delete(&domain.Item{}, "id IN ?", ids).Error
 	})
 }
 

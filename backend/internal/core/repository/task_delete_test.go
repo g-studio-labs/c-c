@@ -2,6 +2,7 @@ package repository
 
 import (
 	"testing"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -76,3 +77,79 @@ func TestDeletingAFolderMovesItsSubfoldersAndListsUpOneLevel(t *testing.T) {
 	}
 }
 
+// Borrar una tarea se lleva sus subtareas, también las de las subtareas, y no
+// toca las de otra (command-and-control-386).
+//
+// Roturas que atrapa: dejar las subtareas vivas apuntando a una madre borrada;
+// llevarse sólo el primer nivel; y borrar de más (una tarea hermana o sus
+// subtareas).
+func TestDeletingATaskTakesItsSubtasksWithIt(t *testing.T) {
+	db, cleanup := itemMigrationDB(t)
+	defer cleanup()
+	deleteFixture(t, db)
+	for _, it := range []domain.Item{
+		{BaseModel: domain.BaseModel{ID: "parent"}, OrgID: "org-1", ListID: "l-middle", Title: "parent", Status: domain.ReportPending},
+		{BaseModel: domain.BaseModel{ID: "sub"}, OrgID: "org-1", ListID: "l-middle", Title: "sub", Status: domain.ReportPending, ParentID: strp("parent")},
+		{BaseModel: domain.BaseModel{ID: "subsub"}, OrgID: "org-1", ListID: "l-middle", Title: "subsub", Status: domain.ReportPending, ParentID: strp("sub")},
+		{BaseModel: domain.BaseModel{ID: "other"}, OrgID: "org-1", ListID: "l-middle", Title: "other", Status: domain.ReportPending},
+		{BaseModel: domain.BaseModel{ID: "other-sub"}, OrgID: "org-1", ListID: "l-middle", Title: "other-sub", Status: domain.ReportPending, ParentID: strp("other")},
+	} {
+		it := it
+		if err := db.Create(&it).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&domain.ItemAssignee{ItemID: "subsub", UserID: "u-1"}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewTaskRepository(db).DeleteTask("parent"); err != nil {
+		t.Fatal(err)
+	}
+
+	var alive []string
+	db.Model(&domain.Item{}).Order("id").Pluck("id", &alive)
+	if len(alive) != 2 || alive[0] != "other" || alive[1] != "other-sub" {
+		t.Fatalf("debían quedar sólo other y other-sub, quedan %v", alive)
+	}
+	var links int64
+	db.Model(&domain.ItemAssignee{}).Where("item_id = ?", "subsub").Count(&links)
+	if links != 0 {
+		t.Fatal("la asignación de una subtarea borrada se queda colgando")
+	}
+}
+
+// Un ciclo en `parent_id` (dos tareas que se tienen por madre) no cuelga el
+// borrado: se llevan a las dos y termina.
+//
+// Roturas que atrapa: quitar la memoria de lo ya visto, con lo que el recorrido
+// de subtareas no acaba nunca.
+func TestDeletingATaskInAParentCycleTerminates(t *testing.T) {
+	db, cleanup := itemMigrationDB(t)
+	defer cleanup()
+	deleteFixture(t, db)
+	for _, it := range []domain.Item{
+		{BaseModel: domain.BaseModel{ID: "a"}, OrgID: "org-1", ListID: "l-middle", Title: "a", Status: domain.ReportPending, ParentID: strp("b")},
+		{BaseModel: domain.BaseModel{ID: "b"}, OrgID: "org-1", ListID: "l-middle", Title: "b", Status: domain.ReportPending, ParentID: strp("a")},
+	} {
+		it := it
+		if err := db.Create(&it).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	done := make(chan error, 1)
+	go func() { done <- NewTaskRepository(db).DeleteTask("a") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("el borrado no termina con un ciclo en parent_id")
+	}
+	var left int64
+	db.Model(&domain.Item{}).Count(&left)
+	if left != 0 {
+		t.Fatalf("quedan %d filas del ciclo", left)
+	}
+}
