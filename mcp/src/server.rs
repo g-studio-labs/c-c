@@ -7115,7 +7115,7 @@ fn one_line(text: &str) -> String {
 /// `>`, `-`, ```, `1.`). Una sola comilla al principio es código, y se deja.
 fn prose_line(text: &str) -> String {
     let flat = one_line(text);
-    if flat.starts_with(|c: char| "#>-+*=_<|~".contains(c)) || flat.starts_with("```") {
+    if flat.starts_with(|c: char| "#>-+*=_<|~[".contains(c)) || flat.starts_with("```") {
         return format!("\\{flat}");
     }
     let digits = flat.len() - flat.trim_start_matches(|c: char| c.is_ascii_digit()).len();
@@ -11046,7 +11046,7 @@ mod tests {
         let flat = "a```b `c` # Título - viñeta ```";
         let r = report_args(&json!({
             "verdict": "FALLA",
-            "findings": [{ "where": hostile, "what": hostile }, { "what": hostile }, { "what": "\n# Título" }, { "what": "1. uno" }],
+            "findings": [{ "where": hostile, "what": hostile }, { "what": hostile }, { "what": "\n# Título" }, { "what": "1. uno" }, { "what": "[^1]: nota" }, { "what": "[x]: http://x.y" }],
             "evidence": hostile, "branch": hostile, "commits": [hostile, hostile],
             "agent": { "role": hostile, "model": hostile, "session": hostile }
         }))
@@ -11065,11 +11065,11 @@ mod tests {
         // Fuera del bloque, las secciones en su orden y ni una línea de más.
         let before = &lines[..fences[0]];
         let after = &lines[fences[1] + 1..];
-        assert_eq!(before.len(), 3 + 4 + 2, "ningún campo añade líneas: {md}");
+        assert_eq!(before.len(), 3 + 6 + 2, "ningún campo añade líneas: {md}");
         assert!(before[0].starts_with("**Veredicto: FALLA** · "), "{md}");
         assert_eq!(&before[1..3], &["", "**Hallazgos**"], "{md}");
-        assert!(before[3..7].iter().all(|l| l.starts_with("- ")), "{md}");
-        assert_eq!(&before[7..], &["", "**Evidencia**"], "{md}");
+        assert!(before[3..9].iter().all(|l| l.starts_with("- ")), "{md}");
+        assert_eq!(&before[9..], &["", "**Evidencia**"], "{md}");
         assert_eq!(after.len(), 2, "{md}");
         assert_eq!(after[0], "", "{md}");
         assert!(after[1].starts_with("**Rama:** "), "{md}");
@@ -11083,6 +11083,8 @@ mod tests {
         // La prosa de un hallazgo no abre otro bloque al principio de su viñeta.
         assert_eq!(before[5], "- \\# Título", "{md}");
         assert_eq!(before[6], "- 1\\. uno", "{md}");
+        assert_eq!(before[7], "- \\[^1]: nota", "una nota al pie no sale de su viñeta: {md}");
+        assert_eq!(before[8], "- \\[x]: http://x.y", "una definición de enlace no se come los `[x]` de otros: {md}");
 
         // Con sólo rol (o sólo modelo), el mismo trato.
         for key in ["role", "model"] {
