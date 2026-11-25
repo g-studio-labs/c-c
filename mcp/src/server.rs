@@ -7098,6 +7098,21 @@ fn report_args(args: &Value) -> Result<Report, String> {
     })
 }
 
+/// Un texto de hallazgo en una sola línea: con saltos de línea, un ``` al
+/// principio de una línea abre un bloque que se traga el resto del informe.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Código en línea con una valla más larga que cualquier racha de comillas del
+/// texto, y con un espacio de guarda si éste empieza o acaba en comilla.
+fn inline_code(text: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest + 1);
+    let pad = if text.starts_with('`') || text.ends_with('`') { " " } else { "" };
+    format!("{fence}{pad}{text}{pad}{fence}")
+}
+
 /// El comentario de un informe. Una sola función, para que todos se lean
 /// igual en la app, en `get_task` y en quien los resuma.
 fn report_markdown(r: &Report) -> String {
@@ -7122,10 +7137,12 @@ fn report_markdown(r: &Report) -> String {
         out.push_str("- Ninguno.\n");
     }
     for (place, what) in &r.findings {
+        let what = one_line(what);
+        let place = one_line(place);
         if place.is_empty() {
             out.push_str(&format!("- {what}\n"));
         } else {
-            out.push_str(&format!("- `{place}` — {what}\n"));
+            out.push_str(&format!("- {} — {what}\n", inline_code(&place)));
         }
     }
     // La valla, más larga que cualquier racha de comillas de la salida: si
@@ -10881,8 +10898,9 @@ mod tests {
     /// Roturas que detecta: cambiar o perder una parte del informe (veredicto,
     /// quién, hallazgos con su sitio, evidencia, rama, commits); dejarlo
     /// público; no mandar `agent`; aceptar un veredicto inventado o un
-    /// informe sin evidencia o sin agente; y que una salida con ``` rompa el
-    /// bloque.
+    /// informe sin evidencia o sin agente; que una salida con ``` rompa el
+    /// bloque; y que el texto de un hallazgo (varias líneas con ```, o un `where`
+    /// con comillas) rompa el informe.
     #[test]
     fn a_report_reads_the_same_wherever_it_comes_from() {
         let (cfg, log) = fake_cac(|_, _, _| json!({ "task": { "id": "t1" }, "comments": [{ "id": "c1", "agent": { "of": "Ana", "role": "reviewer", "model": "opus" } }] }));
@@ -10907,6 +10925,21 @@ mod tests {
         assert!(md.starts_with("**Veredicto: listo** · builder\n"), "{md}");
         assert!(md.contains("- Ninguno.\n"), "{md}");
         assert!(md.contains("\n````\n```rust\nx\n```\n````\n"), "la valla tiene que ser más larga que la salida: {md}");
+
+        let hostile = report_args(&json!({
+            "verdict": "FALLA", "evidence": "ok", "agent": { "role": "reviewer" },
+            "findings": [
+                { "where": "a`b``c", "what": "el bloque empieza con:\n```go\nfunc x() {" },
+                { "where": "`x`", "what": "segundo" }
+            ]
+        }))
+        .unwrap();
+        let md = report_markdown(&hostile);
+        assert!(
+            md.contains("- ```a`b``c``` — el bloque empieza con: ```go func x() {\n- `` `x` `` — segundo\n\n**Evidencia**\n"),
+            "un hallazgo no puede abrir un bloque ni romper el código en línea: {md}"
+        );
+        assert!(md.lines().all(|l| !l.starts_with("```") || l == "```"), "sólo la valla de la evidencia abre un bloque: {md}");
 
         let base = json!({ "id": "t1", "verdict": "PASA", "findings": [], "evidence": "ok", "agent": {} });
         let mut wrong = base.clone();
