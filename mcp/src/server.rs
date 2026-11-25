@@ -2574,6 +2574,7 @@ fn tool_defs() -> Value {
                     },
                     "clearDueAt": { "type": "boolean", "description": "Remove the task's due date." },
                     "handoff": { "type": "string", "description": "Where the work was left, for whoever picks it up next: what is done, the next step, and how to check whether it shipped. Three lines, markdown. It REPLACES the previous handoff and is stamped with your name and the time; write it before you stop, and every time the state changes. An empty string clears it. Findings and discussion go in comments; this is the summary." },
+                    "agent": agent_schema(),
                     "comment": { "type": "string", "description": "Optional. A markdown comment added to the thread after the other changes, in the same call: closing a task is handoff + status + comment at once. Append-only, like add_task_comment (needs `tasks:write`), and like it an internal note unless commentVisibility says public." },
                     "commentVisibility": { "type": "string", "enum": ["internal", "public"], "description": "Who reads `comment`. internal (default): the team. public: the client too, on a task they can see; only when the user asked for it." },
                     "claim": { "type": "boolean", "description": "Take the task: you become an assignee (the current ones stay) and it moves to in progress, atomically. Refused with `claimed: false` when it is already in progress with someone else." },
@@ -2642,9 +2643,39 @@ fn tool_defs() -> Value {
                     "id": { "type": "string" },
                     "body": { "type": "string", "description": "Markdown." },
                     "visibility": { "type": "string", "enum": ["internal", "public"], "description": "internal (default): a note for the team. public: the client reads it and is notified; only meaningful on a task they can see." },
+                    "agent": agent_schema(),
                     "dryRun": { "type": "boolean", "description": "Validate without writing." }
                 },
                 "required": ["id", "body"]
+            }
+        },
+        {
+            "name": "report_to_task",
+            "description": "Leave a subagent's report on its task as one structured internal comment: the verdict, the findings (`file:line` — what), the evidence (the command and its real output), the branch and commits, and which agent did it. Every report reads the same because cac formats it, not you. Use it at the end of a role's work (builder, reviewer) instead of a free-form add_task_comment. Needs `tasks:write`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The task: its id or its ref (proteus-12)." },
+                    "verdict": { "type": "string", "enum": REPORT_VERDICTS, "description": "A reviewer says PASA or FALLA; a builder says listo, espera or falla." },
+                    "findings": {
+                        "type": "array",
+                        "description": "What you found, one per item. An empty list says there was nothing.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "where": { "type": "string", "description": "`path/to/file.go:42`, or empty for something without a place." },
+                                "what": { "type": "string" }
+                            },
+                            "required": ["what"]
+                        }
+                    },
+                    "evidence": { "type": "string", "description": "The command you ran and its real output, trimmed. Never say something passes without it." },
+                    "branch": { "type": "string" },
+                    "commits": { "type": "array", "items": { "type": "string" }, "description": "The commit shas, oldest first." },
+                    "agent": agent_schema(),
+                    "dryRun": { "type": "boolean", "description": "Validate without writing." }
+                },
+                "required": ["id", "verdict", "findings", "evidence", "agent"]
             }
         },
         {
@@ -3951,7 +3982,7 @@ fn merge_secret_refs(current: &[Value], set: &[Value], remove: &[String], replac
 fn task_id_fields(tool: &str) -> &'static [&'static str] {
     match tool {
         "update_task" | "add_task_comment" | "edit_task_comment" | "delete_task_comment"
-        | "add_task_attachment" | "link_pull_request" => &["id"],
+        | "add_task_attachment" | "link_pull_request" | "report_to_task" => &["id"],
         "create_task" => &["parentId"],
         "create_request" | "list_requests" => &["taskId"],
         "record_decision" | "record_incident" => &["originTaskId"],
@@ -4637,6 +4668,7 @@ fn run_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                 d["ref"] = json!(r);
             }
             drop_mirrored_commit_notes(&mut d);
+            sign_handoff(&mut d);
             hoist_handoff(&mut d);
             tracker_hint(&mut d);
             Ok(d)
@@ -5089,6 +5121,11 @@ fn run_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
             // rellenar, así que no pasa por `arg_str`, que tira lo vacío.
             if let Some(h) = args.get("handoff").and_then(|v| v.as_str()) {
                 body["handoff"] = json!(h);
+                // Qué agente lo escribe: sólo viaja con el handoff, que es lo
+                // único de este PATCH que se firma.
+                if let Some(a) = agent_arg(args)? {
+                    body["agent"] = a;
+                }
             }
             if let Some(l) = &list_id {
                 body["listId"] = json!(l);
@@ -5128,7 +5165,7 @@ fn run_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                 if let Err(e) = api_patch(cfg, &format!("/api/v1/tasks/{}", urlencode(&id)), body.clone()) {
                     return task_conflict(cfg, &id, &e, "updated").ok_or(e).map(Ok)?;
                 }
-                changed.extend(body.as_object().unwrap().keys().filter(|k| *k != "ifStatus").map(|k| k.as_str()));
+                changed.extend(body.as_object().unwrap().keys().filter(|k| *k != "ifStatus" && *k != "agent").map(|k| k.as_str()));
             }
             if let Some(status) = status_id {
                 // Empty neighbours = drop it at the top of the target column.
@@ -5272,6 +5309,26 @@ fn run_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                 "createdAt": added.and_then(|c| c.get("createdAt")),
                 "taskId": id,
                 "commentsOnTask": comments.map(|c| c.len()),
+            }))
+        }
+
+        "report_to_task" => {
+            let id = arg_str(args, "id").ok_or("id is required")?;
+            let report = report_args(args)?;
+            if arg_bool(args, "dryRun") {
+                let target = api_get(cfg, &format!("/api/v1/tasks/{}", urlencode(&id)));
+                return dry_run(cfg, "tasks:write", target);
+            }
+            let mut body = json!({ "body": report_markdown(&report), "visibility": "internal" });
+            body["agent"] = report.agent.clone();
+            let detail = api_post(cfg, &format!("/api/v1/tasks/{}/comments", urlencode(&id)), body)?;
+            let added = detail.get("comments").and_then(|v| v.as_array()).and_then(|c| c.last());
+            Ok(json!({
+                "id": added.and_then(|c| c.get("id")),
+                "taskId": id,
+                "verdict": report.verdict,
+                "signedAs": added.and_then(|c| c.get("agent")).and_then(agent_signature),
+                "createdAt": added.and_then(|c| c.get("createdAt")),
             }))
         }
 
@@ -5763,7 +5820,13 @@ fn run_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                     parts.push(format!("only={}", urlencode(&names.join(","))));
                 }
             }
-            api_get(cfg, &format!("/api/v1/context?{}", parts.join("&")))
+            let mut map = api_get(cfg, &format!("/api/v1/context?{}", parts.join("&")))?;
+            for pointer in ["/inProgress", "/ready", "/changes/tasks"] {
+                if let Some(tasks) = map.pointer_mut(pointer).and_then(|v| v.as_array_mut()) {
+                    tasks.iter_mut().for_each(sign_handoff);
+                }
+            }
+            Ok(map)
         }
 
         "list_repo_docs" => {
@@ -6930,6 +6993,160 @@ fn hoist_handoff(d: &mut Value) {
     d["handoff"] = json!({ "text": text, "at": at, "by": by });
 }
 
+/// Lo que escribió un agente con el token de su dueño se firma como suyo, no
+/// como de la persona: `handoffBy` y el `authorName` de un comentario pasan a
+/// «agente de Ana (builder, sonnet)». Hasta command-and-control-522 un handoff
+/// de un agente decía sólo «Ana».
+fn sign_handoff(d: &mut Value) {
+    if let Some(sig) = d.get("handoffAgent").and_then(agent_signature) {
+        d["handoffBy"] = json!(sig);
+    }
+    if let Some(comments) = d.get_mut("comments").and_then(|c| c.as_array_mut()) {
+        for c in comments {
+            if let Some(sig) = c.get("agent").and_then(agent_signature) {
+                c["authorName"] = json!(sig);
+            }
+        }
+    }
+}
+
+/// La firma de un agente, en una sola forma para el handoff, los comentarios
+/// y el mapa: «agente de Ana», con rol y modelo entre paréntesis si los dijo.
+fn agent_signature(agent: &Value) -> Option<String> {
+    let of = agent.get("of")?.as_str()?;
+    let which: Vec<&str> = ["role", "model"]
+        .iter()
+        .filter_map(|k| agent.get(*k).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()))
+        .collect();
+    Some(if which.is_empty() { format!("agente de {of}") } else { format!("agente de {of} ({})", which.join(", ")) })
+}
+
+/// El `agent` de las herramientas que escriben: quién eres, cuando te lanzó
+/// un arnés con un papel.
+fn agent_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Which agent is writing, when you run with a role (a builder, a reviewer). With a personal token cac already signs what you write as an agent of the token's owner; this says which one, and it reads \"agente de <owner> (<role>, <model>)\".",
+        "properties": {
+            "role": { "type": "string", "description": "builder, reviewer, planner… (max 40)." },
+            "model": { "type": "string", "description": "sonnet, opus… (max 60)." },
+            "session": { "type": "string", "description": "Your session id, to find the transcript (max 80)." }
+        }
+    })
+}
+
+/// `agent` limpio: sólo rol, modelo y sesión, en texto y con los topes del
+/// servidor, para que un error se diga aquí y no como un 400 sin contexto.
+fn agent_arg(args: &Value) -> Result<Option<Value>, String> {
+    let a = match args.get("agent") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(a) => a.as_object().ok_or("agent must be an object: { role, model, session }")?,
+    };
+    let mut out = serde_json::Map::new();
+    for (key, max) in [("role", 40), ("model", 60), ("session", 80)] {
+        match a.get(key) {
+            None | Some(Value::Null) => {}
+            Some(Value::String(v)) => {
+                let v = v.trim();
+                if v.chars().count() > max {
+                    return Err(format!("agent.{key} is longer than {max} characters"));
+                }
+                if !v.is_empty() {
+                    out.insert(key.into(), json!(v));
+                }
+            }
+            Some(_) => return Err(format!("agent.{key} must be text")),
+        }
+    }
+    Ok(Some(Value::Object(out)))
+}
+
+/// Los veredictos de un informe: los del revisor y los del builder.
+const REPORT_VERDICTS: [&str; 5] = ["PASA", "FALLA", "listo", "espera", "falla"];
+
+/// Un informe de `report_to_task`, ya comprobado.
+struct Report {
+    verdict: String,
+    findings: Vec<(String, String)>,
+    evidence: String,
+    branch: Option<String>,
+    commits: Vec<String>,
+    agent: Value,
+}
+
+fn report_args(args: &Value) -> Result<Report, String> {
+    let verdict = arg_str(args, "verdict").ok_or("verdict is required")?;
+    if !REPORT_VERDICTS.contains(&verdict.as_str()) {
+        return Err(format!("unknown verdict `{verdict}`: use {}", REPORT_VERDICTS.join(", ")));
+    }
+    let raw = args.get("findings").and_then(|v| v.as_array()).ok_or("findings is required: a list, empty if there was nothing")?;
+    let mut findings = vec![];
+    for f in raw {
+        let what = f.get("what").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).ok_or("each finding needs `what`")?;
+        let place = f.get("where").and_then(|v| v.as_str()).map(str::trim).unwrap_or("");
+        findings.push((place.to_string(), what.to_string()));
+    }
+    let evidence = arg_str(args, "evidence").filter(|e| !e.trim().is_empty()).ok_or("evidence is required: the command and its real output")?;
+    let agent = agent_arg(args)?.ok_or("agent is required: { role, model, session }")?;
+    Ok(Report {
+        verdict,
+        findings,
+        evidence,
+        branch: arg_str(args, "branch"),
+        commits: arg_names(args, "commits").unwrap_or_default(),
+        agent,
+    })
+}
+
+/// El comentario de un informe. Una sola función, para que todos se lean
+/// igual en la app, en `get_task` y en quien los resuma.
+fn report_markdown(r: &Report) -> String {
+    let mut who = vec![];
+    if let Some(role) = r.agent.get("role").and_then(|v| v.as_str()) {
+        who.push(match r.agent.get("model").and_then(|v| v.as_str()) {
+            Some(model) => format!("{role} ({model})"),
+            None => role.to_string(),
+        });
+    } else if let Some(model) = r.agent.get("model").and_then(|v| v.as_str()) {
+        who.push(model.to_string());
+    }
+    if let Some(session) = r.agent.get("session").and_then(|v| v.as_str()) {
+        who.push(format!("sesión `{session}`"));
+    }
+    let mut out = format!("**Veredicto: {}**", r.verdict);
+    if !who.is_empty() {
+        out.push_str(&format!(" · {}", who.join(" · ")));
+    }
+    out.push_str("\n\n**Hallazgos**\n");
+    if r.findings.is_empty() {
+        out.push_str("- Ninguno.\n");
+    }
+    for (place, what) in &r.findings {
+        if place.is_empty() {
+            out.push_str(&format!("- {what}\n"));
+        } else {
+            out.push_str(&format!("- `{place}` — {what}\n"));
+        }
+    }
+    // La valla, más larga que cualquier racha de comillas de la salida: si
+    // no, una salida con ``` cierra el bloque a la mitad.
+    let longest = r.evidence.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
+    out.push_str(&format!("\n**Evidencia**\n{fence}\n{}\n{fence}\n", r.evidence.trim_end()));
+    let mut tail = vec![];
+    if let Some(b) = &r.branch {
+        tail.push(format!("**Rama:** `{b}`"));
+    }
+    if !r.commits.is_empty() {
+        let shas: Vec<String> = r.commits.iter().map(|c| format!("`{c}`")).collect();
+        tail.push(format!("**Commits:** {}", shas.join(", ")));
+    }
+    if !tail.is_empty() {
+        out.push_str(&format!("\n{}\n", tail.join(" · ")));
+    }
+    out
+}
+
 /// Si la tarea es un ticket de fuera, lo dice junto a desde cuándo no se lee:
 /// `tracker: { tickets, since }`, con `since` la hora del último handoff. Es
 /// lo que la skill usa para pedirle al tracker sólo los comentarios nuevos
@@ -6952,7 +7169,11 @@ fn comment_body(text: &str, args: &Value, key: &str) -> Result<Value, String> {
         Some("public") => "public",
         Some(other) => return Err(format!("unknown {key} `{other}`: use internal or public")),
     };
-    Ok(json!({ "body": text, "visibility": visibility }))
+    let mut body = json!({ "body": text, "visibility": visibility });
+    if let Some(a) = agent_arg(args)? {
+        body["agent"] = a;
+    }
+    Ok(body)
 }
 
 /// A quién va un mensaje: un canal (el chat de un espacio) o una persona.
@@ -10598,5 +10819,104 @@ mod tests {
         keys.sort();
         assert_eq!(keys, ["body", "dryRun", "link", "orgId", "title"]);
     }
-}
 
+    /// Lo que escribe un agente dice cuál es: `agent` viaja con el comentario
+    /// y con el handoff, limpio, y no con un PATCH que no firma nada
+    /// (command-and-control-522). Roturas que detecta: no mandar `agent` en
+    /// un comentario (también el de `update_task`) o con el handoff; mandarlo
+    /// en un PATCH sin handoff; dejar pasar un rol que no es texto.
+    #[test]
+    fn an_agent_says_which_one_it_is_when_it_writes() {
+        let (cfg, log) = fake_cac(|_, _, _| json!({ "task": { "id": "t1", "seq": 5 }, "comments": [] }));
+        let agent = json!({ "role": " builder ", "model": "sonnet", "session": "s-9", "extra": "x" });
+        call_tool(&cfg, "add_task_comment", &json!({ "id": "t1", "body": "medí", "agent": agent })).unwrap();
+        call_tool(&cfg, "update_task", &json!({ "id": "t1", "handoff": "Falta", "comment": "y", "agent": agent })).unwrap();
+        call_tool(&cfg, "update_task", &json!({ "id": "t1", "title": "Otro", "agent": agent })).unwrap();
+        let calls = log.lock().unwrap().clone();
+        let clean = json!({ "role": "builder", "model": "sonnet", "session": "s-9" });
+        let comments: Vec<&Value> = calls.iter().filter(|(m, p, _)| m == "POST" && p.ends_with("/comments")).map(|(_, _, b)| b).collect();
+        assert_eq!(comments.len(), 2, "{calls:?}");
+        assert!(comments.iter().all(|b| b["agent"] == clean), "{comments:?}");
+        let patches: Vec<&Value> = calls.iter().filter(|(m, _, _)| m == "PATCH").map(|(_, _, b)| b).collect();
+        assert_eq!(patches[0]["agent"], clean, "con el handoff");
+        assert!(patches[1].get("agent").is_none(), "sin handoff no hay nada que firmar: {}", patches[1]);
+        let bad = call_tool(&cfg, "add_task_comment", &json!({ "id": "t1", "body": "x", "agent": { "role": 7 } })).unwrap_err();
+        assert!(bad.contains("agent.role"), "{bad}");
+    }
+
+    /// `get_task` y `get_context` firman lo de un agente como suyo: «agente de
+    /// Jose Guzman (builder, sonnet)», y lo de la persona, con su nombre.
+    /// Roturas que detecta: no leer `handoffAgent` (el handoff de un agente
+    /// sale con el nombre de la persona); no firmar sus comentarios; firmar
+    /// lo de la persona; o no hacerlo en el mapa.
+    #[test]
+    fn an_agents_handoff_and_comments_are_signed_as_its_owners_agent() {
+        let (cfg, _) = fake_cac(|_, p, _| {
+            if p.starts_with("/api/v1/context") {
+                json!({ "inProgress": [
+                    { "id": "t1", "handoff": "Falta", "handoffBy": "Jose Guzman", "handoffAgent": { "of": "Jose Guzman", "role": "reviewer", "model": "opus" } },
+                    { "id": "t2", "handoff": "Mío", "handoffBy": "Jose Guzman" }
+                ], "changes": { "tasks": [{ "id": "t1", "handoffBy": "Jose Guzman", "handoffAgent": { "of": "Jose Guzman" } }] } })
+            } else {
+                json!({ "task": { "id": "t1", "seq": 5, "handoff": "Falta la release", "handoffAt": "2026-11-25T08:00:00Z" },
+                        "handoffBy": "Jose Guzman", "handoffAgent": { "of": "Jose Guzman", "role": "builder", "model": "sonnet", "session": "s-9" },
+                        "comments": [
+                            { "id": "c1", "authorName": "jose", "via": "mcp", "agent": { "of": "Jose Guzman", "role": "builder" }, "body": "x" },
+                            { "id": "c2", "authorName": "jose", "body": "y" }
+                        ] })
+            }
+        });
+        let task = call_tool(&cfg, "get_task", &json!({ "id": "t1" })).unwrap();
+        assert_eq!(task["handoff"]["by"], "agente de Jose Guzman (builder, sonnet)");
+        assert_eq!(task["comments"][0]["authorName"], "agente de Jose Guzman (builder)");
+        assert_eq!(task["comments"][1]["authorName"], "jose", "lo de la persona no se toca");
+        let map = call_tool(&cfg, "get_context", &json!({ "spaceId": "sp" })).unwrap();
+        assert_eq!(map["inProgress"][0]["handoffBy"], "agente de Jose Guzman (reviewer, opus)");
+        assert_eq!(map["inProgress"][1]["handoffBy"], "Jose Guzman");
+        assert_eq!(map["changes"]["tasks"][0]["handoffBy"], "agente de Jose Guzman");
+    }
+
+    /// Un informe se lee igual venga de quien venga: lo forma una función, y
+    /// `report_to_task` lo deja como nota interna firmada por el agente.
+    /// Roturas que detecta: cambiar o perder una parte del informe (veredicto,
+    /// quién, hallazgos con su sitio, evidencia, rama, commits); dejarlo
+    /// público; no mandar `agent`; aceptar un veredicto inventado o un
+    /// informe sin evidencia o sin agente; y que una salida con ``` rompa el
+    /// bloque.
+    #[test]
+    fn a_report_reads_the_same_wherever_it_comes_from() {
+        let (cfg, log) = fake_cac(|_, _, _| json!({ "task": { "id": "t1" }, "comments": [{ "id": "c1", "agent": { "of": "Ana", "role": "reviewer", "model": "opus" } }] }));
+        let args = json!({
+            "id": "t1", "verdict": "FALLA",
+            "findings": [{ "where": "backend/x.go:42", "what": "no mira el token" }, { "what": "falta la migración" }],
+            "evidence": "$ go test ./...\nok", "branch": "command-and-control-522", "commits": ["abc123", "def456"],
+            "agent": { "role": "reviewer", "model": "opus", "session": "s-1" }
+        });
+        let out = call_tool(&cfg, "report_to_task", &args).unwrap();
+        assert_eq!(out["signedAs"], "agente de Ana (reviewer, opus)");
+        let sent = log.lock().unwrap().iter().find(|(m, p, _)| m == "POST" && p == "/api/v1/tasks/t1/comments").map(|(_, _, b)| b.clone()).unwrap();
+        assert_eq!(sent["visibility"], "internal");
+        assert_eq!(sent["agent"], json!({ "role": "reviewer", "model": "opus", "session": "s-1" }));
+        assert_eq!(
+            sent["body"],
+            "**Veredicto: FALLA** · reviewer (opus) · sesión `s-1`\n\n**Hallazgos**\n- `backend/x.go:42` — no mira el token\n- falta la migración\n\n**Evidencia**\n```\n$ go test ./...\nok\n```\n\n**Rama:** `command-and-control-522` · **Commits:** `abc123`, `def456`\n"
+        );
+
+        let empty = report_args(&json!({ "verdict": "listo", "findings": [], "evidence": "```rust\nx\n```", "agent": { "role": "builder" } })).unwrap();
+        let md = report_markdown(&empty);
+        assert!(md.starts_with("**Veredicto: listo** · builder\n"), "{md}");
+        assert!(md.contains("- Ninguno.\n"), "{md}");
+        assert!(md.contains("\n````\n```rust\nx\n```\n````\n"), "la valla tiene que ser más larga que la salida: {md}");
+
+        let base = json!({ "id": "t1", "verdict": "PASA", "findings": [], "evidence": "ok", "agent": {} });
+        let mut wrong = base.clone();
+        wrong["verdict"] = json!("aprobado");
+        assert!(call_tool(&cfg, "report_to_task", &wrong).unwrap_err().contains("verdict"));
+        let mut mute = base.clone();
+        mute["evidence"] = json!("  ");
+        assert!(call_tool(&cfg, "report_to_task", &mute).unwrap_err().contains("evidence"));
+        let mut anonymous = base.clone();
+        anonymous.as_object_mut().unwrap().remove("agent");
+        assert!(call_tool(&cfg, "report_to_task", &anonymous).unwrap_err().contains("agent"));
+    }
+}
