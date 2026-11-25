@@ -532,7 +532,9 @@ func (h *taskHandler) DeleteSpace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.DeleteSpace(sp.ID); err != nil {
-		SendErrorResponse(w, http.StatusInternalServerError, "Failed to delete space", err.Error())
+		if !mapTaskError(w, err) {
+			SendErrorResponse(w, http.StatusInternalServerError, "Failed to delete space", err.Error())
+		}
 		return
 	}
 	SendResult(w, http.StatusOK, domain.APIResponse[any]{Success: true, Message: "Space deleted"})
@@ -755,7 +757,9 @@ func (h *taskHandler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.DeleteFolder(f.ID); err != nil {
-		SendErrorResponse(w, http.StatusInternalServerError, "Failed to delete folder", err.Error())
+		if !mapTaskError(w, err) {
+			SendErrorResponse(w, http.StatusInternalServerError, "Failed to delete folder", err.Error())
+		}
 		return
 	}
 	SendResult(w, http.StatusOK, domain.APIResponse[any]{Success: true, Message: "Folder deleted"})
@@ -810,7 +814,9 @@ func (h *taskHandler) DeleteList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.DeleteList(l.ID); err != nil {
-		SendErrorResponse(w, http.StatusInternalServerError, "Failed to delete list", err.Error())
+		if !mapTaskError(w, err) {
+			SendErrorResponse(w, http.StatusInternalServerError, "Failed to delete list", err.Error())
+		}
 		return
 	}
 	SendResult(w, http.StatusOK, domain.APIResponse[any]{Success: true, Message: "List deleted"})
@@ -1209,7 +1215,9 @@ func (h *taskHandler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.DeleteTask(t.ID); err != nil {
-		SendErrorResponse(w, http.StatusInternalServerError, "Failed to delete task", err.Error())
+		if !mapTaskError(w, err) {
+			SendErrorResponse(w, http.StatusInternalServerError, "Failed to delete task", err.Error())
+		}
 		return
 	}
 	SendResult(w, http.StatusOK, domain.APIResponse[any]{Success: true, Message: "Task deleted"})
