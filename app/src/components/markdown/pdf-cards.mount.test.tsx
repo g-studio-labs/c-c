@@ -17,7 +17,7 @@ describe("montar el editor con un PDF", () => {
     const errores = vi.spyOn(console, "error").mockImplementation(() => {});
     const { default: MarkdownEditor } = await import("./MarkdownEditor");
     const { PromptProvider } = await import("@/components/PromptDialog");
-    const { container } = render(
+    const { container, unmount } = render(
       <PromptProvider>
         <MarkdownEditor value="[informe.pdf](/api/v1/notes/n/attachments/a/raw)" onChange={() => {}} />
       </PromptProvider>,
@@ -26,5 +26,14 @@ describe("montar el editor con un PDF", () => {
     const anidado = errores.mock.calls.some((c) => String(c[0]).includes("Render methods should be a pure function"));
     errores.mockRestore();
     expect(anidado).toBe(false);
+
+    // La tarjeta se desmonta en una microtarea y React hace ese trabajo en su
+    // planificador, después. Si la prueba acaba antes, ese trabajo corre con el
+    // entorno ya desmontado («window is not defined») y tumba la suite entera
+    // aunque todo pase (CI del 25-nov, sólo en una de las tres zonas). Se
+    // espera a que la tarjeta quede vacía.
+    const host = container.querySelector("[data-pdf-card]")!.parentElement!;
+    unmount();
+    await waitFor(() => expect(host.childNodes.length).toBe(0));
   });
 });
