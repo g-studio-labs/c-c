@@ -9,6 +9,7 @@ import (
 
 	"github.com/guz-studio/cac/backend/internal/core/domain"
 	lg "github.com/guz-studio/cac/backend/internal/core/logger"
+	"github.com/guz-studio/cac/backend/internal/core/repository"
 )
 
 // ghRelease: la release tal como la cuentan el evento `release` y la API de
@@ -85,7 +86,7 @@ func (s *GitHubService) saveRelease(repo *domain.GitHubRepo, rel ghRelease) (*do
 		ListedByLine: true,
 	}
 	var commits []domain.ReleaseCommit
-	var inheritUpTo *time.Time
+	var inherit *repository.Inheritance
 	if s.CanRead() {
 		prev, err := s.previousTag(repo, rel.TagName, published)
 		if err != nil {
@@ -99,11 +100,13 @@ func (s *GitHubService) saveRelease(repo *domain.GitHubRepo, rel ghRelease) (*do
 			}
 			r.CommitCount, r.Truncated = total, total > len(commits)
 			if prev.lineStart {
-				inheritUpTo = &prev.at
+				if inherit, err = s.inheritance(repo, rel.TagName, prev.tag, prev.at); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
-	if _, err := s.repo.SaveReleaseInheriting(r, commits, inheritUpTo); err != nil {
+	if _, err := s.repo.SaveReleaseInheriting(r, commits, inherit); err != nil {
 		return nil, err
 	}
 	// Si otra entrega la guardó a la vez, manda la suya.
@@ -184,7 +187,8 @@ const ReleasesRelistedPerRound = 10
 //
 // Nada se quita y lo que ya estaba se queda; la release se marca y no se
 // vuelve a mirar. Si GitHub falla, la vuelta para ahí y sigue en la
-// siguiente; si ya no conoce una de las dos etiquetas, se marca sin añadir.
+// siguiente; si ya no conoce una de las dos etiquetas, se marca sin añadir y
+// la vuelta sigue con las demás (ver goneFromGitHub).
 func (s *GitHubService) RelistReleasesByLine(limit int) (int, error) {
 	if !s.CanRead() {
 		return 0, nil
@@ -220,9 +224,8 @@ func (s *GitHubService) relistRelease(repo *domain.GitHubRepo, rel *domain.Relea
 	}
 	if prev != nil {
 		commits, total, err := s.compareCommits(repo, prev.Tag, rel.Tag)
-		var status *ghStatusError
-		if errors.As(err, &status) && (status.Code == http.StatusNotFound || status.Code == http.StatusUnprocessableEntity) {
-			lg.Warn(fmt.Sprintf("github: relist %s: compare %s...%s: %d", repo.FullName, prev.Tag, rel.Tag, status.Code))
+		if goneFromGitHub(err) {
+			lg.Warn(fmt.Sprintf("github: relist %s: compare %s...%s: %v", repo.FullName, prev.Tag, rel.Tag, err))
 			return s.repo.RelistRelease(rel, nil, nil)
 		}
 		if err != nil {
@@ -238,7 +241,47 @@ func (s *GitHubService) relistRelease(repo *domain.GitHubRepo, rel *domain.Relea
 	if base == nil {
 		return s.repo.RelistRelease(rel, nil, nil)
 	}
-	return s.repo.RelistRelease(rel, nil, &base.PublishedAt)
+	inherit, err := s.inheritance(repo, rel.Tag, base.Tag, base.PublishedAt)
+	if goneFromGitHub(err) {
+		lg.Warn(fmt.Sprintf("github: relist %s: compare %s...%s: %v", repo.FullName, rel.Tag, base.Tag, err))
+		return s.repo.RelistRelease(rel, nil, nil)
+	}
+	if err != nil {
+		return err
+	}
+	return s.repo.RelistRelease(rel, nil, inherit)
+}
+
+// goneFromGitHub: GitHub ya no conoce una de las etiquetas del `compare`
+// (404) o no puede compararlas (422). Preguntar otra vez no lo arregla, así
+// que el relistado marca la release y sigue: si devolviera el error, la más
+// vieja sin relistar se quedaría la primera para siempre y ninguna de las de
+// después se relistaría.
+func goneFromGitHub(err error) bool {
+	var status *ghStatusError
+	return errors.As(err, &status) && (status.Code == http.StatusNotFound || status.Code == http.StatusUnprocessableEntity)
+}
+
+// inheritance: lo que hereda `tag`, primera release de su línea, de las
+// publicadas hasta su base (ver repository.Inheritance). Pide el `compare
+// <tag>...<base>`, lo que la base lleva y `tag` no, para no heredarlo. Si
+// viene cortado no se sabe qué más falta, y no se hereda nada: mejor un
+// commit que no conste como publicado que uno que conste sin estar dentro.
+func (s *GitHubService) inheritance(repo *domain.GitHubRepo, tag, base string, at time.Time) (*repository.Inheritance, error) {
+	missing, total, err := s.compareCommits(repo, tag, base)
+	if err != nil {
+		return nil, err
+	}
+	if total > len(missing) {
+		lg.Warn(fmt.Sprintf("github: %s: %s no hereda de %s: le faltan %d commits de la base y sólo se listan %d",
+			repo.FullName, tag, base, total, len(missing)))
+		return nil, nil
+	}
+	except := make([]string, len(missing))
+	for i, c := range missing {
+		except[i] = c.SHA
+	}
+	return &repository.Inheritance{UpTo: at, Except: except}, nil
 }
 
 // compareCommits: los commits de entre dos tags (una página, hasta

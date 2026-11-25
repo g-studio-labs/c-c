@@ -339,6 +339,7 @@ func TestAReleaseIsListedAgainstItsOwnLine(t *testing.T) {
 	}
 	f.gh.compare["v1.0.0...v1.1.0"] = []string{shaRel2, shaRel1}
 	f.gh.compare["v1.1.0...desktop-v0.1.0"] = []string{shaRel3}
+	f.gh.compare["desktop-v0.1.0...v1.1.0"] = []string{}
 
 	f.hook(t, "release", "d-1", releaseEvent("published", "v1.1.0", day.Add(2*time.Hour), false, false))
 	var rel domain.Release
@@ -358,5 +359,34 @@ func TestAReleaseIsListedAgainstItsOwnLine(t *testing.T) {
 	}
 	if lines := f.releasedLines("it-1"); len(lines) != before {
 		t.Errorf("se anunció lo heredado: %q", lines)
+	}
+}
+
+// La anterior de su línea puede estar sólo en GitHub (salió antes de que cac
+// escuchara): la desktop-v0.1.0 se compara contra la desktop-v0.0.9 de
+// GitHub, no contra la v1.0.0, más nueva, que sí está en la tabla.
+//
+// Roturas que atrapa: tomar de la lista de GitHub la anterior de cualquier
+// línea (se compararía contra la v1.0.0 y lo de la nativa no constaría).
+func TestThePreviousReleaseOfTheLineMayOnlyBeOnGitHub(t *testing.T) {
+	f := releaseSetup(t)
+	day := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := repository.NewGitHubRepository(f.db).SaveRelease(&domain.Release{OrgID: "org-1", RepoID: 100,
+		RepoFullName: "dwit/api", Tag: "v1.0.0", PublishedAt: day, ListedByLine: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.gh.releases = fmt.Sprintf(`[
+		{"tag_name":"v1.0.0","published_at":%q},
+		{"tag_name":"desktop-v0.0.9","published_at":%q}]`,
+		day.Format(time.RFC3339), day.Add(-time.Hour).Format(time.RFC3339))
+	f.gh.compare["desktop-v0.0.9...desktop-v0.1.0"] = []string{shaRel3}
+
+	f.hook(t, "release", "d-1", releaseEvent("published", "desktop-v0.1.0", day.Add(time.Hour), false, false))
+	var desk domain.Release
+	f.db.Where("tag = ?", "desktop-v0.1.0").First(&desk)
+	var shas []string
+	f.db.Model(&domain.ReleaseCommit{}).Where("release_id = ?", desk.ID).Pluck("sha", &shas)
+	if desk.PrevTag != "desktop-v0.0.9" || fmt.Sprint(shas) != fmt.Sprint([]string{shaRel3}) {
+		t.Errorf("desktop-v0.1.0 se comparó contra %q y lleva %v", desk.PrevTag, shas)
 	}
 }

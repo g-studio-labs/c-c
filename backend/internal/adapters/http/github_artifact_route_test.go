@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -437,13 +438,17 @@ func TestTheBackfillFollowsRenamesAndIncidents(t *testing.T) {
 // Roturas que atrapa: no relistar (un commit de app/ que la v1.36.0 lleva
 // pero que su `compare` viejo contra mcp-v1.33.0 no listó no saldría),
 // comparar contra la anterior de cualquier línea, no heredar en la primera
-// de una línea, volver a preguntar a GitHub por una ya puesta al día, y
-// volver a comparar una cuya anterior ya era de su línea.
+// de una línea, volver a preguntar a GitHub por una ya puesta al día, volver
+// a comparar una cuya anterior ya era de su línea, y relistar de la más nueva
+// a la más vieja: la desktop-v0.1.0 heredaría de la v1.36.0 antes de que ésta
+// ganara lo que su `compare` nuevo trae y el viejo no (el de nativa `n`, que
+// la lista vieja, cortada, no tenía).
 func TestOldReleasesAreRelistedByLine(t *testing.T) {
 	f := artifactSetup(t)
-	app, mcp, desk := cacSha('a'), cacSha('e'), cacSha('d')
+	app, mcp, desk, late := cacSha('a'), cacSha('e'), cacSha('d'), cacSha('f')
 	f.hook(t, "push", "p-1", cacPush(app, "fix(app): x cac#12", "app/src/x.ts"))
 	f.hook(t, "push", "p-2", cacPush(desk, "fix(desktop): x cac#12", "desktop/src/x.rs"))
+	f.hook(t, "push", "p-3", cacPush(late, "fix(desktop): y cac#12", "desktop/src/y.rs"))
 	day := time.Date(2026, 11, 25, 3, 0, 0, 0, time.UTC)
 	old := func(tag, prev string, at time.Time, shas ...string) {
 		var commits []domain.ReleaseCommit
@@ -462,7 +467,9 @@ func TestOldReleasesAreRelistedByLine(t *testing.T) {
 	old("mcp-v1.33.0", "v1.35.0", day.Add(time.Hour), app, mcp)
 	old("v1.36.0", "mcp-v1.33.0", day.Add(2*time.Hour), desk)
 	old("desktop-v0.1.0", "v1.36.0", day.Add(3*time.Hour))
-	f.gh.compare["v1.35.0...v1.36.0"] = []string{app, mcp, desk}
+	f.gh.compare["v1.35.0...v1.36.0"] = []string{app, mcp, desk, late}
+	f.gh.compare["desktop-v0.1.0...v1.36.0"] = []string{}
+	f.gh.compare["mcp-v1.33.0...v1.35.0"] = []string{}
 
 	if got := f.releasedIn(t, "it-1"); got["aaaaaaa"] != "" {
 		t.Fatalf("antes de relistar el de app/ no salió con ninguna v*: %v", got)
@@ -470,11 +477,13 @@ func TestOldReleasesAreRelistedByLine(t *testing.T) {
 	if _, err := f.svc.RelistReleasesByLine(10); err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(f.gh.compared) != "[v1.35.0...v1.36.0]" {
-		t.Errorf("se compararon %v, se esperaba sólo v1.35.0...v1.36.0", f.gh.compared)
+	compared := append([]string{}, f.gh.compared...)
+	slices.Sort(compared)
+	if fmt.Sprint(compared) != "[desktop-v0.1.0...v1.36.0 mcp-v1.33.0...v1.35.0 v1.35.0...v1.36.0]" {
+		t.Errorf("se compararon %v, se esperaba v1.35.0...v1.36.0 y lo que a las primeras de su línea les falta de su base", compared)
 	}
 	got := f.releasedIn(t, "it-1")
-	want := map[string]string{"aaaaaaa": "v1.36.0", "ddddddd": "desktop-v0.1.0"}
+	want := map[string]string{"aaaaaaa": "v1.36.0", "ddddddd": "desktop-v0.1.0", "fffffff": "desktop-v0.1.0"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("relistadas: %v, se esperaba %v", got, want)
 	}
@@ -487,5 +496,99 @@ func TestOldReleasesAreRelistedByLine(t *testing.T) {
 	f.gh.compared = nil
 	if n, err := f.svc.RelistReleasesByLine(10); err != nil || n != 0 || len(f.gh.compared) != 0 {
 		t.Errorf("la segunda vuelta hizo algo: %d, %v, %v", n, f.gh.compared, err)
+	}
+}
+
+// oldRelease: una release como la guardaba cac antes del 25-nov-2026, sin
+// relistar, comparada contra `prev`.
+func (f *artifactFixture) oldRelease(t *testing.T, tag, prev string, at time.Time, shas ...string) {
+	t.Helper()
+	var commits []domain.ReleaseCommit
+	for _, s := range shas {
+		commits = append(commits, domain.ReleaseCommit{SHA: s})
+	}
+	rel := &domain.Release{OrgID: "org-1", RepoID: domain.CacRepoID, RepoFullName: cacFullName, Tag: tag, PrevTag: prev, PublishedAt: at}
+	if _, err := repository.NewGitHubRepository(f.db).SaveRelease(rel, commits); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f *artifactFixture) relisted(tag string) bool {
+	var rel domain.Release
+	f.db.Where("repo_id = ? AND tag = ?", domain.CacRepoID, tag).First(&rel)
+	return rel.ListedByLine
+}
+
+// Una etiqueta que GitHub ya no sabe comparar (404) no atasca el relistado:
+// esa release se marca sin añadir nada y la vuelta sigue con las de después.
+// Pasa con el `compare` contra la anterior de su línea y con el que pide la
+// primera de una línea para saber qué no heredar.
+//
+// Roturas que atrapa: devolver el error del 404 en cualquiera de los dos
+// sitios (la vuelta fallaría, la v1.35.0 se quedaría la primera para
+// siempre y la v1.36.0 no se relistaría nunca), y heredar sin saber qué le
+// falta a la nueva.
+func TestARelistThatGitHubCannotCompareDoesNotBlockTheRest(t *testing.T) {
+	f := artifactSetup(t)
+	app, desk := cacSha('a'), cacSha('d')
+	f.hook(t, "push", "p-1", cacPush(app, "fix(app): x cac#12", "app/src/x.ts"))
+	f.hook(t, "push", "p-2", cacPush(desk, "fix(desktop): x cac#12", "desktop/src/x.rs"))
+	day := time.Date(2026, 11, 25, 3, 0, 0, 0, time.UTC)
+	f.oldRelease(t, "v1.34.0", "v1.33.0", day, desk)
+	f.oldRelease(t, "v1.35.0", "mcp-v0.9.0", day.Add(time.Hour))
+	f.oldRelease(t, "v1.36.0", "mcp-v0.9.1", day.Add(2*time.Hour))
+	f.oldRelease(t, "desktop-v0.1.0", "v1.36.0", day.Add(3*time.Hour))
+	// Ni v1.34.0...v1.35.0 ni desktop-v0.1.0...v1.36.0: 404.
+	f.gh.compare["v1.35.0...v1.36.0"] = []string{app}
+
+	if _, err := f.svc.RelistReleasesByLine(10); err != nil {
+		t.Fatalf("un 404 del compare cortó la vuelta: %v", err)
+	}
+	for _, tag := range []string{"v1.34.0", "v1.35.0", "v1.36.0", "desktop-v0.1.0"} {
+		if !f.relisted(tag) {
+			t.Errorf("%s no quedó relistada", tag)
+		}
+	}
+	got := f.releasedIn(t, "it-1")
+	if want := map[string]string{"aaaaaaa": "v1.36.0"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("tras el 404: %v, se esperaba %v (la desktop-v0.1.0 sin heredar)", got, want)
+	}
+}
+
+func cacReleaseEvent(tag string, published time.Time) string {
+	return fmt.Sprintf(`{"action":"published","repository":{"id":%d,"full_name":%q},
+		"release":{"tag_name":%q,"name":%q,"html_url":"https://github.com/%s/releases/tag/%s",
+		"published_at":%q,"author":{"login":"jose"}}}`,
+		domain.CacRepoID, cacFullName, tag, tag, cacFullName, tag, published.UTC().Format(time.RFC3339))
+}
+
+// La carrera de la primera release de una línea: desktop-release se lanza en
+// A; mientras compila entra C (de desktop/) y sale la v1.36.0 con C; luego se
+// publica la desktop-v0.1.0, con target A. Su base es la v1.36.0, y heredar
+// por fecha le metería C sin llevarlo. Lo que la base lleva y ella no
+// (`compare desktop-v0.1.0...v1.36.0`) no se hereda: C no ha salido, y A sí.
+//
+// Roturas que atrapa: heredar todo lo publicado hasta la base sin quitar lo
+// que la nueva no lleva, y no heredar nada (A, de la nativa, no saldría).
+func TestTheFirstReleaseOfALineOnlyInheritsWhatItCarries(t *testing.T) {
+	f := artifactSetup(t)
+	a, c := cacSha('a'), cacSha('c')
+	f.hook(t, "push", "p-1", cacPush(a, "fix(desktop): a cac#12", "desktop/src/a.rs"))
+	f.hook(t, "push", "p-2", cacPush(c, "fix(desktop): c cac#12", "desktop/src/c.rs"))
+	day := time.Date(2026, 11, 25, 3, 0, 0, 0, time.UTC)
+	f.release(t, "v1.35.0", day, a)
+	f.gh.compare["v1.35.0...v1.36.0"] = []string{c}
+	f.gh.compare["v1.36.0...desktop-v0.1.0"] = []string{}
+	f.gh.compare["desktop-v0.1.0...v1.36.0"] = []string{c}
+
+	f.hook(t, "release", "r-1", cacReleaseEvent("v1.36.0", day.Add(time.Hour)))
+	f.hook(t, "release", "r-2", cacReleaseEvent("desktop-v0.1.0", day.Add(2*time.Hour)))
+	var desk domain.Release
+	if err := f.db.Where("tag = ?", "desktop-v0.1.0").First(&desk).Error; err != nil {
+		t.Fatalf("la desktop-v0.1.0 no se guardó: %v", err)
+	}
+	got := f.releasedIn(t, "it-1")
+	if want := map[string]string{"aaaaaaa": "desktop-v0.1.0"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("publicados: %v, se esperaba %v (C no va en la desktop-v0.1.0)", got, want)
 	}
 }

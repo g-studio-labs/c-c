@@ -81,12 +81,11 @@ func (r *GitHubRepository) SaveRelease(rel *domain.Release, commits []domain.Rel
 // Su `compare` va contra la anterior de otra línea (su base), y sólo lista lo
 // que hay entre las dos; pero la release lleva todo lo de antes. Así que
 // hereda, como filas suyas, los commits de toda release del repo publicada
-// hasta `upTo` (la base). Es lo único de aquí que se apoya en fechas, y sólo
-// una vez por línea.
+// hasta la base (ver Inheritance), menos los que la base lleva y ella no.
 //
 // Sin esto, la primera `desktop-v*` no llevaría nada de la nativa que saliera
 // antes en una `v*`, que es justo lo que tiene que dar por publicado.
-func (r *GitHubRepository) SaveReleaseInheriting(rel *domain.Release, commits []domain.ReleaseCommit, upTo *time.Time) (bool, error) {
+func (r *GitHubRepository) SaveReleaseInheriting(rel *domain.Release, commits []domain.ReleaseCommit, inherit *Inheritance) (bool, error) {
 	created := false
 	err := r.db.Transaction(func(tx *gorm.DB) error {
 		res := tx.Clauses(clause.OnConflict{
@@ -100,10 +99,10 @@ func (r *GitHubRepository) SaveReleaseInheriting(rel *domain.Release, commits []
 		if err := addReleaseCommits(tx, rel, commits); err != nil {
 			return err
 		}
-		if upTo == nil {
+		if inherit == nil {
 			return nil
 		}
-		return inheritCommits(tx, rel, *upTo)
+		return inheritCommits(tx, rel, *inherit)
 	})
 	return created, err
 }
@@ -124,26 +123,46 @@ func addReleaseCommits(tx *gorm.DB, rel *domain.Release, commits []domain.Releas
 	}).CreateInBatches(commits, 100).Error
 }
 
+// Inheritance: lo que hereda la primera release de una línea.
+//
+// UpTo es cuándo se publicó su base. La fecha sola no basta: una
+// `desktop-v*` se crea al final de su workflow con el target del momento en
+// que se lanzó, así que una `v*` que sale mientras compila (la base) puede
+// llevar commits que ella no lleva. Except son ésos, los del `compare
+// <nueva>...<base>`, y no se heredan (command-and-control-526).
+type Inheritance struct {
+	UpTo   time.Time
+	Except []string
+}
+
 // inheritCommits: ver SaveReleaseInheriting.
-func inheritCommits(tx *gorm.DB, rel *domain.Release, upTo time.Time) error {
+func inheritCommits(tx *gorm.DB, rel *domain.Release, inherit Inheritance) error {
 	var old []domain.ReleaseCommit
 	if err := tx.Raw(`
 		SELECT DISTINCT ON (rc.sha) rc.sha, rc.title, rc.html_url
 		FROM release_commits rc JOIN releases r ON r.id = rc.release_id
 		WHERE rc.repo_id = ? AND r.id <> ? AND r.published_at <= ?
-		ORDER BY rc.sha`, rel.RepoID, rel.ID, upTo).Scan(&old).Error; err != nil {
+		ORDER BY rc.sha`, rel.RepoID, rel.ID, inherit.UpTo).Scan(&old).Error; err != nil {
 		return err
 	}
-	for i := range old {
-		old[i].Inherited = true
+	// En Go y no con `NOT IN ?`: con la lista vacía GORM escribe
+	// `NOT IN (NULL)`, que no deja pasar nada.
+	kept := old[:0]
+	for _, c := range old {
+		if !slices.Contains(inherit.Except, c.SHA) {
+			c.Inherited = true
+			kept = append(kept, c)
+		}
 	}
-	return addReleaseCommits(tx, rel, old)
+	return addReleaseCommits(tx, rel, kept)
 }
 
 // ReleasesToRelist: hasta `limit` releases del repo guardadas antes de
 // comparar por línea (domain.Release.ListedByLine), de la más vieja a la
-// más nueva: la primera de una línea hereda de las de antes, y tienen que
-// estar ya listadas.
+// más nueva. El orden importa: la primera de una línea hereda las filas de
+// las de antes, y lo que el `compare` nuevo de una de ésas añade (lo que su
+// lista vieja, cortada en domain.MaxReleaseCommits, no traía) sólo lo hereda
+// si se relistó antes. Lo guarda TestOldReleasesAreRelistedByLine.
 func (r *GitHubRepository) ReleasesToRelist(repoID int64, limit int) ([]domain.Release, error) {
 	var rels []domain.Release
 	err := r.db.Where("repo_id = ? AND NOT listed_by_line", repoID).
@@ -155,13 +174,13 @@ func (r *GitHubRepository) ReleasesToRelist(repoID int64, limit int) ([]domain.R
 // le faltan (los de su `compare` contra la anterior de su línea, o los que
 // hereda si es la primera) sin quitar ninguno, y la marca. Volver a pasar por
 // ella no cambia nada.
-func (r *GitHubRepository) RelistRelease(rel *domain.Release, commits []domain.ReleaseCommit, inheritUpTo *time.Time) error {
+func (r *GitHubRepository) RelistRelease(rel *domain.Release, commits []domain.ReleaseCommit, inherit *Inheritance) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		if err := addReleaseCommits(tx, rel, commits); err != nil {
 			return err
 		}
-		if inheritUpTo != nil {
-			if err := inheritCommits(tx, rel, *inheritUpTo); err != nil {
+		if inherit != nil {
+			if err := inheritCommits(tx, rel, *inherit); err != nil {
 				return err
 			}
 		}
