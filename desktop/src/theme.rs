@@ -339,6 +339,25 @@ const FONT_FAMILY: &str = "Inter";
 /// `index.css`): la de los identificadores, las referencias y el código.
 const MONO_FONT_FAMILY: &str = "Iosevka Term Slab";
 
+/// La tipografía de los emojis a color, que va dentro del binario.
+///
+/// Con la del sistema salían grises: el motor de texto busca el carácter en
+/// la cadena de reserva de fontconfig y se queda con el primero que lo trae,
+/// que es DejaVu Sans y sus ❤ y 😂 en blanco y negro, antes de llegar a
+/// «Noto Color Emoji» (incidente ca5c0caa). Pedirle «Noto Color Emoji» como
+/// reserva propia tampoco vale: GPUI descarta, sin decir nada, toda cara que
+/// no cubra la «m». `CacEmoji.ttf` es Noto con la «m» y una lista corta de
+/// emojis (ver `assets/fonts/build-cac-emoji.py`); el resto sigue como antes.
+pub const EMOJI_FAMILY: &str = "Cac Emoji";
+
+/// La letra del texto, con los emojis a color como reserva. Va en la raíz de
+/// la ventana y lo demás la hereda.
+pub fn text_font() -> gpui_kit::Font {
+    let mut font = gpui_kit::font(FONT_FAMILY);
+    font.fallbacks = Some(gpui_kit::FontFallbacks::from_fonts(vec![EMOJI_FAMILY.to_string()]));
+    font
+}
+
 /// Marca de que esta app ya tiene sus tipografías cargadas.
 struct FontsInstalled;
 impl gpui_kit::Global for FontsInstalled {}
@@ -360,7 +379,7 @@ fn install_fonts(cx: &mut App) {
         return;
     }
     cx.set_global(FontsInstalled);
-    let faces: [&'static [u8]; 7] = [
+    let faces: [&'static [u8]; 8] = [
         include_bytes!("../assets/fonts/Inter-Regular.ttf"),
         include_bytes!("../assets/fonts/Inter-Medium.ttf"),
         include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
@@ -368,6 +387,7 @@ fn install_fonts(cx: &mut App) {
         include_bytes!("../assets/fonts/Inter-Italic.ttf"),
         include_bytes!("../assets/fonts/IosevkaTermSlab-Regular.ttf"),
         include_bytes!("../assets/fonts/IosevkaTermSlab-Bold.ttf"),
+        include_bytes!("../assets/fonts/CacEmoji.ttf"),
     ];
     // Si no se pudieran cargar, el texto sale con la letra del sistema: se
     // lee igual.
@@ -486,6 +506,21 @@ mod tests {
             assert_eq!(theme.muted_foreground, Hsla::from(rgb(0x676767)));
         });
     }
+    /// Los emojis a color son la reserva del texto, y la cara que lleva ese
+    /// nombre es la que va dentro del binario.
+    ///
+    /// Roturas que atrapa: quitar la reserva (el ❤ vuelve a salir gris con
+    /// DejaVu); cambiar el nombre de la familia en un lado y no en el otro
+    /// (GPUI no avisa: descarta la reserva y todo sigue «funcionando»).
+    #[test]
+    fn color_emoji_are_the_fallback_and_the_font_is_bundled_under_that_name() {
+        let fallbacks = super::text_font().fallbacks.expect("sin reserva");
+        assert_eq!(fallbacks.fallback_list(), [super::EMOJI_FAMILY]);
+        let name: Vec<u8> = super::EMOJI_FAMILY.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        let font: &[u8] = include_bytes!("../assets/fonts/CacEmoji.ttf");
+        assert!(font.windows(name.len()).any(|window| window == name), "la cara no se llama {}", super::EMOJI_FAMILY);
+    }
+
     /// La app trae su letra, con sus negritas, y no depende de la que haya
     /// en la máquina.
     ///

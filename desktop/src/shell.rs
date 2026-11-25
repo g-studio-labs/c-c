@@ -139,7 +139,7 @@ impl Render for Shell {
             Screen::NewPassword(view) => div().size_full().child(view.clone()),
             Screen::Open(view) => div().size_full().child(view.clone()),
         };
-        screen.child(crate::drop_wake::drop_wake()).children(asking)
+        screen.font(crate::theme::text_font()).child(crate::drop_wake::drop_wake()).children(asking)
     }
 }
 
