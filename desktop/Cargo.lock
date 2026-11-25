@@ -967,6 +967,7 @@ dependencies = [
  "serde_json",
  "sys-locale",
  "tokio",
+ "ttf-parser",
  "winresource",
  "wiremock",
 ]

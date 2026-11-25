@@ -86,11 +86,16 @@ assets = [
     ["packaging/icons/128x128.png", "usr/share/icons/hicolor/128x128/apps/dev.guz-studio.cac.native.png", "644"],
     ["packaging/icons/256x256.png", "usr/share/icons/hicolor/256x256/apps/dev.guz-studio.cac.native.png", "644"],
     ["packaging/icons/512x512.png", "usr/share/icons/hicolor/512x512/apps/dev.guz-studio.cac.native.png", "644"],
+    # Las tipografías van dentro del binario y su licencia (OFL) pide ir con ellas.
+    ["assets/fonts/LICENSE-*.txt", "usr/share/doc/cac-desktop/licenses/", "644"],
 ]
 
 [dev-dependencies]
 # El arnés de pruebas de GPUI: ventanas sin pantalla, clics y teclado de verdad.
 gpui-kit = { version = "=0.9.1", features = ["test-support"] }
+# Leer las tipografías que van dentro del binario (qué cubren y cómo se
+# llaman). Ya estaba en el árbol por el motor de texto de GPUI.
+ttf-parser = "=0.25.1"
 # Para fabricar una sesión de prueba.
 serde_json = "1"
 # El servidor de mentira de las pruebas de pantalla, el mismo que usa el core.

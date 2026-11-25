@@ -506,6 +506,14 @@ mod tests {
             assert_eq!(theme.muted_foreground, Hsla::from(rgb(0x676767)));
         });
     }
+    fn emoji_face() -> ttf_parser::Face<'static> {
+        ttf_parser::Face::parse(include_bytes!("../assets/fonts/CacEmoji.ttf"), 0).expect("CacEmoji.ttf no se lee")
+    }
+
+    fn name_of(face: &ttf_parser::Face, id: u16) -> Option<String> {
+        face.names().into_iter().find(|name| name.name_id == id).and_then(|name| name.to_string())
+    }
+
     /// Los emojis a color son la reserva del texto, y la cara que lleva ese
     /// nombre es la que va dentro del binario.
     ///
@@ -516,9 +524,55 @@ mod tests {
     fn color_emoji_are_the_fallback_and_the_font_is_bundled_under_that_name() {
         let fallbacks = super::text_font().fallbacks.expect("sin reserva");
         assert_eq!(fallbacks.fallback_list(), [super::EMOJI_FAMILY]);
-        let name: Vec<u8> = super::EMOJI_FAMILY.encode_utf16().flat_map(u16::to_be_bytes).collect();
-        let font: &[u8] = include_bytes!("../assets/fonts/CacEmoji.ttf");
-        assert!(font.windows(name.len()).any(|window| window == name), "la cara no se llama {}", super::EMOJI_FAMILY);
+        assert_eq!(name_of(&emoji_face(), 1).as_deref(), Some(super::EMOJI_FAMILY));
+    }
+
+    /// Lo que GPUI da por hecho de la cara de emojis y que un recorte puede
+    /// romper sin que nada avise: se pinta en color por su nombre PostScript;
+    /// sólo se carga si cubre la «m»; se salta el glifo 3 porque es donde el
+    /// shaper pone el espacio del FE0F y el ZWJ (si el espacio cae en otro
+    /// número se intenta pintar como emoji, falla, y el resto de la línea se
+    /// queda sin pintar); y la licencia (OFL) viaja dentro de la cara.
+    ///
+    /// Roturas que atrapa: regenerar la fuente sin la «m»; con otro nombre
+    /// PostScript (los emojis pasan a pintarse grises); con el espacio en el
+    /// glifo 1 (los mensajes pierden el texto tras un 👍🏽); sin el nombre 13
+    /// (la licencia).
+    #[test]
+    fn the_bundled_emoji_face_keeps_what_gpui_requires() {
+        let face = emoji_face();
+        assert!(face.glyph_index('m').is_some(), "sin la «m» GPUI descarta la cara");
+        assert_eq!(name_of(&face, 6).as_deref(), Some("NotoColorEmoji"), "con otro nombre PostScript no sale en color");
+        assert_eq!(face.glyph_index(' '), Some(ttf_parser::GlyphId(3)), "el espacio tiene que ser el glifo 3");
+        assert_eq!(face.glyph_index('m'), face.glyph_index(' '));
+        let hourglass = face.glyph_index('\u{231B}').expect("⌛ no está");
+        assert_ne!(hourglass.0, 3, "⌛ no se pinta si ocupa el glifo 3");
+        let license = name_of(&face, 13).expect("la cara no lleva su licencia");
+        assert!(license.contains("SIL Open Font License"), "{license}");
+    }
+
+    /// Inter no cubre lo que pinta la cara de emojis: si lo cubre, GPUI lo
+    /// saca de Inter (en blanco y negro) y ni mira la reserva.
+    ///
+    /// Roturas que atrapa: volver a poner el ❤, el ☀ o el ⚠ en una de las
+    /// caras de Inter; que alguna cara pierda la «m» (no cargaría).
+    #[test]
+    fn inter_leaves_the_emoji_it_has_to_the_emoji_face() {
+        let faces: [&[u8]; 5] = [
+            include_bytes!("../assets/fonts/Inter-Regular.ttf"),
+            include_bytes!("../assets/fonts/Inter-Medium.ttf"),
+            include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
+            include_bytes!("../assets/fonts/Inter-Bold.ttf"),
+            include_bytes!("../assets/fonts/Inter-Italic.ttf"),
+        ];
+        for bytes in faces {
+            let face = ttf_parser::Face::parse(bytes, 0).unwrap();
+            assert!(face.glyph_index('m').is_some());
+            for emoji in ['\u{2764}', '\u{2600}', '\u{26A0}'] {
+                assert!(face.glyph_index(emoji).is_none(), "Inter cubre U+{:04X}", emoji as u32);
+                assert!(emoji_face().glyph_index(emoji).is_some(), "la cara de emojis no cubre U+{:04X}", emoji as u32);
+            }
+        }
     }
 
     /// La app trae su letra, con sus negritas, y no depende de la que haya

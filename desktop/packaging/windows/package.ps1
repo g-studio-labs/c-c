@@ -47,7 +47,9 @@ $base = "$binary-$version-windows-$arch"
 # --- .zip -------------------------------------------------------------------
 $zip = Join-Path $outDir "$base.zip"
 if (Test-Path $zip) { Remove-Item $zip }
-Compress-Archive -Path $exe -DestinationPath $zip
+# Con la licencia de las tipografías que lleva el .exe (OFL).
+$licenses = Join-Path $crateDir "assets\fonts\LICENSE-*.txt"
+Compress-Archive -Path $exe, $licenses -DestinationPath $zip
 
 # --- Instalador -------------------------------------------------------------
 # `makensis` puede estar instalado sin estar en el PATH: es lo normal.
@@ -65,7 +67,7 @@ $installer = Join-Path $outDir "$base-setup.exe"
 $icon = Join-Path $packagingDir "icons\icon.ico"
 & $makensis /V2 /INPUTCHARSET UTF8 `
     "/DAPP_NAME=$name" "/DAPP_ID=$id" "/DAPP_BINARY=$binary" "/DAPP_VERSION=$version" `
-    "/DSOURCE_EXE=$exe" "/DICON_FILE=$icon" "/DOUT_FILE=$installer" `
+    "/DSOURCE_EXE=$exe" "/DLICENSES=$licenses" "/DICON_FILE=$icon" "/DOUT_FILE=$installer" `
     (Join-Path $PSScriptRoot "installer.nsi")
 if ($LASTEXITCODE -ne 0) { throw "packaging: makensis salió con $LASTEXITCODE" }
 

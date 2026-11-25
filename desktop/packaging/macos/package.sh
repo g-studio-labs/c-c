@@ -24,6 +24,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$OUT_DIR"
 
 cp "$BINARY" "$APP/Contents/MacOS/$APP_BINARY"
 cp "$PACKAGING_DIR/icons/icon.icns" "$APP/Contents/Resources/icon.icns"
+# La licencia de las tipografías que lleva el binario (OFL).
+mkdir -p "$APP/Contents/Resources/licenses"
+cp "$CRATE_DIR"/assets/fonts/LICENSE-*.txt "$APP/Contents/Resources/licenses/"
 sed -e "s/__APP_NAME__/$APP_NAME/g" \
     -e "s/__APP_ID__/$APP_ID/g" \
     -e "s/__APP_BINARY__/$APP_BINARY/g" \

@@ -37,6 +37,10 @@ for size in 32 64 128 256 512; do
   install -Dm644 "$PACKAGING_DIR/icons/${size}x${size}.png" \
     "$ROOT/share/icons/hicolor/${size}x${size}/apps/$APP_ID.png"
 done
+# La licencia de las tipografías que lleva el binario (OFL).
+for license in "$CRATE_DIR"/assets/fonts/LICENSE-*.txt; do
+  install -Dm644 "$license" "$ROOT/share/doc/$APP_BINARY/licenses/$(basename "$license")"
+done
 # Sin dueño ni fecha de esta máquina: el mismo binario da el mismo archivo.
 tar --owner=0 --group=0 --numeric-owner -C "$STAGE_DIR" -czf "$OUT_DIR/$NAME.tar.gz" "$NAME"
 

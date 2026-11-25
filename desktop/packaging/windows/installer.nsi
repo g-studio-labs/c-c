@@ -18,7 +18,7 @@
 Unicode true
 !include "MUI2.nsh"
 
-!ifndef APP_NAME | APP_ID | APP_BINARY | APP_VERSION | SOURCE_EXE | ICON_FILE | OUT_FILE
+!ifndef APP_NAME | APP_ID | APP_BINARY | APP_VERSION | SOURCE_EXE | LICENSES | ICON_FILE | OUT_FILE
   !error "Faltan definiciones: este script se lanza desde package.ps1"
 !endif
 
@@ -49,6 +49,9 @@ SetCompressor /SOLID lzma
 Section "Install"
   SetOutPath "$INSTDIR"
   File "/oname=${APP_BINARY}.exe" "${SOURCE_EXE}"
+  SetOutPath "$INSTDIR\licenses"
+  File "${LICENSES}"
+  SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   CreateShortcut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\${APP_BINARY}.exe"
@@ -69,6 +72,7 @@ SectionEnd
 Section "Uninstall"
   Delete "$INSTDIR\${APP_BINARY}.exe"
   Delete "$INSTDIR\uninstall.exe"
+  RMDir /r "$INSTDIR\licenses"
   RMDir "$INSTDIR"
   Delete "$SMPROGRAMS\${APP_NAME}.lnk"
   DeleteRegKey HKCU "${UNINSTALL_KEY}"
