@@ -21,7 +21,7 @@ func NewAuthRepository(db *gorm.DB) *AuthRepository {
 // CreateUser inserts a new user, rejecting a duplicate username.
 func (r *AuthRepository) CreateUser(u *domain.User) error {
 	var count int64
-	if err := r.db.Model(&domain.User{}).Where("username = ?", u.Username).Count(&count).Error; err != nil {
+	if err := r.db.Model(&domain.User{}).Where("lower(username) = lower(?)", u.Username).Count(&count).Error; err != nil {
 		return err
 	}
 	if count > 0 {
@@ -87,14 +87,35 @@ func (r *AuthRepository) DeleteUser(id string) error {
 }
 
 func (r *AuthRepository) FindByUsername(username string) (*domain.User, error) {
+	user, err := findByUsernameFold(r.db, username)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, errors.New("user not found")
+	}
+	return user, err
+}
+
+// findByUsernameFold busca el usuario sin distinguir mayúsculas: quien se
+// registró como «Itzramn» escribe «itzramn» al entrar o al pedir otra
+// contraseña, y no encontrarla la dejaba fuera sin decir por qué (25-nov). La
+// forma exacta gana; si no, sólo vale una coincidencia única, para no entrar
+// en la cuenta de otro si alguna vez hubo dos que sólo cambian en mayúsculas.
+func findByUsernameFold(db *gorm.DB, username string) (*domain.User, error) {
 	var user domain.User
-	if err := r.db.Where("username = ?", username).First(&user).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errors.New("user not found")
+	err := db.Where("username = ?", username).First(&user).Error
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		if err != nil {
+			return nil, err
 		}
+		return &user, nil
+	}
+	var found []domain.User
+	if err := db.Where("lower(username) = lower(?)", username).Limit(2).Find(&found).Error; err != nil {
 		return nil, err
 	}
-	return &user, nil
+	if len(found) != 1 {
+		return nil, gorm.ErrRecordNotFound
+	}
+	return &found[0], nil
 }
 
 // OrgClaimsForUser returns the compact org memberships embedded in the access

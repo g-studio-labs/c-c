@@ -77,10 +77,9 @@ func (r *AccountRepository) FindByEmail(email string) (*domain.User, error) {
 // cuentas viejas sin él.
 func (r *AccountRepository) FindByLogin(login string) (*domain.User, error) {
 	login = strings.TrimSpace(login)
-	var u domain.User
-	err := r.db.Where("username = ?", login).First(&u).Error
+	u, err := findByUsernameFold(r.db, login)
 	if err == nil {
-		return &u, nil
+		return u, nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
