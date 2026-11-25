@@ -556,6 +556,7 @@ impl Notes {
         self.core.comms().leave();
         self.core.platform().leave();
         self.core.requests().leave();
+        self.core.overview().leave();
         self.update(|state| state.on_screen = true);
         true
     }

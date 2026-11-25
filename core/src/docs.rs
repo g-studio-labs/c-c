@@ -487,6 +487,7 @@ impl Docs {
         // abierto desde la campana estando en ella no se veía.
         self.core.platform().leave();
         self.core.requests().leave();
+        self.core.overview().leave();
         self.core.notes().leave();
         // Quién puede escribir aquí: quien puede cambiar el árbol de la
         // organización que se mira (`can_edit_tree`). Un `viewer` lee.

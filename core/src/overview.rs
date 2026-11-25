@@ -149,6 +149,7 @@ impl Overview {
         self.core.comms().leave();
         self.core.platform().leave();
         self.core.requests().leave();
+        self.core.notes().leave();
         self.change(|state| state.on_screen = true);
         true
     }

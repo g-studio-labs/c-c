@@ -869,4 +869,14 @@ async fn opening_a_document_leaves_notes_and_requests() {
     assert!(!rig.core.notes().state().on_screen, "«Por atender» tiene que dejar Notas");
     rig.core.docs().open("a").await;
     assert!(!rig.core.requests().state().on_screen, "«Por atender» siguió delante de la documentación");
+
+    // Y el resumen y Notas se ceden el sitio.
+    rig.core.notes().show();
+    rig.core.overview().show();
+    assert!(!rig.core.notes().state().on_screen, "el resumen tiene que dejar Notas");
+    rig.core.notes().show();
+    assert!(!rig.core.overview().state().on_screen, "Notas tiene que dejar el resumen");
+    rig.core.overview().show();
+    rig.core.docs().open("a").await;
+    assert!(!rig.core.overview().state().on_screen, "el resumen siguió delante de la documentación");
 }
