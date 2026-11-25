@@ -41,18 +41,26 @@ Tareas que tocan los mismos ficheros no van en paralelo. Tareas chicas de la mis
 
 ## 4. Builder
 
-`Agent` con `subagent_type: "builder"` (y `model: "opus"` si toca). El brief lleva todo, porque empieza sin contexto:
+**Una sesión de fondo, no un subagente** (jose, 25-nov): jose la ve en su lista, puede entrar a corregirla (`claude attach <id>`), sobrevive si el orquestador se cae y corre los hooks de cac. Desde el worktree de la tarea:
+
+```sh
+cd <worktree> && (unset CLAUDE_CONFIG_DIR; command claude --bg \
+  --model sonnet --permission-mode bypassPermissions \
+  --name "<n>-builder" "$(cat <brief.md>)")
+```
+
+`command` salta la función de zsh que pregunta la cuenta; cac va con la de `~/.claude`. `--model opus` si toca. El brief (en un fichero, fuera del repo) le dice que ya está aislado en su worktree, que lea `.claude/agents/builder.md` y lo siga, y lleva todo lo demás, porque empieza sin contexto:
 - la ref y qué se hace, en dos o tres frases;
 - el criterio de aceptación;
 - el plan, si lo hubo;
-- la ruta del worktree y la rama;
-- lo que ya sabes que muerde ahí (la trampa del CLAUDE.md, el incidente).
+- lo que ya sabes que muerde ahí (la trampa del CLAUDE.md, el incidente);
+- su Postgres desechable, si toca Go (`docker run -d --rm --name cac-test-pg-<n> -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=cac -p 127.0.0.1:<puerto>:5432 postgres:16`), nunca la de otro proyecto.
 
-Lánzalo en segundo plano y sigue con otra tarea.
+Una sesión de fondo no avisa al terminar: vigílala con `claude agents --json --all` (sale de `busy` al acabar) en un bucle en segundo plano, y lee su informe en la tarea (`get_task`), no en sus logs.
 
 ## 5. Reviewer
 
-Con el builder en `listo`: `Agent` con `subagent_type: "reviewer"`, con la ref, el plan si lo hubo y el worktree con su rama. **No le pases el resumen del builder ni tu opinión.**
+Con el builder en `listo`: otra sesión, igual, con `--model opus`, `--name "<n>-reviewer"` y un brief que le diga que lea `.claude/agents/reviewer.md`, con la ref, el plan si lo hubo y el worktree con su rama. **No le pases el resumen del builder ni tu opinión.**
 
 - `FALLA` → un builder nuevo con los hallazgos, una vez. Segundo `FALLA` → builder en Opus con todo el historial; si vuelve a fallar, `create_request` decidir con los hallazgos y para.
 - `PASA` → paso 6.
