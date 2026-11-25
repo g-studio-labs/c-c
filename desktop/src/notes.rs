@@ -96,6 +96,12 @@ fn text_button(id: impl Into<ElementId>, label: String, active: bool, tone: Opti
         .test_support()
 }
 
+/// Guarda lo escrito; un título en blanco queda como «Sin título».
+fn save(cx: &App) {
+    let untitled = cac_core::text(locale(cx), "work:notes.untitled");
+    Backend::run(cx, move |core| async move { core.notes().save(&untitled).await });
+}
+
 fn section_title(text: String, muted: Hsla) -> Div {
     div().leading_xs().font_weight(FontWeight::MEDIUM).text_color(muted).child(text.to_uppercase())
 }
@@ -456,7 +462,7 @@ impl NotesView {
                     .children(failed)
                     .children(status)
                     .child(Button::new("note-save").primary().small().h_7().px_2p5().label(tr(cx, "work:docs.save")).disabled(!edit.can_save()).loading(edit.saving).on_click(|_, _, cx| {
-                        Backend::run(cx, |core| async move { core.notes().save().await })
+                        save(cx)
                     }))
                     .child(text_button("note-cancel", tr(cx, "work:docs.cancel"), false, None, cx, |_, _, cx| Backend::core(cx).notes().cancel_edit()))
                     .child(close)
@@ -532,7 +538,7 @@ impl NotesView {
                     .on_key_down(|event: &KeyDownEvent, _, cx| {
                         let held = event.keystroke.modifiers;
                         if held.secondary(cx) && !held.shift && !held.alt && event.keystroke.key == "s" {
-                            Backend::run(cx, |core| async move { core.notes().save().await });
+                            save(cx);
                             cx.stop_propagation();
                         }
                     })
@@ -630,7 +636,7 @@ impl NotesView {
             });
         }
         let theme = cx.theme();
-        let (muted, hover, foreground, background) = (theme.muted_foreground, crate::theme::ghost_hover(cx), theme.foreground, theme.background);
+        let (muted, hover, foreground, background, danger) = (theme.muted_foreground, crate::theme::ghost_hover(cx), theme.foreground, theme.background, theme.danger);
         let here = locale(cx);
         let query = state.search.query.trim().to_string();
         let found = state.search.results.clone();
@@ -665,7 +671,10 @@ impl NotesView {
                     .flex_col()
                     .gap_0p5()
                     .when(state.search.searching, |this| this.child(div().px_1().py_2().leading_xs().text_color(muted).child(tr(cx, "common:servers.loading"))))
-                    .when(!state.search.searching && !query.is_empty() && found.is_empty(), |this| {
+                    .when_some(state.search.failed.as_ref().map(|failed| failed.phrase(here)), |this, said| {
+                        this.child(div().id("note-search-failed").test_support().px_1().py_2().leading_xs().text_color(danger).aria_label(said.clone()).child(said))
+                    })
+                    .when(!state.search.searching && state.search.failed.is_none() && !query.is_empty() && found.is_empty(), |this| {
                         this.child(div().id("note-search-none").test_support().px_1().py_2().leading_xs().text_color(muted).child(tr(cx, "work:notes.noMatches")))
                     })
                     .when(!state.search.searching && !query.is_empty(), |this| {
@@ -863,6 +872,9 @@ mod tests {
                 )),
                 ("GET", ["search"]) => {
                     let wanted = request.url.query_pairs().find(|(key, _)| key == "q").map(|(_, value)| value.to_lowercase()).unwrap_or_default();
+                    if wanted == "boom" {
+                        return ResponseTemplate::new(500).set_body_json(json!({ "success": false, "error": "internal", "message": "boom" }));
+                    }
                     ok(Value::Array(notes.iter().filter(|n| n.title.to_lowercase().contains(&wanted)).map(|n| json!({ "id": n.id, "title": n.title, "excerpt": n.body })).collect()))
                 }
                 ("GET", ["trash"]) => ok(Value::Array(notes.iter().filter(|n| n.trashed).map(|n| json!({ "id": n.id, "title": n.title, "deletedAt": "2026-11-25T10:00:00Z", "subpages": 0 })).collect())),
@@ -1001,11 +1013,12 @@ mod tests {
         wait_until(cx, "pliega", |cx| !on_screen(window, "note-b", cx));
         click(window, "note-toggle-a", cx);
         wait_until(cx, "despliega", |cx| on_screen(window, "note-b", cx));
-        // Dos idas y vueltas después: una apertura pedida por el chevrón ya habría llegado.
-        assert!(state(cx).open_id.is_none() && server.hits("/api/v1/notes/a") == 0, "el chevrón abrió la nota");
 
         click(window, "note-a", cx);
         wait_until(cx, "se lee la nota", |cx| on_screen(window, "note-body", cx));
+        // Las dos pulsaciones del chevrón van antes que esta apertura: si
+        // hubieran pedido la nota, sus lecturas ya habrían llegado.
+        assert_eq!(server.hits("/api/v1/notes/a"), 1, "el chevrón abrió la nota");
         assert_eq!(label_of(window, "note-heading", cx), "Alfa");
         assert!(on_screen(window, "note-subpages", cx) && on_screen(window, "note-subpage-b", cx), "las hijas que el texto no enlaza van al pie");
 
@@ -1135,7 +1148,8 @@ mod tests {
     /// Buscar abre su diálogo, enseña lo que encuentra y abre la nota pulsada.
     ///
     /// Roturas que atrapa: una búsqueda que no llega al core; resultados que
-    /// no se abren; un diálogo que se queda tras elegir.
+    /// no se abren; un diálogo que se queda tras elegir; un fallo del servidor
+    /// leído como «nada coincide».
     #[gpui_kit::test]
     fn search_finds_a_note_and_opens_it(cx: &mut TestAppContext) {
         let (server, _) = server();
@@ -1146,6 +1160,13 @@ mod tests {
         wait_until(cx, "sale el resultado", |cx| on_screen(window, "note-found-c", cx));
         click(window, "note-found-c", cx);
         wait_until(cx, "se abre", |cx| state(cx).open_id.as_deref() == Some("c") && !on_screen(window, "note-search-card", cx));
+
+        // Una búsqueda que falla lo dice; no se lee como «nada coincide».
+        click(window, "note-search", cx);
+        wait_until(cx, "sale el diálogo", |cx| on_screen(window, "note-search-input", cx));
+        type_in(window, "note-search-input", "boom", cx);
+        wait_until(cx, "dice que falló", |cx| on_screen(window, "note-search-failed", cx));
+        assert!(!on_screen(window, "note-search-none", cx));
         stop(cx);
     }
 }
