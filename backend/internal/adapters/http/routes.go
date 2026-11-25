@@ -59,6 +59,9 @@ func InitRoutes(db *gorm.DB) *chi.Mux {
 		WithApp(GitHubAppKeyFromEnv()).
 		WithActivity(repository.NewActivityRepository(db))
 	InitServerRoutesWith(db, r, hub, gh)
+	// Las carpetas de los commits ya enlazados, para saber con qué etiqueta
+	// salen (command-and-control-526).
+	startCommitDirsBackfill(gh)
 	InitReportRoutes(db, r, hub)
 	// Las llamadas guardadas, antes que quien da entradas a las salas.
 	calls := InitCallSessionRoutes(db, r, hub)

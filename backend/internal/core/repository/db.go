@@ -181,6 +181,8 @@ func DBConnection() {
 		&domain.TaskGitLink{},
 		// Las releases y sus commits: «¿esto ya salió?» (ver domain/release.go).
 		&domain.Release{}, &domain.ReleaseCommit{},
+		// Qué carpetas toca cada commit: qué artefacto lleva (command-and-control-526).
+		&domain.CommitDirs{},
 		// Las fuentes de cada espacio (ver domain/space_source.go).
 		&domain.SpaceSource{},
 	); err != nil {

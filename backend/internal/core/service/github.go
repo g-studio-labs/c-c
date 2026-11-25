@@ -75,6 +75,9 @@ type GitHubService struct {
 	mu     sync.Mutex
 	tokens map[int64]installationToken
 	locks  map[string]*sync.Mutex
+	// gone: los commits que GitHub no conoce, para que el relleno de sus
+	// carpetas no los vuelva a pedir (ver BackfillCommitDirs).
+	gone map[string]bool
 }
 
 func NewGitHubService(repo *repository.GitHubRepository, cfg GitHubConfig, hub *events.Hub) *GitHubService {
@@ -413,6 +416,8 @@ type ghPayload struct {
 		// repo y cuándo, sin preguntárselo a GitHub (ver docsOnPush).
 		Added    []string `json:"added"`
 		Modified []string `json:"modified"`
+		// Removed: con los otros dos, qué artefacto lleva (ver commitDirsOnPush).
+		Removed []string `json:"removed"`
 	} `json:"commits"`
 	WorkflowRun struct {
 		ID           int64      `json:"id"`
@@ -487,6 +492,9 @@ func (s *GitHubService) handle(event string, body []byte) error {
 			}
 		}
 	case "push":
+		if err := s.commitDirsOnPush(&p); err != nil {
+			return err
+		}
 		s.docsOnPush(&p)
 		s.deploysOnPush(&p)
 		return s.onPush(&p)

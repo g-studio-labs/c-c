@@ -127,6 +127,17 @@ func (s *GitHubService) installationToken(id int64) (string, error) {
 	return out.Token, nil
 }
 
+// ghStatusError: GitHub contestó, pero no un 2xx. Con el código a la vista
+// para quien tenga que distinguir un 404 de una caída.
+type ghStatusError struct {
+	Method, Path string
+	Code         int
+}
+
+func (e *ghStatusError) Error() string {
+	return fmt.Sprintf("github %s %s: %d", e.Method, e.Path, e.Code)
+}
+
 func (s *GitHubService) call(auth, method, path string, body, out any) error {
 	var rd io.Reader
 	if body != nil {
@@ -152,7 +163,7 @@ func (s *GitHubService) call(auth, method, path string, body, out any) error {
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 300 {
-		return fmt.Errorf("github %s %s: %d", method, path, res.StatusCode)
+		return &ghStatusError{Method: method, Path: path, Code: res.StatusCode}
 	}
 	if out == nil {
 		return nil
