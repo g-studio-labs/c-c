@@ -37,7 +37,7 @@ pub use flow::{
 };
 pub use sheet::{client_reads, can_change_comment, is_agent_note, says_something, task_sheet, SheetActivity, SheetBlocker, SheetComment, SheetFile, SheetSubtask, SheetTag, StatusChoice, TaskSheet};
 pub use types::{
-    CommentAuthor, DecisionRef, GitSummary, ReleaseRef, Task, TaskAttachment, TaskBlocker, TaskCard,
+    AgentSignature, CommentAuthor, DecisionRef, GitSummary, ReleaseRef, Task, TaskAttachment, TaskBlocker, TaskCard,
     TaskComment, TaskDetail, TaskGitLink, TaskGitLinks, TaskStatus, TaskTag, UserSummary,
 };
 

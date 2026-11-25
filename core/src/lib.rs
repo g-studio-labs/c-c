@@ -159,7 +159,7 @@ pub use stream::{backoff, parse_frame, Connection, ConnectionState, FrameBuffer,
 pub use task::{
     can_transition, canonical_priority, canonical_status, due_instant, flow_for, new_task_body, open_subtasks_block, patch_body, status_refusal,
     status_refusal_phrase, SUBTASKS_OPEN,
-    CommentAuthor, DecisionRef, DueChange, Flow, GitSummary, NewTask, ReleaseRef, StatusOption, Task,
+    AgentSignature, CommentAuthor, DecisionRef, DueChange, Flow, GitSummary, NewTask, ReleaseRef, StatusOption, Task,
     TaskAttachment, TaskBlocker, TaskCard, TaskComment, TaskDetail, TaskGitLink, TaskGitLinks, TaskPatch,
     TaskState, TaskStatus, TaskTag, Tasks, UserSummary,
 };

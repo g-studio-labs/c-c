@@ -628,6 +628,10 @@ type ReportCommentResponse struct {
 	Source string `json:"-"`
 	// Via: por dónde entró (ItemComment.Via). Sólo para el tablero del equipo.
 	Via string `json:"-"`
+	// AgentRole, AgentModel, AgentSession: ItemComment.Agent, scan-only.
+	AgentRole    string `json:"-"`
+	AgentModel   string `json:"-"`
+	AgentSession string `json:"-"`
 	// ActorName: en una línea de sistema, cómo se llama quien hizo lo que la
 	// línea cuenta (hoy, un cambio de estado en una tarea interna). Scan-only,
 	// como las de arriba y por la misma razón: sólo lo lee el tablero del

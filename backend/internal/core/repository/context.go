@@ -139,20 +139,24 @@ func (r *ContextRepository) ChangedTasks(spaceID string, since time.Time, limit 
 func (r *ContextRepository) tasks(q *gorm.DB, withStatus, withKeys bool) ([]domain.ContextTask, error) {
 	type row struct {
 		ID, Title, ListID, ProjectID, Handoff, HandoffByID, Status, Description string
+		HandoffVia, HandoffAgentRole, HandoffAgentModel, HandoffAgentSession    string
 		Seq                                                                     int
 		UpdatedAt                                                               time.Time
 		HandoffAt                                                               *time.Time
 	}
 	var rows []row
 	err := q.Table("items").
-		Select("id, seq, title, list_id, project_id, status, updated_at, handoff, handoff_at, handoff_by_id, description").
+		Select("id, seq, title, list_id, project_id, status, updated_at, handoff, handoff_at, handoff_by_id, description, " +
+			"COALESCE(handoff_via, '') AS handoff_via, COALESCE(handoff_agent_role, '') AS handoff_agent_role, " +
+			"COALESCE(handoff_agent_model, '') AS handoff_agent_model, COALESCE(handoff_agent_session, '') AS handoff_agent_session").
 		Where("parent_id IS NULL AND archived_at IS NULL AND deleted_at IS NULL").
 		Order("updated_at DESC").Scan(&rows).Error
 	out := make([]domain.ContextTask, len(rows))
 	for i, x := range rows {
 		out[i] = domain.ContextTask{
 			ID: x.ID, Seq: x.Seq, Title: x.Title, ListID: x.ListID, ProjectID: x.ProjectID, UpdatedAt: x.UpdatedAt,
-			Handoff: x.Handoff, HandoffAt: x.HandoffAt, HandoffByID: x.HandoffByID,
+			Handoff: x.Handoff, HandoffAt: x.HandoffAt, HandoffByID: x.HandoffByID, HandoffVia: x.HandoffVia,
+			HandoffStamp: domain.AgentStamp{Role: x.HandoffAgentRole, Model: x.HandoffAgentModel, Session: x.HandoffAgentSession},
 		}
 		if withStatus {
 			out[i].Status = x.Status

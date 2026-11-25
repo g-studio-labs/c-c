@@ -1209,10 +1209,12 @@ func (r *TaskRepository) Comments(taskID string) ([]domain.TaskCommentResponse, 
 			Kind:         row.Kind,
 			Source:       row.Source,
 			Via:          row.Via,
-			Body:         row.Body,
-			Attachments:  att,
-			CreatedAt:    row.CreatedAt,
-			UpdatedAt:    row.UpdatedAt,
+			Agent: domain.SignedByAgent(row.Via, row.ActorName, domain.AgentStamp{
+				Role: row.AgentRole, Model: row.AgentModel, Session: row.AgentSession}),
+			Body:        row.Body,
+			Attachments: att,
+			CreatedAt:   row.CreatedAt,
+			UpdatedAt:   row.UpdatedAt,
 		}
 	}
 	return out, nil

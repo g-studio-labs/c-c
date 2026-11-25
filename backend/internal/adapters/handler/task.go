@@ -1013,6 +1013,19 @@ func commentOrigin(r *http.Request, want domain.ItemVisibility) (context.Context
 	return ctx, want
 }
 
+// agentStamp: con qué agente se firma lo que escribe esta petición, o nil si
+// es la persona. Lo decide `ViaToken`, que sólo pone el middleware: el `agent`
+// que mande el cliente sólo dice cuál (ver domain.AgentStampFor).
+func agentStamp(r *http.Request, sent *domain.AgentStamp) *domain.AgentStamp {
+	c, _ := currentUser(r)
+	return domain.AgentStampFor(c, sent)
+}
+
+// agentWriting: el contexto de la petición con la firma del agente, si la hay.
+func agentWriting(r *http.Request, sent *domain.AgentStamp) context.Context {
+	return domain.WithAgent(r.Context(), agentStamp(r, sent))
+}
+
 func (h *taskHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	l, sp, ok := h.resolveList(w, r, chi.URLParam(r, "id"), true)
 	if !ok {
@@ -1162,7 +1175,7 @@ func (h *taskHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	editor, _ := currentUser(r)
-	if err := h.svc.UpdateTask(r.Context(), t.ID, editor.UserID, req); err != nil {
+	if err := h.svc.UpdateTask(agentWriting(r, req.Agent), t.ID, editor.UserID, req); err != nil {
 		// Faltaba, y era la única escritura de tareas sin mapeo: hasta «esa
 		// tarea no existe» o «ese padre es de otra lista» salían como 500.
 		if mapTaskError(w, err) {
@@ -1246,7 +1259,7 @@ func (h *taskHandler) AddComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx, visibility := commentOrigin(r, req.Visibility)
-	c, err := h.svc.AddComment(ctx, t.ID, user.UserID, req.Body, visibility)
+	c, err := h.svc.AddComment(domain.WithAgent(ctx, agentStamp(r, req.Agent)), t.ID, user.UserID, req.Body, visibility)
 	if err != nil {
 		SendErrorResponse(w, http.StatusInternalServerError, "Failed to add comment", err.Error())
 		return

@@ -254,6 +254,10 @@ type ContextTask struct {
 	HandoffAt   *time.Time `json:"handoffAt,omitempty"`
 	HandoffByID string     `json:"-"`
 	HandoffBy   string     `json:"handoffBy,omitempty"`
+	// HandoffAgent: ver TaskDetail.HandoffAgent.
+	HandoffAgent *AgentSignature `json:"handoffAgent,omitempty"`
+	HandoffVia   string          `json:"-"`
+	HandoffStamp AgentStamp      `json:"-"`
 	// Shipped: todos sus commits enlazados ya salieron en una release (ver
 	// Release). Es la tarea que la sesión cierra al poner el tablero al día;
 	// cac no la mueve (command-and-control-295).

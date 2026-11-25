@@ -901,6 +901,9 @@ type UpdateTaskRequest struct {
 	// Handoff reemplaza el «dónde quedó» (ver Item.Handoff). Vacío lo quita.
 	// Con tope: es un resumen para leer de un vistazo, no otro hilo.
 	Handoff *string `json:"handoff" validate:"omitempty,max=2000"`
+	// Agent: qué agente escribe el handoff. Sólo cuenta con un token personal
+	// (ver AgentStampFor).
+	Agent *AgentStamp `json:"agent" validate:"omitempty"`
 	// IfStatus: sólo si la tarea sigue en ese estado; si no, 409 con el estado
 	// real. Para que dos agentes no se pisen sin enterarse (22-oct-2026).
 	IfStatus *string `json:"ifStatus" validate:"omitempty,oneof=pending in_progress resolved closed"`
@@ -978,6 +981,9 @@ type TaskCommentRequest struct {
 	// partirlo deja el estado a medias cuando la segunda falla, que en un
 	// registro del que no se puede borrar es peor que no haberlo escrito.
 	Decision *DecisionRequest `json:"decision" validate:"omitempty"`
+	// Agent: qué agente escribe el comentario. Sólo cuenta con un token
+	// personal (ver AgentStampFor).
+	Agent *AgentStamp `json:"agent" validate:"omitempty"`
 }
 
 // ─── Responses ────────────────────────────────────────────────────────────────
@@ -1209,7 +1215,9 @@ type TaskCommentResponse struct {
 	Source string `json:"source,omitempty"`
 	// Via: `mcp` si lo escribió un agente con el token de `AuthorName`. La app
 	// pone esas notas aparte del hilo (command-and-control-359).
-	Via         string           `json:"via,omitempty"`
+	Via string `json:"via,omitempty"`
+	// Agent: con `via: mcp`, el agente de quién y cuál (command-and-control-522).
+	Agent       *AgentSignature  `json:"agent,omitempty"`
 	Body        string           `json:"body"`
 	Attachments []TaskAttachment `json:"attachments"`
 	CreatedAt   time.Time        `json:"createdAt"`
@@ -1244,6 +1252,10 @@ type TaskDetail struct {
 	// HandoffBy: quién escribió el «dónde quedó» (Item.Handoff), con su nombre
 	// visible; la fecha va en la propia tarea.
 	HandoffBy string `json:"handoffBy,omitempty"`
+	// HandoffAgent: si el «dónde quedó» lo escribió un agente con el token de
+	// `HandoffBy`, cuál. Sin esto salía firmado por la persona
+	// (command-and-control-522).
+	HandoffAgent *AgentSignature `json:"handoffAgent,omitempty"`
 	// BlockedBy: de qué tareas depende, y si siguen abiertas. Ver ItemBlock.
 	BlockedBy []TaskBlocker `json:"blockedBy"`
 	// Decisions: las decisiones enlazadas a esta tarea, vigentes o no (una

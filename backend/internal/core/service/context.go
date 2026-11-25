@@ -228,6 +228,7 @@ func (s *ContextService) decorateTasks(spaceKey string, tasks []domain.ContextTa
 		t.Shipped = shipped[t.ID]
 		if t.HandoffByID != "" {
 			t.HandoffBy = s.repo.DisplayName(t.HandoffByID)
+			t.HandoffAgent = domain.SignedByAgent(t.HandoffVia, t.HandoffBy, t.HandoffStamp)
 		}
 		for _, b := range blockers[t.ID] {
 			if r := ref(b.SpaceID, b.ProjectID, b.Seq); r != "" {

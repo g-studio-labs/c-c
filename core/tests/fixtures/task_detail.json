@@ -80,6 +80,12 @@
       "kind": "user",
       "source": "gh",
       "via": "mcp",
+      "agent": {
+        "of": "Ana Pérez",
+        "role": "builder",
+        "model": "sonnet",
+        "session": "s-1"
+      },
       "body": "Una nota.",
       "attachments": [
         {
@@ -213,6 +219,12 @@
     "PROTEUS-165"
   ],
   "handoffBy": "Ana Pérez",
+  "handoffAgent": {
+    "of": "Ana Pérez",
+    "role": "reviewer",
+    "model": "opus",
+    "session": "s-2"
+  },
   "blockedBy": [
     {
       "id": "t9",

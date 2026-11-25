@@ -426,3 +426,31 @@ func TestTheMapCanBeTrimmedAndSaysWhatChangedSince(t *testing.T) {
 		t.Fatal("ready no va en el mapa por defecto")
 	}
 }
+
+// El mapa de contexto firma el «dónde quedó» como lo guardó la tarea: de un
+// agente de la persona si lo escribió con su token, de la persona si no
+// (command-and-control-522).
+//
+// Roturas que detecta: no leer la firma de la fila (el handoff de un agente
+// sale firmado por la persona), o perder el rol y el modelo por el camino.
+func TestTheContextMapSignsAnAgentsHandoff(t *testing.T) {
+	db := contextFixture(t)
+	s := NewContextService(db)
+	m, err := s.Map("org-1", "sp-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.InProgress[0].HandoffAgent != nil {
+		t.Fatalf("un handoff de la persona salió firmado por un agente: %+v", m.InProgress[0].HandoffAgent)
+	}
+	if err := db.Exec(`UPDATE items SET handoff_via = 'mcp', handoff_agent_role = 'reviewer', handoff_agent_model = 'opus' WHERE id = 'it-curso'`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if m, err = s.Map("org-1", "sp-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	got := m.InProgress[0].HandoffAgent
+	if got == nil || *got != (domain.AgentSignature{Of: "ana", Role: "reviewer", Model: "opus"}) {
+		t.Fatalf("el handoff de un agente: %+v", got)
+	}
+}

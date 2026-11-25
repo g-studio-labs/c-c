@@ -445,6 +445,7 @@ func fullTaskDetail(day time.Time) TaskDetail {
 			},
 			AuthorUserID: "u1", AuthorName: "Ana Pérez", Visibility: VisibilityInternal,
 			Kind: "user", Source: "gh", Via: "mcp", Body: "Una nota.",
+			Agent: &AgentSignature{Of: "Ana Pérez", Role: "builder", Model: "sonnet", Session: "s-1"},
 			Attachments: []TaskAttachment{file}, CreatedAt: at, UpdatedAt: at,
 		}},
 		Attachments: []TaskAttachment{file},
@@ -456,6 +457,7 @@ func fullTaskDetail(day time.Time) TaskDetail {
 		Keys:        []string{"PROTEUS-165"},
 		Tickets:     []string{"PROTEUS-165"},
 		HandoffBy:   "Ana Pérez",
+		HandoffAgent: &AgentSignature{Of: "Ana Pérez", Role: "reviewer", Model: "opus", Session: "s-2"},
 		BlockedBy:   []TaskBlocker{{ID: "t9", Ref: "command-and-control-9", Title: "La de antes", Status: ReportPending, Open: true}},
 		Decisions: []DecisionRef{{
 			ID: "d1", Title: "GPUI Kit", OwnerKind: "space", OwnerID: "sp1",

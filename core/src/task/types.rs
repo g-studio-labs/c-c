@@ -145,6 +145,22 @@ pub struct UserSummary {
 }
 
 /// Quién escribió un comentario: alguien del equipo, el cliente o el sistema.
+/// Espejo de `domain.AgentSignature`: lo escribió un agente con el token de
+/// `of`, y cuál, si lo dijo (command-and-control-522).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSignature {
+    #[serde(default)]
+    pub of: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+}
+
 /// Espejo de `domain.CommentAuthor`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -216,6 +232,9 @@ pub struct TaskComment {
     /// notas van aparte del hilo (command-and-control-359).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
+    /// Con `via: mcp`, el agente de quién y cuál.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentSignature>,
     #[serde(default)]
     pub body: String,
     #[serde(default, deserialize_with = "or_empty")]
@@ -438,6 +457,10 @@ pub struct TaskDetail {
     /// Quién escribió el «dónde quedó», con su nombre visible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_by: Option<String>,
+    /// Si el «dónde quedó» lo escribió un agente con el token de `handoff_by`,
+    /// cuál. Sin pintar todavía.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_agent: Option<AgentSignature>,
     #[serde(default, deserialize_with = "or_empty")]
     pub blocked_by: Vec<TaskBlocker>,
     #[serde(default, deserialize_with = "or_empty")]

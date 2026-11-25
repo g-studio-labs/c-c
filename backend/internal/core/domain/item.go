@@ -225,7 +225,12 @@ type Item struct {
 	Handoff     string     `gorm:"type:text"        json:"handoff,omitempty"`
 	HandoffAt   *time.Time `json:"handoffAt,omitempty"`
 	HandoffByID string     `gorm:"type:varchar(36)" json:"handoffById,omitempty"`
-	CreatedByID string     `gorm:"type:varchar(36)" json:"createdById,omitempty"`
+	// HandoffVia y HandoffAgent: si lo escribió un agente con el token de
+	// `HandoffByID` (`mcp`) y cuál. Se contestan juntos como `handoffAgent`
+	// en el detalle y en el mapa de contexto (ver AgentSignature).
+	HandoffVia   string     `gorm:"type:varchar(20)" json:"-"`
+	HandoffAgent AgentStamp `gorm:"embedded;embeddedPrefix:handoff_agent_" json:"-"`
+	CreatedByID  string     `gorm:"type:varchar(36)" json:"createdById,omitempty"`
 	// ArchivedAt hides an item from the internal board without deleting it. The
 	// report-facing API ignores it: a tenant watching its own report must not see
 	// it vanish because we tidied up, and no event would explain it.
@@ -315,12 +320,15 @@ type ItemComment struct {
 	// token de su dueño. Es lo que deja poner aparte las notas de los agentes
 	// en el hilo de una tarea (command-and-control-359). Fuera del JSON: esta
 	// fila también es la del hilo del cliente, y a él no le dice nada.
-	Via                string  `gorm:"type:varchar(20)"  json:"-"`
-	AuthorUserID       *string `gorm:"type:varchar(36)"       json:"authorUserId,omitempty"`
-	AuthorProjectID    *string `gorm:"type:varchar(36);index" json:"-"`
-	AuthorExternalID   string  `gorm:"type:varchar(255)"      json:"-"`
-	AuthorExternalName string  `gorm:"type:varchar(120)"      json:"-"`
-	Body               string  `gorm:"type:text;not null"     json:"body"`
+	Via string `gorm:"type:varchar(20)"  json:"-"`
+	// Agent: qué agente, cuando lo escribió uno con token (ver AgentStamp).
+	// Fuera del JSON por lo mismo que Via.
+	Agent              AgentStamp `gorm:"embedded;embeddedPrefix:agent_" json:"-"`
+	AuthorUserID       *string    `gorm:"type:varchar(36)"       json:"authorUserId,omitempty"`
+	AuthorProjectID    *string    `gorm:"type:varchar(36);index" json:"-"`
+	AuthorExternalID   string     `gorm:"type:varchar(255)"      json:"-"`
+	AuthorExternalName string     `gorm:"type:varchar(120)"      json:"-"`
+	Body               string     `gorm:"type:text;not null"     json:"body"`
 	// Soft for everything. A task comment used to be deleted outright; keeping
 	// the row changes nothing anyone can see (it stays hidden everywhere) and
 	// stops the text from being destroyed.

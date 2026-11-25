@@ -659,6 +659,16 @@ func (s *TaskService) UpdateTask(ctx context.Context, id, actorID string, req do
 		// fecha vieja ya dice algo; sin fecha diría lo mismo que uno de hoy.
 		text := strings.TrimSpace(*req.Handoff)
 		fields["handoff"] = text
+		// Y quién: la persona, o un agente con su token. La firma se reescribe
+		// siempre con el texto, para que uno de la app no herede la del agente
+		// que escribió el anterior.
+		via, agent := domain.ViaApp, domain.AgentStamp{}
+		if a := domain.AgentFrom(ctx); a != nil && text != "" {
+			via, agent = domain.ViaMCP, *a
+		}
+		fields["handoff_via"] = via
+		fields["handoff_agent_role"], fields["handoff_agent_model"], fields["handoff_agent_session"] =
+			agent.Role, agent.Model, agent.Session
 		if text == "" {
 			fields["handoff_at"], fields["handoff_by_id"] = nil, ""
 		} else {
@@ -1040,6 +1050,7 @@ func (s *TaskService) Detail(id string) (*domain.TaskDetail, error) {
 	}
 	if t.HandoffByID != "" {
 		detail.HandoffBy = s.repo.DisplayName(t.HandoffByID)
+		detail.HandoffAgent = domain.SignedByAgent(t.HandoffVia, detail.HandoffBy, t.HandoffAgent)
 	}
 	detail.Keys = s.repo.ExternalKeysOf([]string{id})[id]
 	detail.Tickets = s.repo.TicketsOf(id)
@@ -1270,6 +1281,10 @@ func (s *TaskService) AddComment(ctx context.Context, taskID, userID, body strin
 	c := newComment(taskID, userID, body, visibility)
 	// Por dónde entró: lo que escribe un agente se pone aparte en el hilo.
 	c.Via = domain.ViaFrom(ctx)
+	// Y qué agente, si lo escribió uno con token (ver AgentStampFor).
+	if a := domain.AgentFrom(ctx); a != nil {
+		c.Via, c.Agent = domain.ViaMCP, *a
+	}
 	if err := s.repo.CreateComment(c); err != nil {
 		return nil, err
 	}

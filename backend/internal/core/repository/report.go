@@ -378,6 +378,8 @@ func listItemComments(db *gorm.DB, itemID string, includeInternal, includeWithdr
 		       r.reporter_name, r.reporter_id, c.deleted_at, c.visibility,
 		       split_part(COALESCE(c.source_key, ''), ':', 1) AS source,
 		       COALESCE(c.via, '') AS via,
+		       COALESCE(c.agent_role, '') AS agent_role, COALESCE(c.agent_model, '') AS agent_model,
+		       COALESCE(c.agent_session, '') AS agent_session,
 		       COALESCE((SELECT `+nombreVisible+` FROM users WHERE id = c.author_user_id), '') AS actor_name,
 		       c.body, c.created_at, c.updated_at
 		FROM item_comments c

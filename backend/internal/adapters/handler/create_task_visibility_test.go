@@ -65,3 +65,22 @@ func TestAnAgentsCommentIsAnInternalNote(t *testing.T) {
 		t.Errorf("una persona en la app ya no comenta como antes: %q por %q", v, via)
 	}
 }
+
+// Lo que escribe un token llega al servicio firmado como de un agente, con el
+// `agent` que mande; lo que escribe la app, sin firma aunque la mande
+// (command-and-control-522). Roturas que detecta: no pasar la firma al
+// servicio, o decidirla por lo que manda el cliente y no por el token.
+func TestAnAgentsWritingCarriesItsStamp(t *testing.T) {
+	writing := func(viaToken bool) *domain.AgentStamp {
+		r := httptest.NewRequest(http.MethodPatch, "/api/v1/tasks/t", nil)
+		c := &domain.ClaimsJWT{UserID: "u-1", ViaToken: viaToken}
+		r = r.WithContext(context.WithValue(r.Context(), repository.UserContextKey, c))
+		return domain.AgentFrom(agentWriting(r, &domain.AgentStamp{Role: "builder"}))
+	}
+	if a := writing(true); a == nil || a.Role != "builder" {
+		t.Errorf("un token escribe sin la firma de su agente: %+v", a)
+	}
+	if a := writing(false); a != nil {
+		t.Errorf("la app escribe firmada por un agente: %+v", a)
+	}
+}
