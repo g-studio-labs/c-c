@@ -8,7 +8,9 @@ import { join } from "node:path";
  * navega a «Por atender» con él resaltado y le dice al servidor «lo abrí» con
  * el mismo nonce, que es lo que el MCP espera para decir `delivered`.
  *
- * Roturas que atrapa: no navegar; navegar sin el pedido; no mandar el «lo
+ * Roturas que atrapa: abrir uno de una organización a la que no se puede
+ * pasar (se navegaría y se diría «lo abrí»); no pasar el código a minúsculas
+ * al buscarlo; no navegar; navegar sin el pedido; no mandar el «lo
  * abrí» o mandarlo con otro nonce (el agente diría que no hay app); abrirlo
  * dos veces; no atender el evento en el repartidor o en el transporte del
  * navegador; que la bandeja no se repinte con los `request:*`.
@@ -47,9 +49,10 @@ describe("abrir un pedido desde un agente", () => {
   it("navega a él y dice «lo abrí» con su nonce, una sola vez", async () => {
     useAgentRequestsStore.setState({ mineOpen: [known("req-7k2m9x", "o1")] });
     render(<MemoryRouter initialEntries={["/my-work"]}><Probe /></MemoryRouter>);
-    useAgentRequestsStore.getState().askToOpen("req-7k2m9x", "n-1");
-    await waitFor(() => expect(where).toBe("/requests?open=req-7k2m9x"));
-    expect(post.mock.calls).toEqual([["/api/v1/requests/req-7k2m9x/opened", { nonce: "n-1" }, true]]);
+    // En mayúsculas, como lo puede escribir quien lo copia: se encuentra igual.
+    useAgentRequestsStore.getState().askToOpen("REQ-7K2M9X", "n-1");
+    await waitFor(() => expect(where).toBe("/requests?open=REQ-7K2M9X"));
+    expect(post.mock.calls).toEqual([["/api/v1/requests/REQ-7K2M9X/opened", { nonce: "n-1" }, true]]);
     expect(useAgentRequestsStore.getState().pendingOpen).toBeNull();
   });
 
@@ -60,6 +63,17 @@ describe("abrir un pedido desde un agente", () => {
     await waitFor(() => expect(where).toBe("/requests?open=req-g1"));
     expect(useOrgsStore.getState().currentOrgId).toBe("o2");
     await waitFor(() => expect(post.mock.calls).toEqual([["/api/v1/requests/req-g1/opened", { nonce: "n-3" }, true]]));
+  });
+
+  it("de una organización a la que no se puede pasar: ni se navega ni se dice «lo abrí»", async () => {
+    useAgentRequestsStore.setState({ mineOpen: [known("req-x1", "o9")] });
+    render(<MemoryRouter initialEntries={["/my-work"]}><Probe /></MemoryRouter>);
+    useAgentRequestsStore.getState().askToOpen("req-x1", "n-6");
+    await waitFor(() => expect(useAgentRequestsStore.getState().pendingOpen).toBeNull());
+    await new Promise((r) => setTimeout(r, 50));
+    expect(where).toBe("/my-work");
+    expect(post).not.toHaveBeenCalled();
+    expect(useOrgsStore.getState().currentOrgId).toBe("o1");
   });
 
   it("uno recién creado, que aún no está en las listas, se busca antes de decidir la organización", async () => {

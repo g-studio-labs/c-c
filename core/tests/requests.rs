@@ -291,6 +291,27 @@ async fn opening_a_request_of_another_organization_switches_to_it_first() {
     assert_eq!(*rig.recorder.shown.lock().unwrap(), ["req-g1"]);
 }
 
+/// Un pedido de una organización a la que no se puede pasar (no es tuya) no se
+/// enseña ni se confirma: el MCP no debe oír «lo enseñé» de lo que nadie ve.
+///
+/// Rotura que atrapa: ignorar que el cambio de organización dijo que no y
+/// enseñar y confirmar igual.
+#[tokio::test]
+async fn a_request_of_an_organization_that_cannot_be_entered_is_neither_shown_nor_confirmed() {
+    let rig = rig().await;
+    let ana = ("u1", "Ana Ruiz");
+    let stranger = in_org("o-unknown", request("req-x1", "t9", ana, true));
+    list("team", "open").respond_with(ok(json!([request("req-a1", "t1", ana, true), stranger]))).with_priority(1).mount(&rig.server).await;
+    Mock::given(method("POST")).and(path("/api/v1/requests/req-x1/opened")).respond_with(ok(json!(null))).mount(&rig.server).await;
+
+    rig.core.stream().deliver(ServerEvent { event: "request:open".into(), data: json!({ "code": "REQ-X1", "nonce": "n-9" }).to_string() });
+    until("la búsqueda del pedido", || rig.core.requests().state().mine_count == 1).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(posted(&rig.server, "/api/v1/requests/req-x1/opened").await.is_empty());
+    assert!(rig.recorder.shown.lock().unwrap().is_empty());
+    assert_eq!(rig.core.orgs().state().current_org_id.as_deref(), Some("o1"));
+}
+
 /// Una organización que no está en la lista (o que aún no llegó) no avisa:
 /// el aviso nunca dice un id.
 ///
