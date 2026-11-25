@@ -366,6 +366,12 @@ impl Core {
             .await
             .ok()?; // red o plazo: pasajero, la sesión se queda
 
+        // Mientras viajaba, alguien pudo dejar un par nuevo en la mano (cambiar
+        // la contraseña revoca el de antes y devuelve otro): la respuesta es
+        // del par viejo, y ni un 401 ni un par rotado de él pisan el nuevo.
+        if let Some(now) = self.held().filter(|now| now.refresh_token != held.refresh_token) {
+            return Some(now.access_token);
+        }
         if reply.status == 401 {
             // Caducado, revocado, o reutilizado y dado por robado.
             self.forget();

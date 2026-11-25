@@ -241,6 +241,54 @@ async fn a_refresh_that_is_refused_ends_the_session() {
     assert_eq!(*rig.recorder.seen.lock().unwrap(), [Some("ana".to_string()), None]);
 }
 
+/// Un refresh del par viejo que vuelve después de cambiar la contraseña no
+/// toca el par nuevo, lo diga el servidor como lo diga.
+///
+/// Cambiar la contraseña revoca el refresh de antes y deja otro en la mano.
+/// Roturas que atrapan: que el 401 del viejo, que llega tarde, cierre la
+/// sesión de quien la acaba de cambiar; que un par rotado del viejo pise el
+/// nuevo.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_refresh_of_the_old_pair_leaves_the_new_one_alone() {
+    for answer in [
+        ResponseTemplate::new(401).set_body_string(r#"{"success":false,"error":"invalid-token"}"#),
+        ResponseTemplate::new(200)
+            .set_body_string(r#"{"success":true,"data":{"accessToken":"rotated-access","refreshToken":"rotated-refresh"}}"#),
+    ] {
+        let rig = signed_in().await;
+        let late = Gate::default();
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(header("authorization", "Bearer old-refresh"))
+            .respond_with(late.hold(answer))
+            .mount(&rig.server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/change-password"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"success":true,"data":{"accessToken":"new-access","refreshToken":"new-refresh"}}"#,
+            ))
+            .mount(&rig.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/auth/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"success":true,"data":{"id":"u1","username":"ana"}}"#))
+            .mount(&rig.server)
+            .await;
+
+        let core = rig.core.clone();
+        let refreshing = tokio::spawn(async move { core.refresh_access_token().await });
+        gated::until("el refresh viejo está en camino", || late.held() == 1).await;
+        rig.core.change_password("vieja-clave", "nueva-clave").await.unwrap();
+        late.open();
+        assert_eq!(refreshing.await.unwrap().as_deref(), Some("new-access"));
+
+        assert_eq!(rig.core.access_token().as_deref(), Some("new-access"), "el refresh viejo pisó el par nuevo");
+        let stored = rig.storage.get("session").expect("el refresh viejo cerró la sesión");
+        assert!(stored.contains("new-refresh"));
+    }
+}
+
 /// La sesión de una versión anterior no pisa la que el core ya tiene.
 ///
 /// Rotura que atrapa: adoptar siempre.
