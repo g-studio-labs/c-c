@@ -42,6 +42,7 @@ mod requests;
 mod newtask;
 mod notifier;
 mod organization;
+mod overview;
 mod platform;
 mod system;
 mod prompt;
@@ -61,6 +62,7 @@ mod voice_ring;
 mod voice_screen_picker;
 mod voice_settings;
 mod voice_video;
+mod wall;
 mod workspace;
 #[cfg(test)]
 mod testing;

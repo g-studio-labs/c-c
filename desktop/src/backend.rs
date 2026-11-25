@@ -17,8 +17,8 @@ use std::future::Future;
 use std::sync::Arc;
 
 use cac_core::{
-    Announcement, ApiError, CommsState, InboxState, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, OrgsState, PlatformState, RequestsState, Session, Storage,
-    TaskState, ThreadState, TreeState, VoiceState,
+    Announcement, ApiError, CommsState, InboxState, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, OrgsState, OverviewState, PlatformState, RequestsState, Session, Storage,
+    TaskState, ThreadState, TreeState, VoiceState, WallState,
 };
 use gpui_kit::{App, AppContext, Entity, Global};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
@@ -39,6 +39,8 @@ enum CoreEvent {
     Voice(VoiceState),
     Platform(PlatformState),
     Requests(RequestsState),
+    Wall(WallState),
+    Overview(OverviewState),
     /// No es estado: un agente pidió que se mire un pedido ya.
     ShowRequest,
     /// No es estado: un aviso del sistema que enseñar (`notifier`).
@@ -102,6 +104,12 @@ impl Listener for Forwarder {
     fn requests_changed(&self, state: RequestsState) {
         self.send(CoreEvent::Requests(state));
     }
+    fn wall_changed(&self, state: WallState) {
+        self.send(CoreEvent::Wall(state));
+    }
+    fn overview_changed(&self, state: OverviewState) {
+        self.send(CoreEvent::Overview(state));
+    }
     fn show_request(&self, _code: String) {
         self.send(CoreEvent::ShowRequest);
     }
@@ -138,6 +146,10 @@ pub struct Snapshot {
     /// «Por atender»: los pedidos de los agentes, su número y las marcas
     /// «espera a…» de las tareas.
     pub requests: RequestsState,
+    /// El muro de feedback.
+    pub wall: WallState,
+    /// Lo que lee el resumen; lo demás lo toma de comunicación y Plataforma.
+    pub overview: OverviewState,
 }
 
 impl Snapshot {
@@ -160,6 +172,8 @@ impl Snapshot {
             CoreEvent::Voice(state) => self.voice = state,
             CoreEvent::Platform(state) => self.platform = state,
             CoreEvent::Requests(state) => self.requests = state,
+            CoreEvent::Wall(state) => self.wall = state,
+            CoreEvent::Overview(state) => self.overview = state,
             // No llegan aquí: no son estado.
             CoreEvent::Announce(_) | CoreEvent::ShowRequest => {}
         }

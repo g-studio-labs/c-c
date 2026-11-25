@@ -93,8 +93,9 @@ impl Aside {
 struct Opened {
     task: Option<String>,
     doc: Option<String>,
-    /// Comunicación, Plataforma y «Por atender» en pantalla.
-    modules: [bool; 3],
+    /// Comunicación, Plataforma, «Por atender», el resumen y el muro en
+    /// pantalla.
+    modules: [bool; 5],
 }
 
 impl Opened {
@@ -145,6 +146,10 @@ pub struct Workspace {
     pub(crate) task: Entity<TaskView>,
     /// «Por atender»: los pedidos de los agentes.
     pub(crate) requests: Entity<crate::requests::RequestsView>,
+    /// «Resumen».
+    overview: Entity<crate::overview::OverviewScreen>,
+    /// El muro de feedback, en comunicación.
+    wall: Entity<crate::wall::WallView>,
     /// La lista de comunicación: lo que el panel enseña mientras se está en
     /// ese módulo.
     pub(crate) comms: Entity<CommsView>,
@@ -266,6 +271,8 @@ impl Workspace {
             docs_filter: cx.new(|cx| InputState::new(window, cx).placeholder(tr(cx, "nav:panel.filter"))),
             task: cx.new(|cx| TaskView::new(window, cx)),
             requests: cx.new(|cx| crate::requests::RequestsView::new(window, cx)),
+            overview: cx.new(|_| crate::overview::OverviewScreen::new()),
+            wall: cx.new(|cx| crate::wall::WallView::new(window, cx)),
             comms,
             servers: cx.new(|_| crate::platform::servers::ServersView::new()),
             organization,
@@ -1044,7 +1051,7 @@ impl Workspace {
         Opened {
             task: snapshot.task.task_id.clone(),
             doc: snapshot.docs.target.as_ref().map(|target| target.id.clone()),
-            modules: [snapshot.comms.on_screen, snapshot.platform.on_screen, snapshot.requests.on_screen],
+            modules: [snapshot.comms.on_screen, snapshot.platform.on_screen, snapshot.requests.on_screen, snapshot.overview.on_screen, snapshot.comms.on_screen && snapshot.comms.on_wall],
         }
     }
 
@@ -1152,6 +1159,38 @@ impl Workspace {
                     .child(text)
                     .test_support()
             }))
+            .test_support()
+    }
+
+    /// «Resumen»: la fila del panel que pone delante con qué te encuentras.
+    fn overview_row(&self, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, hover, foreground) = (theme.muted_foreground, theme.sidebar_accent, theme.sidebar_foreground);
+        div()
+            .id("panel-overview")
+            .h(px(PANEL_ROW_HEIGHT))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .px_1()
+            .mx_1()
+            .rounded(px(8.))
+            .leading_sm()
+            .when(active, |this| this.bg(hover).font_weight(FontWeight::MEDIUM))
+            .when(!active, |this| this.text_color(muted).hover(move |style| style.bg(hover.opacity(0.5)).text_color(foreground)))
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.leave_aside();
+                cx.notify();
+                Backend::run(cx, |core| async move {
+                    if core.overview().show() {
+                        core.overview().load().await;
+                    }
+                })
+            }))
+            .child(Icon::new(Lucide::LayoutDashboard).size_4())
+            .child(tr(cx, "nav:item.overview"))
             .test_support()
     }
 
@@ -1699,7 +1738,8 @@ impl Workspace {
         // «Mi trabajo» es la pantalla, esté acotada o no: a qué, lo dice el
         // árbol. Leyendo documentación o en «Por atender» ya no se está en ella.
         let on_requests = snapshot.requests.on_screen;
-        let on_my_work = snapshot.docs.target.is_none() && !on_requests;
+        let on_overview = snapshot.overview.on_screen;
+        let on_my_work = snapshot.docs.target.is_none() && !on_requests && !on_overview;
         let waiting = snapshot.requests.mine_count;
         // En comunicación el panel es su lista, y en Plataforma sus filas:
         // misma cabecera, otro cuerpo.
@@ -1858,7 +1898,7 @@ impl Workspace {
                     .child(tr(cx, "nav:item.myWork")),
             )
             .child(self.requests_row(on_requests, waiting, cx))
-            .child(Self::pending_panel_row("panel-overview", Lucide::LayoutDashboard, "nav:item.overview", cx))
+            .child(self.overview_row(on_overview, cx))
             .child(Self::pending_panel_row("panel-notes", Lucide::NotebookPen, "nav:item.notes", cx))
             // Filtra lo que ya está en el panel; no es el buscador.
             .child(
@@ -2026,6 +2066,8 @@ impl Render for Workspace {
                 Aside::Invitations => self.received.clone().into_any_element(),
                 Aside::Profile(view) => view.clone().into_any_element(),
             }
+        } else if snapshot.comms.on_screen && snapshot.comms.on_wall {
+            self.wall.clone().into_any_element()
         } else if snapshot.comms.on_screen {
             crate::comms::conversation(&self.chat, &self.channel_tabs, cx)
         } else if snapshot.platform.on_screen {
@@ -2036,6 +2078,8 @@ impl Render for Workspace {
             self.docs.clone().into_any_element()
         } else if snapshot.requests.on_screen {
             self.requests.clone().into_any_element()
+        } else if snapshot.overview.on_screen {
+            self.overview.clone().into_any_element()
         } else {
             self.my_work.clone().into_any_element()
         };

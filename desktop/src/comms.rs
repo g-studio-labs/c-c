@@ -251,6 +251,24 @@ impl CommsView {
         }
     }
 
+    /// El muro de feedback (`CommsPanel.tsx`), con un punto si hay algo
+    /// publicado desde que se abrió. Abrirlo es haberlo visto.
+    fn wall_row(active: bool, has_new: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (active_bg, active_ink, primary) = (theme.sidebar_accent, theme.sidebar_accent_foreground, theme.primary);
+        let new = tr(cx, "common:feedback.new");
+        plain_row("comms-wall", Lucide::Megaphone, tr(cx, "nav:item.feedback"), false, cx)
+            .when(active, |this| this.bg(active_bg).font_weight(FontWeight::MEDIUM).text_color(active_ink))
+            .cursor_pointer()
+            .aria_selected(active)
+            .on_click(|_, _, cx| {
+                Backend::core(cx).wall().show();
+                Backend::run(cx, |core| async move { core.wall().opened().await });
+            })
+            .when(has_new, |this| this.child(div().id("comms-wall-new").size_2().flex_none().rounded_full().bg(primary).aria_label(new).test_support()))
+            .test_support()
+    }
+
     /// Una sección (`PanelSection.tsx`): la cabecera en mayúsculas, que la
     /// pliega y sigue diciendo cuánto hay sin leer, y sus filas.
     fn render_section(section: CommsSection, rows: &CommsRows, extra: Vec<AnyElement>, cx: &App) -> AnyElement {
@@ -329,6 +347,10 @@ impl Render for CommsView {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let not_yet = tr(cx, "common:misc.notInThisApp");
+        let (on_wall, wall_new) = {
+            let snapshot = Backend::snapshot(cx).read(cx);
+            (snapshot.comms.on_screen && snapshot.comms.on_wall, snapshot.wall.has_new)
+        };
 
         let mut channel_extras: Vec<AnyElement> = Vec::new();
         if panel.no_channels {
@@ -381,14 +403,7 @@ impl Render for CommsView {
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    // El muro está en su sitio y todavía no se abre aquí.
-                    .child(
-                        div().flex().flex_col().px_1().child(
-                            plain_row("comms-wall", Lucide::Megaphone, tr(cx, "nav:item.feedback"), false, cx)
-                                .tooltip(move |window, cx| Tooltip::new(not_yet.clone()).build(window, cx))
-                                .test_support(),
-                        ),
-                    )
+                    .child(div().flex().flex_col().px_1().child(Self::wall_row(on_wall, wall_new, cx)))
                     .when(panel.channels.shown, |this| this.child(Self::render_section(CommsSection::Channels, &panel.channels, channel_extras, cx)))
                     .when(panel.directs.shown, |this| this.child(Self::render_section(CommsSection::Directs, &panel.directs, direct_extras, cx)))
                     .when(panel.nothing_matches, |this| {

@@ -526,7 +526,7 @@ mod tests {
         json!([
             notice("n1", "chat:message", "/chat?space=a", "2026-11-18T10:00:00Z", Some("chat:a")),
             notice("n2", "chat:mention", "/chat?space=a", "2026-11-18T11:00:00Z", Some("chat:a")),
-            notice("n3", "post:feedback", "/feedback?post=p1", "2026-11-18T09:00:00Z", None),
+            notice("n3", "post:feedback", "/servers/x/backups?target=b", "2026-11-18T09:00:00Z", None),
             json!({ "id": "n4", "orgId": "o1", "kind": "task:assigned", "title": "Te asignaron", "body": "Arreglar login", "link": "/tasks?task=t1",
                     "createdAt": "2026-11-17T09:00:00Z", "readAt": "2026-11-17T10:00:00Z" }),
         ])
