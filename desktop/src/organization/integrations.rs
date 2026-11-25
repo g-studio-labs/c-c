@@ -15,7 +15,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use super::pickers::{choice_chip, Choice};
-use super::{card, OrgView};
+use super::{card, Notice, OrgView, PendingKey};
 use crate::backend::Backend;
 use crate::lang::{locale, tr};
 use crate::theme::Leading as _;
@@ -37,12 +37,6 @@ pub(super) struct IntegrationsTab {
     /// El nombre de la nueva, mientras se escribe.
     creating: Option<Entity<InputState>>,
     _on_creating: Option<Subscription>,
-    /// La llave recién entregada. El servidor la da al crear y al rotar y no
-    /// vuelve a darla —guarda un hash y nada más—, así que es el único
-    /// momento en que existe legible: se queda a la vista hasta que se diga
-    /// que ya se guardó, y no en un aviso que se va mientras se busca el
-    /// gestor de contraseñas.
-    key: Option<String>,
     editing: Option<Editing>,
 }
 
@@ -88,17 +82,48 @@ impl OrgView {
         if name.is_empty() {
             return;
         }
-        let id = org.id.clone();
-        self.act_with(
-            move |core| async move { core.orgs().create_report_project(&id, &name).await },
-            |this, key, cx| {
-                this.integrations.creating = None;
-                this.integrations.key = Some(key);
-                this.refresh_projects(cx);
-            },
-            "org:errCreate",
-            cx,
-        );
+        let (id, project) = (org.id.clone(), name.clone());
+        self.ask_key(&org, project, move |core| async move { core.orgs().create_report_project(&id, &name).await }, "org:errCreate", |this| this.integrations.creating = None, cx);
+    }
+
+    /// Pide una llave (al crear o al rotar) y la deja a la vista pase lo que
+    /// pase: si mientras tanto se cambió de organización, el resto de lo
+    /// contestado es de la otra, pero la llave no se tira, que no hay otra.
+    fn ask_key<F, Fut>(&mut self, org: &cac_core::Organization, project: String, work: F, fallback_key: &'static str, on_done: impl FnOnce(&mut Self) + 'static, cx: &mut Context<Self>)
+    where
+        F: FnOnce(cac_core::Core) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<String, cac_core::ApiError>> + Send + 'static,
+    {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        self.notice = None;
+        cx.notify();
+        let org_name = org.name.clone();
+        let asked_for = self.loaded_for.clone();
+        let answer = Backend::ask(cx, work);
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = answer.await else { return };
+            this.update(cx, |this, cx| {
+                this.busy = false;
+                let same_org = this.loaded_for == asked_for;
+                match result {
+                    Ok(key) => {
+                        this.pending_key = Some(PendingKey { org_name, project, key });
+                        if same_org {
+                            on_done(this);
+                            this.refresh_projects(cx);
+                        }
+                    }
+                    Err(error) if same_org => this.notice = Some(Notice { text: crate::lang::error_text(cx, &error, fallback_key), problem: true }),
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn start_editing(&mut self, project: &ReportProject, window: &mut Window, cx: &mut Context<Self>) {
@@ -168,8 +193,9 @@ impl OrgView {
                 return;
             }
             this.update(cx, |this, cx| {
-                let id = project.id.clone();
-                this.act_with(move |core| async move { core.orgs().rotate_report_key(&id).await }, |this, key, _| this.integrations.key = Some(key), "org:errSave", cx);
+                let Some((org, _)) = Self::current(cx) else { return };
+                let (id, name) = (project.id.clone(), project.name.clone());
+                this.ask_key(&org, name, move |core| async move { core.orgs().rotate_report_key(&id).await }, "org:errSave", |_| {}, cx);
             })
             .ok();
         })
@@ -193,8 +219,8 @@ impl OrgView {
         .detach();
     }
 
-    fn render_key(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let key = self.integrations.key.clone()?;
+    pub(super) fn render_key(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let PendingKey { org_name, project, key, .. } = self.pending_key.clone()?;
         let theme = cx.theme();
         let (warning, muted, background, mono) = (theme.warning, theme.muted_foreground, theme.background, theme.mono_font_family.clone());
         let copied = key.clone();
@@ -210,6 +236,7 @@ impl OrgView {
                 .border_color(warning.opacity(0.5))
                 .bg(warning.opacity(0.1))
                 .leading_xs()
+                .child(div().id("org-key-owner").aria_label(format!("{project} · {org_name}")).font_weight(FontWeight::MEDIUM).child(format!("{project} · {org_name}")).test_support())
                 .child(div().font_weight(FontWeight::MEDIUM).child(tr(cx, "org:keyShownOnce")))
                 .child(div().text_color(muted).child(tr(cx, "org:keyHashOnly")))
                 .child(
@@ -221,7 +248,7 @@ impl OrgView {
                         .child(div().id("org-key").aria_label(key.clone()).flex_1().min_w_0().truncate().px_2().py_1().rounded(px(4.)).bg(background).font_family(mono).child(key).test_support())
                         .child(Button::new("org-key-copy").ghost().small().icon(Icon::new(Lucide::Copy)).label(tr(cx, "common:admin.copy")).on_click(cx.listener(move |_, _, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copied.clone())))))
                         .child(Button::new("org-key-saved").ghost().small().label(tr(cx, "org:iSavedIt")).on_click(cx.listener(|this, _, _, cx| {
-                            this.integrations.key = None;
+                            this.pending_key = None;
                             cx.notify();
                         }))),
                 )
@@ -424,11 +451,15 @@ impl OrgView {
     }
 
     pub(super) fn render_integrations(&mut self, org: &cac_core::Organization, manage: bool, cx: &mut Context<Self>) -> AnyElement {
+        // Un formulario abierto no sobrevive a perder el permiso.
+        if !manage {
+            self.integrations.creating = None;
+            self.integrations.editing = None;
+        }
         let theme = cx.theme();
         let (border, muted) = (theme.border, theme.muted_foreground);
         let spaces = Self::current_spaces(cx);
         let lists = inbox_lists(spaces.as_deref().unwrap_or_default(), &org.id);
-        let key = self.render_key(cx);
         let busy = self.busy;
 
         let creating = self.integrations.creating.clone().map(|input| {
@@ -460,7 +491,6 @@ impl OrgView {
             .flex()
             .flex_col()
             .gap_3()
-            .children(key)
             // Lo que hay que saber antes de crear una, no después.
             .child(div().max_w(px(660.)).leading_xs().text_color(muted).child(tr(cx, "org:lead")))
             .child(

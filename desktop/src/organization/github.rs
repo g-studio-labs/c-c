@@ -27,6 +27,10 @@ pub(super) struct GitHubTab {
     loading: bool,
     /// El repo cuyos docs se están sincronizando.
     syncing: Option<String>,
+    /// Repos con un cambio viajando, y lo que se pidió mientras tanto: se
+    /// manda junto cuando vuelve, sobre el repo tal como quedó.
+    saving: std::collections::HashSet<String>,
+    queued: std::collections::HashMap<String, RepoChange>,
 }
 
 impl GitHubTab {
@@ -105,9 +109,24 @@ impl OrgView {
         .detach();
     }
 
+    /// Guarda un cambio de un repo. Si ya viaja otro del mismo repo, éste
+    /// espera y se junta con los que lleguen: el servidor reemplaza el repo
+    /// entero, y dos cambios mandados a la vez se pisarían.
     fn update_repo(&mut self, repo: GitHubRepo, change: RepoChange, cx: &mut Context<Self>) {
+        if !self.github.saving.insert(repo.id.clone()) {
+            let merged = match self.github.queued.remove(&repo.id) {
+                Some(waiting) => waiting.merged_with(change),
+                None => change,
+            };
+            self.github.queued.insert(repo.id, merged);
+            return;
+        }
+        self.send_repo(repo, change, cx);
+    }
+
+    fn send_repo(&mut self, repo: GitHubRepo, change: RepoChange, cx: &mut Context<Self>) {
         let Some((org, _)) = Self::current(cx) else { return };
-        let id = org.id.clone();
+        let (id, repo_id) = (org.id.clone(), repo.id.clone());
         let asked_for = self.loaded_for.clone();
         let answer = Backend::ask(cx, move |core| async move { core.orgs().github_update_repo(&id, &repo, &change).await });
         cx.spawn(async move |this, cx| {
@@ -117,12 +136,23 @@ impl OrgView {
                     return;
                 }
                 match result {
-                    Ok(saved) => this.github.replace(saved),
+                    Ok(saved) => {
+                        this.github.replace(saved.clone());
+                        if let Some(next) = this.github.queued.remove(&repo_id) {
+                            this.send_repo(saved, next, cx);
+                            cx.notify();
+                            return;
+                        }
+                    }
                     Err(error) => {
+                        this.github.queued.remove(&repo_id);
                         let text = crate::lang::error_text(cx, &error, "org:github.saveFailed");
                         this.say(text, true, cx);
+                        // Lo que se ve vuelve a ser lo que dice el servidor.
+                        this.load_github(cx);
                     }
                 }
+                this.github.saving.remove(&repo_id);
                 cx.notify();
             })
             .ok();

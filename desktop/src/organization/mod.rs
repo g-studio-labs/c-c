@@ -29,6 +29,18 @@ use crate::backend::Backend;
 use crate::lang::{locale, tr};
 use crate::theme::Leading as _;
 
+/// La llave de ingesta recién entregada. El servidor la da al crear y al
+/// rotar y no vuelve a darla —guarda un hash—, así que se queda a la vista,
+/// con el proyecto y la organización a los que pertenece, hasta que se diga
+/// que ya se guardó: cambiar de organización o salir de la pantalla no la
+/// tira.
+#[derive(Clone)]
+pub(crate) struct PendingKey {
+    pub org_name: String,
+    pub project: String,
+    pub key: String,
+}
+
 /// El aviso de la última acción: lo que en la app de siempre es un toast.
 #[derive(Clone)]
 pub(crate) struct Notice {
@@ -77,6 +89,7 @@ pub struct OrgView {
     meetings: meetings::MeetingsTab,
     github: github::GitHubTab,
     integrations: integrations::IntegrationsTab,
+    pending_key: Option<PendingKey>,
     repo_filter: Entity<InputState>,
     /// La zona de la máquina, para decir a qué hora suena cada reunión «para ti».
     viewer_zone: String,
@@ -166,6 +179,7 @@ impl OrgView {
             meetings: Default::default(),
             github: Default::default(),
             integrations: Default::default(),
+            pending_key: None,
             repo_filter,
             viewer_zone: cac_core::local_zone_name(),
             _subscriptions: subscriptions,
@@ -478,6 +492,7 @@ impl Render for OrgView {
                         .gap_6()
                         .leading_sm()
                         .child(self.render_header(&org, manage, cx))
+                        .children(self.render_key(cx))
                         .child(self.render_tabs(manage, cx))
                         .children(self.render_notice(cx))
                         .child(body),

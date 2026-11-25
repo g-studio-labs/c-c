@@ -7,7 +7,7 @@
 //! (`cac_core::org_meetings`).
 
 use cac_core::{
-    default_meeting_zone, dual_time, is_zone, meeting_when, next_ring, readable_rule, reached, text_with, toggled_exclusion, wall_time_today, weekday_name, zone_label, Freq, Meeting, MeetingForm, MeetingRoom,
+    default_meeting_zone, is_zone, meeting_preview, meeting_when, next_ring, readable_rule, reached, text_with, toggled_exclusion, weekday_name, zone_label, Freq, Meeting, MeetingForm, MeetingRoom,
     ALL_DAYS, WEEK_ORDER,
 };
 use chrono::Utc;
@@ -44,6 +44,10 @@ pub(super) struct MeetingsTab {
     editor: Option<Editor>,
     /// La reunión cuyo «a quién le llega» está abierto.
     people_open: Option<String>,
+    /// Reuniones con una lista de excluidos viajando, y las que cambiaron
+    /// mientras tanto: se vuelve a mandar la última, de una en una.
+    sending_people: std::collections::HashSet<String>,
+    resend_people: std::collections::HashSet<String>,
 }
 
 impl OrgView {
@@ -166,9 +170,46 @@ impl OrgView {
         .detach();
     }
 
-    fn toggle_person(&mut self, meeting: &Meeting, user_id: &str, cx: &mut Context<Self>) {
-        let (id, excluded) = (meeting.id.clone(), toggled_exclusion(meeting, user_id));
-        self.act(move |core| async move { core.orgs().set_meeting_excluded(&id, &excluded).await }, |this, cx| this.load_meetings(cx), "org:errReach", cx);
+    /// Marca o desmarca a alguien sobre lo último que se ve, incluido lo que
+    /// aún no ha llegado al servidor, y manda la lista de una en una: dos
+    /// clics seguidos no se pisan.
+    fn toggle_person(&mut self, meeting_id: &str, user_id: &str, cx: &mut Context<Self>) {
+        let Some(meeting) = self.meetings.list.as_mut().and_then(|list| list.iter_mut().find(|meeting| meeting.id == meeting_id)) else { return };
+        meeting.excluded_user_ids = toggled_exclusion(meeting, user_id);
+        cx.notify();
+        if !self.meetings.sending_people.insert(meeting_id.to_string()) {
+            self.meetings.resend_people.insert(meeting_id.to_string());
+            return;
+        }
+        self.send_exclusions(meeting_id.to_string(), cx);
+    }
+
+    fn send_exclusions(&mut self, meeting_id: String, cx: &mut Context<Self>) {
+        let Some(excluded) = self.meetings.list.as_ref().and_then(|list| list.iter().find(|meeting| meeting.id == meeting_id)).map(|meeting| meeting.excluded_user_ids.clone()) else { return };
+        let (id, asked_for) = (meeting_id.clone(), self.loaded_for.clone());
+        let answer = Backend::ask(cx, move |core| async move { core.orgs().set_meeting_excluded(&id, &excluded).await });
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = answer.await else { return };
+            this.update(cx, |this, cx| {
+                if this.loaded_for != asked_for {
+                    return;
+                }
+                if result.is_ok() && this.meetings.resend_people.remove(&meeting_id) {
+                    this.send_exclusions(meeting_id, cx);
+                    return;
+                }
+                this.meetings.sending_people.remove(&meeting_id);
+                this.meetings.resend_people.remove(&meeting_id);
+                if let Err(error) = result {
+                    let text = crate::lang::error_text(cx, &error, "org:errReach");
+                    this.say(text, true, cx);
+                }
+                // Lo que se ve vuelve a ser lo que dice el servidor.
+                this.load_meetings(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn render_editor(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -284,14 +325,7 @@ impl OrgView {
 
         // A qué hora suena, allí y para quien mira: antes de guardar, no
         // después.
-        let preview = wall_time_today(&form.time, &form.zone, now).map(|at| {
-            let (there, here) = dual_time(at, &form.zone, &viewer_zone, lang);
-            let text = match &here {
-                Some(here) => format!("{there} · {here}"),
-                None => there,
-            };
-            div().id("org-meeting-preview").leading_xs().aria_label(text.clone()).child(text).test_support()
-        });
+        let preview = meeting_preview(&form.time, &form.zone, &viewer_zone, now, lang).map(|text| div().id("org-meeting-preview").leading_xs().aria_label(text.clone()).child(text).test_support());
 
         let mut rooms = vec![Choice::option("", tr(cx, "org:noRoom"))];
         rooms.extend(self.meetings.rooms.iter().map(|room| Choice::option(room.id.clone(), if room.is_general() { format!("{} (general)", room.name) } else { room.name.clone() })));
@@ -442,7 +476,7 @@ impl OrgView {
                 .child(div().leading_xs().text_color(muted).child(tr(cx, "org:everyoneByDefault")))
                 .child(div().flex().flex_wrap().gap_2().children(members.iter().map(|member| {
                     let included = !meeting.excluded_user_ids.contains(&member.user_id);
-                    let (target, user) = (meeting.clone(), member.user_id.clone());
+                    let (target, user) = (meeting.id.clone(), member.user_id.clone());
                     let button = Button::new(SharedString::from(format!("org-meeting-person-{}-{}", meeting.id, member.user_id))).small().label(format!("@{}", member.username)).on_click(cx.listener(move |this, _, _, cx| this.toggle_person(&target, &user, cx)));
                     if included { button.primary() } else { button.outline() }
                 })))
@@ -459,7 +493,7 @@ impl OrgView {
                 .py_2()
                 .border_t_1()
                 .border_color(border)
-                .child(div().flex_1().text_size(px(11.)).text_color(muted).child(if meeting.paused { tr(cx, "org:notRinging") } else { format!("{}{}", tr(cx, "org:next"), next_ring(meeting, &chrono::Local, lang)) }))
+                .child(div().flex_1().text_size(px(11.)).text_color(muted).child(if meeting.paused { tr(cx, "org:notRinging") } else { format!("{}{}", tr(cx, "org:next"), next_ring(meeting, &self.viewer_zone, lang)) }))
                 .child(Button::new(SharedString::from(format!("org-meeting-edit-{id}"))).ghost().small().icon(Icon::new(Lucide::Pencil)).label(tr(cx, "org:edit")).on_click(cx.listener(move |this, _, window, cx| this.open_editor(Some(editing.clone()), window, cx))))
                 .child(
                     Button::new(SharedString::from(format!("org-meeting-pause-{id}")))
@@ -496,6 +530,11 @@ impl OrgView {
     }
 
     pub(super) fn render_meetings(&mut self, manage: bool, cx: &mut Context<Self>) -> AnyElement {
+        // Un formulario abierto no sobrevive a perder el permiso (un cambio
+        // de papel que llega con él delante).
+        if !manage && self.meetings.editor.is_some() {
+            self.meetings.editor = None;
+        }
         if self.meetings.list.is_none() && !self.meetings.loading {
             self.load_meetings(cx);
         }

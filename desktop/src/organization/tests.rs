@@ -490,9 +490,8 @@ fn a_member_sees_meetings_but_cannot_change_them(cx: &mut TestAppContext) {
     let (_server, window) = open_org_with(meetings_server("member"), cx);
     click(window, "org-tab-meetings", cx);
     wait_until(cx, "sale la reunión", |cx| on_screen(window, "org-meeting-m1", cx));
-    for id in ["org-meeting-new", "org-meeting-edit-m1", "org-meeting-pause-m1", "org-meeting-delete-m1", "org-meeting-people-m1"] {
-        assert!(!on_screen(window, id, cx), "{id}");
-    }
+    let shown: Vec<&str> = ["org-meeting-new", "org-meeting-edit-m1", "org-meeting-pause-m1", "org-meeting-delete-m1", "org-meeting-people-m1"].into_iter().filter(|id| on_screen(window, id, cx)).collect();
+    assert!(shown.is_empty(), "un miembro ve: {shown:?}");
     stop_stream(cx);
 }
 
@@ -592,11 +591,20 @@ fn a_project() -> serde_json::Value {
 }
 
 fn integrations_server(projects: serde_json::Value) -> FakeServer {
-    let server = org_server_with("admin", projects);
+    integrations_server_as("admin", projects, None)
+}
+
+/// Con la respuesta de crear retenida, si se da una `Gate`.
+fn integrations_server_as(role: &str, projects: serde_json::Value, create_held: Option<&Gate>) -> FakeServer {
+    let server = org_server_with(role, projects);
     server.mount(Mock::given(method("PATCH")).and(path("/api/v1/report-projects/p1")).respond_with(ok(json!(null))));
     server.mount(Mock::given(method("DELETE")).and(path("/api/v1/report-projects/p1")).respond_with(ok(json!(null))));
     server.mount(Mock::given(method("POST")).and(path("/api/v1/report-projects/p1/rotate-key")).respond_with(ok(json!({ "ingestKey": "k-rotated" }))));
-    server.mount(Mock::given(method("POST")).and(path("/api/v1/report-projects/")).respond_with(ok(json!({ "project": a_project(), "ingestKey": "k-new" }))));
+    let created = ok(json!({ "project": a_project(), "ingestKey": "k-new" }));
+    server.mount(Mock::given(method("POST")).and(path("/api/v1/report-projects/")).respond_with(match create_held {
+        Some(gate) => gate.hold(created),
+        None => created,
+    }));
     server
 }
 
@@ -656,7 +664,8 @@ fn an_integration_shows_its_key_once_and_changes_only_what_was_asked(cx: &mut Te
     assert_eq!(count_of(&server, "POST", "/api/v1/report-projects/p1/rotate-key"), 0, "rotó al cancelar");
     click(window, "org-project-rotate-p1", cx);
     cx.simulate_prompt_answer("Rotar");
-    wait_until(cx, "enseña la llave nueva", |cx| label(window, "org-key", cx) == "k-rotated");
+    wait_until(cx, "enseña la llave nueva", |cx| on_screen(window, "org-key", cx) && label(window, "org-key", cx) == "k-rotated");
+    click(window, "org-key-saved", cx);
 
     click(window, "org-project-edit-p1", cx);
     wait_until(cx, "sale el formulario", |cx| on_screen(window, "org-project-save", cx));
@@ -668,5 +677,167 @@ fn an_integration_shows_its_key_once_and_changes_only_what_was_asked(cx: &mut Te
     click(window, "org-project-pause-p1", cx);
     wait_until(cx, "pausa", |_| count_of(&server, "PATCH", "/api/v1/report-projects/p1") == 1);
     assert_eq!(request_body(&server, "PATCH", "/api/v1/report-projects/p1"), json!({ "isActive": false }));
+    stop_stream(cx);
+}
+
+/// Quien sólo es miembro ve las integraciones pero no las crea, edita,
+/// pausa, borra ni rota.
+///
+/// Rotura que atrapa: ofrecerle a un miembro cualquiera de esos controles
+/// (el servidor se lo negaría, y la pantalla no debe ofrecerlo).
+#[gpui_kit::test]
+fn a_member_sees_integrations_but_cannot_change_them(cx: &mut TestAppContext) {
+    let (_server, window) = open_org_with(integrations_server_as("member", json!([a_project()]), None), cx);
+    click(window, "org-tab-integrations", cx);
+    wait_until(cx, "sale la ficha", |cx| on_screen(window, "org-project-p1", cx));
+    let shown: Vec<&str> = ["org-project-new-button", "org-project-edit-p1", "org-project-pause-p1", "org-project-delete-p1", "org-project-rotate-p1"].into_iter().filter(|id| on_screen(window, id, cx)).collect();
+    assert!(shown.is_empty(), "un miembro ve: {shown:?}");
+    stop_stream(cx);
+}
+
+/// Un formulario abierto no sobrevive a perder el permiso: si te bajan de
+/// admin con el de una reunión y el de una integración abiertos, se cierran.
+///
+/// Roturas que atrapa: el formulario de reunión o el de integración que se
+/// quedan abiertos (y guardan, o lo intentan) tras el aviso `org:role`.
+#[gpui_kit::test]
+fn an_open_form_closes_when_you_stop_being_admin(cx: &mut TestAppContext) {
+    let server = FakeServer::start();
+    let get = |route: &str| Mock::given(method("GET")).and(path(route.to_string()));
+    let mut admin = org("o1", "G Studio");
+    admin["role"] = json!("admin");
+    let mut viewer = admin.clone();
+    viewer["role"] = json!("viewer");
+    server.mount(get("/api/v1/organizations/").respond_with(ok(json!([admin]))).up_to_n_times(1));
+    server.mount(get("/api/v1/organizations/").respond_with(ok(json!([viewer]))));
+    for mock in [
+        get("/api/v1/task-spaces/").respond_with(ok(json!([space("a", "Producto")]))),
+        get("/api/v1/docs/").respond_with(ok(json!({}))),
+        get("/api/v1/tasks/").respond_with(ok(json!([]))),
+        get("/api/v1/report-projects/").respond_with(ok(json!([a_project()]))),
+        get("/api/v1/organizations/o1/invitations").respond_with(ok(json!([]))),
+        get("/api/v1/organizations/o1/members").respond_with(ok(json!([{ "userId": "u1", "username": "ana", "role": "admin" }, { "userId": "u2", "username": "bob", "role": "viewer" }]))),
+        get("/api/v1/organizations/o1/meetings/").respond_with(ok(json!([a_meeting()]))),
+    ] {
+        server.mount(mock);
+    }
+    let (_server, window) = open_org_with(server, cx);
+    click(window, "org-tab-meetings", cx);
+    wait_until(cx, "sale la reunión", |cx| on_screen(window, "org-meeting-m1", cx));
+    click(window, "org-meeting-edit-m1", cx);
+    wait_until(cx, "el formulario de la reunión", |cx| on_screen(window, "org-meeting-form", cx));
+    click(window, "org-tab-integrations", cx);
+    wait_until(cx, "sale la ficha", |cx| on_screen(window, "org-project-p1", cx));
+    click(window, "org-project-edit-p1", cx);
+    wait_until(cx, "el formulario de la integración", |cx| on_screen(window, "org-project-save", cx));
+
+    cx.update(|cx| {
+        Backend::run(cx, |core| async move {
+            core.stream().deliver(cac_core::ServerEvent { event: "org:role".into(), data: json!({ "orgId": "o1", "orgName": "G Studio", "role": "viewer" }).to_string() })
+        })
+    });
+    wait_until(cx, "se cierra el de la integración", |cx| !on_screen(window, "org-project-save", cx));
+    click(window, "org-tab-meetings", cx);
+    wait_until(cx, "vuelven las reuniones", |cx| on_screen(window, "org-meeting-m1", cx));
+    assert!(!on_screen(window, "org-meeting-form", cx), "el formulario de la reunión sigue abierto");
+    stop_stream(cx);
+}
+
+/// La llave se entrega aunque se cambie de organización mientras se crea, dice
+/// de qué proyecto y organización es, y no se va al salir de la pantalla y
+/// volver: sólo cuando se dice que ya se guardó.
+///
+/// Roturas que atrapa: tirar en silencio la llave de lo creado en otra
+/// organización; la llave sin su proyecto y su organización; borrarla al
+/// reabrir la pantalla sin haberla reconocido.
+#[gpui_kit::test]
+fn the_key_survives_switching_organization_and_reopening(cx: &mut TestAppContext) {
+    let gate = Gate::default();
+    let (_server, window) = open_org_with(integrations_server_as("admin", json!([a_project()]), Some(&gate)), cx);
+    click(window, "org-tab-integrations", cx);
+    wait_until(cx, "salen las fichas", |cx| on_screen(window, "org-project-p1", cx));
+    click(window, "org-project-new-button", cx);
+    wait_until(cx, "sale el campo", |cx| on_screen(window, "org-project-new-name", cx));
+    type_into(window, "org-project-new-name", "Latinet", cx);
+    click(window, "org-project-create", cx);
+    wait_until(cx, "la petición queda retenida", |_| gate.held() == 1);
+
+    cx.update(|cx| Backend::run(cx, |core| async move { core.switch_org("o2").await; }));
+    wait_until(cx, "pasa a la otra", |cx| on_screen(window, "org-page-title", cx) && label(window, "org-page-title", cx) == "Cliente");
+    gate.open();
+    wait_until(cx, "la llave sale igual", |cx| on_screen(window, "org-key", cx) && label(window, "org-key", cx) == "k-new");
+    assert_eq!(label(window, "org-key-owner", cx), "Latinet · G Studio");
+
+    click(window, "rail-comms", cx);
+    wait_until(cx, "sale el panel de comunicación", |cx| on_screen(window, "comms-channel-a", cx));
+    click(window, "rail-organization", cx);
+    wait_until(cx, "vuelve la organización", |cx| on_screen(window, "org-page", cx));
+    assert!(on_screen(window, "org-key", cx), "reabrir la pantalla tiró la llave sin reconocer");
+    click(window, "org-key-saved", cx);
+    assert!(!on_screen(window, "org-key", cx));
+    stop_stream(cx);
+}
+
+/// Dos clics seguidos sobre la lista de a quién le llega una reunión no se
+/// pisan: el segundo se calcula sobre el primero y sólo sale cuando éste
+/// vuelve.
+///
+/// Roturas que atrapa: calcular el segundo sobre la lista vieja (que deshace
+/// el primero); mandar los dos a la vez.
+#[gpui_kit::test]
+fn two_quick_clicks_on_who_a_meeting_reaches_do_not_undo_each_other(cx: &mut TestAppContext) {
+    let gate = Gate::default();
+    let server = org_server("admin");
+    server.mount(Mock::given(method("GET")).and(path("/api/v1/organizations/o1/meetings/")).respond_with(ok(json!([a_meeting()]))));
+    server.mount(Mock::given(method("PUT")).and(path("/api/v1/meetings/m1/recipients")).respond_with(gate.hold(ok(json!(null)))));
+    let (server, window) = open_org_with(server, cx);
+    click(window, "org-tab-meetings", cx);
+    wait_until(cx, "sale la reunión", |cx| on_screen(window, "org-meeting-m1", cx));
+    click(window, "org-meeting-people-m1", cx);
+    wait_until(cx, "salen los miembros", |cx| on_screen(window, "org-meeting-person-m1-u1", cx));
+
+    // Parte de «u2 excluido».
+    click(window, "org-meeting-person-m1-u1", cx);
+    wait_until(cx, "viaja el primero", |_| gate.held() == 1);
+    click(window, "org-meeting-person-m1-u2", cx);
+    cx.run_until_parked();
+    assert_eq!(count_of(&server, "PUT", "/api/v1/meetings/m1/recipients"), 1, "mandó el segundo sin esperar al primero");
+
+    gate.open();
+    wait_until(cx, "sale el segundo", |_| count_of(&server, "PUT", "/api/v1/meetings/m1/recipients") == 2);
+    let bodies: Vec<serde_json::Value> = server.requests().iter().filter(|request| request.method.as_str() == "PUT" && request.url.path() == "/api/v1/meetings/m1/recipients").map(|request| serde_json::from_slice(&request.body).unwrap()).collect();
+    assert_eq!(bodies, [json!({ "excludedUserIds": ["u2", "u1"] }), json!({ "excludedUserIds": ["u1"] })]);
+    stop_stream(cx);
+}
+
+/// Dos casillas del mismo repo pulsadas seguidas se guardan juntas: el
+/// servidor reemplaza el repo entero, y el segundo cambio sobre el repo viejo
+/// habría deshecho el primero.
+///
+/// Roturas que atrapa: mandar los dos PATCH a la vez; el segundo calculado
+/// sobre el repo de antes del primero.
+#[gpui_kit::test]
+fn two_quick_checkboxes_on_a_repo_are_saved_one_after_the_other(cx: &mut TestAppContext) {
+    let gate = Gate::default();
+    let linked = |bare: bool, docs: bool| json!({ "id": "r1", "installationId": 5, "repoId": 100, "fullName": "dwit/api", "orgId": "o1", "spaceId": "a", "bareRefs": bare, "showDocs": docs });
+    let mut status = github_status(true, json!([]));
+    status["repos"] = json!([linked(false, false)]);
+    let server = org_server("admin");
+    server.mount(Mock::given(method("GET")).and(path("/api/v1/organizations/o1/github/")).respond_with(ok(status)));
+    server.mount(Mock::given(method("PATCH")).and(path("/api/v1/organizations/o1/github/repos/r1")).respond_with(gate.hold(ok(linked(true, false)))));
+    let (server, window) = open_org_with(server, cx);
+    click(window, "org-tab-github", cx);
+    wait_until(cx, "sale el repo", |cx| on_screen(window, "org-github-docs-r1", cx));
+
+    click(window, "org-github-bare-r1", cx);
+    wait_until(cx, "viaja el primero", |_| gate.held() == 1);
+    click(window, "org-github-docs-r1", cx);
+    cx.run_until_parked();
+    assert_eq!(count_of(&server, "PATCH", "/api/v1/organizations/o1/github/repos/r1"), 1, "mandó el segundo sin esperar al primero");
+
+    gate.open();
+    wait_until(cx, "sale el segundo", |_| count_of(&server, "PATCH", "/api/v1/organizations/o1/github/repos/r1") == 2);
+    let bodies: Vec<serde_json::Value> = server.requests().iter().filter(|request| request.method.as_str() == "PATCH").map(|request| serde_json::from_slice(&request.body).unwrap()).collect();
+    assert_eq!(bodies, [json!({ "spaceId": "a", "bareRefs": true, "showDocs": false }), json!({ "spaceId": "a", "bareRefs": true, "showDocs": true })]);
     stop_stream(cx);
 }

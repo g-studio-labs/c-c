@@ -2153,7 +2153,7 @@ mod tests {
     // Sin `use super::*`: ver la nota en `shell.rs`.
     use super::Workspace;
     use crate::backend::Backend;
-    use crate::testing::{ok, sign_in, wait_until, FakeServer};
+    use crate::testing::{ok, sign_in, wait_until, FakeServer, Gate};
     use cac_core::ScopeKind;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{px, size, AnyWindowHandle, AppContext, Bounds, Point, TestAppContext, WindowBounds, WindowOptions};
