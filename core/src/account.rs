@@ -1,5 +1,5 @@
-//! Lo que hace alguien con su cuenta desde la pantalla de entrada: pedir el
-//! enlace de «olvidé mi contraseña» y cambiar la contraseña.
+//! Lo que hace alguien con su cuenta: pedir el enlace de «olvidé mi
+//! contraseña», cambiar la contraseña y cambiar cómo se le llama.
 //!
 //! Y las reglas de esos formularios, que antes vivían en cada pantalla
 //! (`app/src/pages/Login.tsx`, `ChangePassword.tsx`). El servidor las vuelve a
@@ -113,6 +113,22 @@ impl Core {
             return Ok(());
         }
         Err(crate::session::server_error(&reply))
+    }
+
+    /// Guarda el nombre y el correo de quien está dentro (`Profile.tsx`) y
+    /// vuelve a pedir quién es.
+    ///
+    /// El usuario no viaja: es el identificador, y cambiarlo rompería las
+    /// menciones ya escritas. Y se relee la sesión porque el nombre se pinta
+    /// desde ella en el menú de la cuenta y en media app: sin eso se guarda
+    /// bien y se sigue viendo el de antes hasta reiniciar.
+    pub async fn update_profile(&self, name: &str, email: &str) -> Result<Session, ApiError> {
+        let body = serde_json::json!({ "name": name.trim(), "email": email.trim() });
+        let reply = self.request("PATCH", "/api/v1/auth/me", Some(body.to_string()), true).await?;
+        if reply.status >= 400 {
+            return Err(crate::session::server_error(&reply));
+        }
+        self.me().await
     }
 
     /// Cambia la contraseña de quien está dentro y lo deja dentro.

@@ -326,6 +326,56 @@ async fn a_server_that_returns_no_pair_gets_a_regular_refresh() {
     assert_eq!(core.access_token().as_deref(), Some("renewed-access"));
 }
 
+/// Guardar el perfil manda el nombre y el correo limpios, nunca el usuario,
+/// y deja la sesión con lo que el servidor dice ahora.
+///
+/// Roturas que atrapa: mandar el usuario (cambiarlo rompería las menciones
+/// ya escritas); mandar los espacios que se colaron al escribir; no releer la
+/// sesión (el menú de la cuenta seguiría con el nombre de antes hasta
+/// reiniciar); dar por guardado lo que el servidor rechazó.
+#[tokio::test]
+async fn saving_the_profile_sends_name_and_email_and_rereads_the_session() {
+    let server = MockServer::start().await;
+    let (core, storage) = core_at(&server).await;
+    core.sign_in(ana(false), "access".into(), "refresh".into()).unwrap();
+
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/auth/me"))
+        .and(header("Authorization", "Bearer access"))
+        .and(body_json(serde_json::json!({ "name": "Ana Ruiz", "email": "ana@cac.dev" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "message": "Profile updated" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true,
+            "data": { "id": "u1", "username": "ana", "name": "Ana Ruiz", "email": "ana@cac.dev" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let session = core.update_profile("  Ana Ruiz ", " ana@cac.dev ").await.unwrap();
+
+    assert_eq!(session.name.as_deref(), Some("Ana Ruiz"));
+    assert_eq!(core.session().unwrap().name.as_deref(), Some("Ana Ruiz"));
+    assert!(storage.get("session").unwrap().contains("Ana Ruiz"), "la sesión guardada sigue con el nombre de antes");
+
+    server.reset().await;
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/auth/me"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(
+            serde_json::json!({ "success": false, "message": "Invalid request", "error": "email" }),
+        ))
+        .mount(&server)
+        .await;
+    let refused = core.update_profile("Otra", "no-es-correo").await.unwrap_err();
+    assert!(matches!(refused, ApiError::Server { status: 400, .. }));
+    assert_eq!(core.session().unwrap().name.as_deref(), Some("Ana Ruiz"));
+}
+
 // ── Preferencias ────────────────────────────────────────────────────────
 
 /// «Mi trabajo» se mira en lista hasta que alguien elige otra vista, y lo
