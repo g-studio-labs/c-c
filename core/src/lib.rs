@@ -54,7 +54,7 @@ pub mod workspace;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub use account::{check_new_password, check_sign_in, gate, FormCheck, Gate, MIN_PASSWORD};
+pub use account::{check_new_password, check_sign_in, gate, FormCheck, Gate, PasswordChanged, MIN_PASSWORD};
 pub use chat::{
     apply_reaction, around_label, enter_sends, file_token, mention_token, message_body, message_to_send, picture_step, thread_lines, thread_pictures, thread_splice, BodyFile, Chat, ComposerToken, MessageBody,
     ThreadLine, ThreadLink, ThreadMessage, ThreadPicture, ThreadQuote, ThreadSplice, ThreadState, MESSAGE_MAX_CHARS, THREAD_PAGE,

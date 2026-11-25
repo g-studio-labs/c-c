@@ -9,19 +9,29 @@ use std::sync::{Arc, Mutex};
 
 use cac_core::{
     check_new_password, check_sign_in, error_phrase, first_spoken, folds_panel, gate, is_dark, shortcut_text, KeysHeld, pick_locale, text, text_count, text_with, ApiError, Config, Core,
-    FormCheck, Gate, Locale, ThemePreference, WorkLayout, NoListener, Session, Storage,
+    FormCheck, Gate, Locale, PasswordChanged, ThemePreference, WorkLayout, NoListener, Session, Storage,
 };
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 #[derive(Default)]
-struct MemoryStorage(Mutex<HashMap<String, String>>);
+struct MemoryStorage(Mutex<HashMap<String, String>>, std::sync::atomic::AtomicBool);
+
+impl MemoryStorage {
+    /// Desde ahora no guarda nada: un disco lleno, un llavero cerrado.
+    fn refuse(&self) {
+        self.1.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 impl Storage for MemoryStorage {
     fn get(&self, key: &str) -> Option<String> {
         self.0.lock().unwrap().get(key).cloned()
     }
     fn set(&self, key: &str, value: &str) -> Result<(), String> {
+        if self.1.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("disk full".into());
+        }
         self.0.lock().unwrap().insert(key.into(), value.into());
         Ok(())
     }
@@ -252,9 +262,8 @@ async fn changing_the_password_keeps_you_in_with_the_new_pair() {
         .mount(&server)
         .await;
 
-    let session = core.change_password("vieja-clave", "nueva-clave").await.unwrap();
+    assert_eq!(core.change_password("vieja-clave", "nueva-clave").await.unwrap(), PasswordChanged::Done);
 
-    assert!(!session.must_change_password);
     assert!(!core.session().unwrap().must_change_password);
     assert_eq!(core.access_token().as_deref(), Some("new-access"));
     let stored = storage.get("session").unwrap();
@@ -374,6 +383,69 @@ async fn saving_the_profile_sends_name_and_email_and_rereads_the_session() {
     let refused = core.update_profile("Otra", "no-es-correo").await.unwrap_err();
     assert!(matches!(refused, ApiError::Server { status: 400, .. }));
     assert_eq!(core.session().unwrap().name.as_deref(), Some("Ana Ruiz"));
+}
+
+/// Lo que falla después de guardar el perfil no lo da por no guardado.
+///
+/// Roturas que atrapa: decir «no se pudo guardar» cuando lo que falló fue
+/// releer; dejar en el menú el nombre de antes porque no se pudo releer.
+#[tokio::test]
+async fn a_profile_that_saved_but_could_not_be_reread_counts_as_saved() {
+    let server = MockServer::start().await;
+    let (core, _) = core_at(&server).await;
+    core.sign_in(ana(false), "access".into(), "refresh".into()).unwrap();
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/auth/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/me"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({ "success": false, "error": "internal" })))
+        .mount(&server)
+        .await;
+
+    let session = core.update_profile(" Ana Ruiz ", "ana@cac.dev").await.unwrap();
+
+    assert_eq!(session.name.as_deref(), Some("Ana Ruiz"));
+    assert_eq!(core.session().unwrap().name.as_deref(), Some("Ana Ruiz"));
+    assert_eq!(core.session().unwrap().email.as_deref(), Some("ana@cac.dev"));
+}
+
+/// Una contraseña que se cambió no se da por no cambiada por lo que falle
+/// después: si no se pudo guardar la sesión nueva se dice eso, y si no se
+/// pudo releer quién es, no se deja a nadie en «tienes que cambiarla».
+///
+/// Roturas que atrapan: decir «falló el cambio» con la contraseña ya
+/// cambiada (la persona seguiría usando la de antes); callar que la sesión
+/// no quedó guardada; dejar en la pantalla de la contraseña forzada a quien
+/// ya la cambió.
+#[tokio::test]
+async fn a_changed_password_stays_changed_whatever_fails_afterwards() {
+    let server = MockServer::start().await;
+    let (core, storage) = core_at(&server).await;
+    core.sign_in(ana(true), "old-access".into(), "old-refresh".into()).unwrap();
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/change-password"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true,
+            "data": { "accessToken": "new-access", "refreshToken": "new-refresh" }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/me"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({ "success": false, "error": "internal" })))
+        .mount(&server)
+        .await;
+
+    assert_eq!(core.change_password("vieja-clave", "nueva-clave").await.unwrap(), PasswordChanged::Done);
+    assert!(!core.session().unwrap().must_change_password, "se queda en «tienes que cambiarla»");
+
+    core.sign_in(ana(false), "mid-access".into(), "mid-refresh".into()).unwrap();
+    storage.refuse();
+    assert_eq!(core.change_password("nueva-clave", "otra-clave").await.unwrap(), PasswordChanged::NotStored);
+    assert_eq!(core.access_token().as_deref(), Some("new-access"), "sin guardar, el par nuevo tampoco está en la mano");
 }
 
 // ── Preferencias ────────────────────────────────────────────────────────

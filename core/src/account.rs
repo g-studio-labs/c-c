@@ -82,6 +82,17 @@ pub fn gate(session: Option<&Session>) -> Gate {
     }
 }
 
+/// Cómo quedó una contraseña que sí se cambió.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum PasswordChanged {
+    /// Cambiada, y la sesión nueva guardada.
+    Done,
+    /// Cambiada, pero la sesión nueva no se pudo guardar en esta máquina:
+    /// sirve hasta cerrar la app, y al volver a abrirla hay que entrar.
+    NotStored,
+}
+
 /// Lo que devuelve cambiar la contraseña. Un servidor de antes del barrido
 /// del 6-oct-2026 no devolvía par: por eso son opcionales.
 #[derive(Deserialize, Default)]
@@ -122,13 +133,25 @@ impl Core {
     /// menciones ya escritas. Y se relee la sesión porque el nombre se pinta
     /// desde ella en el menú de la cuenta y en media app: sin eso se guarda
     /// bien y se sigue viendo el de antes hasta reiniciar.
+    ///
+    /// Un fallo al releer no es un fallo al guardar: lo guardado se pone en la
+    /// sesión de la mano, y la siguiente lectura de `/auth/me` la deja al día.
     pub async fn update_profile(&self, name: &str, email: &str) -> Result<Session, ApiError> {
-        let body = serde_json::json!({ "name": name.trim(), "email": email.trim() });
+        let (name, email) = (name.trim(), email.trim());
+        let body = serde_json::json!({ "name": name, "email": email });
         let reply = self.request("PATCH", "/api/v1/auth/me", Some(body.to_string()), true).await?;
         if reply.status >= 400 {
             return Err(crate::session::server_error(&reply));
         }
-        self.me().await
+        if let Ok(session) = self.me().await {
+            return Ok(session);
+        }
+        let Some(mut session) = self.session() else { return Err(ApiError::SessionExpired) };
+        session.name = Some(name.to_string());
+        session.email = Some(email.to_string());
+        // Si tampoco se guarda en disco, en la mano sí queda.
+        let _ = self.update_session(session.clone());
+        Ok(session)
     }
 
     /// Cambia la contraseña de quien está dentro y lo deja dentro.
@@ -137,7 +160,10 @@ impl Core {
     /// guardado queda revocado, y renovar con él sería un 401 que saca a quien
     /// la acaba de cambiar. El servidor devuelve un par nuevo y es el que se
     /// guarda. `/auth/me` va después: es lo que quita el «tiene que cambiarla».
-    pub async fn change_password(&self, current: &str, next: &str) -> Result<Session, ApiError> {
+    ///
+    /// `Err` sólo si la contraseña **no** se cambió. Lo que falle después ya
+    /// no lo deshace, y decir «falló» haría creer que sigue la de antes.
+    pub async fn change_password(&self, current: &str, next: &str) -> Result<PasswordChanged, ApiError> {
         let body = serde_json::json!({ "currentPassword": current, "newPassword": next });
         let reply = self
             .request("POST", "/api/v1/auth/change-password", Some(body.to_string()), true)
@@ -146,12 +172,27 @@ impl Core {
             return Err(crate::session::server_error(&reply));
         }
         let pair: NewPair = crate::session::data_or_default(&reply);
+        let mut outcome = PasswordChanged::Done;
         match (pair.access_token, pair.refresh_token, self.session()) {
-            (Some(access), Some(refresh), Some(session)) => self.sign_in(session, access, refresh)?,
+            (Some(access), Some(refresh), Some(session)) => {
+                // El par queda en la mano aunque no se pueda guardar: esta
+                // vez se sigue dentro, y la próxima hay que volver a entrar.
+                if self.sign_in(session, access, refresh).is_err() {
+                    outcome = PasswordChanged::NotStored;
+                }
+            }
             _ => {
                 self.refresh_access_token().await;
             }
         }
-        self.me().await
+        if self.me().await.is_err() {
+            // El servidor ya quitó el «tiene que cambiarla»; si no se pudo
+            // releer, se quita aquí para no dejar a nadie en esa pantalla.
+            if let Some(mut session) = self.session() {
+                session.must_change_password = false;
+                let _ = self.update_session(session);
+            }
+        }
+        Ok(outcome)
     }
 }
