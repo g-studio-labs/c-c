@@ -31,7 +31,9 @@ import (
 // Roturas que atrapa: quitar la comprobación de una ruta cualquiera; colgar una
 // ruta nueva que escriba sin ella; que un token personal de un lector con
 // `docs:write` escriba; y, con el control, que se le niegue también a un
-// miembro, o que el lector deje de poder leer.
+// miembro, o que el lector deje de poder leer; que el rol se mire antes que
+// la pertenencia (un extraño recibiría 403 en vez de 404); y que un superadmin
+// sin membresía deje de poder escribir.
 func TestAReaderCannotChangeDocumentation(t *testing.T) {
 	db := docReaderDB(t)
 	r := chi.NewRouter()
@@ -206,6 +208,36 @@ func TestAReaderCannotChangeDocumentation(t *testing.T) {
 		if rec := do(member, rt.method, fill(rt.pattern), "{}"); refused(rec) {
 			t.Errorf("%s: a un miembro → %d %s", key, rec.Code, rec.Body.String())
 		}
+	}
+
+	// A quien no es de la organización se le sigue contestando 404 en todas,
+	// también en revocar: la pertenencia va antes que el rol. Con el rol
+	// primero, un extraño recibiría 403 y sabría que el nodo existe.
+	stranger, err := repository.GenerateTokens("u-stranger", "u-stranger", false,
+		[]domain.OrgMembershipClaim{{OrgID: "org-2", Role: domain.OrgRoleMember}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rt := range routes {
+		key := rt.method + " " + rt.pattern
+		if rec := do(stranger.AccessToken, rt.method, fill(rt.pattern), "{}"); rec.Code != http.StatusNotFound {
+			t.Errorf("%s: a uno de otra organización → %d %s, se esperaba 404", key, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Un superadmin escribe aunque no sea miembro con rol de escritura.
+	super, err := repository.GenerateTokens("u-super", "u-super", true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rt := range routes {
+		key := rt.method + " " + rt.pattern
+		if rec := do(super.AccessToken, rt.method, fill(rt.pattern), "{}"); refused(rec) {
+			t.Errorf("%s: a un superadmin sin membresía → %d %s", key, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := do(super.AccessToken, http.MethodPost, node+"/pages", `{"title":"Del superadmin"}`); rec.Code != http.StatusCreated {
+		t.Errorf("un superadmin sin membresía no crea una página → %d %s", rec.Code, rec.Body.String())
 	}
 }
 
