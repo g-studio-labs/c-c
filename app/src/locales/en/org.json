@@ -121,6 +121,9 @@
   "yourRole": "Your role: {{role}}",
   "createdOn": "created {{when}}",
   "reportsArriveInShort": "Reports arrive in",
+  "reachesOf": "{{invited}} of {{total}}",
+  "rotateNamed": "Rotate the key for {{name}}?",
+  "nowhereLost": "nowhere — anything it sends is being lost",
   "membership": {
     "added": "You were added to {{org}}",
     "removed": "You no longer belong to {{org}}",

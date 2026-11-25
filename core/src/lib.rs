@@ -32,6 +32,9 @@ pub mod nav;
 pub mod notice;
 pub mod notice_sound;
 pub mod org_admin;
+pub mod org_github;
+pub mod org_integrations;
+pub mod org_meetings;
 pub mod orgs;
 pub mod platform;
 pub mod prefs;
@@ -104,6 +107,14 @@ pub use hue::{hue_index, HUES};
 pub use org_admin::{
     account_notice, can_manage_org, date_with_year, delete_org_confirmed, delete_org_phrase, invitation_deadline, member_face, members_matching, org_summary, org_tabs, space_access_text, space_cards,
     username_initials, valid_email, valid_team_zone, AccountLink, AccountNotice, AddOutcome, Invitation, OrgMember, OrgPatch, OrgTab, PersonHit, ReportProject, SpaceAccess, SpaceCard, SpaceFace, ORG_ROLES,
+};
+pub use org_github::{
+    bare_refs_enabled, docs_line, linkable_spaces, shown_repos, GitHubInstallation, GitHubRepo, GitHubStatus, GitHubUnbound, RepoChange,
+};
+pub use org_integrations::{inbox_lists, list_path, lists_by_space, ListPath, ProjectForm, ProjectPatch};
+pub use org_meetings::{
+    default_meeting_zone, dual_time, hour_in, is_zone, local_zone_name, meeting_when, next_ring, normalized_wall_time, readable_rule, readable_weekdays, reached, toggled_exclusion, wall_time_today,
+    zone_city, zone_label, zone_offset, Freq, Meeting, MeetingDraft, MeetingForm, MeetingRoom, MeetingWhen, ALL_DAYS, WEEK_ORDER, WORKWEEK,
 };
 pub use orgs::{initials, org_hint, Organization, Orgs, OrgsState};
 pub use platform::{

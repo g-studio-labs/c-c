@@ -341,8 +341,9 @@ pub struct SpaceFace {
     pub username: String,
 }
 
-/// Un proyecto de reportes: a qué cliente pertenece un espacio.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Un proyecto de reportes: a qué cliente pertenece un espacio y, en la
+/// pestaña Integraciones, cómo recibe lo que le mandan.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct ReportProject {
@@ -350,6 +351,29 @@ pub struct ReportProject {
     pub name: String,
     #[serde(default)]
     pub org_id: String,
+    #[serde(default)]
+    pub slug: String,
+    #[serde(default)]
+    pub rate_limit_per_hour: i64,
+    #[serde(default)]
+    pub rate_limit_per_reporter_per_hour: i64,
+    #[serde(default)]
+    pub is_active: bool,
+    #[serde(default)]
+    pub default_assignee_user_id: Option<String>,
+    /// En qué lista caen los reportes que llegan por la llave.
+    #[serde(default)]
+    pub list_id: Option<String>,
+    #[serde(default)]
+    pub webhook_url: String,
+    /// Si hay un secreto de firma: el valor nunca se devuelve.
+    #[serde(default)]
+    pub webhook_configured: bool,
+    #[serde(default)]
+    pub created_at: String,
+    /// Cuántos reportes recibió en el mes en curso.
+    #[serde(default)]
+    pub reports_this_month: i64,
 }
 
 fn every_list(folders: &[FolderTree], out: &mut Vec<ListSummary>) {
@@ -722,7 +746,7 @@ mod tests {
             }))
             .unwrap()
         };
-        let projects = [ReportProject { id: "p1".into(), name: "Portento".into(), org_id: "o".into() }];
+        let projects = [ReportProject { id: "p1".into(), name: "Portento".into(), org_id: "o".into(), ..Default::default() }];
         let cards = space_cards(&[space("a", None, None, 6), space("b", Some("p1"), None, 0), space("c", None, Some("p1"), 0)], &projects);
         assert_eq!((cards[0].tasks, cards[0].open), (51, 10));
         assert_eq!(cards[0].access, SpaceAccess::WholeOrg);
