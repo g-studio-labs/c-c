@@ -7098,36 +7098,83 @@ fn report_args(args: &Value) -> Result<Report, String> {
     })
 }
 
-/// Un texto de hallazgo en una sola línea: con saltos de línea, un ``` al
-/// principio de una línea abre un bloque que se traga el resto del informe.
+// Todo lo que manda el llamador entra en el informe por una de estas
+// funciones, según su sitio; ningún campo se pega crudo. Sin eso, cada vuelta
+// se escapaba otro: un salto de línea en la rama metía un título, una comilla
+// invertida en la sesión abría un bloque que se tragaba los hallazgos.
+
+/// Una sola línea: con saltos de línea, un ``` o un `#` al principio de una
+/// línea abren un bloque o un título fuera de su sitio.
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Código en línea con una valla más larga que cualquier racha de comillas del
-/// texto, y con un espacio de guarda si éste empieza o acaba en comilla.
+/// Prosa en una línea (el `what` de un hallazgo): conserva el markdown en línea
+/// (el revisor escribe `código`), porque va al final de su viñeta y no tiene a
+/// quién comerse; pero se escapa lo que al principio haría otro bloque (`#`,
+/// `>`, `-`, ```, `1.`). Una sola comilla al principio es código, y se deja.
+fn prose_line(text: &str) -> String {
+    let flat = one_line(text);
+    if flat.starts_with(|c: char| "#>-+*=_<|~".contains(c)) || flat.starts_with("```") {
+        return format!("\\{flat}");
+    }
+    let digits = flat.len() - flat.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits > 0 && matches!(flat.as_bytes().get(digits), Some(b'.' | b')')) {
+        return format!("{}\\{}", &flat[..digits], &flat[digits..]);
+    }
+    flat
+}
+
+/// Texto literal en una línea (el rol y el modelo, que van seguidos en la
+/// cabecera): se escapa lo que abre algo en línea, para que una comilla de uno
+/// no se empareje con la del siguiente ni con la valla de la sesión. El guion y
+/// el punto sólo cuentan al principio de una línea, y aquí nunca lo están.
+fn inline_text(text: &str) -> String {
+    let mut out = String::new();
+    for c in one_line(text).chars() {
+        if "\\`*_[]<>!~|&".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Código en línea (un `where`, la rama, cada commit, la sesión): en una línea,
+/// con una valla más larga que cualquier racha de comillas del texto, y con un
+/// espacio de guarda si éste empieza o acaba en comilla.
 fn inline_code(text: &str) -> String {
-    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    let fence = "`".repeat(longest + 1);
-    let pad = if text.starts_with('`') || text.ends_with('`') { " " } else { "" };
-    format!("{fence}{pad}{text}{pad}{fence}")
+    let flat = one_line(text);
+    let fence = "`".repeat(longest_backtick_run(&flat) + 1);
+    let pad = if flat.starts_with('`') || flat.ends_with('`') { " " } else { "" };
+    format!("{fence}{pad}{flat}{pad}{fence}")
+}
+
+/// Un bloque de código (la evidencia), con una valla más larga que cualquier
+/// racha de comillas de dentro: si no, una salida con ``` lo cierra a la mitad.
+fn code_block(text: &str) -> String {
+    let fence = "`".repeat(longest_backtick_run(text).max(2) + 1);
+    format!("{fence}\n{}\n{fence}", text.trim_end())
+}
+
+fn longest_backtick_run(text: &str) -> usize {
+    text.split(|c| c != '`').map(str::len).max().unwrap_or(0)
 }
 
 /// El comentario de un informe. Una sola función, para que todos se lean
 /// igual en la app, en `get_task` y en quien los resuma.
 fn report_markdown(r: &Report) -> String {
+    let field = |key: &str| r.agent.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
     let mut who = vec![];
-    if let Some(role) = r.agent.get("role").and_then(|v| v.as_str()) {
-        who.push(match r.agent.get("model").and_then(|v| v.as_str()) {
-            Some(model) => format!("{role} ({model})"),
-            None => role.to_string(),
-        });
-    } else if let Some(model) = r.agent.get("model").and_then(|v| v.as_str()) {
-        who.push(model.to_string());
+    match (field("role"), field("model")) {
+        (Some(role), Some(model)) => who.push(format!("{} ({})", inline_text(role), inline_text(model))),
+        (Some(one), None) | (None, Some(one)) => who.push(inline_text(one)),
+        (None, None) => {}
     }
-    if let Some(session) = r.agent.get("session").and_then(|v| v.as_str()) {
-        who.push(format!("sesión `{session}`"));
+    if let Some(session) = field("session") {
+        who.push(format!("sesión {}", inline_code(session)));
     }
+    // El veredicto no se escapa: `report_args` sólo deja pasar `REPORT_VERDICTS`.
     let mut out = format!("**Veredicto: {}**", r.verdict);
     if !who.is_empty() {
         out.push_str(&format!(" · {}", who.join(" · ")));
@@ -7137,25 +7184,19 @@ fn report_markdown(r: &Report) -> String {
         out.push_str("- Ninguno.\n");
     }
     for (place, what) in &r.findings {
-        let what = one_line(what);
-        let place = one_line(place);
-        if place.is_empty() {
-            out.push_str(&format!("- {what}\n"));
+        if one_line(place).is_empty() {
+            out.push_str(&format!("- {}\n", prose_line(what)));
         } else {
-            out.push_str(&format!("- {} — {what}\n", inline_code(&place)));
+            out.push_str(&format!("- {} — {}\n", inline_code(place), prose_line(what)));
         }
     }
-    // La valla, más larga que cualquier racha de comillas de la salida: si
-    // no, una salida con ``` cierra el bloque a la mitad.
-    let longest = r.evidence.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    let fence = "`".repeat(longest.max(2) + 1);
-    out.push_str(&format!("\n**Evidencia**\n{fence}\n{}\n{fence}\n", r.evidence.trim_end()));
+    out.push_str(&format!("\n**Evidencia**\n{}\n", code_block(&r.evidence)));
     let mut tail = vec![];
-    if let Some(b) = &r.branch {
-        tail.push(format!("**Rama:** `{b}`"));
+    if let Some(b) = r.branch.as_deref().filter(|b| !one_line(b).is_empty()) {
+        tail.push(format!("**Rama:** {}", inline_code(b)));
     }
-    if !r.commits.is_empty() {
-        let shas: Vec<String> = r.commits.iter().map(|c| format!("`{c}`")).collect();
+    let shas: Vec<String> = r.commits.iter().filter(|c| !one_line(c).is_empty()).map(|c| inline_code(c)).collect();
+    if !shas.is_empty() {
         tail.push(format!("**Commits:** {}", shas.join(", ")));
     }
     if !tail.is_empty() {
@@ -10951,5 +10992,107 @@ mod tests {
         let mut anonymous = base.clone();
         anonymous.as_object_mut().unwrap().remove("agent");
         assert!(call_tool(&cfg, "report_to_task", &anonymous).unwrap_err().contains("agent"));
+    }
+
+    /// Los tramos de código en línea de una línea, como los corta CommonMark:
+    /// una racha de comillas cierra con otra del mismo largo, una sin pareja es
+    /// texto, y `\` escapa la comilla que le sigue (fuera del código).
+    fn code_spans(line: &str) -> Vec<String> {
+        let b = line.as_bytes();
+        let (mut i, mut out) = (0, vec![]);
+        while i < b.len() {
+            if b[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if b[i] != b'`' {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < b.len() && b[i] == b'`' {
+                i += 1;
+            }
+            let n = i - start;
+            let mut j = i;
+            while j < b.len() {
+                if b[j] != b'`' {
+                    j += 1;
+                    continue;
+                }
+                let run = j;
+                while j < b.len() && b[j] == b'`' {
+                    j += 1;
+                }
+                if j - run == n {
+                    let mut c = &line[i..run];
+                    if c.len() >= 2 && c.starts_with(' ') && c.ends_with(' ') && !c.trim().is_empty() {
+                        c = &c[1..c.len() - 1];
+                    }
+                    out.push(c.to_string());
+                    i = j;
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_caller_field_stays_in_its_own_section() {
+        // Lo mismo en cada campo que manda el llamador: comillas sueltas y en
+        // racha, un título y una viñeta tras saltos de línea, y una valla.
+        let hostile = "a```b `c`\n# Título\n\n- viñeta\n```";
+        let flat = "a```b `c` # Título - viñeta ```";
+        let r = report_args(&json!({
+            "verdict": "FALLA",
+            "findings": [{ "where": hostile, "what": hostile }, { "what": hostile }, { "what": "\n# Título" }, { "what": "1. uno" }],
+            "evidence": hostile, "branch": hostile, "commits": [hostile, hostile],
+            "agent": { "role": hostile, "model": hostile, "session": hostile }
+        }))
+        .unwrap();
+        let md = report_markdown(&r);
+        let lines: Vec<&str> = md.lines().collect();
+
+        // Una sola valla de bloque, abierta y cerrada igual, y dentro la evidencia entera.
+        let is_fence = |l: &str| l.len() >= 3 && l.bytes().all(|c| c == b'`');
+        let open = lines.iter().position(|l| is_fence(l)).expect("la evidencia va en un bloque");
+        let close = open + 1 + lines[open + 1..].iter().position(|l| *l == lines[open]).expect("y el bloque se cierra");
+        let fences = [open, close];
+        assert!(lines[close + 1..].iter().all(|l| !is_fence(l)), "sólo la evidencia abre un bloque: {md}");
+        assert_eq!(lines[fences[0] + 1..fences[1]].join("\n"), hostile, "la evidencia, entera y sin tocar: {md}");
+
+        // Fuera del bloque, las secciones en su orden y ni una línea de más.
+        let before = &lines[..fences[0]];
+        let after = &lines[fences[1] + 1..];
+        assert_eq!(before.len(), 3 + 4 + 2, "ningún campo añade líneas: {md}");
+        assert!(before[0].starts_with("**Veredicto: FALLA** · "), "{md}");
+        assert_eq!(&before[1..3], &["", "**Hallazgos**"], "{md}");
+        assert!(before[3..7].iter().all(|l| l.starts_with("- ")), "{md}");
+        assert_eq!(&before[7..], &["", "**Evidencia**"], "{md}");
+        assert_eq!(after.len(), 2, "{md}");
+        assert_eq!(after[0], "", "{md}");
+        assert!(after[1].starts_with("**Rama:** "), "{md}");
+
+        // Cada código en línea es el campo entero, aplanado: ni se corta ni se come al de al lado.
+        assert_eq!(code_spans(before[0]), vec![flat], "la cabecera: el rol y el modelo, literales; la sesión, un solo código: {md}");
+        assert_eq!(code_spans(before[3]).first().map(String::as_str), Some(flat), "el `where`: {md}");
+        assert_eq!(code_spans(after[1]), vec![flat, flat, flat], "la rama y los commits: {md}");
+        assert!(after[1].contains(" · **Commits:** "), "la etiqueta de los commits no puede quedar dentro de un código: {md}");
+
+        // La prosa de un hallazgo no abre otro bloque al principio de su viñeta.
+        assert_eq!(before[5], "- \\# Título", "{md}");
+        assert_eq!(before[6], "- 1\\. uno", "{md}");
+
+        // Con sólo rol (o sólo modelo), el mismo trato.
+        for key in ["role", "model"] {
+            let mut args = json!({ "verdict": "PASA", "findings": [], "evidence": "ok", "agent": {} });
+            args["agent"][key] = json!(hostile);
+            let alone = report_args(&args).unwrap();
+            let md = report_markdown(&alone);
+            let header = md.lines().next().unwrap();
+            assert!(md.starts_with(&format!("{header}\n\n**Hallazgos**\n- Ninguno.\n")), "{key} solo: {md}");
+            assert!(code_spans(header).is_empty(), "{key} solo, literal: {md}");
+        }
     }
 }
