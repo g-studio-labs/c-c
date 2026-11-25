@@ -2,6 +2,7 @@ package repository
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,7 +20,16 @@ import (
 // EnsureReleaseIndexes: el sha de un incidente puede ser corto (7 a 40), así
 // que se busca por prefijo; con `varchar_pattern_ops` el `LIKE 'abc1234%'`
 // usa el índice aunque la base no esté en colación C.
+//
+// Y quita el índice único por (repo, sha) de antes del 25-nov-2026: un
+// commit está ahora en cada release que lo lleva (ver domain.ReleaseCommit).
+// Con él puesto, la segunda línea que lo trae no podría apuntarlo, y en
+// silencio (`ON CONFLICT DO NOTHING`). `AutoMigrate` no lo quita: no borra
+// índices que el modelo ya no nombra.
 func EnsureReleaseIndexes(db *gorm.DB) error {
+	if err := db.Exec(`DROP INDEX IF EXISTS idx_release_commits_sha`).Error; err != nil {
+		return err
+	}
 	return db.Exec(`CREATE INDEX IF NOT EXISTS idx_release_commits_sha_prefix
 		ON release_commits (sha varchar_pattern_ops)`).Error
 }
@@ -45,12 +55,38 @@ func (r *GitHubRepository) PreviousRelease(repoID int64, before time.Time) (*dom
 	return &rel, err
 }
 
+// PreviousReleaseOfLine: la última release del repo de esa línea
+// (domain.ReleaseLine) publicada antes de `before`.
+func (r *GitHubRepository) PreviousReleaseOfLine(repoID int64, line string, before time.Time) (*domain.Release, error) {
+	var rels []domain.Release
+	if err := r.db.Where("repo_id = ? AND published_at < ?", repoID, before).
+		Order("published_at DESC").Find(&rels).Error; err != nil {
+		return nil, err
+	}
+	for i := range rels {
+		if domain.ReleaseLine(rels[i].Tag) == line {
+			return &rels[i], nil
+		}
+	}
+	return nil, nil
+}
+
 // SaveRelease guarda la release y sus commits de una vez. Si ya estaba (una
 // reentrega que corre a la vez que otra), no escribe nada y lo dice.
-//
-// Un commit que ya salió en otra release no se mueve: sale en la primera que
-// lo trajo (índice único por repo y sha).
 func (r *GitHubRepository) SaveRelease(rel *domain.Release, commits []domain.ReleaseCommit) (bool, error) {
+	return r.SaveReleaseInheriting(rel, commits, nil)
+}
+
+// SaveReleaseInheriting: SaveRelease para la primera release de una línea.
+// Su `compare` va contra la anterior de otra línea (su base), y sólo lista lo
+// que hay entre las dos; pero la release lleva todo lo de antes. Así que
+// hereda, como filas suyas, los commits de toda release del repo publicada
+// hasta `upTo` (la base). Es lo único de aquí que se apoya en fechas, y sólo
+// una vez por línea.
+//
+// Sin esto, la primera `desktop-v*` no llevaría nada de la nativa que saliera
+// antes en una `v*`, que es justo lo que tiene que dar por publicado.
+func (r *GitHubRepository) SaveReleaseInheriting(rel *domain.Release, commits []domain.ReleaseCommit, upTo *time.Time) (bool, error) {
 	created := false
 	err := r.db.Transaction(func(tx *gorm.DB) error {
 		res := tx.Clauses(clause.OnConflict{
@@ -61,20 +97,79 @@ func (r *GitHubRepository) SaveRelease(rel *domain.Release, commits []domain.Rel
 			return res.Error
 		}
 		created = true
-		for i := range commits {
-			commits[i].ID = uuid.NewString()
-			commits[i].ReleaseID = rel.ID
-			commits[i].RepoID = rel.RepoID
+		if err := addReleaseCommits(tx, rel, commits); err != nil {
+			return err
 		}
-		if len(commits) == 0 {
+		if upTo == nil {
 			return nil
 		}
-		return tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "repo_id"}, {Name: "sha"}},
-			DoNothing: true,
-		}).CreateInBatches(commits, 100).Error
+		return inheritCommits(tx, rel, *upTo)
 	})
 	return created, err
+}
+
+// addReleaseCommits: commits de una release; los que ya tenía se quedan.
+func addReleaseCommits(tx *gorm.DB, rel *domain.Release, commits []domain.ReleaseCommit) error {
+	if len(commits) == 0 {
+		return nil
+	}
+	for i := range commits {
+		commits[i].ID = uuid.NewString()
+		commits[i].ReleaseID = rel.ID
+		commits[i].RepoID = rel.RepoID
+	}
+	return tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "release_id"}, {Name: "sha"}},
+		DoNothing: true,
+	}).CreateInBatches(commits, 100).Error
+}
+
+// inheritCommits: ver SaveReleaseInheriting.
+func inheritCommits(tx *gorm.DB, rel *domain.Release, upTo time.Time) error {
+	var old []domain.ReleaseCommit
+	if err := tx.Raw(`
+		SELECT DISTINCT ON (rc.sha) rc.sha, rc.title, rc.html_url
+		FROM release_commits rc JOIN releases r ON r.id = rc.release_id
+		WHERE rc.repo_id = ? AND r.id <> ? AND r.published_at <= ?
+		ORDER BY rc.sha`, rel.RepoID, rel.ID, upTo).Scan(&old).Error; err != nil {
+		return err
+	}
+	for i := range old {
+		old[i].Inherited = true
+	}
+	return addReleaseCommits(tx, rel, old)
+}
+
+// ReleasesToRelist: hasta `limit` releases del repo guardadas antes de
+// comparar por línea (domain.Release.ListedByLine), de la más vieja a la
+// más nueva: la primera de una línea hereda de las de antes, y tienen que
+// estar ya listadas.
+func (r *GitHubRepository) ReleasesToRelist(repoID int64, limit int) ([]domain.Release, error) {
+	var rels []domain.Release
+	err := r.db.Where("repo_id = ? AND NOT listed_by_line", repoID).
+		Order("published_at, tag").Limit(limit).Find(&rels).Error
+	return rels, err
+}
+
+// RelistRelease: una release vieja, puesta por línea. Añade los commits que
+// le faltan (los de su `compare` contra la anterior de su línea, o los que
+// hereda si es la primera) sin quitar ninguno, y la marca. Volver a pasar por
+// ella no cambia nada.
+func (r *GitHubRepository) RelistRelease(rel *domain.Release, commits []domain.ReleaseCommit, inheritUpTo *time.Time) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := addReleaseCommits(tx, rel, commits); err != nil {
+			return err
+		}
+		if inheritUpTo != nil {
+			if err := inheritCommits(tx, rel, *inheritUpTo); err != nil {
+				return err
+			}
+		}
+		return tx.Model(&domain.Release{}).Where("id = ?", rel.ID).Updates(map[string]any{
+			"listed_by_line": true, "prev_tag": rel.PrevTag,
+			"commit_count": rel.CommitCount, "truncated": rel.Truncated,
+		}).Error
+	})
 }
 
 // UpdateReleaseMeta: una release editada en GitHub (su nombre o su enlace).
@@ -103,9 +198,11 @@ func (r *GitHubRepository) DeleteRelease(repoID int64, tag string) error {
 
 // ReleaseCommitsOf: los shas de una release, para volver a comentar en una
 // reentrega sin preguntarle nada a GitHub.
+//
+// Sólo los que listó su `compare`: los heredados no se anuncian.
 func (r *GitHubRepository) ReleaseCommitsOf(releaseID string) ([]string, error) {
 	var shas []string
-	err := r.db.Model(&domain.ReleaseCommit{}).Where("release_id = ?", releaseID).Pluck("sha", &shas).Error
+	err := r.db.Model(&domain.ReleaseCommit{}).Where("release_id = ? AND NOT inherited", releaseID).Pluck("sha", &shas).Error
 	return shas, err
 }
 
@@ -152,31 +249,18 @@ func hasReleases(db *gorm.DB) bool {
 }
 
 // ReleasesOfCommits: en qué release quedó publicado cada uno de esos commits
-// del repo (domain.CommitShipped: en el de cac, cuando salió cada artefacto
-// que toca). Los que no salieron no están en el mapa.
+// del repo (domain.CommitShipped: en el de cac, cuando salió cada cosa que
+// toca). Los que no salieron no están en el mapa.
 func ReleasesOfCommits(db *gorm.DB, repoID int64, shas []string) (map[string]domain.ReleaseRef, error) {
 	out := map[string]domain.ReleaseRef{}
 	if len(shas) == 0 || !hasReleases(db) {
 		return out, nil
 	}
-	type row struct {
-		SHA         string `gorm:"column:sha"`
-		Tag         string
-		PublishedAt time.Time
-		HTMLURL     string `gorm:"column:html_url"`
+	keys := make([]commitKey, len(shas))
+	for i, sha := range shas {
+		keys[i] = commitKey{repoID, sha}
 	}
-	var rows []row
-	if err := db.Table("release_commits rc").
-		Select("rc.sha, r.tag, r.published_at, r.html_url").
-		Joins("JOIN releases r ON r.id = rc.release_id").
-		Where("rc.repo_id = ? AND rc.sha IN ?", repoID, shas).Scan(&rows).Error; err != nil {
-		return out, err
-	}
-	firsts := map[commitKey]domain.ReleaseRef{}
-	for _, x := range rows {
-		firsts[commitKey{repoID, x.SHA}] = domain.ReleaseRef{Tag: x.Tag, At: x.PublishedAt, URL: x.HTMLURL}
-	}
-	shipped, err := shippedCommits(db, firsts)
+	shipped, err := shippedCommits(db, keys)
 	for k, r := range shipped {
 		out[k.sha] = r
 	}
@@ -189,34 +273,53 @@ type commitKey struct {
 	sha    string
 }
 
-// shippedCommits: de esos commits, con la primera release que trajo cada uno,
-// en qué release quedó publicado (domain.CommitShipped). Los que no, fuera
-// del mapa.
-func shippedCommits(db *gorm.DB, firsts map[commitKey]domain.ReleaseRef) (map[commitKey]domain.ReleaseRef, error) {
+// shippedCommits: de esos commits, en qué release quedó publicado cada uno
+// (domain.CommitShipped). Los que no, fuera del mapa.
+func shippedCommits(db *gorm.DB, keys []commitKey) (map[commitKey]domain.ReleaseRef, error) {
 	out := map[commitKey]domain.ReleaseRef{}
 	byRepo := map[int64][]string{}
-	for k := range firsts {
-		byRepo[k.repoID] = append(byRepo[k.repoID], k.sha)
+	for _, k := range keys {
+		if k.sha != "" && !slices.Contains(byRepo[k.repoID], k.sha) {
+			byRepo[k.repoID] = append(byRepo[k.repoID], k.sha)
+		}
 	}
 	for repoID, shas := range byRepo {
+		containing, err := containingReleases(db, repoID, shas)
+		if err != nil {
+			return out, err
+		}
 		var dirs map[string][]string
-		var releases []domain.ReleaseRef
 		if domain.TracksArtifacts(repoID) {
-			var err error
 			if dirs, err = commitDirsOf(db, repoID, shas); err != nil {
-				return out, err
-			}
-			if releases, err = releasesOfRepo(db, repoID); err != nil {
 				return out, err
 			}
 		}
 		for _, sha := range shas {
-			k := commitKey{repoID, sha}
-			first := firsts[k]
-			if r := domain.CommitShipped(repoID, &first, dirs[sha], releases); r != nil {
-				out[k] = *r
+			if r := domain.CommitShipped(repoID, dirs[sha], containing[sha]); r != nil {
+				out[commitKey{repoID, sha}] = *r
 			}
 		}
+	}
+	return out, nil
+}
+
+// containingReleases: por commit, las releases del repo que lo llevan.
+func containingReleases(db *gorm.DB, repoID int64, shas []string) (map[string][]domain.ReleaseRef, error) {
+	var rows []struct {
+		SHA         string `gorm:"column:sha"`
+		Tag         string
+		PublishedAt time.Time
+		HTMLURL     string `gorm:"column:html_url"`
+	}
+	out := map[string][]domain.ReleaseRef{}
+	if err := db.Table("release_commits rc").
+		Select("rc.sha, r.tag, r.published_at, r.html_url").
+		Joins("JOIN releases r ON r.id = rc.release_id").
+		Where("rc.repo_id = ? AND rc.sha IN ?", repoID, shas).Scan(&rows).Error; err != nil {
+		return out, err
+	}
+	for _, x := range rows {
+		out[x.SHA] = append(out[x.SHA], domain.ReleaseRef{Tag: x.Tag, At: x.PublishedAt, URL: x.HTMLURL})
 	}
 	return out, nil
 }
@@ -234,19 +337,6 @@ func commitDirsOf(db *gorm.DB, repoID int64, shas []string) (map[string][]string
 	}
 	for _, r := range rows {
 		out[r.SHA] = domain.SplitDirs(r.Dirs)
-	}
-	return out, nil
-}
-
-// releasesOfRepo: todas las releases del repo. Son pocas (una por versión).
-func releasesOfRepo(db *gorm.DB, repoID int64) ([]domain.ReleaseRef, error) {
-	var rows []domain.Release
-	if err := db.Select("tag, published_at, html_url").Where("repo_id = ?", repoID).Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	out := make([]domain.ReleaseRef, len(rows))
-	for i, r := range rows {
-		out[i] = domain.ReleaseRef{Tag: r.Tag, At: r.PublishedAt, URL: r.HTMLURL}
 	}
 	return out, nil
 }
@@ -284,13 +374,15 @@ func (r *GitHubRepository) CommitsMissingDirs(repoID int64, fullName string, lim
 		WHERE (ic.repo = '' OR ic.repo = @name)
 		  AND (ic.sha = rc.sha OR (length(ic.sha) < 40 AND rc.sha LIKE ic.sha || '%')))`)
 	}
+	// Un commit está en varias releases: se pide una vez.
 	var shas []string
 	err := r.db.Raw(`
 		SELECT rc.sha FROM release_commits rc
 		WHERE rc.repo_id = @repo
 		  AND NOT EXISTS (SELECT 1 FROM commit_dirs cd WHERE cd.repo_id = rc.repo_id AND cd.sha = rc.sha)
 		  AND (`+strings.Join(linked, " OR ")+`)
-		ORDER BY rc.created_at DESC, rc.sha
+		GROUP BY rc.sha
+		ORDER BY min(rc.created_at) DESC, rc.sha
 		LIMIT @limit`,
 		map[string]any{"repo": repoID, "name": fullName, "limit": limit}).Scan(&shas).Error
 	return shas, err
@@ -322,30 +414,25 @@ func shippedFrom(rows []ownedCommit) map[string]*domain.ReleaseRef {
 	return out
 }
 
-// linkedRow: un commit enlazado de algo, con la primera release que lo trajo
-// si alguna. Tag vacío: no está en ninguna.
+// linkedRow: un commit enlazado de algo. SHA vacío: un incidente cuyo sha
+// no casa con ningún commit de una release.
 type linkedRow struct {
-	OwnerID     string
-	RepoID      int64
-	SHA         string `gorm:"column:sha"`
-	Tag         string
-	PublishedAt *time.Time
-	HTMLURL     string `gorm:"column:html_url"`
+	OwnerID string
+	RepoID  int64
+	SHA     string `gorm:"column:sha"`
 }
 
 // ownedFrom resuelve cada fila con shippedCommits.
 func ownedFrom(db *gorm.DB, rows []linkedRow) ([]ownedCommit, error) {
-	firsts := map[commitKey]domain.ReleaseRef{}
-	for _, x := range rows {
-		if x.Tag != "" && x.PublishedAt != nil {
-			firsts[commitKey{x.RepoID, x.SHA}] = domain.ReleaseRef{Tag: x.Tag, At: *x.PublishedAt, URL: x.HTMLURL}
-		}
+	keys := make([]commitKey, len(rows))
+	for i, x := range rows {
+		keys[i] = commitKey{x.RepoID, x.SHA}
 	}
-	shipped, err := shippedCommits(db, firsts)
+	shipped, err := shippedCommits(db, keys)
 	out := make([]ownedCommit, len(rows))
 	for i, x := range rows {
 		out[i].ownerID = x.OwnerID
-		if r, ok := shipped[commitKey{x.RepoID, x.SHA}]; ok {
+		if r, ok := shipped[commitKey{x.RepoID, x.SHA}]; ok && x.SHA != "" {
 			out[i].shipped = &r
 		}
 	}
@@ -364,9 +451,7 @@ func shippedOfTasks(db *gorm.DB, itemIDs []string) (map[string]*domain.ReleaseRe
 	}
 	var rows []linkedRow
 	err := db.Table("task_git_links l").
-		Select("l.item_id AS owner_id, l.repo_id, l.key AS sha, coalesce(r.tag, '') AS tag, r.published_at, coalesce(r.html_url, '') AS html_url").
-		Joins("LEFT JOIN release_commits rc ON rc.repo_id = l.repo_id AND rc.sha = l.key").
-		Joins("LEFT JOIN releases r ON r.id = rc.release_id").
+		Select("l.item_id AS owner_id, l.repo_id, l.key AS sha").
 		Where("l.kind = ? AND l.item_id IN ?", domain.GitLinkCommit, itemIDs).Scan(&rows).Error
 	if err != nil {
 		return map[string]*domain.ReleaseRef{}, err
@@ -390,11 +475,10 @@ func ShippedOfIncidents(db *gorm.DB, incidentIDs []string) (map[string]*domain.R
 	}
 	var rows []linkedRow
 	err := db.Raw(`
-		SELECT ic.incident_id AS owner_id, coalesce(x.repo_id, 0) AS repo_id, coalesce(x.sha, '') AS sha,
-		       coalesce(x.tag, '') AS tag, x.published_at, coalesce(x.html_url, '') AS html_url
+		SELECT ic.incident_id AS owner_id, coalesce(x.repo_id, 0) AS repo_id, coalesce(x.sha, '') AS sha
 		FROM incident_commits ic
 		LEFT JOIN LATERAL (
-			SELECT rc.repo_id, rc.sha, r.tag, r.published_at, r.html_url
+			SELECT rc.repo_id, rc.sha
 			FROM release_commits rc JOIN releases r ON r.id = rc.release_id
 			WHERE (rc.sha = ic.sha OR (length(ic.sha) < 40 AND rc.sha LIKE ic.sha || '%'))
 			  AND (ic.repo = '' OR r.repo_full_name = ic.repo)

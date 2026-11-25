@@ -21,8 +21,9 @@ import (
 const CacRepoID int64 = 1182990045
 
 // cacArtifactLines: por carpeta de primer nivel del repo de cac, las líneas de
-// release que la llevan dentro. Sale de los `Cargo.toml` y de qué compila cada
-// workflow de release:
+// release que la llevan dentro. Sale de los `Cargo.toml`, de los
+// `include_str!`/`include_bytes!` que se llevan ficheros de otra carpeta, y de
+// qué compila cada workflow de release:
 //
 //   - `app/src-tauri` depende de core, mcp y ops; `desktop/` de core, mcp, ops
 //     y voice; `mcp/` de core. `ops/` depende de mcp, no al revés.
@@ -30,19 +31,29 @@ const CacRepoID int64 = 1182990045
 //     ahí es de la nativa: contarlo con `v*` es justo el fallo que esto
 //     arregla, así que sólo sale con `desktop-v*` (el criterio de la tarea).
 //   - `mcp/` sale suelto (`mcp-v*`) y dentro de las dos apps (`cac --mcp`).
+//   - `.claude/`: el MCP mete los hooks en el binario (`hooks_install.rs`).
+//   - Una clave con `/` es un fichero suelto que otro artefacto se lleva:
+//     `app/src/index.css` lo compila la nativa (`desktop/src/theme.rs`). Se
+//     apunta aparte en vez de darle `desktop-v*` a toda `app/`, para que un
+//     commit sólo de Tauri no espere a la nativa por ese fichero. Cuenta además
+//     de su carpeta: tocarlo pide `v*` (por `app`) y `desktop-v*`.
 //
-// Lo que no está (backend/, infra/, swarm-manage/, docs/, scripts/, .claude/,
-// los ficheros de la raíz…) no sale con ninguna etiqueta: se despliega con el
-// push o no se publica. Un commit que sólo toca eso no cuenta nunca como
-// publicado por una release; para esas tareas manda el handoff.
+// Lo que no está (backend/, infra/, docs/, scripts/, los ficheros de la
+// raíz…) sale con `v*` (cacRestLines): así una tarea mixta, con su commit de
+// backend o de STATUS.md, sale cuando sale la app, como antes.
 var cacArtifactLines = map[string][]string{
-	"app":     {"v"},
-	"desktop": {"desktop-v"},
-	"core":    {"desktop-v"},
-	"voice":   {"desktop-v"},
-	"ops":     {"v", "desktop-v"},
-	"mcp":     {"v", "mcp-v", "desktop-v"},
+	"app":               {"v"},
+	"app/src/index.css": {"desktop-v"},
+	"desktop":           {"desktop-v"},
+	"core":              {"desktop-v"},
+	"voice":             {"desktop-v"},
+	"ops":               {"v", "desktop-v"},
+	"mcp":               {"v", "mcp-v", "desktop-v"},
+	".claude":           {"v", "mcp-v", "desktop-v"},
 }
+
+// cacRestLines: las líneas de lo que no está en cacArtifactLines.
+var cacRestLines = []string{"v"}
 
 // artifactLinesOf: la tabla de ese repo, y si la tiene. Sólo el de cac: en el
 // resto de repos de las orgs una release es una release y lleva todo lo que
@@ -93,7 +104,25 @@ func TopDirs(paths []string) []string {
 	return out
 }
 
-// CommitDirs: qué carpetas de primer nivel toca un commit (ver TopDirs). Se
+// CommitKeys: lo que se apunta de un commit de ese repo: sus carpetas de
+// primer nivel y, en el de cac, los ficheros sueltos de la tabla que toca
+// (`app/src/index.css`). En orden y sin repetir.
+func CommitKeys(repoID int64, paths []string) []string {
+	out := TopDirs(paths)
+	table, ok := artifactLinesOf(repoID)
+	if !ok {
+		return out
+	}
+	for _, p := range paths {
+		if _, shared := table[p]; shared && strings.Contains(p, "/") && !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// CommitDirs: qué carpetas de primer nivel toca un commit (ver CommitKeys). Se
 // guarda al llegar el push y, para los commits de antes, se rellena
 // preguntándole a GitHub.
 //
@@ -119,65 +148,75 @@ func (CommitDirs) TableName() string { return "commit_dirs" }
 // JoinDirs / SplitDirs: cómo viajan las carpetas en CommitDirs.Dirs.
 func JoinDirs(dirs []string) string { return strings.Join(dirs, ",") }
 
+// SplitDirs nunca da nil: una fila con Dirs vacío es «sólo la raíz», que se
+// sabe, y nil es «no se sabe».
 func SplitDirs(s string) []string {
 	if s == "" {
-		return nil
+		return []string{}
 	}
 	return strings.Split(s, ",")
 }
 
 // CommitShipped: en qué release quedó publicado un commit, o nil.
 //
-//   - first: la primera release del repo, de cualquier línea, que lo trajo
-//     (la que tiene su fila en `release_commits`); nil si ninguna.
-//   - dirs: sus carpetas; nil si no se saben (y no se sabe no es salir).
-//   - releases: todas las releases del repo.
+//   - dirs: lo que toca (CommitKeys); nil si no se sabe, y no saberlo no es
+//     salir. Vacío es que sólo toca la raíz.
+//   - containing: las releases del repo que lo llevan, de cualquier línea (las
+//     que tienen su fila en `release_commits`).
 //
-// En un repo sin tabla, first y ya (la regla de antes). En el de cac, cada
-// artefacto que toca tiene que haber salido en una release de alguna de sus
-// líneas publicada no antes que first, y cuenta la más tardía de esas: es
-// cuando quedó entero fuera.
+// Es contenido, no fechas: una release cuenta para un commit si lo lleva, no
+// si se publicó después. Los workflows de la nativa y del MCP fijan el sha al
+// lanzarse y publican al terminar, así que una `desktop-v*` puede salir
+// después de una `v*` sin llevar lo que lleva ésa.
 //
-// «No antes que first» es «la contiene» porque todas las releases se cortan
-// desde main, en orden (`gh release create --target $GITHUB_SHA` en los
-// workflows, y `/soltar`): una release lleva todo lo que llevaba la anterior.
-// Por eso un commit que llegó primero en una `v*` también está en la
-// `desktop-v*` siguiente, aunque `compare` no lo vuelva a listar ahí.
-func CommitShipped(repoID int64, first *ReleaseRef, dirs []string, releases []ReleaseRef) *ReleaseRef {
-	if first == nil {
+// En un repo sin tabla, la primera que lo lleva. En el de cac, cada cosa que
+// toca tiene que ir en una release de alguna de sus líneas: de cada una
+// cuenta la primera que lo lleva, y de todas la más tardía, que es cuando
+// quedó entero fuera.
+func CommitShipped(repoID int64, dirs []string, containing []ReleaseRef) *ReleaseRef {
+	if len(containing) == 0 {
 		return nil
 	}
 	table, ok := artifactLinesOf(repoID)
 	if !ok {
-		return first
+		return earliestIn(containing, nil)
+	}
+	if dirs == nil {
+		return nil
+	}
+	keys := dirs
+	if len(keys) == 0 {
+		keys = []string{""}
 	}
 	var out *ReleaseRef
-	touched := 0
-	for _, d := range dirs {
-		lines, ok := table[d]
+	for _, k := range keys {
+		lines, ok := table[k]
 		if !ok {
-			continue
+			lines = cacRestLines
 		}
-		touched++
-		var earliest *ReleaseRef
-		for i := range releases {
-			r := releases[i]
-			if r.At.Before(first.At) || !slices.Contains(lines, ReleaseLine(r.Tag)) {
-				continue
-			}
-			if earliest == nil || r.At.Before(earliest.At) {
-				earliest = &r
-			}
-		}
-		if earliest == nil {
+		first := earliestIn(containing, lines)
+		if first == nil {
 			return nil
 		}
-		if out == nil || earliest.At.After(out.At) {
-			out = earliest
+		if out == nil || first.At.After(out.At) {
+			out = first
 		}
 	}
-	if touched == 0 {
-		return nil
+	return out
+}
+
+// earliestIn: la más temprana de esas releases que es de alguna de esas
+// líneas (de cualquiera con lines nil), o nil.
+func earliestIn(releases []ReleaseRef, lines []string) *ReleaseRef {
+	var out *ReleaseRef
+	for i := range releases {
+		r := releases[i]
+		if lines != nil && !slices.Contains(lines, ReleaseLine(r.Tag)) {
+			continue
+		}
+		if out == nil || r.At.Before(out.At) {
+			out = &r
+		}
 	}
 	return out
 }

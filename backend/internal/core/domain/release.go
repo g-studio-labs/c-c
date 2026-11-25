@@ -36,19 +36,32 @@ type Release struct {
 	CommitCount int    `json:"commitCount"`
 	// Truncated: trae más commits de los que se leen (MaxReleaseCommits).
 	Truncated bool `json:"truncated"`
+	// ListedByLine: sus commits se compararon contra la anterior de su misma
+	// línea (ver ReleaseLine). Las guardadas antes del 25-nov-2026 se
+	// comparaban contra la anterior de cualquier línea, y una vuelta en
+	// segundo plano las vuelve a listar una vez (command-and-control-526).
+	ListedByLine bool `gorm:"not null;default:false" json:"-"`
 }
 
 func (Release) TableName() string { return "releases" }
 
-// ReleaseCommit: un commit que salió en una release. Único por (repo, sha):
-// un commit sale una vez, en la primera release que lo trae.
+// ReleaseCommit: un commit que lleva una release. Único por (release, sha):
+// el mismo commit está en cada release de cada línea que lo lleva (una `v*` y
+// la `desktop-v*` siguiente, por ejemplo), porque «salió» se pregunta por
+// línea (command-and-control-526). Hasta el 25-nov-2026 era único por (repo,
+// sha) y un commit sólo constaba en la primera release que lo traía.
 type ReleaseCommit struct {
-	ID        string    `gorm:"primaryKey;type:varchar(36)" json:"id"`
-	ReleaseID string    `gorm:"type:varchar(36);index;not null" json:"releaseId"`
-	RepoID    int64     `gorm:"not null;uniqueIndex:idx_release_commits_sha,priority:1" json:"repoId"`
-	SHA       string    `gorm:"column:sha;type:varchar(40);not null;uniqueIndex:idx_release_commits_sha,priority:2" json:"sha"`
-	Title     string    `gorm:"type:varchar(200)" json:"title"`
-	HTMLURL   string    `gorm:"column:html_url;type:varchar(400)" json:"htmlUrl"`
+	ID        string `gorm:"primaryKey;type:varchar(36)" json:"id"`
+	ReleaseID string `gorm:"type:varchar(36);index;not null;uniqueIndex:idx_release_commits_release_sha,priority:1" json:"releaseId"`
+	RepoID    int64  `gorm:"not null;index:idx_release_commits_repo_sha,priority:1" json:"repoId"`
+	SHA       string `gorm:"column:sha;type:varchar(40);not null;uniqueIndex:idx_release_commits_release_sha,priority:2;index:idx_release_commits_repo_sha,priority:2" json:"sha"`
+	Title     string `gorm:"type:varchar(200)" json:"title"`
+	HTMLURL   string `gorm:"column:html_url;type:varchar(400)" json:"htmlUrl"`
+	// Inherited: no lo listó su `compare`, lo hereda. La primera release de
+	// una línea lleva todo lo que llevaban las de antes de su base (ver
+	// GitHubRepository.SaveReleaseInheriting). No se anuncia en los hilos:
+	// serían cientos de líneas en tareas que salieron hace meses.
+	Inherited bool      `gorm:"not null;default:false" json:"-"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -73,8 +86,7 @@ const MaxReleaseCommits = 250
 // es cuando quedó entero fuera.
 //
 // Es la definición de «salió» en un solo sitio: la usan las tareas del mapa y
-// los incidentes. Una tarea con un commit del backend (que se despliega con el
-// push, sin release) no sale nunca por aquí: para ésas manda el handoff.
+// los incidentes. Cada commit llega ya resuelto con CommitShipped.
 func ShippedOf(total int, released []ReleaseRef) *ReleaseRef {
 	if total == 0 || len(released) < total {
 		return nil

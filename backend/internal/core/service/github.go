@@ -492,8 +492,11 @@ func (s *GitHubService) handle(event string, body []byte) error {
 			}
 		}
 	case "push":
+		// Un dato de más: si no se guarda, el relleno lo pregunta después, y
+		// el enlace del commit a su tarea, los docs y los despliegues no
+		// pueden caer por esto.
 		if err := s.commitDirsOnPush(&p); err != nil {
-			return err
+			lg.Warn("github: commit dirs on push: " + err.Error())
 		}
 		s.docsOnPush(&p)
 		s.deploysOnPush(&p)

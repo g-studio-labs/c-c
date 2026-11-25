@@ -36,7 +36,7 @@ func (s *GitHubService) commitDirsOnPush(p *ghPayload) error {
 		if len(paths) == 0 {
 			continue
 		}
-		rows = append(rows, domain.CommitDirs{RepoID: repo.RepoID, SHA: c.ID, Dirs: domain.JoinDirs(domain.TopDirs(paths))})
+		rows = append(rows, domain.CommitDirs{RepoID: repo.RepoID, SHA: c.ID, Dirs: domain.JoinDirs(domain.CommitKeys(repo.RepoID, paths))})
 	}
 	return s.repo.SaveCommitDirs(rows)
 }
@@ -137,7 +137,7 @@ func (s *GitHubService) commitDirsFromAPI(repo *domain.GitHubRepo, sha string) (
 			break
 		}
 	}
-	return domain.TopDirs(paths), nil
+	return domain.CommitKeys(repo.RepoID, paths), nil
 }
 
 func goneKey(repoID int64, sha string) string { return fmt.Sprintf("%d:%s", repoID, sha) }

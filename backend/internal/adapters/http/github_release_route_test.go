@@ -309,3 +309,54 @@ func TestAnIncidentKnowsWhenItsFixShipped(t *testing.T) {
 		t.Errorf("salidos %v, se esperaban %v", got, want)
 	}
 }
+
+// Una release se compara contra la anterior de su misma línea, no contra la
+// de otra línea que salió en medio; y la primera de una línea lleva lo de
+// antes, sin anunciarlo en los hilos.
+//
+// Roturas que atrapa: comparar contra la anterior de cualquier línea, que la
+// primera de una línea no herede (lo que salió antes en una `v*` no constaría
+// en la primera `desktop-v*`), y anunciar lo heredado (cada tarea con un
+// commit viejo recibiría una línea «Released in desktop-v0.1.0»).
+func TestAReleaseIsListedAgainstItsOwnLine(t *testing.T) {
+	f := releaseSetup(t)
+	f.hook(t, "push", "d-p1", push(100, shaRel2, "fix: el login cac#12"))
+	day := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	repo := repository.NewGitHubRepository(f.db)
+	for _, r := range []struct {
+		tag string
+		at  time.Time
+		sha string
+	}{{"v1.0.0", day, ""}, {"mcp-v1.0.0", day.Add(time.Hour), shaRel1}} {
+		var commits []domain.ReleaseCommit
+		if r.sha != "" {
+			commits = append(commits, domain.ReleaseCommit{SHA: r.sha})
+		}
+		if _, err := repo.SaveRelease(&domain.Release{OrgID: "org-1", RepoID: 100, RepoFullName: "dwit/api",
+			Tag: r.tag, PublishedAt: r.at, ListedByLine: true}, commits); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.gh.compare["v1.0.0...v1.1.0"] = []string{shaRel2, shaRel1}
+	f.gh.compare["v1.1.0...desktop-v0.1.0"] = []string{shaRel3}
+
+	f.hook(t, "release", "d-1", releaseEvent("published", "v1.1.0", day.Add(2*time.Hour), false, false))
+	var rel domain.Release
+	f.db.Where("tag = ?", "v1.1.0").First(&rel)
+	if rel.PrevTag != "v1.0.0" {
+		t.Errorf("v1.1.0 se comparó contra %q", rel.PrevTag)
+	}
+	before := len(f.releasedLines("it-1"))
+
+	f.hook(t, "release", "d-2", releaseEvent("published", "desktop-v0.1.0", day.Add(3*time.Hour), false, false))
+	var desk domain.Release
+	f.db.Where("tag = ?", "desktop-v0.1.0").First(&desk)
+	var shas []string
+	f.db.Model(&domain.ReleaseCommit{}).Where("release_id = ?", desk.ID).Order("sha").Pluck("sha", &shas)
+	if fmt.Sprint(shas) != fmt.Sprint([]string{shaRel1, shaRel2, shaRel3}) {
+		t.Errorf("desktop-v0.1.0 lleva %v, se esperaban los tres", shas)
+	}
+	if lines := f.releasedLines("it-1"); len(lines) != before {
+		t.Errorf("se anunció lo heredado: %q", lines)
+	}
+}

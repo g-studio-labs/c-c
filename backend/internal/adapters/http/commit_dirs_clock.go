@@ -12,7 +12,8 @@ import (
 )
 
 // Cada cuánto da una vuelta el relleno de las carpetas de los commits (ver
-// service.BackfillCommitDirs). La primera espera lo mismo: no estorba al
+// service.BackfillCommitDirs) y de las releases viejas por línea (ver
+// service.RelistReleasesByLine). La primera espera lo mismo: no estorba al
 // arranque.
 const commitDirsTick = time.Minute
 
@@ -33,7 +34,13 @@ func startCommitDirsBackfill(gh *service.GitHubService) {
 			case <-ctx.Done():
 				return
 			case <-tick.C:
-				// Un fallo se reintenta en la vuelta siguiente.
+				// Un fallo se reintenta en la vuelta siguiente. Primero las
+				// releases viejas, que deciden qué commits hacen falta.
+				if n, err := gh.RelistReleasesByLine(service.ReleasesRelistedPerRound); err != nil {
+					lg.Warn("github: relist releases by line: " + err.Error())
+				} else if n > 0 {
+					lg.Info(fmt.Sprintf("github: releases relisted by line: %d", n))
+				}
 				if n, err := gh.BackfillCommitDirs(service.CommitDirsPerRound); err != nil {
 					lg.Warn("github: commit dirs backfill: " + err.Error())
 				} else if n > 0 {
