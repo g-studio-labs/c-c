@@ -40,6 +40,7 @@ mod mywork;
 mod picture_viewer;
 mod requests;
 mod newtask;
+mod notes;
 mod notifier;
 mod organization;
 mod overview;

@@ -96,9 +96,9 @@ struct Opened {
     /// La publicación abierta en el muro: un aviso que la abre con el muro ya
     /// delante también se va del perfil.
     post: Option<String>,
-    /// Comunicación, Plataforma, «Por atender», el resumen y el muro en
+    /// Comunicación, Plataforma, «Por atender», el resumen, el muro y Notas en
     /// pantalla.
-    modules: [bool; 5],
+    modules: [bool; 6],
 }
 
 impl Opened {
@@ -142,6 +142,7 @@ struct NameField {
 pub struct Workspace {
     pub(crate) my_work: Entity<MyWorkView>,
     docs: Entity<DocsView>,
+    notes: Entity<crate::notes::NotesView>,
     /// La tabla de toda la documentación: la pantalla de Documentación
     /// cuando no se lee nada.
     doc_index: Entity<crate::docs_module::DocIndexView>,
@@ -271,6 +272,7 @@ impl Workspace {
         Self {
             my_work: cx.new(|cx| MyWorkView::new(window, cx)),
             docs: cx.new(DocsView::new),
+            notes: cx.new(|cx| crate::notes::NotesView::new(window, cx)),
             doc_index: cx.new(|cx| crate::docs_module::DocIndexView::new(window, cx)),
             docs_filter: cx.new(|cx| InputState::new(window, cx).placeholder(tr(cx, "nav:panel.filter"))),
             task: cx.new(|cx| TaskView::new(window, cx)),
@@ -1056,7 +1058,7 @@ impl Workspace {
             task: snapshot.task.task_id.clone(),
             doc: snapshot.docs.target.as_ref().map(|target| target.id.clone()),
             post: snapshot.wall.open.as_ref().map(|post| post.id.clone()),
-            modules: [snapshot.comms.on_screen, snapshot.platform.on_screen, snapshot.requests.on_screen, snapshot.overview.on_screen, snapshot.comms.on_screen && snapshot.comms.on_wall],
+            modules: [snapshot.comms.on_screen, snapshot.platform.on_screen, snapshot.requests.on_screen, snapshot.overview.on_screen, snapshot.comms.on_screen && snapshot.comms.on_wall, snapshot.notes.on_screen],
         }
     }
 
@@ -1196,6 +1198,35 @@ impl Workspace {
             }))
             .child(Icon::new(Lucide::LayoutDashboard).size_4())
             .child(tr(cx, "nav:item.overview"))
+            .test_support()
+    }
+
+    /// «Notas», en el panel de Trabajo: abre la pantalla de las páginas
+    /// personales (`WorkPanel.tsx`).
+    fn notes_row(&self, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, hover, foreground) = (theme.muted_foreground, theme.sidebar_accent, theme.sidebar_foreground);
+        div()
+            .id("panel-notes")
+            .h(px(PANEL_ROW_HEIGHT))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .px_1()
+            .mx_1()
+            .rounded(px(8.))
+            .leading_sm()
+            .when(active, |this| this.bg(hover).font_weight(FontWeight::MEDIUM))
+            .when(!active, |this| this.text_color(muted).hover(move |style| style.bg(hover.opacity(0.5)).text_color(foreground)))
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.leave_aside();
+                cx.notify();
+                Backend::run(cx, |core| async move { core.notes().enter().await })
+            }))
+            .child(Icon::new(Lucide::NotebookPen).size_4())
+            .child(tr(cx, "nav:item.notes"))
             .test_support()
     }
 
@@ -1744,7 +1775,8 @@ impl Workspace {
         // árbol. Leyendo documentación o en «Por atender» ya no se está en ella.
         let on_requests = snapshot.requests.on_screen;
         let on_overview = snapshot.overview.on_screen;
-        let on_my_work = snapshot.docs.target.is_none() && !on_requests && !on_overview;
+        let on_notes = snapshot.notes.on_screen;
+        let on_my_work = snapshot.docs.target.is_none() && !on_requests && !on_overview && !on_notes;
         let waiting = snapshot.requests.mine_count;
         // En comunicación el panel es su lista, y en Plataforma sus filas:
         // misma cabecera, otro cuerpo.
@@ -1904,7 +1936,7 @@ impl Workspace {
             )
             .child(self.requests_row(on_requests, waiting, cx))
             .child(self.overview_row(on_overview, cx))
-            .child(Self::pending_panel_row("panel-notes", Lucide::NotebookPen, "nav:item.notes", cx))
+            .child(self.notes_row(on_notes, cx))
             // Filtra lo que ya está en el panel; no es el buscador.
             .child(
                 div().mt_1().px_2().py_1().child(
@@ -2081,6 +2113,8 @@ impl Render for Workspace {
             self.doc_index.clone().into_any_element()
         } else if snapshot.docs.target.is_some() {
             self.docs.clone().into_any_element()
+        } else if snapshot.notes.on_screen {
+            self.notes.clone().into_any_element()
         } else if snapshot.requests.on_screen {
             self.requests.clone().into_any_element()
         } else if snapshot.overview.on_screen {
@@ -2363,6 +2397,31 @@ mod tests {
 
     fn scope(cx: &mut TestAppContext) -> Option<(ScopeKind, String)> {
         cx.update(|cx| Backend::snapshot(cx).read(cx).my_work.scope.as_ref().map(|scope| (scope.kind, scope.id.clone())))
+    }
+
+    /// «Notas», en el panel de Trabajo, abre la pantalla de las páginas
+    /// personales —su navegador con el árbol— en el sitio de «Mi trabajo», y
+    /// «Mi trabajo» la deja.
+    ///
+    /// Roturas que atrapa: una fila que sigue sin hacer nada («aún no está en
+    /// esta app»); una pantalla que no trae el árbol al entrar; que «Mi
+    /// trabajo» no saque de Notas.
+    #[gpui_kit::test]
+    fn the_notes_row_opens_the_screen_and_my_work_leaves_it(cx: &mut TestAppContext) {
+        let server = server();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/notes/")).respond_with(ok(json!([{ "id": "n1", "position": 0, "title": "Una", "hasBody": false, "favorite": false }]))));
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega a la pantalla", |cx| on_screen(window, "tree-l-a", cx));
+        assert!(!on_screen(window, "notes", cx));
+
+        click(window, "panel-notes", cx);
+        wait_until(cx, "llega su árbol", |cx| on_screen(window, "note-n1", cx));
+        assert!(on_screen(window, "notes", cx));
+
+        click(window, "tree-everything", cx);
+        wait_until(cx, "vuelve «Mi trabajo»", |cx| !on_screen(window, "notes", cx));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
     /// Entrar trae la organización y su árbol, y los pinta.

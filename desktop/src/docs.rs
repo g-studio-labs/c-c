@@ -392,7 +392,7 @@ fn ghost_button(id: &'static str, icon: Lucide, label: String, cx: &App) -> Stat
 /// Cómo se lee un documento: la tipografía de `.prose-doc .md-body` (15 px
 /// con aire entre líneas; los títulos a 18, 17 y 13) y, de `.md-body`, el
 /// bloque de código sobre fondo apagado y las celdas con su borde.
-fn reading_style(cx: &App) -> TextViewStyle {
+pub(crate) fn reading_style(cx: &App) -> TextViewStyle {
     let muted = cx.theme().muted;
     let mut table = StyleRefinement::default();
     // Una tabla que no cabe se desliza por dentro en vez de estrujarse.

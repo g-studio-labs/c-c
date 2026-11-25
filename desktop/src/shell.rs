@@ -69,7 +69,7 @@ impl Shell {
     /// documentación (lo dice el core, que tiene el borrador) o en la tarea
     /// abierta (lo dice su página, que tiene sus cajas).
     fn has_unsaved(&self, cx: &App) -> bool {
-        Backend::core(cx).unsaved_docs() || matches!(&self.screen, Screen::Open(workspace) if workspace.read(cx).task.read(cx).has_unsaved(cx))
+        Backend::core(cx).unsaved_docs() || Backend::core(cx).unsaved_notes() || matches!(&self.screen, Screen::Open(workspace) if workspace.read(cx).task.read(cx).has_unsaved(cx))
     }
 
     /// Si la ventana puede cerrarse ya. Con texto sin guardar no: se
@@ -390,6 +390,31 @@ mod tests {
         cx.update_window(window, |_, window, cx| window.click("close-ask-yes", cx)).unwrap();
         cx.run_until_parked();
         assert!(cx.update_window(window, |_, _, _| ()).is_err(), "«Cerrar sin guardar» no cerró la ventana");
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Una nota a medias también hace preguntar al cerrar la ventana.
+    ///
+    /// Rotura que atrapa: que la ventana sólo mire la documentación y la
+    /// tarea y se cierre con una nota escrita y sin guardar.
+    #[gpui_kit::test]
+    fn closing_the_window_with_a_half_written_note_asks_too(cx: &mut TestAppContext) {
+        let (server, window) = open_with_a_document(cx, |_| {});
+        let note = json!({ "id": "n1", "title": "Una", "body": "texto", "bodyHash": "h1" });
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/notes/")).respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true, "data": [{ "id": "n1", "position": 0, "title": "Una" }] }))));
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/notes/n1")).respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true, "data": { "note": note } }))));
+        cx.update(|cx| Backend::run(cx, |core| async move { core.notes().enter().await; core.notes().open("n1").await }));
+        wait_until(cx, "llega la nota", |cx| on_screen(window, "note-edit", cx));
+        cx.update_window(window, |_, window, cx| window.click("note-edit", cx)).unwrap();
+        wait_until(cx, "sale el editor", |cx| on_screen(window, "note-edit-input", cx));
+        cx.update_window(window, |_, window, cx| {
+            window.click("note-edit-input", cx);
+            window.input("X", cx);
+        })
+        .unwrap();
+        wait_until(cx, "llega al borrador", |cx| cx.update(|cx| Backend::core(cx).unsaved_notes()));
+        assert!(!gpui_kit::VisualTestContext::from_window(window.into(), cx).simulate_close(), "la ventana se cerró con una nota sin guardar");
+        wait_until(cx, "se pregunta", |cx| on_screen(window, "close-ask", cx));
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 

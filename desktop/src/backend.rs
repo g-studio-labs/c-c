@@ -17,7 +17,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use cac_core::{
-    Announcement, ApiError, CommsState, InboxState, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, OrgsState, OverviewState, PlatformState, RequestsState, Session, Storage,
+    Announcement, ApiError, CommsState, InboxState, Config, ConnectionState, Core, CountersState, DocsState, Listener, MyWorkState, NotesState, OrgsState, OverviewState, PlatformState, RequestsState, Session, Storage,
     TaskState, ThreadState, TreeState, VoiceState, WallState,
 };
 use gpui_kit::{App, AppContext, Entity, Global};
@@ -30,6 +30,7 @@ enum CoreEvent {
     Orgs(OrgsState),
     Tree(TreeState),
     Docs(DocsState),
+    Notes(NotesState),
     Task(TaskState),
     Counters(CountersState),
     Comms(CommsState),
@@ -73,6 +74,9 @@ impl Listener for Forwarder {
     }
     fn docs_changed(&self, state: DocsState) {
         self.send(CoreEvent::Docs(state));
+    }
+    fn notes_changed(&self, state: NotesState) {
+        self.send(CoreEvent::Notes(state));
     }
     fn task_changed(&self, state: TaskState) {
         self.send(CoreEvent::Task(state));
@@ -124,6 +128,8 @@ pub struct Snapshot {
     pub orgs: OrgsState,
     pub tree: TreeState,
     pub docs: DocsState,
+    /// Notas: el árbol de páginas personales y la que se lee o se escribe.
+    pub notes: NotesState,
     pub task: TaskState,
     /// Los números de la campana y del riel.
     pub counters: CountersState,
@@ -160,6 +166,7 @@ impl Snapshot {
             CoreEvent::Orgs(state) => self.orgs = state,
             CoreEvent::Tree(state) => self.tree = state,
             CoreEvent::Docs(state) => self.docs = state,
+            CoreEvent::Notes(state) => self.notes = state,
             CoreEvent::Task(state) => self.task = state,
             CoreEvent::Counters(state) => self.counters = state,
             CoreEvent::Comms(state) => self.comms = state,
