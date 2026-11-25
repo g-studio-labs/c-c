@@ -410,7 +410,8 @@ impl Requests {
             match elsewhere.iter_mut().find(|entry| entry.org_id == request.org_id) {
                 Some(entry) => entry.count += 1,
                 None => {
-                    let org_name = orgs.orgs.iter().find(|org| org.id == request.org_id).map(|org| org.name.clone()).unwrap_or_else(|| request.org_id.clone());
+                    // Sin su nombre no se avisa: un uuid no dice nada.
+                    let Some(org_name) = orgs.orgs.iter().find(|org| org.id == request.org_id).map(|org| org.name.clone()) else { continue };
                     elsewhere.push(RequestsElsewhere { org_id: request.org_id.clone(), org_name, count: 1 });
                 }
             }
@@ -551,6 +552,13 @@ impl Requests {
             return;
         }
         let code = ask.code.to_lowercase();
+        // La lista sólo trae la organización que se mira: se cambia a la del
+        // pedido antes de enseñarlo, o su tarjeta no estaría y se diría
+        // «enseñé» de algo que nadie tiene delante.
+        let Some(org_id) = self.org_of(&code).await else { return };
+        if Some(org_id.as_str()) != self.core.orgs().state().current_org_id.as_deref() && !self.core.switch_org(&org_id).await {
+            return;
+        }
         if !self.show(Some(code.clone())) {
             return;
         }
@@ -558,6 +566,19 @@ impl Requests {
         let path = format!("/api/v1/requests/{code}/opened");
         let _ = self.core.call_ok("POST", &path, Some(serde_json::json!({ "nonce": ask.nonce }))).await;
         self.reload_with_list().await;
+    }
+
+    /// De qué organización es un pedido, mirando lo guardado y, si no está
+    /// (uno recién creado), lo que dice el servidor.
+    async fn org_of(&self, code: &str) -> Option<String> {
+        let find = |data: &RequestsData| {
+            data.team_open.iter().chain(&data.all_open).chain(&data.all_closed).find(|request| request.code == code).map(|request| request.org_id.clone())
+        };
+        if let Some(org_id) = find(&self.data()) {
+            return Some(org_id);
+        }
+        self.refresh_marks().await;
+        find(&self.data())
     }
 
     async fn reload_with_list(&self) {

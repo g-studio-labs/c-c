@@ -258,3 +258,51 @@ async fn only_the_organization_being_looked_at_is_listed_and_the_others_are_anno
     assert_eq!((state.elsewhere.len(), state.elsewhere[0].org_name.as_str(), state.elsewhere[0].count), (1, "DWIT", 1));
     assert_eq!(team_loads(&rig.server).await, loads, "cambiar de organización reparte, no vuelve a pedir");
 }
+
+/// Un agente pide abrir un pedido de **otra** organización: se pasa a ella
+/// antes de enseñarlo, y sólo entonces se dice «lo enseñé» (command-and-control-527).
+///
+/// Roturas que atrapa: enseñar y confirmar sin cambiar de organización (la
+/// tarjeta no estaría en la lista y el MCP diría `delivered` sin que nadie
+/// lo viera); confirmar un pedido que no se encuentra en ninguna lista.
+#[tokio::test]
+async fn opening_a_request_of_another_organization_switches_to_it_first() {
+    let rig = rig().await;
+    let ana = ("u1", "Ana Ruiz");
+    let g1 = in_org("o2", request("req-g1", "t9", ana, true));
+    list("team", "open").respond_with(ok(json!([request("req-a1", "t1", ana, true), g1.clone()]))).with_priority(1).mount(&rig.server).await;
+    list("mine", "open").respond_with(ok(json!([request("req-a1", "t1", ana, true), g1]))).with_priority(1).mount(&rig.server).await;
+    for code in ["req-g1", "req-zz"] {
+        Mock::given(method("POST")).and(path(format!("/api/v1/requests/{code}/opened"))).respond_with(ok(json!(null))).mount(&rig.server).await;
+    }
+    assert_eq!(rig.core.orgs().state().current_org_id.as_deref(), Some("o1"));
+
+    rig.core.stream().deliver(ServerEvent { event: "request:open".into(), data: json!({ "code": "req-g1", "nonce": "n-1" }).to_string() });
+    until("el pedido, delante", || rig.core.requests().state().highlight.as_deref() == Some("req-g1")).await;
+    until("la lista de la otra organización", || rig.core.requests().state().open.iter().any(|r| r.code == "req-g1")).await;
+    assert_eq!(rig.core.orgs().state().current_org_id.as_deref(), Some("o2"), "se cambió a la del pedido");
+    assert_eq!(posted(&rig.server, "/api/v1/requests/req-g1/opened").await, [json!({ "nonce": "n-1" })]);
+
+    // Uno que ningún listado conoce no se puede enseñar, y no se confirma.
+    rig.core.stream().deliver(ServerEvent { event: "request:open".into(), data: json!({ "code": "req-zz", "nonce": "n-2" }).to_string() });
+    until("la búsqueda del desconocido", || rig.recorder.shown.lock().unwrap().len() >= 1).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(posted(&rig.server, "/api/v1/requests/req-zz/opened").await.is_empty());
+    assert_eq!(*rig.recorder.shown.lock().unwrap(), ["req-g1"]);
+}
+
+/// Una organización que no está en la lista (o que aún no llegó) no avisa:
+/// el aviso nunca dice un id.
+///
+/// Rotura que atrapa: avisar «2 pedidos más en <uuid>».
+#[tokio::test]
+async fn an_organization_without_a_known_name_is_not_announced() {
+    let rig = rig().await;
+    let ana = ("u1", "Ana Ruiz");
+    let stranger = in_org("o-unknown", request("req-x1", "t9", ana, true));
+    list("team", "open").respond_with(ok(json!([request("req-a1", "t1", ana, true), stranger]))).with_priority(1).mount(&rig.server).await;
+    rig.core.requests().refresh_marks().await;
+    let state = rig.core.requests().state();
+    assert_eq!(state.mine_count, 1);
+    assert!(state.elsewhere.is_empty(), "sin nombre no se avisa: {:?}", state.elsewhere);
+}
