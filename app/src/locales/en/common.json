@@ -21,7 +21,11 @@
     "hoursAgo_one": "1 hour ago",
     "hoursAgo_other": "{{count}} hours ago",
     "daysAgo_one": "1 day ago",
-    "daysAgo_other": "{{count}} days ago"
+    "daysAgo_other": "{{count}} days ago",
+    "inHours_one": "in 1 hour",
+    "inHours_other": "in {{count}} hours",
+    "inDays_one": "in 1 day",
+    "inDays_other": "in {{count}} days"
   },
   "presence": {
     "activeRecently": "active recently",

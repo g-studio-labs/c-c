@@ -414,6 +414,12 @@ impl Counters {
         }
     }
 
+    /// Se leyeron las invitaciones de quien mira (al abrirlas, aceptar o
+    /// rechazar una): el número del riel, sin esperar a la próxima carga.
+    pub(crate) fn invitations_seen(&self, pending: i64) {
+        self.update(|data| data.state.invitations = Some(pending));
+    }
+
     /// El árbol de una organización llegó: sus espacios son sus canales,
     /// también la sala general, que el árbol no pinta.
     pub(crate) fn spaces_loaded(&self, org_id: &str, space_ids: Vec<String>) {

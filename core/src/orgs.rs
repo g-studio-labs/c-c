@@ -96,7 +96,7 @@ struct Remembered {
 
 /// Las organizaciones de este core.
 pub struct Orgs {
-    core: Core,
+    pub(crate) core: Core,
 }
 
 impl Core {
@@ -117,6 +117,15 @@ impl Orgs {
             state.clone()
         };
         self.core.inner.listener.orgs_changed(state);
+    }
+
+    /// Pone la organización tal como la dejó un cambio.
+    pub(crate) fn replace(&self, org: Organization) {
+        self.update(|state| {
+            if let Some(slot) = state.orgs.iter_mut().find(|candidate| candidate.id == org.id) {
+                *slot = org;
+            }
+        });
     }
 
     /// La que se miraba la última vez, para arrancar en ella.

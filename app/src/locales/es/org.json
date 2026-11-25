@@ -175,5 +175,32 @@
   "nobody": "Nadie",
   "leaveBlankToKeep": "déjalo vacío para conservarlo",
   "optional": "opcional",
-  "roleAny": "Rol: cualquiera"
+  "roleAny": "Rol: cualquiera",
+  "spaceAccess": {
+    "wholeOrg": "toda la organización",
+    "partly": "un cliente ve una parte",
+    "someClient": "un cliente"
+  },
+  "spaceTasks": "{{all}} · {{open}} abiertas",
+  "nobodyOnIt": "nadie lo está llevando",
+  "expired": "caducada",
+  "pendingChip": "pendiente",
+  "invitedBy": "invitada por @{{who}} · {{when}}",
+  "resend": "Reenviar",
+  "revokeTitle": "¿Revocar la invitación a @{{who}}?",
+  "removeTitle": "¿Quitar a @{{who}}?",
+  "removeBody": "Perderá el acceso a {{org}} y a lo que tiene dentro.",
+  "you": "tú",
+  "rolesExplain": "admin administra · member escribe · viewer sólo lee",
+  "guestsNotListed": "Los invitados no salen aquí: sólo llegan a DevTools y no pertenecen a la organización.",
+  "require2fa": "Pedir 2FA a los admins",
+  "invitedYou": "Te invitó @{{who}} · rol",
+  "accept": "Aceptar",
+  "decline": "Rechazar",
+  "deleteTitle": "¿Borrar {{name}}?",
+  "cannotBeUndone": "No se puede deshacer.",
+  "typeToConfirm": "Escribe {{phrase}} para confirmar.",
+  "badZone": "Eso no es una zona horaria. Escríbela como America/Mexico_City, o déjala vacía.",
+  "saved": "Guardado",
+  "joinedRenew": "Ya estás en {{name}}. Cierra sesión y vuelve a entrar para terminar de tener acceso."
 }

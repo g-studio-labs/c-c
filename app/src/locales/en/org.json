@@ -175,5 +175,32 @@
   "nobody": "Nobody",
   "leaveBlankToKeep": "leave blank to keep it",
   "optional": "optional",
-  "roleAny": "Role: any"
+  "roleAny": "Role: any",
+  "spaceAccess": {
+    "wholeOrg": "the whole organization",
+    "partly": "a client sees part of it",
+    "someClient": "a client"
+  },
+  "spaceTasks": "{{all}} · {{open}} open",
+  "nobodyOnIt": "nobody is on it",
+  "expired": "expired",
+  "pendingChip": "pending",
+  "invitedBy": "invited by @{{who}} · {{when}}",
+  "resend": "Resend",
+  "revokeTitle": "Revoke the invitation to @{{who}}?",
+  "removeTitle": "Remove @{{who}}?",
+  "removeBody": "They will lose access to {{org}} and its resources.",
+  "you": "you",
+  "rolesExplain": "admin manages · member writes · viewer only reads",
+  "guestsNotListed": "Guests are not listed here: they reach DevTools and nothing else, and they do not belong to the organization.",
+  "require2fa": "Require 2FA for admins",
+  "invitedYou": "Invited by @{{who}} · role",
+  "accept": "Accept",
+  "decline": "Decline",
+  "deleteTitle": "Delete {{name}}?",
+  "cannotBeUndone": "It cannot be undone.",
+  "typeToConfirm": "Type {{phrase}} to confirm.",
+  "badZone": "That is not a time zone. Write it like America/Mexico_City, or leave it empty.",
+  "saved": "Saved",
+  "joinedRenew": "Joined {{name}}. Sign out and back in to finish getting access."
 }

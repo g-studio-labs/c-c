@@ -56,7 +56,7 @@ impl Core {
     /// El árbol, sus marcas de documentación, «Mi trabajo», los contadores y
     /// las últimas líneas de los canales de la organización que se mira, a
     /// la vez.
-    async fn load_current_org(&self) {
+    pub(crate) async fn load_current_org(&self) {
         let org_id = self.orgs().state().current_org_id;
         // Los servidores son la misma lista, filtrada por otra organización.
         self.platform().org_changed();
