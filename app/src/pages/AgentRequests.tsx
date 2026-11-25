@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import RequestCard from "@/components/requests/RequestCard";
@@ -28,18 +28,58 @@ export default function AgentRequests() {
     void load();
   }, [load]);
 
-  // El pedido resaltado puede estar ya resuelto: entonces «Resueltos» se abre.
-  useEffect(() => {
-    if (highlight && closed.some((r) => r.code === highlight)) setShowResolved(true);
-  }, [highlight, closed]);
+  // El enlace se atiende una sola vez, la primera vez que su pedido aparece:
+  // si ya estaba resuelto, se abre «Resueltos», y se trae a la vista. Que
+  // cambie la lista después (contestarlo, o que lleguen otros) no vuelve a
+  // desplegar ni a mover la pantalla: así se perdía lo que se estaba leyendo.
+  const handled = useRef<string | null>(null);
+  const scrollPending = useRef(false);
 
-  useEffect(() => {
-    if (!highlight) return;
-    document.getElementById(`request-${highlight}`)?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+  // Lo que llega o cambia no mueve lo que se lee: la primera tarjeta visible
+  // se queda donde estaba aunque entren pedidos por encima.
+  const scroller = useRef<HTMLDivElement>(null);
+  const anchor = useRef<{ id: string; top: number } | null>(null);
+  const captureAnchor = () => {
+    const el = scroller.current;
+    if (!el) return;
+    const top = el.getBoundingClientRect().top;
+    for (const card of el.querySelectorAll<HTMLElement>("[data-request-card]")) {
+      const box = card.getBoundingClientRect();
+      if (box.bottom > top) {
+        anchor.current = { id: card.id, top: box.top - top };
+        return;
+      }
+    }
+    anchor.current = null;
+  };
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    if (highlight && handled.current !== highlight) {
+      const isClosed = closed.some((r) => r.code === highlight);
+      if (isClosed || open.some((r) => r.code === highlight)) {
+        handled.current = highlight;
+        scrollPending.current = true;
+        if (isClosed && !showResolved) {
+          setShowResolved(true);
+          return;
+        }
+      }
+    }
+    if (scrollPending.current) {
+      scrollPending.current = false;
+      document.getElementById(`request-${highlight}`)?.scrollIntoView?.({ block: "center" });
+    } else if (anchor.current) {
+      const card = document.getElementById(anchor.current.id);
+      if (card && el.contains(card)) {
+        el.scrollTop += card.getBoundingClientRect().top - el.getBoundingClientRect().top - anchor.current.top;
+      }
+    }
+    captureAnchor();
   }, [highlight, open, closed, showResolved]);
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 overflow-y-auto p-4 md:p-6">
+    <div ref={scroller} onScroll={captureAnchor} className="mx-auto flex w-full max-w-3xl flex-col gap-4 overflow-y-auto p-4 md:p-6">
       <header className="flex flex-wrap items-center gap-3">
         <div className="min-w-0 flex-1">
           <h1 className="text-xl font-semibold">{t("work:requests.title")}</h1>

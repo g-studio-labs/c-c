@@ -29,6 +29,7 @@ export default function RequestCard({ request, highlighted }: { request: AgentRe
   return (
     <article
       id={`request-${r.code}`}
+      data-request-card=""
       data-highlighted={highlighted || undefined}
       className={cn(
         "flex flex-col gap-3 rounded-lg border bg-card p-4 text-sm",
