@@ -30,7 +30,14 @@ export default function AgentRequests() {
   const mineOpen = useAgentRequestsStore((s) => s.mineOpen);
   const open = useMemo(() => inOrg(allOpen, orgId), [allOpen, orgId]);
   const closed = useMemo(() => inOrg(allClosed, orgId), [allClosed, orgId]);
-  const elsewhere = useMemo(() => inOtherOrgs(mineOpen, orgId), [mineOpen, orgId]);
+  // Sin el nombre de la org no se avisa: un id no dice nada.
+  const elsewhere = useMemo(
+    () => inOtherOrgs(mineOpen, orgId).flatMap((e) => {
+      const name = orgs.find((o) => o.id === e.orgId)?.name;
+      return name ? [{ ...e, name }] : [];
+    }),
+    [mineOpen, orgId, orgs],
+  );
   const [params] = useSearchParams();
   const highlight = params.get("open")?.toLowerCase() ?? null;
   const [showResolved, setShowResolved] = useState(false);
@@ -112,7 +119,7 @@ export default function AgentRequests() {
         </div>
       </header>
 
-      {elsewhere.map(({ orgId: other, count }) => (
+      {elsewhere.map(({ orgId: other, count, name }) => (
         <button
           key={other}
           type="button"
@@ -120,7 +127,7 @@ export default function AgentRequests() {
           className="motion-press rounded-lg border bg-muted/40 px-3 py-2 text-left text-sm hover:bg-muted"
           onClick={() => enterOrg(other)}
         >
-          {t("work:requests.elsewhere", { count, org: orgs.find((o) => o.id === other)?.name ?? other })}
+          {t("work:requests.elsewhere", { count, org: name })}
         </button>
       ))}
 

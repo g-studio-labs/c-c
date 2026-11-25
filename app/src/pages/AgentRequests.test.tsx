@@ -143,6 +143,19 @@ describe("Por atender", () => {
       expect(screen.getByRole("button", { name: /Resolved \(1\)/ })).toBeTruthy();
     });
 
+    // Rotura que atrapa: avisar «2 more requests in o-ghost» con el id de una org sin nombre.
+    it("una org sin nombre conocido no avisa (nunca se dice un id)", async () => {
+      get.mockImplementation(async (p: string) =>
+        p.includes("status=open")
+          ? { success: true, data: [req("req-aaaaaa", "open"), { ...req("req-gggggg", "open"), orgId: "o-ghost" }] }
+          : { success: true, data: [] },
+      );
+      mount();
+      await screen.findByText("Pedido req-aaaaaa");
+      expect(screen.queryByTestId("requests-elsewhere")).toBeNull();
+      expect(document.body.textContent).not.toContain("o-ghost");
+    });
+
     it("pulsar el aviso cambia de organización y enseña los de allí", async () => {
       withOtherOrg();
       mount();
@@ -153,6 +166,15 @@ describe("Por atender", () => {
       expect(screen.queryByText("Pedido req-aaaaaa")).toBeNull();
       expect(screen.getByTestId("requests-elsewhere").textContent).toBe("1 more request in DWIT");
     });
+  });
+
+  // Rotura que atrapa: que `refreshCount` no guarde el número (el del riel al
+  // arrancar y tras cada evento `request:*` sale de ahí).
+  it("refreshCount guarda lo tuyo abierto, de todas las organizaciones", async () => {
+    get.mockImplementation(async () => ({ success: true, data: [req("req-aaaaaa", "open"), { ...req("req-gggggg", "open"), orgId: "o2" }] }));
+    await useAgentRequestsStore.getState().refreshCount();
+    expect(useAgentRequestsStore.getState().mineOpen.map((r) => r.code)).toEqual(["req-aaaaaa", "req-gggggg"]);
+    expect(get).toHaveBeenCalledWith(expect.stringContaining("scope=mine"));
   });
 
   // Rotura que atrapa: contestar un pedido y que el número de la barra siga
