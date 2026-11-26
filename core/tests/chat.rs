@@ -1637,6 +1637,35 @@ async fn a_message_becomes_a_task_in_a_list_of_its_own_channel() {
     rig.core.stream().stop();
 }
 
+/// En la lista de un cliente (con `projectId`) la visibilidad va siempre
+/// dicha, y es la que se contestó: «Interno» no llega al cliente.
+///
+/// Roturas que atrapa: invertir `internal` y `public`; mandar siempre
+/// `public`; no mandar nada (el servidor decidiría solo).
+#[tokio::test(flavor = "multi_thread")]
+async fn in_a_client_list_the_task_is_sent_with_the_visibility_answered() {
+    let rig = rig().await;
+    let mut product = space("a", "o1", "Producto", None);
+    product["lists"][0]["projectId"] = json!("p1");
+    let o1 = json!([product, space("b", "o1", "Diseño", None), space("g", "o1", "General", Some("general"))]);
+    get("/api/v1/task-spaces/").and(query_param("orgId", "o1")).respond_with(ok(o1)).with_priority(1).mount(&rig.server).await;
+    let talk = history(vec![line("m1", "u2", "revisar el contrato", 1)]);
+    mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
+    let created = json!({ "id": "t1", "createdAt": "2026-11-15T10:00:00Z", "updatedAt": "2026-11-15T10:00:00Z", "listId": "l-a", "seq": 1, "title": "x", "status": "pending", "priority": "medium" });
+    post("/api/v1/task-lists/l-a/tasks").respond_with(ok(created)).mount(&rig.server).await;
+    rig.core.open_workspace().await;
+    open(&rig, channel("a")).await;
+    let locale = cac_core::Locale::Es;
+    assert!(rig.core.chat().work_targets(&channel("a"))[0].client, "la lista no se tomó por de cliente");
+
+    rig.core.chat().task_from_message(channel("a"), "m1".into(), "l-a".into(), true, locale).await.unwrap();
+    rig.core.chat().task_from_message(channel("a"), "m1".into(), "l-a".into(), false, locale).await.unwrap();
+    let sent = sent_bodies(&requests(&rig.server, "POST", "/api/v1/task-lists/l-a/tasks").await);
+    let visibility: Vec<_> = sent.iter().map(|body| body.get("visibility").cloned()).collect();
+    assert_eq!(visibility, [Some(json!("internal")), Some(json!("public"))]);
+    rig.core.stream().stop();
+}
+
 /// Un directo y la sala general no tienen dónde crear nada.
 ///
 /// Rotura que atrapa: ofrecer las listas de toda la organización desde un
@@ -1661,6 +1690,8 @@ async fn a_message_is_saved_quoted_into_the_docs_of_a_list_of_its_channel() {
     let talk = history(vec![line("m1", "u2", "usar el puerto 8443", 1)]);
     mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
     post("/api/v1/docs/list/l-a/tabs/runbook/append").respond_with(ok(json!({}))).mount(&rig.server).await;
+    // Montada a propósito: si se rechaza, es por la regla, no por un 404.
+    post("/api/v1/docs/list/l-a/tabs/decisions/append").respond_with(ok(json!({}))).mount(&rig.server).await;
     rig.core.open_workspace().await;
     open(&rig, channel("a")).await;
     let locale = cac_core::Locale::Es;
@@ -1668,6 +1699,7 @@ async fn a_message_is_saved_quoted_into_the_docs_of_a_list_of_its_channel() {
     assert!(rig.core.chat().save_message_to_docs(channel("a"), "m1".into(), "l-a".into(), "decisions".into(), locale).await.is_err());
     assert!(rig.core.chat().save_message_to_docs(channel("a"), "m1".into(), "l-b".into(), "runbook".into(), locale).await.is_err());
     assert_eq!(hits(&rig.server, "POST", "/api/v1/docs/list/l-a/tabs/runbook/append").await, 0);
+    assert_eq!(hits(&rig.server, "POST", "/api/v1/docs/list/l-a/tabs/decisions/append").await, 0, "se mandó a decisiones");
 
     rig.core.chat().save_message_to_docs(channel("a"), "m1".into(), "l-a".into(), "runbook".into(), locale).await.unwrap();
     let sent = sent_bodies(&requests(&rig.server, "POST", "/api/v1/docs/list/l-a/tabs/runbook/append").await);

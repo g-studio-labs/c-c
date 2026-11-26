@@ -2466,6 +2466,67 @@ mod tests {
         stop(cx);
     }
 
+    /// En la lista de un cliente, pasar un mensaje a tarea pregunta antes si
+    /// la ve él, y sólo «Visible para él» la hace pública. En una lista que
+    /// no es de cliente no se pregunta nada.
+    ///
+    /// Roturas que atrapa: no preguntar en la lista de un cliente (o fiarse
+    /// de lo que diga el menú); que «Interno» cree una tarea pública;
+    /// preguntar en una lista interna.
+    #[gpui_kit::test]
+    fn a_task_from_a_client_list_asks_whether_the_client_sees_it(cx: &mut TestAppContext) {
+        let server = server();
+        let mut product = space("a", "Producto", None);
+        product["lists"][0]["projectId"] = json!("p1");
+        server.mount(get("/api/v1/task-spaces/").respond_with(ok(json!([product, space("b", "Diseño", None), space("g", "General", Some("general"))]))).with_priority(1));
+        mount_history(&server, CHAT_A, &history(vec![line("m7", "u2", "Luis Mora", "revisar el contrato", 5, 7)]), Duration::ZERO);
+        mount_history(&server, CHAT_B, &history(vec![line("m8", "u2", "Luis Mora", "otra cosa", 5, 8)]), Duration::ZERO);
+        let task = json!({ "id": "t1", "createdAt": "2026-11-15T10:00:00Z", "updatedAt": "2026-11-15T10:00:00Z", "listId": "l-a", "seq": 1, "title": "x", "status": "pending", "priority": "medium" });
+        for list in ["l-a", "l-b"] {
+            server.mount(Mock::given(method("POST")).and(path(format!("/api/v1/task-lists/{list}/tasks"))).respond_with(ok(task.clone())).with_priority(1));
+        }
+        let (window, view) = open(&server, cx);
+        enter(window, channel("a"), cx);
+        wait_until(cx, "se pinta", |cx| on_screen(window, "thread-line-m7", cx));
+        let make = |list: &str, message: &str, cx: &mut TestAppContext| {
+            let (list, message) = (list.to_string(), message.to_string());
+            cx.update_window(window, |_, window, cx| view.update(cx, |this, cx| this.task_from_message(message, list, window, cx))).unwrap();
+        };
+
+        make("l-a", "m7", cx);
+        wait_until(cx, "pregunta", |cx| cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Interno");
+        // Una a una: con las dos en vuelo, el orden de llegada no es el de pedirlas.
+        wait_until(cx, "se crea la primera", |_| sent(&server, "/api/v1/task-lists/l-a/tasks").len() == 1);
+        make("l-a", "m7", cx);
+        wait_until(cx, "pregunta otra vez", |cx| cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Visible para él");
+        wait_until(cx, "se crean las dos", |_| sent(&server, "/api/v1/task-lists/l-a/tasks").len() == 2);
+        let visibility: Vec<_> = sent(&server, "/api/v1/task-lists/l-a/tasks").iter().map(|body| body["visibility"].clone()).collect();
+        assert_eq!(visibility, [json!("internal"), json!("public")]);
+
+        cx.update(|cx| assert!(Backend::core(cx).comms().select(channel("b"))));
+        wait_until(cx, "se pinta el otro canal", |cx| on_screen(window, "thread-line-m8", cx));
+        make("l-b", "m8", cx);
+        wait_until(cx, "se crea sin preguntar", |_| sent(&server, "/api/v1/task-lists/l-b/tasks").len() == 1);
+        assert!(!cx.has_pending_prompt(), "preguntó en una lista que no es de cliente");
+        assert!(sent(&server, "/api/v1/task-lists/l-b/tasks")[0].get("visibility").is_none());
+        stop(cx);
+    }
+
+    /// Cerrar la pregunta sin contestar deja la tarea interna, igual que
+    /// «Interno»: lo único que la hace pública es el primer botón.
+    ///
+    /// Roturas que atrapa: tomar el cierre (`Err`) por un sí; tomar
+    /// cualquier botón que no sea el segundo por un sí.
+    #[test]
+    fn closing_the_question_keeps_the_task_internal() {
+        use crate::message_actions::answered_internal;
+        assert!(!answered_internal::<()>(Ok(0)));
+        assert!(answered_internal::<()>(Ok(1)));
+        assert!(answered_internal(Err(())));
+    }
+
     /// El resumen de una llamada se pinta como tarjeta, con su grabación, y
     /// lo que escribe una persona con el mismo enlace sigue siendo texto.
     ///

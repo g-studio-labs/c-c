@@ -72,6 +72,5 @@
   "taskFromChannel": "del canal #{{where}}",
   "moreActions": "Más acciones",
   "taskCreated": "Tarea creada",
-  "noListInChannel": "Este canal no tiene una lista donde guardarlo",
-  "pickList": "¿En qué lista?"
+  "noListInChannel": "Este canal no tiene una lista donde guardarlo"
 }

@@ -72,6 +72,5 @@
   "taskFromChannel": "from the #{{where}} channel",
   "moreActions": "More actions",
   "taskCreated": "Task created",
-  "noListInChannel": "This channel has no list to put it in",
-  "pickList": "In which list?"
+  "noListInChannel": "This channel has no list to put it in"
 }

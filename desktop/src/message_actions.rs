@@ -37,6 +37,13 @@ pub struct Editing {
     problem: Option<String>,
 }
 
+/// Lo que contestó la pregunta de si el cliente ve la tarea. Sólo «Visible
+/// para él» (el primer botón) la hace pública: «Interno» y cerrar el diálogo
+/// sin contestar (`Err`) la dejan interna.
+pub(crate) fn answered_internal<E>(answer: Result<usize, E>) -> bool {
+    !matches!(answer, Ok(0))
+}
+
 impl ChatView {
     fn conversation(&self) -> Option<Conversation> {
         self.composer_conversation()
@@ -99,18 +106,20 @@ impl ChatView {
 
     /// Crea una tarea con el mensaje. En la lista de un cliente se pregunta
     /// antes si la ve él: saltarse la pregunta «porque es el chat» es el
-    /// único camino que filtraría lo interno.
-    fn task_from_message(&mut self, id: String, list_id: String, client: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// único camino que filtraría lo interno. Si es de cliente lo dice el
+    /// core, no quien llama: el menú no tiene cómo equivocarse.
+    pub(crate) fn task_from_message(&mut self, id: String, list_id: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(conversation) = self.conversation() else { return };
         let locale = locale(cx);
         let chat = Backend::core(cx).chat();
+        let client = chat.work_targets(&conversation).iter().any(|target| target.list_id == list_id && target.client);
         let asked = client.then(|| {
             let question = chat.client_sees_question(locale);
             window.prompt(PromptLevel::Info, &question.title, Some(&question.body), &[question.confirm.as_str(), question.cancel.as_str()], cx)
         });
         cx.spawn_in(window, async move |this, cx| {
             let internal = match asked {
-                Some(answer) => answer.await != Ok(0),
+                Some(answer) => answered_internal(answer.await),
                 None => false,
             };
             let Ok(done) = cx.update(|_, cx| Backend::ask(cx, move |core| async move { core.chat().task_from_message(conversation, id, list_id, internal, locale).await })) else { return };
@@ -171,11 +180,11 @@ impl ChatView {
                         if several {
                             menu = menu.label(target.label.clone());
                         }
-                        let (list_id, client, message_id) = (target.list_id.clone(), target.client, message.clone());
+                        let (list_id, message_id) = (target.list_id.clone(), message.clone());
                         let task_view = view.clone();
                         menu = menu.item(PopupMenuItem::new(create.clone()).on_click(move |_, window, cx| {
                             let (list_id, message_id) = (list_id.clone(), message_id.clone());
-                            let _ = task_view.update(cx, |this, cx| this.task_from_message(message_id, list_id, client, window, cx));
+                            let _ = task_view.update(cx, |this, cx| this.task_from_message(message_id, list_id, window, cx));
                         }));
                         for (tab, label) in tabs.clone() {
                             let (list_id, message_id, docs_view) = (target.list_id.clone(), message.clone(), view.clone());
