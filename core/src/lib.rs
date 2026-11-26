@@ -10,6 +10,7 @@ uniffi::setup_scaffolding!();
 
 pub mod account;
 pub mod ansi;
+pub mod call_card;
 pub mod channel_tabs;
 pub mod chat;
 pub mod comms;
@@ -27,6 +28,7 @@ pub mod doc_share;
 pub mod docs;
 pub mod docs_panel;
 pub mod events;
+pub mod message_to;
 pub mod mywork;
 pub mod nav;
 pub mod notes;
@@ -67,6 +69,7 @@ pub use chat::{
     apply_reaction, around_label, enter_sends, file_token, mention_token, message_body, message_to_send, picture_step, thread_lines, thread_pictures, thread_splice, BodyFile, Chat, ComposerToken, MessageBody,
     ThreadLine, ThreadLink, ThreadMessage, ThreadPicture, ThreadQuote, ThreadSplice, ThreadState, MESSAGE_MAX_CHARS, THREAD_PAGE,
 };
+pub use call_card::{call_card, call_length, CallCard, CallFace, CallParticipant, CallSession};
 pub use channel_tabs::{
     call_title, channel_tabs, guest_link, local_moment, recording_duration, row_meta, recording_file_name, search_page, search_path, tab_path, CallInvite, CallOccupant, ChannelTab, ChannelTabs,
     ChatLinkItem, ChatMediaItem, PagedTab, Recording, RecordingPlace, RecordingPolicy, TabItem, TabPage, TabShows, CALL_TITLE_MAX, GUEST_TTLS, SEARCH_PAGE,
@@ -75,7 +78,7 @@ pub use comms::{
     comms_panel, conversation_title, people_matching, resolve_conversation, Channel, Comms, CommsPanel, CommsRow, CommsRows, CommsSection, CommsState,
     CommsViewer, Conversation, ConversationTitle,
 };
-pub use comms_text::{list_time, mentions_a_call, preview_line, quote_text, seen_recently, was_read, LastLine};
+pub use comms_text::{call_id_in, list_time, mentions_a_call, preview_line, quote_text, seen_recently, was_read, LastLine};
 pub use comms_wire::{
     ChatFile, ChatLatest, ChatMessage, ChatMessageEvent, ChatUnread, DmMessage, DmMessageEvent, DmReadEvent, DmSummary, MessageQuote, Person, ReactionSummary,
     REACTION_EMOJIS, SYSTEM_KIND,

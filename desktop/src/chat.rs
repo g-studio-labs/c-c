@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
-use cac_core::{BodyFile, Conversation, MessageBody, ThreadLine, ThreadLink, ThreadMessage};
+use cac_core::{BodyFile, CallCard, Conversation, MessageBody, ThreadLine, ThreadLink, ThreadMessage};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::spinner::Spinner;
@@ -85,6 +85,10 @@ pub struct ChatView {
     /// Qué mensajes enseñan cada imagen, por su ruta: al llegar, se vuelven
     /// a medir sus filas sin recorrer la conversación.
     pictured_in: HashMap<String, Vec<String>>,
+    /// La tarjeta de cada resumen de llamada, por su llamada y el texto de su
+    /// línea: cuando la grabación queda lista el servidor reescribe la
+    /// línea, y la tarjeta se vuelve a pedir (`key={m.body}` en Tauri).
+    calls: HashMap<String, CallSlot>,
     /// Qué versión de la conversación está puesta en la lista.
     revision: u64,
     /// Cuántas llegadas se han visto: una más, leyendo arriba, es «nuevos».
@@ -113,6 +117,14 @@ pub struct ChatView {
     /// La caja de escribir, con un borrador por conversación.
     pub(crate) composer: Composer,
     _on_snapshot: Subscription,
+}
+
+/// Lo que se sabe de una llamada: se está pidiendo, llegó, o no llegó (y
+/// entonces se queda la frase del servidor).
+enum CallSlot {
+    Asking,
+    Ready(CallCard),
+    Failed,
 }
 
 /// Un enlace a una grabación, pulsado en un canal o en un directo: lo abre
@@ -147,6 +159,7 @@ impl ChatView {
             messages: Vec::new(),
             bodies: HashMap::new(),
             pictured_in: HashMap::new(),
+            calls: HashMap::new(),
             revision: 0,
             arrivals: 0,
             new_below: false,
@@ -433,6 +446,109 @@ impl ChatView {
         }
     }
 
+    /// La tarjeta de la llamada de esa línea, si ya llegó. La primera vez la
+    /// pide; mientras tanto, y si no llega, se ve la frase.
+    fn call_card_of(&mut self, line: &ThreadLine, cx: &mut Context<Self>) -> Option<CallCard> {
+        let call_id = line.call_id.clone()?;
+        let body = self.messages.iter().find(|message| message.id == line.id).map(|message| message.body.clone()).unwrap_or_default();
+        let key = format!("{call_id}|{body}");
+        match self.calls.get(&key) {
+            Some(CallSlot::Ready(card)) => return Some(card.clone()),
+            Some(_) => return None,
+            None => {}
+        }
+        self.calls.insert(key.clone(), CallSlot::Asking);
+        let (locale, asked) = (locale(cx), call_id.clone());
+        let answer = Backend::ask(cx, move |core| async move { core.chat().call_card(&call_id, locale).await });
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = answer.await else { return };
+            this.update(cx, |this, cx| {
+                let landed = result.is_ok();
+                this.calls.insert(key.clone(), result.map(CallSlot::Ready).unwrap_or(CallSlot::Failed));
+                if landed {
+                    // Las filas de esa llamada cambian de alto: se vuelven a medir.
+                    for (index, shown) in this.lines.iter().enumerate() {
+                        if shown.call_id.as_deref() == Some(asked.as_str()) {
+                            this.list.remeasure_items(index..index + 1);
+                        }
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        None
+    }
+
+    /// El resumen de una llamada como tarjeta (`CallSummaryCard.tsx`): que
+    /// terminó, cuánto, quiénes, y la grabación si se hizo.
+    fn render_call_card(&self, id: &str, card: &CallCard, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted_ink, muted, border, group) = (theme.muted_foreground, theme.muted, theme.border, theme.group_box);
+        let recording = card.recording_id.clone();
+        div()
+            .id(SharedString::from(format!("thread-call-{id}")))
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(border)
+            .bg(group.opacity(0.6))
+            .px_3()
+            .py_2()
+            .leading_sm()
+            .aria_label(format!("{} {}", card.title, card.when))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(Icon::new(Lucide::PhoneOff).size_4().flex_none().text_color(muted_ink))
+                    .child(div().font_weight(FontWeight::MEDIUM).child(card.title.clone()))
+                    .child(div().leading_xs().text_color(muted_ink).child(card.when.clone())),
+            )
+            .when(!card.faces.is_empty(), |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().flex().flex_none().gap_0p5().children(card.faces.iter().enumerate().map(|(index, face)| {
+                            let name = face.name.clone();
+                            div()
+                                .id(SharedString::from(format!("thread-call-face-{id}-{index}")))
+                                .size_6()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(muted)
+                                .leading_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
+                                .child(face.initials.clone())
+                        })))
+                        .child(div().min_w_0().truncate().leading_xs().text_color(muted_ink).child(card.people.clone())),
+                )
+            })
+            .when_some(recording, |this, recording| {
+                this.child(
+                    div().flex().child(
+                        Button::new(SharedString::from(format!("thread-call-recording-{id}")))
+                            .outline()
+                            .xsmall()
+                            .icon(Icon::new(Lucide::Video).size_3p5())
+                            .label(tr(cx, "chat:callWatchRecording"))
+                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(OpenRecording { id: recording.clone() }))),
+                    ),
+                )
+            })
+            .test_support()
+    }
+
     /// La cita encima de una respuesta (`ReplyQuote.tsx`): de quién era y
     /// qué decía, en dos líneas. Pulsarla lleva al mensaje citado.
     fn render_quote(&self, line: &ThreadLine, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -593,7 +709,7 @@ impl ChatView {
         let theme = cx.theme();
         let (foreground, muted_ink, muted, border, primary) = (theme.foreground, theme.muted_foreground, theme.muted, theme.border, theme.primary);
         // Pulsar una pastilla pone o quita la reacción de quien mira.
-        let can_write = Backend::snapshot(cx).read(cx).thread.can_write && !line.system;
+        let can_write = Backend::snapshot(cx).read(cx).thread.can_write;
         let pills = line.reactions.iter().enumerate().map(|(index, reaction)| {
             let (id, emoji, on) = (line.id.clone(), reaction.emoji.clone(), !reaction.mine);
             let label = cac_core::text_with(locale(cx), "chat:reactionCount", &[("emoji", &reaction.emoji), ("count", &reaction.count.to_string())]);
@@ -740,6 +856,9 @@ impl ChatView {
                 cx,
             )
         });
+        // Un resumen de llamada es una tarjeta, no una frase.
+        let call = self.call_card_of(&line, cx).map(|card| self.render_call_card(&id, &card, cx));
+        let text = if call.is_some() { None } else { text };
         let pictures: Vec<AnyElement> = body.parts.pictures.iter().map(|picture| self.render_picture(picture, cx).into_any_element()).collect();
         let files: Vec<AnyElement> = body.parts.files.iter().map(|file| self.render_file(file, cx).into_any_element()).collect();
         let ticks = line.ticks.map(|read| {
@@ -793,7 +912,8 @@ impl ChatView {
             // Corrigiéndolo, la caja va en el sitio de lo que dice.
             .children(editor)
             .when(!editing, |this| {
-                this.children(text)
+                this.children(call)
+                    .children(text)
                     .when(!pictures.is_empty(), |this| this.child(div().mt_1().flex().flex_wrap().gap_2().children(pictures)))
                     .when(!files.is_empty(), |this| this.child(div().mt_1().flex().flex_col().gap_1().children(files)))
             })
@@ -2314,6 +2434,66 @@ mod tests {
         click(window, "thread-reaction-m1-0", cx);
         wait_until(cx, "se manda quitarla", |_| reactions(&server).len() == 2);
         assert_eq!(reactions(&server), [json!({ "emoji": "😂", "on": true }), json!({ "emoji": "👍", "on": false })]);
+        stop(cx);
+    }
+
+    /// En una línea de cac sólo se reacciona: no hay responder ni «más», y la
+    /// carita pone la reacción (para celebrar que la grabación ya está).
+    ///
+    /// Roturas que atrapa: una barra sin la carita en la línea de cac; que
+    /// ofrezca responder o crear tareas de lo que escribió cac; una pastilla
+    /// que no se pulsa por ser de cac.
+    #[gpui_kit::test]
+    fn a_system_line_can_only_be_reacted_to(cx: &mut TestAppContext) {
+        let server = server();
+        let mut system = line("m6", "u1", "Ana Ruiz", "Grabación lista", 5, 6);
+        system["kind"] = json!("system");
+        system["reactions"] = json!([{ "emoji": "👍", "count": 1, "mine": false, "names": ["Luis Mora"] }]);
+        mount_history(&server, CHAT_A, &history(vec![system, line("m7", "u2", "Luis Mora", "hola", 5, 7)]), Duration::ZERO);
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/task-spaces/a/chat/m6/reactions")).respond_with(ok(json!(null))).with_priority(1));
+        let (window, _) = open(&server, cx);
+        enter(window, channel("a"), cx);
+        wait_until(cx, "se pinta", |cx| on_screen(window, "thread-line-m7", cx));
+
+        assert!(on_screen(window, "thread-react-m6", cx), "la línea de cac no tiene la carita");
+        assert!(!on_screen(window, "thread-reply-m6", cx) && !on_screen(window, "thread-more-m6", cx));
+        assert!(on_screen(window, "thread-reply-m7", cx) && on_screen(window, "thread-more-m7", cx));
+
+        click(window, "thread-react-m6", cx);
+        click(window, "thread-pick-m6-2", cx);
+        click(window, "thread-reaction-m6-0", cx);
+        wait_until(cx, "se mandan las dos", |_| sent(&server, "/api/v1/task-spaces/a/chat/m6/reactions").len() == 2);
+        stop(cx);
+    }
+
+    /// El resumen de una llamada se pinta como tarjeta, con su grabación, y
+    /// lo que escribe una persona con el mismo enlace sigue siendo texto.
+    ///
+    /// Roturas que atrapa: seguir pintando la frase; una tarjeta sin la
+    /// grabación; una tarjeta en el mensaje de una persona; no pedir la
+    /// llamada por su id.
+    #[gpui_kit::test]
+    fn a_call_summary_is_painted_as_a_card(cx: &mut TestAppContext) {
+        let server = server();
+        let id = "0f3c1a2b-4d5e-6f70-8192-a3b4c5d6e7f8";
+        let body = format!("Call ended · 12 min — [details](cac:call/{id}).");
+        let mut system = line("m6", "u1", "Ana Ruiz", &body, 5, 6);
+        system["kind"] = json!("system");
+        let person = line("m7", "u2", "Luis Mora", &body, 5, 7);
+        mount_history(&server, CHAT_A, &history(vec![system, person]), Duration::ZERO);
+        server.mount(
+            Mock::given(method("GET")).and(path(format!("/api/v1/call-sessions/{id}"))).respond_with(ok(json!({
+                "id": id, "startedAt": "2026-11-25T10:02:00Z", "endedAt": "2026-11-25T10:14:00Z", "durationMs": 720000, "messages": 0,
+                "participants": [{ "identity": "u1", "name": "Ana Ruiz", "guest": false }], "recordingId": "r1"
+            }))),
+        );
+        let (window, _) = open(&server, cx);
+        enter(window, channel("a"), cx);
+
+        wait_until(cx, "sale la tarjeta", |cx| on_screen(window, "thread-call-m6", cx));
+        assert!(label(window, "thread-call-m6", cx).starts_with("Llamada terminada"));
+        assert!(on_screen(window, "thread-call-recording-m6", cx), "falta ver la grabación");
+        assert!(!on_screen(window, "thread-call-m7", cx), "el mensaje de una persona se pintó como llamada");
         stop(cx);
     }
 }

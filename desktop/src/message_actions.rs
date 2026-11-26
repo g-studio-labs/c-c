@@ -10,8 +10,13 @@
 //! Al corregir se edita el markdown del mensaje tal cual: una mención sale
 //! como su enlace (`[@ana](cac:user/…)`), no como ficha. Rehacer las fichas
 //! al corregir queda para después.
+//!
+//! El botón «más» lleva lo que se hace con lo hablado: una tarea, o un
+//! párrafo en la documentación de la lista (`Chat::task_from_message`,
+//! `Chat::save_message_to_docs`).
 
 use cac_core::{Conversation, ThreadLine, REACTION_EMOJIS};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Enter, Escape, Textarea, TextareaState};
@@ -92,6 +97,99 @@ impl ChatView {
         .detach();
     }
 
+    /// Crea una tarea con el mensaje. En la lista de un cliente se pregunta
+    /// antes si la ve él: saltarse la pregunta «porque es el chat» es el
+    /// único camino que filtraría lo interno.
+    fn task_from_message(&mut self, id: String, list_id: String, client: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(conversation) = self.conversation() else { return };
+        let locale = locale(cx);
+        let chat = Backend::core(cx).chat();
+        let asked = client.then(|| {
+            let question = chat.client_sees_question(locale);
+            window.prompt(PromptLevel::Info, &question.title, Some(&question.body), &[question.confirm.as_str(), question.cancel.as_str()], cx)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let internal = match asked {
+                Some(answer) => answer.await != Ok(0),
+                None => false,
+            };
+            let Ok(done) = cx.update(|_, cx| Backend::ask(cx, move |core| async move { core.chat().task_from_message(conversation, id, list_id, internal, locale).await })) else { return };
+            let Ok(result) = done.await else { return };
+            this.update(cx, |this, cx| {
+                let said = match result {
+                    Ok(()) => tr(cx, "chat:taskCreated"),
+                    Err(error) => error_text(cx, &error, "work:board.errCreate"),
+                };
+                this.say(said, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Guarda el mensaje, citado, en una pestaña de la documentación de la lista.
+    fn save_to_docs(&mut self, id: String, list_id: String, tab: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(conversation) = self.conversation() else { return };
+        let locale = locale(cx);
+        let done = Backend::ask(cx, move |core| async move { core.chat().save_message_to_docs(conversation, id, list_id, tab.to_string(), locale).await });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(result) = done.await else { return };
+            this.update(cx, |this, cx| {
+                let said = match result {
+                    Ok(()) => tr(cx, "work:docs.savedToDoc"),
+                    Err(error) => error_text(cx, &error, "work:docs.errSave"),
+                };
+                this.say(said, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// El botón «más» de un mensaje de un canal: una tarea o un párrafo de
+    /// documentación por cada lista del espacio. Sin ninguna lista, dice por
+    /// qué no hay nada que hacer.
+    fn render_more(&self, id: &str, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let conversation = self.conversation().filter(|conversation| matches!(conversation, Conversation::Channel { .. }))?;
+        let targets = Backend::core(cx).chat().work_targets(&conversation);
+        let (create, save, nothing) = (tr(cx, "chat:createTask"), tr(cx, "work:docs.saveToDocs"), tr(cx, "chat:noListInChannel"));
+        let tabs = [("overview", tr(cx, "work:docs.overview")), ("runbook", tr(cx, "work:docs.runbook")), ("links", tr(cx, "work:docs.links"))];
+        let view = cx.entity().downgrade();
+        let message = id.to_string();
+        Some(
+            Button::new(SharedString::from(format!("thread-more-{id}")))
+                .ghost()
+                .xsmall()
+                .icon(Icon::new(Lucide::Ellipsis).size_4())
+                .tooltip(tr(cx, "chat:moreActions"))
+                .dropdown_menu(move |mut menu, _, _| {
+                    if targets.is_empty() {
+                        return menu.label(nothing.clone());
+                    }
+                    let several = targets.len() > 1;
+                    for target in targets.clone() {
+                        if several {
+                            menu = menu.label(target.label.clone());
+                        }
+                        let (list_id, client, message_id) = (target.list_id.clone(), target.client, message.clone());
+                        let task_view = view.clone();
+                        menu = menu.item(PopupMenuItem::new(create.clone()).on_click(move |_, window, cx| {
+                            let (list_id, message_id) = (list_id.clone(), message_id.clone());
+                            let _ = task_view.update(cx, |this, cx| this.task_from_message(message_id, list_id, client, window, cx));
+                        }));
+                        for (tab, label) in tabs.clone() {
+                            let (list_id, message_id, docs_view) = (target.list_id.clone(), message.clone(), view.clone());
+                            menu = menu.item(PopupMenuItem::new(format!("{save} · {label}")).on_click(move |_, window, cx| {
+                                let (list_id, message_id) = (list_id.clone(), message_id.clone());
+                                let _ = docs_view.update(cx, |this, cx| this.save_to_docs(message_id, list_id, tab, window, cx));
+                            }));
+                        }
+                    }
+                    menu
+                }),
+        )
+    }
+
     /// Retira un mensaje propio, preguntando antes: siempre.
     fn ask_withdraw(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(conversation) = self.conversation() else { return };
@@ -131,20 +229,22 @@ impl ChatView {
     }
 
     /// Lo que la burbuja deja libre a su derecha para la barra de acciones:
-    /// dos botones (responder, reaccionar) o cuatro si el mensaje es propio.
+    /// tres botones (responder, reaccionar, más) o cinco si el mensaje es propio.
     pub(crate) fn actions_gutter(line: &ThreadLine, can_write: bool) -> Pixels {
-        match (line.system || !can_write, line.can_edit) {
-            (true, _) => px(28.),
-            (false, false) => px(64.),
-            (false, true) => px(116.),
+        match (line.system, can_write, line.can_edit) {
+            (_, false, _) => px(28.),
+            // Sólo la carita: en una línea de cac no se responde ni se corrige.
+            (true, true, _) => px(36.),
+            (false, true, false) => px(100.),
+            (false, true, true) => px(152.),
         }
     }
 
     /// La barra de acciones de un mensaje, en su esquina: se ve al pasar
-    /// por él, o mientras se elige una reacción. Una línea de cac no tiene;
-    /// quien no puede escribir, tampoco.
+    /// por él, o mientras se elige una reacción. En una línea de cac sólo está
+    /// la carita; quien no puede escribir no tiene barra.
     pub(crate) fn render_actions(&self, line: &ThreadLine, group: SharedString, can_write: bool, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        if line.system || !can_write {
+        if !can_write {
             return None;
         }
         let id = line.id.clone();
@@ -169,14 +269,16 @@ impl ChatView {
                 .bg(popover)
                 .shadow_sm()
                 .map(|this| if picking { this.opacity(1.) } else { this.opacity(0.).group_hover(group, |style| style.opacity(1.)) })
-                .child(
-                    Button::new(SharedString::from(format!("thread-reply-{id}")))
-                        .ghost()
-                        .xsmall()
-                        .icon(Icon::new(Lucide::CornerUpLeft).size_4())
-                        .tooltip(tr(cx, "chat:reply"))
-                        .on_click(cx.listener(move |this, _, window, cx| this.reply_to(&replied, window, cx))),
-                )
+                .when(!line.system, |this| {
+                    this.child(
+                        Button::new(SharedString::from(format!("thread-reply-{id}")))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(Lucide::CornerUpLeft).size_4())
+                            .tooltip(tr(cx, "chat:reply"))
+                            .on_click(cx.listener(move |this, _, window, cx| this.reply_to(&replied, window, cx))),
+                    )
+                })
                 .child(
                     Button::new(SharedString::from(format!("thread-react-{id}")))
                         .ghost()
@@ -188,6 +290,7 @@ impl ChatView {
                             cx.notify();
                         })),
                 )
+                .when(!line.system, |this| this.children(self.render_more(&id, cx)))
                 .when(line.can_edit, |this| {
                     this.child(
                         Button::new(SharedString::from(format!("thread-edit-{id}")))

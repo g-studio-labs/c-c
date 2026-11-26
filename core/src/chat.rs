@@ -191,7 +191,7 @@ pub(crate) struct ChatData {
 
 /// La conversación de este core.
 pub struct Chat {
-    core: Core,
+    pub(crate) core: Core,
 }
 
 impl Core {
@@ -857,6 +857,13 @@ impl Chat {
         result
     }
 
+    /// El texto de un mensaje de la conversación que se tiene delante.
+    pub(crate) fn message_text(&self, conversation: &Conversation, message_id: &str) -> Option<String> {
+        let data = self.data();
+        let open = data.open.as_ref().filter(|open| &open.conversation == conversation)?;
+        open.messages.iter().find(|message| message.id == message_id).map(|message| message.body.clone())
+    }
+
     /// Lo que se pregunta antes de retirar un mensaje de esa conversación.
     pub fn withdraw_question(&self, conversation: &Conversation, locale: Locale) -> crate::task::Question {
         let body = match conversation {
@@ -1216,6 +1223,8 @@ pub struct ThreadLine {
     /// Quien mira puede corregirlo y retirarlo: es suyo y no es de cac.
     pub can_edit: bool,
     pub reactions: Vec<ReactionSummary>,
+    /// Es el resumen de una llamada: su id (`cac:call/<id>`). Sólo una línea de cac.
+    pub call_id: Option<String>,
 }
 
 /// Las líneas de una conversación, para quien mira (`Message` en
@@ -1263,6 +1272,7 @@ pub fn thread_lines<Viewer: TimeZone>(state: &ThreadState, me: Option<&str>, loc
             ticks: (direct && mine).then(|| was_read(Some(&message.created_at), state.other_read_at.as_deref())),
             can_edit: mine,
             reactions: message.reactions.clone(),
+            call_id: message.system.then(|| crate::comms_text::call_id_in(&message.body)).flatten(),
         });
         previous = Some((message, day));
     }
@@ -1697,6 +1707,25 @@ mod tests {
         assert_eq!(lines[3].author, "desconocido");
         // Sin nadie dentro, nada es propio.
         assert!(thread_lines(&state(Conversation::Channel { space_id: "s".into() }, vec![message("x", "u1", "2026-10-15T15:00:00Z")]), None, Locale::Es, &mexico()).iter().all(|line| !line.mine));
+    }
+
+    /// Sólo una línea de cac es el resumen de una llamada: la de una persona
+    /// que pega el mismo enlace sigue siendo texto.
+    ///
+    /// Roturas que atrapa: pintar como tarjeta lo que escribió una persona;
+    /// no marcar la línea del sistema.
+    #[test]
+    fn only_a_system_line_is_a_call_summary() {
+        let body = "Call ended — [details](cac:call/0f3c1a2b-4d5e-6f70-8192-a3b4c5d6e7f8).";
+        let mut system = message("s", "u1", "2026-10-15T15:00:00Z");
+        system.system = true;
+        system.body = body.into();
+        let mut person = message("p", "u2", "2026-10-15T15:01:00Z");
+        person.body = body.into();
+        let plain = message("q", "u2", "2026-10-15T15:02:00Z");
+        let lines = thread_lines(&state(Conversation::Channel { space_id: "s".into() }, vec![system, person, plain]), Some("u1"), Locale::Es, &mexico());
+        assert_eq!(lines[0].call_id.as_deref(), Some("0f3c1a2b-4d5e-6f70-8192-a3b4c5d6e7f8"));
+        assert_eq!((lines[1].call_id.clone(), lines[2].call_id.clone()), (None, None));
     }
 
     /// Las palomitas son de lo propio, en un directo, y la cita dice lo que

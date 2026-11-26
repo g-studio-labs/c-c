@@ -68,5 +68,10 @@
   "retry": "Reintentar",
   "picture": "Imagen",
   "aroundTitle": "Activos hace poco: {{names}}",
-  "couldNotOpenConversation": "No se pudo abrir la conversación."
+  "couldNotOpenConversation": "No se pudo abrir la conversación.",
+  "taskFromChannel": "del canal #{{where}}",
+  "moreActions": "Más acciones",
+  "taskCreated": "Tarea creada",
+  "noListInChannel": "Este canal no tiene una lista donde guardarlo",
+  "pickList": "¿En qué lista?"
 }

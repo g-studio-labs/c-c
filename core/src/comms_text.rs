@@ -175,15 +175,21 @@ pub fn quote_text(body: &str) -> String {
     without_entities(&one_line)
 }
 
-/// Si el texto lleva la ficha de una llamada (`(cac:call/<id>)`): es el
-/// resumen que cac deja en el canal al colgar (`callIdInBody`).
-pub fn mentions_a_call(body: &str) -> bool {
+/// La llamada que nombra el texto (`(cac:call/<id>)`): es el resumen que cac
+/// deja en el canal al colgar (`callIdInBody`).
+pub fn call_id_in(body: &str) -> Option<String> {
     const OPEN: &str = "(cac:call/";
-    body.match_indices(OPEN).any(|(at, _)| {
+    body.match_indices(OPEN).find_map(|(at, _)| {
         let rest = &body[at + OPEN.len()..];
         let id: String = rest.chars().take(36).collect();
-        id.chars().count() == 36 && id.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-') && rest[id.len()..].starts_with(')')
+        let whole = id.chars().count() == 36 && id.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-') && rest[id.len()..].starts_with(')');
+        whole.then_some(id)
     })
+}
+
+/// Si el texto lleva la ficha de una llamada.
+pub fn mentions_a_call(body: &str) -> bool {
+    call_id_in(body).is_some()
 }
 
 /// La última línea de una conversación, tal como llega.
@@ -329,6 +335,21 @@ mod tests {
         assert_eq!(preview_line(line("La grabación está lista", true, "Ana", true), true, Locale::Es), "La grabación está lista");
         assert!(!mentions_a_call("mira (cac:call/no-es-un-id) y (cac:task/0f3c1a2b-4d5e-6f70-8192-a3b4c5d6e7f8)"));
         assert_eq!(preview_line(line("mira (cac:call/corto)", true, "", false), true, Locale::Es), "mira (cac:call/corto)");
+    }
+
+    /// De una frase con una llamada sale su id, y sólo el de una llamada.
+    ///
+    /// Roturas que atrapa: devolver el id de una tarea (`cac:task/`); uno
+    /// cortado o con letras que no son de un id; el primer paréntesis en
+    /// vez del que es una llamada.
+    #[test]
+    fn the_call_in_a_sentence_is_found_by_its_id() {
+        let id = "0f3c1a2b-4d5e-6f70-8192-a3b4c5d6e7f8";
+        assert_eq!(call_id_in(&format!("Call ended — [details](cac:call/{id}).")).as_deref(), Some(id));
+        assert_eq!(call_id_in(&format!("(cac:call/corto) y (cac:call/{id})")).as_deref(), Some(id));
+        assert_eq!(call_id_in(&format!("(cac:task/{id})")), None);
+        assert_eq!(call_id_in(&format!("(cac:call/{id}x")), None);
+        assert_eq!(call_id_in("(cac:call/zzzzzzzz-4d5e-6f70-8192-a3b4c5d6e7f8)"), None);
     }
 
     /// La hora de la fila, con el día de quien mira.

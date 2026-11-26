@@ -1595,3 +1595,112 @@ fn a_reaction_is_counted_here_like_the_server_would() {
     let only_mine = vec![one("🎉", 1, true, &["Ana"])];
     assert!(apply_reaction(&only_mine, "🎉", false, "Ana").is_empty(), "quedó una pastilla con cero");
 }
+
+
+// ── Lo hablado, a trabajo ───────────────────────────────────────────────
+
+/// Pasar un mensaje a tarea la crea en la lista del espacio del canal, con
+/// la primera línea de título y el mensaje entero de cuerpo; una lista de
+/// otro espacio no se pide nunca.
+///
+/// Roturas que atrapa: crearla en una lista de otro canal (aquí `l-b`); un
+/// título que arrastra todas las líneas; un cuerpo que pierde las de
+/// después de la primera; mandar visibilidad en una lista que no es de
+/// cliente.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_becomes_a_task_in_a_list_of_its_own_channel() {
+    let rig = rig().await;
+    let talk = history(vec![line("m1", "u2", "revisar el contrato\ncon Luis el lunes", 1)]);
+    mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
+    let created = json!({ "id": "t1", "createdAt": "2026-11-15T10:00:00Z", "updatedAt": "2026-11-15T10:00:00Z", "listId": "l-a", "seq": 1, "title": "x", "status": "pending", "priority": "medium" });
+    post("/api/v1/task-lists/l-a/tasks").respond_with(ok(created.clone())).mount(&rig.server).await;
+    post("/api/v1/task-lists/l-b/tasks").respond_with(ok(created)).mount(&rig.server).await;
+    rig.core.open_workspace().await;
+    open(&rig, channel("a")).await;
+    let locale = cac_core::Locale::Es;
+
+    let targets = rig.core.chat().work_targets(&channel("a"));
+    assert_eq!(targets.iter().map(|target| target.list_id.as_str()).collect::<Vec<_>>(), ["l-a"]);
+
+    let refused = rig.core.chat().task_from_message(channel("a"), "m1".into(), "l-b".into(), false, locale).await;
+    assert!(refused.is_err());
+    assert_eq!(hits(&rig.server, "POST", "/api/v1/task-lists/l-b/tasks").await, 0, "se creó en la lista de otro canal");
+
+    rig.core.chat().task_from_message(channel("a"), "m1".into(), "l-a".into(), false, locale).await.unwrap();
+    let sent = sent_bodies(&requests(&rig.server, "POST", "/api/v1/task-lists/l-a/tasks").await);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["title"], "revisar el contrato");
+    let description = sent[0]["description"].as_str().unwrap();
+    assert!(description.starts_with("revisar el contrato\ncon Luis el lunes\n\n— "), "{description}");
+    assert!(description.contains("Producto"), "{description}");
+    assert!(sent[0].get("visibility").is_none(), "{}", sent[0]);
+    rig.core.stream().stop();
+}
+
+/// Un directo y la sala general no tienen dónde crear nada.
+///
+/// Rotura que atrapa: ofrecer las listas de toda la organización desde un
+/// directo.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_direct_has_no_lists_to_make_work_in() {
+    let rig = rig().await;
+    rig.core.open_workspace().await;
+    assert!(rig.core.chat().work_targets(&direct("c1")).is_empty());
+    assert!(rig.core.chat().work_targets(&channel("g")).is_empty());
+    rig.core.stream().stop();
+}
+
+/// Guardar en la documentación añade el mensaje, citado, a la pestaña
+/// pedida de la lista; la de decisiones no es de párrafos y no se pide.
+///
+/// Roturas que atrapa: mandarlo a otra pestaña; no citarlo; aceptar
+/// `decisions`; una lista de otro espacio.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_is_saved_quoted_into_the_docs_of_a_list_of_its_channel() {
+    let rig = rig().await;
+    let talk = history(vec![line("m1", "u2", "usar el puerto 8443", 1)]);
+    mount_history(&rig.server, CHAT_A, &talk, Duration::ZERO).await;
+    post("/api/v1/docs/list/l-a/tabs/runbook/append").respond_with(ok(json!({}))).mount(&rig.server).await;
+    rig.core.open_workspace().await;
+    open(&rig, channel("a")).await;
+    let locale = cac_core::Locale::Es;
+
+    assert!(rig.core.chat().save_message_to_docs(channel("a"), "m1".into(), "l-a".into(), "decisions".into(), locale).await.is_err());
+    assert!(rig.core.chat().save_message_to_docs(channel("a"), "m1".into(), "l-b".into(), "runbook".into(), locale).await.is_err());
+    assert_eq!(hits(&rig.server, "POST", "/api/v1/docs/list/l-a/tabs/runbook/append").await, 0);
+
+    rig.core.chat().save_message_to_docs(channel("a"), "m1".into(), "l-a".into(), "runbook".into(), locale).await.unwrap();
+    let sent = sent_bodies(&requests(&rig.server, "POST", "/api/v1/docs/list/l-a/tabs/runbook/append").await);
+    let body = sent[0]["body"].as_str().unwrap();
+    assert!(body.starts_with("> usar el puerto 8443\n\n— "), "{body}");
+    rig.core.stream().stop();
+}
+
+
+// ── La tarjeta de una llamada ───────────────────────────────────────────
+
+/// La tarjeta sale de lo que el servidor cuenta de esa llamada, por su ruta;
+/// y algo que no es una llamada de verdad es un fallo, no una tarjeta vacía.
+///
+/// Roturas que atrapa: pedir otra ruta; pintar una tarjeta de una respuesta
+/// sin id (un servidor de antes); perder la grabación.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_summary_is_built_from_what_the_server_says_of_the_call() {
+    let rig = rig().await;
+    let id = "0f3c1a2b-4d5e-6f70-8192-a3b4c5d6e7f8";
+    get(&format!("/api/v1/call-sessions/{id}"))
+        .respond_with(ok(json!({
+            "id": id, "startedAt": "2026-11-25T10:02:00Z", "endedAt": "2026-11-25T10:14:00Z", "durationMs": 720000, "messages": 0,
+            "participants": [{ "identity": "u1", "name": "Ana Ruiz", "guest": false }], "recordingId": "r1"
+        })))
+        .mount(&rig.server)
+        .await;
+    get("/api/v1/call-sessions/viejo").respond_with(ok(json!({ "id": "" }))).mount(&rig.server).await;
+
+    let card = rig.core.chat().call_card(id, cac_core::Locale::Es).await.unwrap();
+    assert_eq!(card.recording_id.as_deref(), Some("r1"));
+    assert_eq!(card.faces.len(), 1);
+    assert!(card.when.starts_with("12 min"), "{}", card.when);
+    assert!(rig.core.chat().call_card("viejo", cac_core::Locale::Es).await.is_err());
+    rig.core.stream().stop();
+}

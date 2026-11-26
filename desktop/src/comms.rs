@@ -349,7 +349,6 @@ impl Render for CommsView {
         let panel = Backend::core(cx).comms().panel(&query, locale(cx), &chrono::Local::now());
         let theme = cx.theme();
         let muted = theme.muted_foreground;
-        let not_yet = tr(cx, "common:misc.notInThisApp");
         let (on_wall, wall_new) = {
             let snapshot = Backend::snapshot(cx).read(cx);
             (snapshot.comms.on_screen && snapshot.comms.on_wall, snapshot.wall.has_new)
@@ -361,16 +360,9 @@ impl Render for CommsView {
                 div().id("comms-no-channels").px_2().py_2().leading_xs().text_color(muted).child(tr(cx, "common:last.channelsInSpaces")).test_support().into_any_element(),
             );
         }
-        if panel.offers_general {
-            // Abrir la sala general todavía no se hace desde esta app.
-            let hint = not_yet.clone();
-            channel_extras.push(
-                plain_row("comms-open-general", Lucide::Megaphone, tr(cx, "nav:comms.openGeneral"), true, cx)
-                    .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
-                    .test_support()
-                    .into_any_element(),
-            );
-        }
+        // «Abrir una sala general» (`panel.offers_general`) no se pinta hasta
+        // que haga algo: un botón que sólo avisa en su tooltip de que no
+        // está en esta app es un botón que miente.
         let mut direct_extras: Vec<AnyElement> = Vec::new();
         if panel.offers_new_conversation {
             direct_extras.push(
@@ -1394,7 +1386,7 @@ mod tests {
 
         assert_eq!(label(window, "comms-wall", cx), "Feedback");
         assert!(on_screen(window, "comms-no-channels", cx));
-        assert_eq!(label(window, "comms-open-general", cx), "Abrir una sala general");
+        assert!(!on_screen(window, "comms-open-general", cx), "se pinta un botón que no hace nada");
         assert!(on_screen(window, "comms-new-conversation", cx));
         assert!(!on_screen(window, "conversation-header", cx));
         assert_eq!(label(window, "conversation-not-yet", cx), "Todavía no hay nada que leer.");

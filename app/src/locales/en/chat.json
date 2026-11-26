@@ -68,5 +68,10 @@
   "retry": "Retry",
   "picture": "Image",
   "aroundTitle": "Active recently: {{names}}",
-  "couldNotOpenConversation": "The conversation could not be opened."
+  "couldNotOpenConversation": "The conversation could not be opened.",
+  "taskFromChannel": "from the #{{where}} channel",
+  "moreActions": "More actions",
+  "taskCreated": "Task created",
+  "noListInChannel": "This channel has no list to put it in",
+  "pickList": "In which list?"
 }
