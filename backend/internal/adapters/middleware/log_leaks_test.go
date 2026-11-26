@@ -49,9 +49,9 @@ func TestNoLogPrintsConfigOrAFullURL(t *testing.T) {
 				if m == nil {
 					continue
 				}
-				// El logger del backend tapa la query antes de escribir: ése se
+				// El logger del backend tapa el path y la query antes de escribir: ése se
 				// permite, y sólo ése.
-				if strings.Contains(m[1], "redactQuery(") {
+				if strings.Contains(m[1], "redactURI(") {
 					continue
 				}
 				for _, f := range forbidden {

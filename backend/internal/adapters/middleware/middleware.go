@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,8 +25,49 @@ func Logger(next http.Handler) http.Handler {
 		start := time.Now()
 		ww := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(ww, r)
-		log.Printf("[%s] %s %d %v", r.Method, redactQuery(r.RequestURI), ww.statusCode, time.Since(start))
+		log.Printf("[%s] %s %d %v", r.Method, redactURI(r.RequestURI), ww.statusCode, time.Since(start))
 	})
+}
+
+// SecretPath: una ruta que lleva una credencial **en el path**, no en la
+// query. Todo lo que cuelga de Prefix se tapa, salvo los tramos de Except, que
+// son rutas hermanas sin secreto. Por prefijo y no por el patrón de chi: el log
+// tiene que tapar también lo que no casa con ninguna ruta (otro método, un
+// tramo de más), y ahí chi no da parámetros.
+type SecretPath struct {
+	Prefix string
+	Except []string
+}
+
+// SecretPaths: las rutas con un secreto en el path. Basecamp no firma sus
+// webhooks: el secreto de la dirección es la prueba, y quien lo lea en el log
+// puede inventar comentarios y menciones en ese proyecto (QA
+// command-and-control-555). Una ruta nueva con un secreto en el path entra
+// aquí; `TestEverySecretInAPathIsRedacted` (adapters/http) recorre el router
+// entero y no deja pasar un parámetro de ruta sin clasificar.
+var SecretPaths = []SecretPath{
+	{Prefix: "/webhooks/basecamp/", Except: []string{"setup"}},
+}
+
+// redactURI tapa el secreto de una ruta de SecretPaths y las credenciales de
+// la query. Es lo único que el log de peticiones escribe de la URL.
+func redactURI(uri string) string {
+	path, query := uri, ""
+	if i := strings.IndexByte(uri, '?'); i >= 0 {
+		path, query = uri[:i], uri[i:]
+	}
+	return redactPath(path) + redactQuery(query)
+}
+
+func redactPath(path string) string {
+	for _, sp := range SecretPaths {
+		rest, ok := strings.CutPrefix(path, sp.Prefix)
+		if !ok || rest == "" || slices.Contains(sp.Except, rest) {
+			continue
+		}
+		return sp.Prefix + "REDACTED"
+	}
+	return path
 }
 
 // sensitiveParams are credentials that legitimately travel in a query string,
