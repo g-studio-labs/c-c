@@ -279,5 +279,6 @@
   "request-not-open": "This request is no longer open: it was answered, withdrawn or re-issued.",
   "request-not-publishable": "Only an approved message is published.",
   "request-scope": "The filter is mine or team.",
-  "request-status": "That request status doesn't exist."
+  "request-status": "That request status doesn't exist.",
+  "agent-messages-only": "An agent can only withdraw messages an agent wrote; withdraw your own from the app."
 }
