@@ -89,3 +89,23 @@ func TestAMentionPickedInTheAppStillNotifies(t *testing.T) {
 		t.Errorf("ni se duplica: %q", m.Body)
 	}
 }
+
+// Una línea del sistema la escribe cac, no una persona: su texto (el título de
+// una grabación, por ejemplo) no se reinterpreta, y un `@bea` ahí no avisa.
+func TestASystemLineIsNotRewritten(t *testing.T) {
+	db, cleanup := chatFollowDB(t)
+	defer cleanup()
+	espia := &notificadorEspia{}
+	svc := NewChatService(repository.NewChatRepository(db), nil).WithNotifier(espia)
+
+	m, err := svc.PostSystem("esp-1", "org-1", ana, "Grabación «repaso con @bea» lista", "Grabación lista")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Body != "Grabación «repaso con @bea» lista" {
+		t.Errorf("la línea del sistema se guarda como la escribió cac: %q", m.Body)
+	}
+	if got := espia.paraQuien("chat:mention"); len(got) != 0 {
+		t.Errorf("y no menciona a nadie; %v", got)
+	}
+}

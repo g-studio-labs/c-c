@@ -30,7 +30,8 @@ func TestHandMentionsBecomeLinks(t *testing.T) {
 		{"un bloque con ~~~ tampoco", "~~~sh\necho @bea\n~~~\n", "~~~sh\necho @bea\n~~~\n"},
 		{"una mención que ya es enlace no cambia", "[@bea](" + MentionRef(bea) + ")", "[@bea](" + MentionRef(bea) + ")"},
 		{"ni el texto de otro enlace", "[habla con @bea](https://x.io)", "[habla con @bea](https://x.io)"},
-		{"ni una URL", "https://x.io/@bea y <https://y.io/@bea>", "https://x.io/@bea y <https://y.io/@bea>"},
+		{"ni una URL", "https://x.io/?u=@bea y <https://y.io/?u=@bea>", "https://x.io/?u=@bea y <https://y.io/?u=@bea>"},
+		{"ni una referencia", "[@bea][1]", "[@bea][1]"},
 		{"ni un escape", `\@bea`, `\@bea`},
 		{"varias en una línea", "@bea y @diegotsx", link + " y [@diegotsx](" + MentionRef("44444444-4444-4444-8444-444444444444") + ")"},
 	}

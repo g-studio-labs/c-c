@@ -67,9 +67,9 @@ type MentionTarget struct {
 var handMention = regexp.MustCompile(`(^|[^A-Za-z0-9._%+\-@/\\\[])@([A-Za-z0-9][A-Za-z0-9._-]*)`)
 
 // protectedInline: lo que dentro de una línea de prosa no se toca. Un enlace
-// markdown entero (meter un enlace dentro del texto de otro lo rompe), un
-// autoenlace `<…>` y una URL suelta.
-var protectedInline = regexp.MustCompile(`!?\[[^\]\n]*\]\([^)\n]*\)|<[^>\n]*>|[A-Za-z][A-Za-z0-9+.\-]*://[^\s<>]+`)
+// markdown entero (meter un enlace dentro del texto de otro lo rompe) y una URL
+// suelta, también dentro de `<…>`.
+var protectedInline = regexp.MustCompile(`!?\[[^\]\n]*\]\([^)\n]*\)|[A-Za-z][A-Za-z0-9+.\-]*://[^\s<>]+`)
 
 // HandMentions returns the usernames written as plain `@username` in a body,
 // lowercased, without duplicates and in order of appearance. Code (inline or
