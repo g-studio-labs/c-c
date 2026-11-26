@@ -433,6 +433,8 @@ func (s *ChatService) EditAs(by domain.MessageChanger, messageID, body string) e
 	if err != nil {
 		return err
 	}
+	body = s.linkHandMentions(m.OrgID, body)
+
 	// Antes que el autor, y no después: la línea del sistema lleva el id de
 	// quien grabó, así que la comprobación de autoría **le diría que sí**. Ese
 	// es el orden entero del asunto.
@@ -442,7 +444,6 @@ func (s *ChatService) EditAs(by domain.MessageChanger, messageID, body string) e
 	if !authoredBy(m, by) {
 		return ErrNotTheAuthor
 	}
-	body = s.linkHandMentions(m.OrgID, body)
 	if err := s.repo.Rewrite(messageID, body, by.WrittenVia()); err != nil {
 		return err
 	}
