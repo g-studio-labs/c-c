@@ -483,6 +483,8 @@ playbooks:
       - { name: cac_github_app_private_key, secret: true, from: GITHUB_APP_PRIVATE_KEY }
       - { name: cac_vapid_public_key, secret: true, from: VAPID_PUBLIC_KEY }
       - { name: cac_vapid_private_key, secret: true, from: VAPID_PRIVATE_KEY }
+      - { name: cac_basecamp_client_id, secret: true, from: BASECAMP_CLIENT_ID }
+      - { name: cac_basecamp_client_secret, secret: true, from: BASECAMP_CLIENT_SECRET }
       - { name: cac_valkey_addr, secret: true, from: VALKEY_ADDR }
       - { name: cac_valkey_password, secret: true, from: VALKEY_PASSWORD }
       - { name: cac_recordings_mux_access_key_id, secret: true, from: RECORDINGS_MUX_ACCESS_KEY_ID }

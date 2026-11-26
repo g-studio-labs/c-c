@@ -58,6 +58,8 @@
         GITHUB_APP_PRIVATE_KEY: {{ cac_github_app_private_key | to_json }}
         VAPID_PUBLIC_KEY: {{ cac_vapid_public_key | to_json }}
         VAPID_PRIVATE_KEY: {{ cac_vapid_private_key | to_json }}
+        BASECAMP_CLIENT_ID: {{ cac_basecamp_client_id | to_json }}
+        BASECAMP_CLIENT_SECRET: {{ cac_basecamp_client_secret | to_json }}
       ---
       # El bus de eventos compartido entre réplicas: el Valkey de `data`.
       apiVersion: v1
