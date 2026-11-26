@@ -81,6 +81,9 @@ func InitRoutes(db *gorm.DB) *chi.Mux {
 	// Llamar con gente de fuera (W3): graba con el mismo servicio.
 	InitCallRoutes(db, r, hub, recordings, calls)
 	InitGitHubRoutesWith(r, gh)
+	// Basecamp (command-and-control-516): conectar, sus webhooks y la
+	// renovación de los tokens, que caducan a las dos semanas.
+	startBasecampRefresher(InitBasecampRoutes(db, r, hub, BasecampConfigFromEnv()))
 	InitActivityRoutes(db, r)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {

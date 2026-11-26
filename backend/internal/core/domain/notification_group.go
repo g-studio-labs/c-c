@@ -32,6 +32,7 @@ const (
 	groupAgent      = "agent"
 	groupBackup     = "backup"
 	groupPost       = "post"
+	groupBasecamp   = "basecamp"
 )
 
 // TelemetryGroup: los avisos del vigilante de un proyecto. Por proyecto y no
@@ -82,6 +83,12 @@ func MeetingGroup(meetingID string) string { return prefijo(groupMeeting, meetin
 
 // PostGroup: una publicación del muro. Sus comentarios van juntos.
 func PostGroup(postID string) string { return prefijo(groupPost, postID) }
+
+// BasecampProjectGroup: lo que llega de un proyecto de Basecamp sin tarea
+// enlazada. Por proyecto: un día de comentarios es una fila.
+func BasecampProjectGroup(projectID int64) string {
+	return prefijo(groupBasecamp, strconv.FormatInt(projectID, 10))
+}
 
 // BackupTargetGroup: los avisos de una base respaldada, juntos.
 func BackupTargetGroup(targetID string) string { return prefijo(groupBackup, targetID) }

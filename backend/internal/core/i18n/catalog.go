@@ -78,6 +78,27 @@ var catalogo = map[string]map[Locale]string{
 		EN: "Replied to you in {{where}}",
 		ES: "Te respondieron en {{where}}",
 	},
+	// Basecamp (command-and-control-516): lo que pasa allí llega aquí.
+	"notify.basecamp.comment": {
+		EN: "{{who}} commented in Basecamp",
+		ES: "{{who}} comentó en Basecamp",
+	},
+	"notify.basecamp.message": {
+		EN: "{{who}} posted a message in Basecamp",
+		ES: "{{who}} publicó un mensaje en Basecamp",
+	},
+	"notify.basecamp.todo_done": {
+		EN: "{{who}} completed a to-do in Basecamp",
+		ES: "{{who}} completó un to-do en Basecamp",
+	},
+	"notify.basecamp.mention": {
+		EN: "{{who}} mentioned you in Basecamp",
+		ES: "{{who}} te nombró en Basecamp",
+	},
+	"notify.basecamp.auth_failed": {
+		EN: "Basecamp stopped renewing: connect it again",
+		ES: "Basecamp dejó de renovarse: vuelve a conectarlo",
+	},
 	"notify.item.assigned": {
 		EN: "Assigned to you",
 		ES: "Te la asignaron",

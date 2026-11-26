@@ -50,9 +50,12 @@ const (
 	SystemNotion SourceSystem = "notion"
 	SystemCac    SourceSystem = "cac"
 	SystemOther  SourceSystem = "other"
+	// SystemBasecamp: un proyecto de Basecamp. Lo apunta la integración al
+	// enlazar el proyecto (ver basecamp.go); su ref es la URL del proyecto.
+	SystemBasecamp SourceSystem = "basecamp"
 )
 
-var SourceSystems = []SourceSystem{SystemJira, SystemNotion, SystemCac, SystemOther}
+var SourceSystems = []SourceSystem{SystemJira, SystemNotion, SystemCac, SystemOther, SystemBasecamp}
 
 // SpaceSourcesMax: cuántas fuentes caben en un espacio. Son un puñado; más es
 // un error de quien llama.

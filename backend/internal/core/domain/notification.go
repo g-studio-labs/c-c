@@ -142,6 +142,13 @@ func (p NotificationPrefs) Allows(kind string) bool {
 	switch kind {
 	case "chat:mention":
 		return true // never silenced; see the field comment
+	// Una mención en Basecamp es alguien hablándote, como la del chat; y una
+	// conexión que dejó de renovarse deja la integración muda: tampoco.
+	case BasecampMentionKind, BasecampAuthKind:
+		return true
+	// Lo de un proyecto sin tarea enlazada es un comentario más.
+	case BasecampActivityKind:
+		return p.Comments
 	case "task:comment":
 		return p.Comments
 	case "report:new":

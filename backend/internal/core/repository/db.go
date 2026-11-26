@@ -187,6 +187,9 @@ func DBConnection() {
 		&domain.CommitDirs{},
 		// Las fuentes de cada espacio (ver domain/space_source.go).
 		&domain.SpaceSource{},
+		// Basecamp (ver domain/basecamp.go, command-and-control-516).
+		&domain.BasecampConnection{}, &domain.BasecampProject{}, &domain.BasecampPerson{},
+		&domain.BasecampLink{}, &domain.BasecampEvent{},
 	); err != nil {
 		panic("failed to run migrations: " + err.Error())
 	}
