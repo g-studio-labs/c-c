@@ -1384,7 +1384,7 @@ mod tests {
         click(window, "rail-comms", cx);
         wait_until(cx, "sale la lista", |cx| on_screen(window, "comms-panel", cx));
 
-        assert_eq!(label(window, "comms-wall", cx), "Feedback");
+        assert_eq!(label(window, "comms-wall", cx), "Feed");
         assert!(on_screen(window, "comms-no-channels", cx));
         assert!(!on_screen(window, "comms-open-general", cx), "se pinta un botón que no hace nada");
         assert!(on_screen(window, "comms-new-conversation", cx));

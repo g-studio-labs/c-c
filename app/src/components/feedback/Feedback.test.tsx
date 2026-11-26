@@ -120,7 +120,7 @@ describe("el muro", () => {
     montar();
     await screen.findByText("t-a");
     expect(screen.queryByRole("button", { name: /^Post$/ })).toBeNull();
-    expect(screen.getByText(/As a viewer/)).toBeTruthy();
+    expect(screen.getByText(/With your role you can react and comment, but not post/)).toBeTruthy();
   });
 
   it("un superadmin publica comunicados; si no es de la org, sólo eso", async () => {

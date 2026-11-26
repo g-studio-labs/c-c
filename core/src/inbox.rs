@@ -599,7 +599,13 @@ impl Inbox {
                 tally.unread = 0;
             }
         });
-        self.core.call_ok("POST", &format!("/api/v1/notifications/read-all?orgId={org_id}"), Some(serde_json::json!({}))).await
+        let result = self.core.call_ok("POST", &format!("/api/v1/notifications/read-all?orgId={org_id}"), Some(serde_json::json!({}))).await;
+        // El marcado ya se pintó: si el servidor no lo aceptó, el número y las
+        // filas vuelven a lo que él dice.
+        if result.is_err() {
+            self.load().await;
+        }
+        result
     }
 
     /// Lleva a donde dice un aviso: a su organización si es otra, y a su

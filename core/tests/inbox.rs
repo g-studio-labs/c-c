@@ -64,6 +64,10 @@ fn item(id: &str, group: &str, at: &str) -> Value {
 /// Dos organizaciones; la bandeja de `o1` con dos avisos de `#producto` (de
 /// los cuarenta que el servidor cuenta) y uno de una tarea; la de `o2`, uno.
 async fn rig() -> Rig {
+    rig_with(ok(json!(null))).await
+}
+
+async fn rig_with(read_all: ResponseTemplate) -> Rig {
     let server = MockServer::start().await;
     let org = |id: &str| json!({ "id": id, "name": format!("Org {id}"), "slug": id, "role": "member", "memberCount": 2, "createdAt": "2026-06-09T12:00:00Z" });
     get("/api/v1/organizations/").respond_with(ok(json!([org("o1"), org("o2")]))).mount(&server).await;
@@ -80,7 +84,7 @@ async fn rig() -> Rig {
     let o2 = json!({ "items": [item("z1", "chat:z", "2026-11-18T10:00:00Z")], "unread": 1, "groups": [] });
     get("/api/v1/notifications/").and(query_param("orgId", "o2")).respond_with(ok(o2)).mount(&server).await;
     Mock::given(method("POST")).and(path("/api/v1/notifications/read")).respond_with(ok(json!(null))).mount(&server).await;
-    Mock::given(method("POST")).and(path("/api/v1/notifications/read-all")).respond_with(ok(json!(null))).mount(&server).await;
+    Mock::given(method("POST")).and(path("/api/v1/notifications/read-all")).respond_with(read_all).mount(&server).await;
     let recorder = Arc::new(Recorder::default());
     let mut config = Config::new(front(&server.uri()));
     config.stream_backoff = Duration::from_millis(40);
@@ -140,6 +144,26 @@ async fn reading_lowers_the_count_at_once_and_tells_the_server() {
     assert_eq!(read.iter().map(|(_, body)| body.clone()).collect::<Vec<_>>(), [json!({ "ids": ["n3"] }), json!({ "ids": ["n3"] }), json!({ "group": "chat:a", "orgId": "o1" })]);
     assert_eq!(posted(&rig.server, "/api/v1/notifications/read-all").await[0].0, "orgId=o1");
     assert!(!rig.recorder.inbox.lock().unwrap().is_empty(), "la pantalla se entera");
+    rig.core.stream().stop();
+}
+
+/// Si el servidor rechaza «todo leído», el número y las filas vuelven a lo que
+/// el servidor dice: no se queda un cero que miente.
+///
+/// Roturas que atrapa: no volver a cargar tras el fallo (el cero y las filas
+/// leídas se quedan); devolver Ok ocultando el fallo.
+#[tokio::test]
+async fn a_refused_mark_all_read_restores_what_the_server_says() {
+    let rig = rig_with(ResponseTemplate::new(500)).await;
+    rig.core.open_workspace().await;
+    rig.core.inbox().load().await;
+    assert_eq!(rig.core.inbox().state().feed.unread, 41);
+
+    assert!(rig.core.inbox().mark_all_read().await.is_err());
+    let state = rig.core.inbox().state();
+    assert_eq!(state.feed.unread, 41);
+    assert!(state.feed.items.iter().all(|item| item.read_at.is_none()));
+    assert_eq!(full_loads(&rig.server).await, 2, "volvió a pedir la bandeja");
     rig.core.stream().stop();
 }
 
