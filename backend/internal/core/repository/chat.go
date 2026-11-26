@@ -312,6 +312,31 @@ func (r *ChatRepository) MembersOf(orgID string, userIDs []string) ([]string, er
 	return out, nil
 }
 
+// MentionTargets resuelve los `@usuario` escritos a mano a miembros de la
+// organización, sin distinguir mayúsculas (hay usuarios de antes de la regla
+// de minúsculas, como «Itzramn»). Quien no es miembro no sale. El nombre, por
+// `nombreVisible`; el usuario, en minúsculas, que es como lo busca quien llama.
+func (r *ChatRepository) MentionTargets(orgID string, usernames []string) ([]domain.MentionTarget, error) {
+	if orgID == "" || len(usernames) == 0 {
+		return nil, nil
+	}
+	var rows []struct{ ID, Username, Name string }
+	if err := r.db.Raw(`
+		SELECT u.id, lower(u.username) AS username,
+		       (SELECT `+nombreVisible+` FROM users WHERE id = u.id) AS name
+		FROM users u
+		JOIN org_memberships m ON m.user_id = u.id AND m.org_id = ?
+		WHERE lower(u.username) IN ?
+	`, orgID, usernames).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]domain.MentionTarget, len(rows))
+	for i, row := range rows {
+		out[i] = domain.MentionTarget{ID: row.ID, Username: row.Username, Name: row.Name}
+	}
+	return out, nil
+}
+
 // ─── Attachments ──────────────────────────────────────────────────────────────
 
 func (r *ChatRepository) CreateAttachment(a *domain.ChatAttachment) error {

@@ -297,6 +297,29 @@ func (s *ChatService) mentioned(orgID, body string) []string {
 	return ok
 }
 
+// linkHandMentions convierte cada `@usuario` escrito a mano que sea miembro de
+// la organización en el enlace que escribe el menú de `@` de la app, antes de
+// guardar. Así avisa (ver `mentioned`) y se pinta como mención venga de donde
+// venga: el MCP y quien escribe a mano mandan texto, no enlaces.
+//
+// Si la consulta falla, el cuerpo se guarda como llegó: mejor un mensaje sin
+// aviso que un mensaje rechazado, como en `mentioned`.
+func (s *ChatService) linkHandMentions(orgID, body string) string {
+	names := domain.HandMentions(body)
+	if len(names) == 0 {
+		return body
+	}
+	found, err := s.repo.MentionTargets(orgID, names)
+	if err != nil || len(found) == 0 {
+		return body
+	}
+	members := make(map[string]domain.MentionTarget, len(found))
+	for _, t := range found {
+		members[t.Username] = t
+	}
+	return domain.LinkHandMentions(body, members)
+}
+
 // List: el canal, y con `query` sólo las líneas que la contienen.
 //
 // Buscar **dentro de un canal** y no en toda la organización: la búsqueda
@@ -372,6 +395,9 @@ func (s *ChatService) write(
 	kind domain.ChatKind, spaceID, orgID, actorID, body, notice string,
 	replyToID *string, repliedTo string, via string,
 ) (*domain.ChatMessage, error) {
+	if kind == domain.ChatKindUser {
+		body = s.linkHandMentions(orgID, body)
+	}
 	m := &domain.ChatMessage{
 		SpaceID: spaceID, OrgID: orgID, AuthorUserID: actorID, Body: body, Kind: kind,
 		ReplyToID: replyToID, Via: via,
@@ -416,6 +442,7 @@ func (s *ChatService) EditAs(by domain.MessageChanger, messageID, body string) e
 	if !authoredBy(m, by) {
 		return ErrNotTheAuthor
 	}
+	body = s.linkHandMentions(m.OrgID, body)
 	if err := s.repo.Rewrite(messageID, body, by.WrittenVia()); err != nil {
 		return err
 	}
