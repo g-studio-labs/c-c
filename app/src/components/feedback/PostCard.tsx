@@ -69,7 +69,7 @@ export default function PostCard({ post, onOpen }: { post: Post; onOpen: () => v
             </Badge>
           )}
         </header>
-        {post.title && <h3 className="mb-1 font-semibold">{post.title}</h3>}
+        {post.title && <h3 className="mb-1 font-semibold [overflow-wrap:anywhere]">{post.title}</h3>}
         {/* Recortado por alto; el entero, en el modal. */}
         <div className="relative max-h-56 overflow-hidden text-sm">
           <Markdown>{post.body}</Markdown>

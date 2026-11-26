@@ -106,7 +106,7 @@ export default function VoiceChat({ spaceId, spaceName }: { spaceId: string; spa
                 </div>
                 {m.replyTo && <ReplyQuote quote={m.replyTo} className="mt-0.5" />}
                 {/* En texto plano a propósito: ver el comentario de arriba. */}
-                <div className="whitespace-pre-wrap break-words text-[13px]">
+                <div className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[13px]">
                   <LinkifiedText text={m.body} />
                 </div>
               </div>

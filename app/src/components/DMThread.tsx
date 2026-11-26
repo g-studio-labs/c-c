@@ -105,7 +105,7 @@ export default function DMThread({ onBack }: { onBack: () => void }) {
   return (
     // Toda la conversación es zona para soltar (como WhatsApp): lo soltado
     // va al compositor.
-    <FileDropZone className="flex min-h-0 flex-1 flex-col" onFiles={(fs) => composer.current?.insertFiles(fs)}>
+    <FileDropZone className="flex min-h-0 min-w-0 flex-1 flex-col" onFiles={(fs) => composer.current?.insertFiles(fs)}>
       <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
         <button
           className="text-muted-foreground hover:text-foreground"
@@ -114,7 +114,7 @@ export default function DMThread({ onBack }: { onBack: () => void }) {
         >
           <ArrowLeft className="size-4" />
         </button>
-        <h2 className="truncate text-sm font-medium">{other ? nombreDe(other) : t("common:misc.conversation")}</h2>
+        <h2 className="min-w-0 truncate text-sm font-medium">{other ? nombreDe(other) : t("common:misc.conversation")}</h2>
         <span className="ml-auto text-xs text-muted-foreground">private</span>
       </header>
 
@@ -290,7 +290,7 @@ function DMLine({
           // El hueco de los iconos (la carita y la flecha). Sin él el texto
           // pasa por debajo y los iconos tapan justo las primeras letras de la
           // línea que ibas a leer.
-          "relative rounded-md py-1 pl-2 pr-12 hover:bg-muted/40",
+          "relative min-w-0 max-w-full rounded-md py-1 pl-2 pr-12 hover:bg-muted/40",
           grouped && "mt-0.5",
           mine
             ? "max-w-[75%] rounded-tr-sm border border-primary/25 bg-primary/10"

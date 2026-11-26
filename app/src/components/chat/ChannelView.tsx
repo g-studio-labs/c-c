@@ -217,7 +217,7 @@ export default function ChannelView({
   return (
     // Toda la conversación es zona para soltar (como WhatsApp): lo soltado
     // va al compositor.
-    <FileDropZone className="flex min-h-0 flex-1 flex-col bg-background" onFiles={(fs) => composer.current?.insertFiles(fs)}>
+    <FileDropZone className="flex min-h-0 min-w-0 flex-1 flex-col bg-background" onFiles={(fs) => composer.current?.insertFiles(fs)}>
       <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
         {onBack && (
           <button
@@ -228,7 +228,7 @@ export default function ChannelView({
             <ArrowLeft className="size-4" />
           </button>
         )}
-        <h2 className="truncate text-sm font-medium">#{spaceName}</h2>
+        <h2 className="min-w-0 truncate text-sm font-medium">#{spaceName}</h2>
         <QuienAnda />
         <VoiceBar spaceId={spaceId} />
         {/* Una reunión aparte para gente de fuera (W3). Al lado de la voz del
@@ -562,7 +562,7 @@ function Message({
           // pasa por debajo y los iconos tapan justo las primeras letras de la
           // línea que ibas a leer; reservarles el sitio es lo que hace que no
           // cubran nada nunca. Una línea del sistema sólo lleva la carita.
-          "relative rounded-md py-1 pl-2 hover:bg-muted/40",
+          "relative min-w-0 max-w-full rounded-md py-1 pl-2 hover:bg-muted/40",
           fromSystem ? "pr-7" : "pr-12",
           grouped && "mt-0.5",
           mine

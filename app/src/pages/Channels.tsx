@@ -73,7 +73,7 @@ export default function Channels() {
   }, [space, listOnMobile]);
 
   return (
-    <div className="flex min-h-0 flex-1">
+    <div className="flex min-h-0 min-w-0 flex-1">
       {listOnMobile ? (
         <div className={cn("flex min-h-0 flex-1 flex-col", mobile && "motion-back-in")}>
           <CommsList current="/chat" />

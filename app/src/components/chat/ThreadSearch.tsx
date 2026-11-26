@@ -69,7 +69,7 @@ export default function ThreadSearch({ spaceId, query }: { spaceId: string; quer
       {items.map((m) => (
         <article key={m.id} className="rounded-md border p-2">
           <div className="mb-0.5 flex items-center gap-2 text-xs text-muted-foreground">
-            <span className="font-medium text-foreground">
+            <span className="min-w-0 truncate font-medium text-foreground">
               {m.kind === "system" ? t("chat:systemAuthor") : m.authorName || "unknown"}
             </span>
             <span>

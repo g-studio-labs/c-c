@@ -172,7 +172,7 @@ export function CallChatViewer({ sessionId, onClose }: { sessionId: string; onCl
                   <div className="text-xs text-muted-foreground">
                     <span className="font-semibold text-foreground">{m.authorName}</span> {horaCorta(m.createdAt)}
                   </div>
-                  <div className="whitespace-pre-wrap break-words text-[13px]">
+                  <div className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[13px]">
                     <LinkifiedText text={m.body} />
                   </div>
                 </div>

@@ -31,7 +31,7 @@ export function ReplyQuote({ quote, className }: { quote: MessageQuote; classNam
       ) : (
         <>
           <span className="block font-medium text-primary">{quote.authorName || "unknown"}</span>
-          <span className="line-clamp-2 break-words text-muted-foreground">{quoteText(quote.body)}</span>
+          <span className="line-clamp-2 [overflow-wrap:anywhere] text-muted-foreground">{quoteText(quote.body)}</span>
         </>
       )}
     </button>
@@ -57,7 +57,7 @@ export function ReplyingBar({
       <CornerUpLeft className="mt-0.5 size-3 shrink-0 text-primary" />
       <div className="min-w-0 flex-1">
         <span className="block font-medium text-primary">{t("chat:replyingTo", { name: authorName })}</span>
-        <span className="line-clamp-1 break-words text-muted-foreground">{quoteText(body)}</span>
+        <span className="line-clamp-1 [overflow-wrap:anywhere] text-muted-foreground">{quoteText(body)}</span>
       </div>
       <button
         type="button"

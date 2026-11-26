@@ -101,13 +101,13 @@ export default function DirectMessages() {
   }, [mobile, c, u, isOpen, remembered, orgId, open]);
 
   return (
-    <div className="flex min-h-0 flex-1">
+    <div className="flex min-h-0 min-w-0 flex-1">
       {isOpen ? (
-        <div className={cn("flex min-h-0 flex-1 flex-col", mobile && "motion-push-in")}>
+        <div className={cn("flex min-h-0 min-w-0 flex-1 flex-col", mobile && "motion-push-in")}>
           <DMThread onBack={close} />
         </div>
       ) : mobile ? (
-        <div className="motion-back-in flex min-h-0 flex-1 flex-col">
+        <div className="motion-back-in flex min-h-0 min-w-0 flex-1 flex-col">
           <CommsList current="/dm" />
         </div>
       ) : (
