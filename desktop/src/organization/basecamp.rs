@@ -26,6 +26,9 @@ use crate::theme::Leading as _;
 #[derive(Default)]
 pub(super) struct BasecampTab {
     status: Option<BasecampStatus>,
+    /// Por qué no se pudo leer el estado la primera vez: sin estado no hay
+    /// qué pintar, y «no configurado» sería mentira.
+    status_error: Option<String>,
     loading: bool,
     projects: Option<Result<Vec<BasecampAvailable>, String>>,
     people: Option<Result<Vec<BasecampPerson>, String>>,
@@ -55,6 +58,7 @@ impl OrgView {
             return;
         }
         self.basecamp.loading = true;
+        self.basecamp.status_error = None;
         let id = org.id.clone();
         let answer = Backend::ask(cx, move |core| async move {
             let orgs = core.orgs();
@@ -83,10 +87,12 @@ impl OrgView {
                         this.basecamp.status = Some(status);
                     }
                     Err(error) => {
-                        // Sin esto la pestaña se quedaría leyendo para siempre.
-                        this.basecamp.status.get_or_insert_with(BasecampStatus::default);
                         let text = failed(cx, &error, "org:basecamp.loadFailed");
-                        this.say(text, true, cx);
+                        if this.basecamp.status.is_some() {
+                            this.say(text, true, cx);
+                        } else {
+                            this.basecamp.status_error = Some(text);
+                        }
                     }
                 }
                 cx.notify();
@@ -239,7 +245,7 @@ impl OrgView {
                                 .outline()
                                 .small()
                                 .icon(Icon::new(Lucide::ExternalLink))
-                                .label(tr(cx, "org:basecamp.connect"))
+                                .label(tr(cx, if status.needs_reconnect() { "org:basecamp.reconnect" } else { "org:basecamp.connect" }))
                                 .disabled(busy)
                                 .on_click(cx.listener(|this, _, _, cx| this.connect_basecamp(cx))),
                         )
@@ -248,7 +254,10 @@ impl OrgView {
                         this.child(Button::new("org-basecamp-disconnect").outline().small().label(tr(cx, "org:basecamp.disconnect")).disabled(busy).on_click(cx.listener(|this, _, window, cx| this.ask_disconnect(window, cx))))
                     }),
             )
-            .when(status.needs_reconnect(), |this| this.child(div().id("org-basecamp-reconnect").leading_xs().text_color(danger).child(tr(cx, "org:basecamp.reconnectNeeded")).test_support()))
+            .when(status.needs_reconnect(), |this| {
+                let text = tr(cx, "org:basecamp.reconnectNeeded");
+                this.child(div().id("org-basecamp-reconnect").leading_xs().text_color(danger).aria_label(text.clone()).child(text).test_support())
+            })
             .when(!status.connected, |this| this.child(div().leading_xs().text_color(muted).child(tr(cx, "org:basecamp.lead"))))
             .into_any_element()
     }
@@ -395,10 +404,24 @@ impl OrgView {
         if !manage {
             return div().into_any_element();
         }
-        if self.basecamp.status.is_none() && !self.basecamp.loading {
+        if self.basecamp.status.is_none() && !self.basecamp.loading && self.basecamp.status_error.is_none() {
             self.load_basecamp(cx);
         }
         let muted = cx.theme().muted_foreground;
+        if let (None, Some(text)) = (&self.basecamp.status, self.basecamp.status_error.clone()) {
+            let danger = cx.theme().danger;
+            return div()
+                .id("org-basecamp-load-failed")
+                .max_w(px(768.))
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap_2()
+                .child(div().id("org-basecamp-load-failed-text").text_color(danger).aria_label(text.clone()).child(text).test_support())
+                .child(Button::new("org-basecamp-retry").outline().small().icon(Icon::new(Lucide::RefreshCw)).label(tr(cx, "org:basecamp.retry")).on_click(cx.listener(|this, _, _, cx| this.load_basecamp(cx))))
+                .test_support()
+                .into_any_element();
+        }
         let Some(status) = self.basecamp.status.clone() else {
             return div().id("org-basecamp-loading").py_8().text_center().text_color(muted).child(tr(cx, "org:basecamp.loading")).test_support().into_any_element();
         };

@@ -61,10 +61,12 @@ pub struct BasecampStatus {
 
 impl BasecampStatus {
     /// Conectar se ofrece a quien administra, con la app puesta en el
-    /// servidor y mientras no haya una cuenta: con una conectada, lo que hay
-    /// que ofrecer es desconectar, no conectar otra encima.
+    /// servidor y mientras no haya una cuenta. Con una conectada sólo se
+    /// ofrece si el permiso dejó de renovarse: volver a conectar la misma
+    /// cuenta conserva los proyectos enlazados y limpia el fallo, y
+    /// desconectar primero los borraría.
     pub fn offers_connect(&self, can_manage: bool) -> bool {
-        can_manage && self.configured && !self.connected
+        can_manage && self.configured && (!self.connected || self.needs_reconnect())
     }
 
     pub fn offers_disconnect(&self, can_manage: bool) -> bool {
@@ -72,7 +74,7 @@ impl BasecampStatus {
     }
 
     /// El permiso ya no se renueva: lo conectado sigue a la vista pero no
-    /// llega nada, y la salida es desconectar y volver a conectar.
+    /// llega nada, y la salida es conectar de nuevo, sin desconectar.
     pub fn needs_reconnect(&self) -> bool {
         self.connected && self.refresh_failed_at.is_some()
     }
@@ -214,7 +216,8 @@ mod tests {
     ///
     /// Roturas que atrapa: ofrecer conectar con el servidor sin la app (un
     /// botón que contesta 503), a quien no administra o encima de otra
-    /// cuenta; ofrecer desconectar sin cuenta.
+    /// cuenta sana; no ofrecer conectar de nuevo con la renovación fallida;
+    /// ofrecer desconectar sin cuenta.
     #[test]
     fn connecting_is_offered_only_when_it_can_work() {
         let off = BasecampStatus { configured: false, ..Default::default() };
@@ -223,7 +226,11 @@ mod tests {
         assert!(!off.offers_connect(true), "ofrece conectar sin la app en el servidor");
         assert!(!ready.offers_connect(false), "ofrece conectar a quien no administra");
         assert!(ready.offers_connect(true));
+        let stale = BasecampStatus { refresh_failed_at: Some("2026-11-26T10:00:00Z".into()), ..connected.clone() };
         assert!(!connected.offers_connect(true), "ofrece conectar otra cuenta encima");
+        assert!(stale.offers_connect(true), "no deja volver a conectar con la renovación fallida: obliga a desconectar y pierde los enlaces");
+        assert!(!stale.offers_connect(false), "ofrece reconectar a quien no administra");
+        assert!(!BasecampStatus { configured: false, ..stale.clone() }.offers_connect(true), "ofrece reconectar sin la app en el servidor");
         assert!(connected.offers_disconnect(true));
         assert!(!connected.offers_disconnect(false), "ofrece desconectar a quien no administra");
         assert!(!ready.offers_disconnect(true), "ofrece desconectar sin cuenta");

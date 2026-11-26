@@ -1102,3 +1102,51 @@ fn people_that_fail_to_load_say_why_and_the_projects_stay(cx: &mut TestAppContex
     assert!(!on_screen(window, "org-basecamp-projects-error", cx));
     stop_stream(cx);
 }
+
+/// Un estado que no se pudo leer es un fallo, no «no configurado»: se dice
+/// que no se pudo, no hay botón de conectar, y reintentar vuelve a pedirlo.
+///
+/// Roturas que atrapa: pintar el estado vacío por defecto («este servidor
+/// aún no tiene Basecamp configurado») cuando el GET falla; ofrecer conectar
+/// sobre un estado desconocido; una pantalla de fallo sin cómo reintentar;
+/// que reintentar no vuelva a pedir el estado.
+#[gpui_kit::test]
+fn a_status_that_fails_to_load_is_a_failure_and_can_be_retried(cx: &mut TestAppContext) {
+    let server = org_server("admin");
+    server.mount(Mock::given(method("GET")).and(path(BASECAMP)).respond_with(wiremock::ResponseTemplate::new(502).set_body_json(json!({ "success": false, "error": "basecamp-unreachable", "message": "No" }))).up_to_n_times(1));
+    server.mount(Mock::given(method("GET")).and(path(BASECAMP)).respond_with(ok(basecamp_status(true, false, json!([])))));
+    let (server, window) = open_org_with(server, cx);
+    click(window, "org-tab-basecamp", cx);
+    wait_until(cx, "dice que no se pudo", |cx| on_screen(window, "org-basecamp-load-failed", cx));
+    assert!(!on_screen(window, "org-basecamp-off", cx), "dice «no configurado» cuando no pudo leer");
+    assert!(!on_screen(window, "org-basecamp-connect", cx) && !on_screen(window, "org-basecamp-disconnect", cx), "ofrece conectar sin saber el estado");
+    assert_eq!(count_of(&server, "GET", BASECAMP), 1, "se quedó pidiéndolo en bucle");
+
+    click(window, "org-basecamp-retry", cx);
+    wait_until(cx, "sale conectar", |cx| on_screen(window, "org-basecamp-connect", cx));
+    assert_eq!(count_of(&server, "GET", BASECAMP), 2, "reintentar no volvió a pedir el estado");
+    assert!(!on_screen(window, "org-basecamp-load-failed", cx));
+    stop_stream(cx);
+}
+
+/// Con la renovación fallida se ofrece conectar de nuevo, sin desconectar:
+/// pide la URL igual que conectar y no manda ningún DELETE (que borraría los
+/// proyectos enlazados).
+///
+/// Roturas que atrapa: no ofrecer conectar con la renovación fallida; que
+/// reconectar pase por desconectar; el texto que manda a desconectar.
+#[gpui_kit::test]
+fn a_failed_renewal_connects_again_without_disconnecting(cx: &mut TestAppContext) {
+    let mut status = basecamp_status(true, true, json!([]));
+    status["refreshFailedAt"] = json!("2026-11-26T10:00:00Z");
+    let server = basecamp_server("admin", status, json!([]), json!([]));
+    server.mount(Mock::given(method("POST")).and(path(format!("{BASECAMP}/connect"))).respond_with(ok(json!({ "url": "https://launchpad.37signals.com/authorization/new?state=s" }))));
+    let (server, window) = open_org_with(server, cx);
+    click(window, "org-tab-basecamp", cx);
+    wait_until(cx, "sale conectar de nuevo", |cx| on_screen(window, "org-basecamp-connect", cx));
+    assert!(!label(window, "org-basecamp-reconnect", cx).to_lowercase().contains("desconecta"), "{}", label(window, "org-basecamp-reconnect", cx));
+    click(window, "org-basecamp-connect", cx);
+    wait_until(cx, "pide la URL", |_| count_of(&server, "POST", &format!("{BASECAMP}/connect")) == 1);
+    assert_eq!(count_of(&server, "DELETE", BASECAMP), 0, "reconectar desconectó");
+    stop_stream(cx);
+}

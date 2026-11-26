@@ -165,7 +165,9 @@
     "notConnected": "Ninguna cuenta de Basecamp está conectada a esta organización.",
     "connect": "Conectar Basecamp",
     "connectedTo": "Conectada a {{account}} como {{identity}}",
-    "reconnectNeeded": "Basecamp dejó de renovar el permiso y no está llegando nada. Desconecta y vuelve a conectar.",
+    "reconnectNeeded": "Basecamp dejó de renovar el permiso y no está llegando nada. Conecta de nuevo: los proyectos que enlazaste se conservan.",
+    "reconnect": "Conectar de nuevo",
+    "retry": "Reintentar",
     "reload": "Recargar",
     "finishInBrowser": "Autoriza a cac en el navegador y vuelve aquí: esta pantalla vuelve a leer Basecamp cuando lo hagas.",
     "connectFailed": "No se pudo iniciar la conexión con Basecamp",
@@ -181,7 +183,6 @@
     "projectsNone": "Esta cuenta de Basecamp no tiene proyectos.",
     "projectsFailed": "No se pudieron leer los proyectos de Basecamp",
     "notLinked": "Sin enlazar",
-    "spaceFor": "Espacio de {{project}}",
     "webhookOk": "Webhook dado de alta",
     "webhookMissing": "Enlazado, pero Basecamp no dio de alta el webhook: de este proyecto no llega nada",
     "linked": "{{project}} quedó enlazado a {{space}}: Basecamp mandará aquí su actividad",
@@ -199,8 +200,7 @@
     "searchMember": "Buscar un miembro por nombre",
     "noMember": "Ningún miembro con ese nombre.",
     "assigned": "{{person}} ahora es {{member}}",
-    "assignFailed": "No se pudo asignar a la persona",
-    "cancel": "Cancelar"
+    "assignFailed": "No se pudo asignar a la persona"
   },
   "zoneUnset": "Sin decidir (la de quien crea)",
   "zoneSuggested": "Sugeridas",
