@@ -9,12 +9,20 @@
 //! Qué se agrupa con qué, en qué orden y qué dice cada fila lo decide el core
 //! (`cac_core::inbox_panel`); aquí se pinta y se pulsa. Lo único propio de
 //! esta pantalla es qué pestaña se mira y qué conversaciones se abrieron.
+//!
+//! Pulsar el aviso de una conversación no se va de la página: la tarjeta
+//! pasa a ser su **vista rápida**, con los últimos mensajes y una caja para
+//! contestar ahí (`cac_core::inbox_peek`). Y con la campana abierta, las
+//! filas de un directo que se ven llevan el inicio de su mensaje, pedido a
+//! la conversación; al cerrarla se olvida.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use cac_core::{InboxGroup, InboxIcon, InboxRow, InboxTab, InboxTarget, InboxTone, INBOX_TABS};
+use cac_core::{ApiError, Conversation, InboxGroup, InboxIcon, InboxRow, InboxTab, InboxTarget, InboxTone, PreviewWanted, ThreadMessage, INBOX_TABS};
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Enter, InputContent, Textarea, TextareaState};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::FluentBuilder;
@@ -36,6 +44,35 @@ pub(crate) struct InboxPanelState {
     expanded: HashSet<String>,
     /// Lo que se dice tras pulsar algo que esta app todavía no tiene.
     said: Option<String>,
+    /// Los últimos mensajes de cada directo cuyas filas se ven, para su
+    /// inicio. Sólo con la campana abierta: al cerrarla se vacía.
+    previews: HashMap<Conversation, Vec<ThreadMessage>>,
+    /// Lo ya pedido (o en camino), por conversación y aviso más nuevo.
+    asked: HashSet<PreviewWanted>,
+    /// Cuántas veces se ha abierto: lo que llega de una apertura anterior no
+    /// se pone.
+    opened: u64,
+    /// Cuántas vistas rápidas se han abierto, para numerarlas.
+    quick_serials: u64,
+    /// La vista rápida de una conversación, si se pulsó una.
+    pub(crate) quick: Option<QuickView>,
+}
+
+/// La vista rápida: los últimos mensajes de una conversación y una caja
+/// para contestar, encima de la página.
+pub(crate) struct QuickView {
+    conversation: Conversation,
+    title: String,
+    link: String,
+    org_id: String,
+    /// `None` mientras llegan.
+    messages: Option<Vec<ThreadMessage>>,
+    failed: bool,
+    pub(crate) field: Entity<TextareaState>,
+    sending: bool,
+    error: Option<String>,
+    /// Cuál de las vistas rápidas es: lo que llega para otra no se pone.
+    serial: u64,
 }
 
 fn icon_of(icon: InboxIcon) -> Lucide {
@@ -72,12 +109,15 @@ fn color_of(tone: InboxTone, cx: &App) -> Hsla {
 impl Workspace {
     /// Abre o cierra el panel. Al abrirlo se pide la bandeja: hasta entonces
     /// la campana sólo sabía cuántos.
-    pub(crate) fn toggle_inbox(&mut self, cx: &mut Context<Self>) {
-        self.inbox.open = !self.inbox.open;
-        self.inbox.said = None;
+    pub(crate) fn toggle_inbox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.inbox.open {
-            Backend::run(cx, |core| async move { core.inbox().load().await });
+            self.close_inbox(window, cx);
+            return;
         }
+        self.inbox.open = true;
+        self.inbox.opened += 1;
+        self.inbox.said = None;
+        Backend::run(cx, |core| async move { core.inbox().load().await });
         cx.notify();
     }
 
@@ -98,43 +138,196 @@ impl Workspace {
     }
 
     /// Lo cierra; Escape también (lo oye `workspace.rs`, que tiene el foco).
-    pub(crate) fn close_inbox(&mut self, cx: &mut Context<Self>) {
+    /// Lo que se leyó de las conversaciones se olvida: con la campana
+    /// cerrada no queda texto de nadie a mano.
+    pub(crate) fn close_inbox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_quick_view(window, cx);
         self.inbox.open = false;
+        self.inbox.previews.clear();
+        self.inbox.asked.clear();
         cx.notify();
     }
 
-    /// Pulsar un aviso o una conversación: leída, y a su sitio. Si es un
-    /// sitio que esta app todavía no tiene, se queda en el panel y lo dice.
-    fn open_from_inbox(&mut self, read: InboxRead, link: String, org_id: String, cx: &mut Context<Self>) {
-        let here = cac_core::link_target(&link) != InboxTarget::NotHere;
+    /// Pulsar un aviso o una conversación: leída, y a su sitio. Una
+    /// conversación se abre en la vista rápida, sin irse de la página. Si es
+    /// un sitio que esta app todavía no tiene, se queda en el panel y lo dice.
+    fn open_from_inbox(&mut self, read: InboxRead, link: String, org_id: String, title: String, window: &mut Window, cx: &mut Context<Self>) {
+        let target = cac_core::link_target(&link);
+        let here = target != InboxTarget::NotHere;
+        let quick = matches!(target, InboxTarget::Conversation { .. });
+        let (go_link, go_org) = (link.clone(), org_id.clone());
         Backend::run(cx, move |core| async move {
             let _ = match read {
                 InboxRead::One(id) => core.inbox().mark_read(vec![id]).await,
                 InboxRead::Group(key) => core.inbox().mark_group_read(key).await,
             };
-            if here {
-                core.inbox().open(&link, &org_id).await;
+            if here && !quick {
+                core.inbox().open(&go_link, &go_org).await;
             }
         });
-        if here {
-            self.close_inbox(cx);
+        if let InboxTarget::Conversation { conversation } = target {
+            self.open_quick_view(conversation, title, link, org_id, window, cx);
+        } else if here {
+            self.close_inbox(window, cx);
         } else {
             self.inbox.said = Some(tr(cx, "common:misc.notInThisApp"));
             cx.notify();
         }
     }
 
-    pub(crate) fn render_inbox(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Abre la vista rápida de esa conversación: pide sus últimos mensajes y
+    /// trae a la caja lo que hubiera escrito para ella.
+    fn open_quick_view(&mut self, conversation: Conversation, title: String, link: String, org_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_quick_view(window, cx);
+        self.inbox.said = None;
+        let draft = self.chat.update(cx, |chat, cx| chat.take_draft(&conversation, window, cx));
+        let placeholder = tr(cx, "notifications:quick.reply");
+        let field = cx.new(|cx| {
+            let mut field = TextareaState::new(window, cx).auto_grow(1, 5);
+            field.set_placeholder(placeholder, window, cx);
+            field.set_value(draft, window, cx);
+            let end = field.value().len();
+            field.set_selected_range(end..end, cx);
+            field
+        });
+        field.update(cx, |field, cx| field.focus(window, cx));
+        self.inbox.quick_serials += 1;
+        let serial = self.inbox.quick_serials;
+        self.inbox.quick = Some(QuickView { conversation: conversation.clone(), title, link, org_id, messages: None, failed: false, field, sending: false, error: None, serial });
+        self.load_quick_view(conversation, serial, cx);
+        cx.notify();
+    }
+
+    fn load_quick_view(&mut self, conversation: Conversation, serial: u64, cx: &mut Context<Self>) {
+        if let Some(quick) = self.inbox.quick.as_mut() {
+            quick.failed = false;
+        }
+        let answer = Backend::ask(cx, move |core| async move { core.inbox().quick_view(&conversation).await });
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = answer.await else { return };
+            this.update(cx, |this, cx| {
+                let Some(quick) = this.inbox.quick.as_mut().filter(|quick| quick.serial == serial) else { return };
+                match result {
+                    Ok(messages) => quick.messages = Some(messages),
+                    Err(_) => quick.failed = quick.messages.is_none(),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Cierra la vista rápida y devuelve lo escrito a su conversación.
+    fn close_quick_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(quick) = self.inbox.quick.take() else { return };
+        let content: InputContent = quick.field.read(cx).content();
+        let conversation = quick.conversation;
+        self.chat.update(cx, |chat, cx| chat.give_draft(conversation, content, window, cx));
+        cx.notify();
+    }
+
+    /// «Abrir la conversación»: a ella, como antes de la vista rápida, con lo
+    /// escrito esperándola en su caja.
+    fn open_quick_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((link, org_id)) = self.inbox.quick.as_ref().map(|quick| (quick.link.clone(), quick.org_id.clone())) else { return };
+        Backend::run(cx, move |core| async move {
+            core.inbox().open(&link, &org_id).await;
+        });
+        self.close_inbox(window, cx);
+    }
+
+    /// Manda lo escrito en la vista rápida a su conversación, por el mismo
+    /// camino que la caja de la conversación (`Chat::send`). Si sale bien se
+    /// vacía la caja —si sigue diciendo lo mismo— y se releen los últimos.
+    fn send_quick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(quick) = self.inbox.quick.as_mut() else { return };
+        if quick.sending {
+            return;
+        }
+        let written = quick.field.read(cx).value().to_string();
+        if cac_core::message_to_send(&written).is_err() {
+            return;
+        }
+        quick.sending = true;
+        quick.error = None;
+        let (to, serial, sent) = (quick.conversation.clone(), quick.serial, written.clone());
+        let answer = Backend::ask(cx, move |core| async move {
+            let result = core.chat().send(to.clone(), sent, None).await;
+            let fresh = match result {
+                Ok(()) => core.inbox().peek(&to).await.ok(),
+                Err(_) => None,
+            };
+            (result, fresh)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok((result, fresh)) = answer.await else { return };
+            this.update_in(cx, |this, window, cx| {
+                let Some(quick) = this.inbox.quick.as_mut().filter(|quick| quick.serial == serial) else { return };
+                quick.sending = false;
+                match result {
+                    Ok(()) => {
+                        if quick.field.read(cx).value().as_ref() == written {
+                            quick.field.update(cx, |field, cx| field.set_value("", window, cx));
+                        }
+                        if let Some(fresh) = fresh {
+                            quick.messages = Some(fresh);
+                        }
+                    }
+                    Err(ApiError::Server { ref code, .. }) if code == "already-sending" => {}
+                    Err(error) => quick.error = Some(error_text(cx, &error, "common:last.couldNotSend")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Pide el inicio de los directos que el panel enseña y todavía no se
+    /// tienen. Lo que llega tarde, de una campana ya cerrada, no se pone.
+    fn ask_previews(&mut self, wanted: Vec<PreviewWanted>, cx: &mut Context<Self>) {
+        for want in wanted {
+            if !self.inbox.asked.insert(want.clone()) {
+                continue;
+            }
+            let opened = self.inbox.opened;
+            let conversation = want.conversation.clone();
+            let answer = Backend::ask(cx, move |core| async move { core.inbox().peek(&conversation).await });
+            cx.spawn(async move |this, cx| {
+                let Ok(Ok(messages)) = answer.await else { return };
+                this.update(cx, |this, cx| {
+                    if this.inbox.open && this.inbox.opened == opened {
+                        this.inbox.previews.insert(want.conversation, messages);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    pub(crate) fn render_inbox(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.inbox.open {
             return None;
         }
         let language = locale(cx);
-        let snapshot = Backend::snapshot(cx).read(cx);
-        let panel = cac_core::inbox_panel(&snapshot.inbox, self.inbox.tab, &self.inbox.expanded, language, &chrono::Utc::now());
+        let (panel, me) = {
+            let snapshot = Backend::snapshot(cx).read(cx);
+            (cac_core::inbox_panel(&snapshot.inbox, self.inbox.tab, &self.inbox.expanded, language, &chrono::Utc::now()), snapshot.session.as_ref().map(|session| session.id.clone()))
+        };
+        let hide = Backend::core(cx).hide_direct_previews();
+        self.ask_previews(cac_core::previews_wanted(&panel, hide), cx);
+        let panel = cac_core::with_previews(panel, &self.inbox.previews, me.as_deref(), hide);
+        if let Some(quick) = self.render_quick_view(me.as_deref(), cx) {
+            return Some(self.render_inbox_frame(quick, cx));
+        }
         let sound = Backend::core(cx).notify_sound();
         let theme = cx.theme();
-        let (border, card, muted, primary, on_primary, accent, foreground) =
-            (theme.border, theme.popover, theme.muted_foreground, theme.primary, theme.primary_foreground, theme.accent, theme.foreground);
+        let (border, muted, primary, on_primary, accent, foreground) =
+            (theme.border, theme.muted_foreground, theme.primary, theme.primary_foreground, theme.accent, theme.foreground);
 
         let header = div()
             .flex()
@@ -197,6 +390,26 @@ impl Workspace {
                                 cx.notify();
                             }))
                             .child(Icon::new(if sound { Lucide::Volume2 } else { Lucide::VolumeX }).size_3p5())
+                            .test_support()
+                    })
+                    // Para compartir pantalla: las filas de un directo sin lo
+                    // que dice. De esta máquina, como el sonido.
+                    .child({
+                        let hint = tr(cx, "notifications:prefs.hidePreviewsHint");
+                        div()
+                            .id("inbox-hide-previews")
+                            .cursor_pointer()
+                            .hover(move |style| style.text_color(foreground))
+                            .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+                            .aria_label(tr(cx, "notifications:prefs.hidePreviews"))
+                            .aria_selected(hide)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let _ = Backend::core(cx).set_hide_direct_previews(!hide);
+                                this.inbox.previews.clear();
+                                this.inbox.asked.clear();
+                                cx.notify();
+                            }))
+                            .child(Icon::new(if hide { Lucide::EyeOff } else { Lucide::Eye }).size_3p5())
                             .test_support()
                     }),
             );
@@ -277,8 +490,16 @@ impl Workspace {
             .child(Icon::new(Lucide::Info).size_3p5().flex_none().text_color(primary))
             .child(tr(cx, "notifications:footer"));
 
-        Some(
-            div()
+        let content = div().flex().flex_col().min_h_0().child(header).child(tabs).child(list).children(said).child(footer).into_any_element();
+        Some(self.render_inbox_frame(content, cx))
+    }
+
+    /// El fondo y la tarjeta colgada de la campana, con lo que toque dentro:
+    /// la bandeja o una vista rápida.
+    fn render_inbox_frame(&self, content: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (border, card) = (theme.border, theme.popover);
+        div()
                 .id("inbox")
                 .absolute()
                 .inset_0()
@@ -289,7 +510,7 @@ impl Workspace {
                         .absolute()
                         .inset_0()
                         .bg(gpui_kit::black().opacity(0.35))
-                        .on_click(cx.listener(|this, _, _, cx| this.close_inbox(cx)))
+                        .on_click(cx.listener(|this, _, window, cx| this.close_inbox(window, cx)))
                         .test_support(),
                 )
                 .child(
@@ -318,14 +539,154 @@ impl Workspace {
                                 .border_color(border)
                                 .bg(card)
                                 .shadow_2xl()
-                                .child(header)
-                                .child(tabs)
-                                .child(list)
-                                .children(said)
-                                .child(footer),
+                                .child(content),
                         )
                         .test_support(),
                 )
+                .test_support()
+                .into_any_element()
+    }
+
+    /// La vista rápida, si hay una abierta: quién, los últimos mensajes, la
+    /// caja para contestar y «Abrir la conversación».
+    fn render_quick_view(&self, me: Option<&str>, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let quick = self.inbox.quick.as_ref()?;
+        let language = locale(cx);
+        let theme = cx.theme();
+        let (border, muted, foreground, danger, primary) = (theme.border, theme.muted_foreground, theme.foreground, theme.danger, theme.primary);
+        let header = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2p5()
+            .py_2()
+            .border_b_1()
+            .border_color(border)
+            .child(
+                Button::new("inbox-quick-back")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(Lucide::ArrowLeft))
+                    .tooltip(tr(cx, "notifications:quick.back"))
+                    .on_click(cx.listener(|this, _, window, cx| this.close_quick_view(window, cx))),
+            )
+            .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(quick.title.clone()))
+            .child(
+                Button::new("inbox-quick-open")
+                    .ghost()
+                    .small()
+                    .label(tr(cx, "notifications:quick.open"))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_quick_conversation(window, cx))),
+            );
+
+        let mut list = div().id("inbox-quick-lines").flex_1().min_h_0().overflow_y_scroll().px_3().py_2().flex().flex_col().gap_2();
+        match &quick.messages {
+            Some(messages) if messages.is_empty() => {
+                let said = tr(cx, "notifications:quick.empty");
+                list = list.child(div().id("inbox-quick-empty").py_3().text_center().text_color(muted).aria_label(said.clone()).child(said).test_support());
+            }
+            Some(messages) => {
+                for line in cac_core::quick_lines(&quick.conversation, messages, me, language, &chrono::Local::now()) {
+                    let label = format!("{}: {}", line.author, line.text);
+                    list = list.child(
+                        div()
+                            .id(SharedString::from(format!("inbox-quick-line-{}", line.id)))
+                            .flex()
+                            .flex_col()
+                            .when(line.mine, |this| this.items_end())
+                            .aria_label(label)
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_1p5()
+                                    .text_size(px(11.))
+                                    .text_color(muted)
+                                    .child(div().font_weight(FontWeight::MEDIUM).text_color(if line.mine { primary } else { foreground }).child(line.author.clone()))
+                                    .child(line.time.clone()),
+                            )
+                            .child(div().leading_xs().child(line.text.clone()))
+                            .test_support(),
+                    );
+                }
+            }
+            None if quick.failed => {
+                let said = tr(cx, "notifications:quick.failed");
+                let (conversation, serial) = (quick.conversation.clone(), quick.serial);
+                list = list.child(
+                    div()
+                        .id("inbox-quick-failed")
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_2()
+                        .py_3()
+                        .text_color(muted)
+                        .aria_label(said.clone())
+                        .child(said)
+                        .child(Button::new("inbox-quick-retry").outline().small().label(tr(cx, "chat:retry")).on_click(cx.listener(move |this, _, _, cx| this.load_quick_view(conversation.clone(), serial, cx))))
+                        .test_support(),
+                );
+            }
+            None => list = list.child(div().id("inbox-quick-loading").py_3().flex().justify_center().child(Spinner::new().small().color(muted)).test_support()),
+        }
+
+        let error = quick.error.clone().map(|said| div().id("inbox-quick-error").px_3().pb_1().leading_xs().text_color(danger).aria_label(said.clone()).child(said).test_support());
+        let sending = quick.sending;
+        let composer = div()
+            .flex()
+            .items_end()
+            .gap_2()
+            .border_t_1()
+            .border_color(border)
+            .p_2()
+            .child(
+                div()
+                    .id("inbox-quick-field")
+                    .flex_1()
+                    .min_w_0()
+                    // Enter manda, como en la conversación; Mayús+Enter salta
+                    // de línea.
+                    .capture_action(cx.listener(|this, enter: &Enter, window, cx| {
+                        if enter.shift || enter.secondary {
+                            return;
+                        }
+                        let Some(quick) = this.inbox.quick.as_ref() else { return };
+                        let (text, cursor) = {
+                            let field = quick.field.read(cx);
+                            (field.value().to_string(), field.cursor())
+                        };
+                        if cac_core::enter_sends(&text, cursor as u32) {
+                            cx.stop_propagation();
+                            this.send_quick(window, cx);
+                        }
+                    }))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(border)
+                    .bg(crate::theme::field_background(cx))
+                    .px_1()
+                    .child(Textarea::new(&quick.field).appearance(false))
+                    .test_support(),
+            )
+            .child(
+                Button::new("inbox-quick-send")
+                    .primary()
+                    .map(|this| if sending { this.child(Spinner::new().xsmall()) } else { this.icon(Icon::new(Lucide::Send)) })
+                    .tooltip(tr(cx, "chat:send"))
+                    .on_click(cx.listener(|this, _, window, cx| this.send_quick(window, cx))),
+            );
+        Some(
+            div()
+                .id("inbox-quick")
+                .flex()
+                .flex_col()
+                .min_h_0()
+                .max_h(px(560.))
+                .aria_label(quick.title.clone())
+                .child(header)
+                .child(list)
+                .children(error)
+                .child(composer)
                 .test_support()
                 .into_any_element(),
         )
@@ -367,6 +728,7 @@ impl Workspace {
         };
         let summary = {
             let key = key.clone();
+            let title = group.title.clone();
             div()
                 .id(SharedString::from(format!("inbox-group-{key}")))
                 .flex_1()
@@ -378,7 +740,7 @@ impl Workspace {
                 .pr_2()
                 .cursor_pointer()
                 .aria_label(format!("{} · {}", group.title, group.detail))
-                .on_click(cx.listener(move |this, _, _, cx| this.open_from_inbox(InboxRead::Group(key.clone()), link.clone(), org.clone(), cx)))
+                .on_click(cx.listener(move |this, _, window, cx| this.open_from_inbox(InboxRead::Group(key.clone()), link.clone(), org.clone(), title.clone(), window, cx)))
                 .child(Icon::new(icon_of(group.icon)).size_4().mt_0p5().flex_none().text_color(color_of(group.tone, cx)))
                 .child(
                     div()
@@ -450,7 +812,7 @@ impl Workspace {
     fn render_inbox_row(&self, row: &InboxRow, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (muted, primary, accent, border) = (theme.muted_foreground, theme.primary, theme.accent, theme.border);
-        let (id, link, org) = (row.id.clone(), row.link.clone(), row.org_id.clone());
+        let (id, link, org, title) = (row.id.clone(), row.link.clone(), row.org_id.clone(), row.title.clone());
         let unread = row.unread;
         div()
             .id(SharedString::from(format!("inbox-row-{}", row.id)))
@@ -465,7 +827,7 @@ impl Workspace {
             .when(!unread, |this| this.opacity(0.55))
             .aria_label(row.title.clone())
             .aria_selected(unread)
-            .on_click(cx.listener(move |this, _, _, cx| this.open_from_inbox(InboxRead::One(id.clone()), link.clone(), org.clone(), cx)))
+            .on_click(cx.listener(move |this, _, window, cx| this.open_from_inbox(InboxRead::One(id.clone()), link.clone(), org.clone(), title.clone(), window, cx)))
             .child(
                 div()
                     .size(px(26.))
@@ -512,7 +874,18 @@ impl Workspace {
                             })
                             .child(div().ml_auto().flex_none().text_size(px(10.5)).text_color(muted).child(row.when.clone())),
                     )
-                    .when(!row.body.is_empty(), |this| this.child(div().mt_0p5().leading_xs().text_color(muted).child(row.body.clone()))),
+                    .when(!row.body.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .id(SharedString::from(format!("inbox-row-body-{}", row.id)))
+                                .mt_0p5()
+                                .leading_xs()
+                                .text_color(muted)
+                                .aria_label(row.body.clone())
+                                .child(row.body.clone())
+                                .test_support(),
+                        )
+                    }),
             )
             .child(div().size_1p5().flex_none().rounded_full().when(unread, |this| this.bg(primary)))
             .test_support()
@@ -556,8 +929,12 @@ mod tests {
         server.mount(get("/api/v1/notifications/").and(query_param("limit", "50")).respond_with(ok(feed)).with_priority(1));
         server.mount(get("/api/v1/chat/latest").respond_with(ok(json!([]))));
         server.mount(get("/api/v1/dm/").respond_with(ok(json!([]))));
+        server.mount(get("/api/v1/task-spaces/a/chat").respond_with(ok(json!([
+            { "id": "k1", "spaceId": "a", "authorUserId": "u2", "authorName": "Bea", "kind": "user", "body": "hola canal", "createdAt": "2026-11-18T11:00:00Z", "updatedAt": "2026-11-18T11:00:00Z" },
+        ]))));
         server.mount(Mock::given(method("POST")).and(path("/api/v1/notifications/read")).respond_with(ok(json!(null))));
         server.mount(Mock::given(method("POST")).and(path("/api/v1/notifications/read-all")).respond_with(ok(json!(null))));
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/task-spaces/a/chat/read")).respond_with(ok(json!(null))));
         server
     }
 
@@ -572,13 +949,17 @@ mod tests {
     }
 
     fn open(cx: &mut TestAppContext) -> AnyWindowHandle {
+        open_with_workspace(cx).0
+    }
+
+    fn open_with_workspace(cx: &mut TestAppContext) -> (AnyWindowHandle, gpui_kit::Entity<Workspace>) {
         sign_in(cx);
         cx.update(|cx| {
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds { origin: Point::default(), size: size(px(1100.), px(760.)) })),
                 ..WindowOptions::default()
             };
-            gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx))).expect("open test window").0
+            gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx))).expect("open test window")
         })
     }
 
@@ -658,13 +1039,15 @@ mod tests {
         stop(cx);
     }
 
-    /// Pulsar una conversación la marca leída entera y lleva a ella; pulsar
+    /// Pulsar una conversación la marca leída entera y abre su vista rápida
+    /// sin irse de la página; «Abrir la conversación» lleva a ella. Pulsar
     /// algo que esta app no tiene lo marca leído, se queda en el panel y lo
     /// dice.
     ///
     /// Roturas que atrapa: marcar una conversación por los ids que hay a mano;
-    /// no llevar a ella; cerrar el panel y no ir a ningún sitio (un clic
-    /// perdido); no marcar leído lo que no se puede abrir.
+    /// irse de la página al pulsarla; un «Abrir la conversación» que no lleva
+    /// a ella; cerrar el panel y no ir a ningún sitio (un clic perdido); no
+    /// marcar leído lo que no se puede abrir.
     #[gpui_kit::test]
     fn clicking_goes_where_it_says_or_says_why_not(cx: &mut TestAppContext) {
         let server = server(full_inbox());
@@ -678,6 +1061,9 @@ mod tests {
         wait_until(cx, "se marca leído", |_| posted(&server, "/api/v1/notifications/read").iter().any(|(_, body)| *body == json!({ "ids": ["n3"] })));
 
         click(window, "inbox-group-chat:a", cx);
+        wait_until(cx, "la vista rápida enseña el canal", |cx| label(window, "inbox-quick-line-k1", cx) == "Bea: hola canal");
+        assert!(cx.update(|cx| !Backend::snapshot(cx).read(cx).comms.on_screen), "la página de debajo no cambia");
+        click(window, "inbox-quick-open", cx);
         wait_until(cx, "el panel se cierra", |cx| !on_screen(window, "inbox", cx));
         wait_until(cx, "y lleva a la conversación", |cx| {
             cx.update(|cx| {
@@ -792,6 +1178,154 @@ mod tests {
         open_panel(window, cx);
         click(window, "inbox-mark-all", cx);
         wait_until(cx, "lo dice", |cx| !label(window, "inbox-said", cx).is_empty());
+        stop(cx);
+    }
+    /// Una bandeja con dos directos de Diego (c1, plegados) y uno de Bea
+    /// (c2, suelto), sin texto, como los manda el servidor; y las dos
+    /// conversaciones con sus últimos mensajes.
+    fn server_with_directs() -> FakeServer {
+        let dm = |id: &str, conversation: &str, at: &str, who: &str| {
+            json!({ "id": id, "orgId": "o1", "kind": "dm:message", "title": format!("{who} te escribió"), "body": "", "link": format!("/dm?c={conversation}"),
+                    "createdAt": at, "groupKey": format!("dm:{conversation}"), "groupLabel": who })
+        };
+        let items = json!([
+            dm("d1", "c1", "2026-11-18T11:00:01Z", "Diego"),
+            dm("d2", "c1", "2026-11-18T11:30:01Z", "Diego"),
+            dm("b1", "c2", "2026-11-18T10:00:01Z", "Bea"),
+        ]);
+        let server = server_with_tasks(vec![]);
+        let feed = json!({ "items": items, "unread": 3, "groups": [] });
+        server.mount(get("/api/v1/notifications/").and(query_param("limit", "50")).respond_with(ok(feed)).with_priority(1));
+        server.mount(get("/api/v1/chat/latest").respond_with(ok(json!([]))));
+        server.mount(get("/api/v1/dm/").respond_with(ok(json!([]))));
+        let message = |id: &str, conversation: &str, author: &str, name: &str, at: &str, body: &str| {
+            json!({ "id": id, "conversationId": conversation, "authorUserId": author, "authorName": name, "body": body, "createdAt": at, "updatedAt": at })
+        };
+        server.mount(get("/api/v1/dm/c1/messages").respond_with(ok(json!([
+            message("m1", "c1", "u3", "Diego", "2026-11-18T11:00:00Z", "¿Has visto el **deploy**?"),
+            message("m2", "c1", "u3", "Diego", "2026-11-18T11:30:00Z", "Ya está, avísame"),
+        ]))));
+        server.mount(get("/api/v1/dm/c2/messages").respond_with(ok(json!([message("x1", "c2", "u2", "Bea", "2026-11-18T10:00:00Z", "Te paso el acta")]))));
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/notifications/read")).respond_with(ok(json!(null))));
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/dm/c1/read")).respond_with(ok(json!(null))));
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/dm/c1/messages")).respond_with(ok(json!(null))));
+        server
+    }
+
+    /// Cuántas veces se leyeron los últimos mensajes de esa conversación.
+    fn peeks(server: &FakeServer, conversation: &str) -> usize {
+        server.requests().iter().filter(|request| request.method.as_str() == "GET" && request.url.path() == format!("/api/v1/dm/{conversation}/messages")).count()
+    }
+
+    fn wait_open(window: AnyWindowHandle, cx: &mut TestAppContext) {
+        click(window, "notifications-bell", cx);
+        wait_until(cx, "el panel enseña la bandeja", |cx| on_screen(window, "inbox-group-dm:c1", cx));
+    }
+
+    /// Con la campana abierta, cada fila de un directo que se ve enseña el
+    /// inicio de su mensaje, pedido a su conversación; un grupo plegado no
+    /// pide nada; al cerrar la campana se olvida; y el ajuste de ocultar lo
+    /// apaga.
+    ///
+    /// Roturas que atrapa: pedir texto con la campana cerrada; pedir el de un
+    /// grupo plegado; no pintar el inicio en la fila; guardar lo leído al
+    /// cerrar (al volver no se pediría de nuevo); un ajuste que no apaga el
+    /// texto, o que lo apaga pero lo sigue pidiendo.
+    #[gpui_kit::test]
+    fn direct_rows_show_their_start_only_with_the_bell_open(cx: &mut TestAppContext) {
+        let server = server_with_directs();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        assert_eq!((peeks(&server, "c1"), peeks(&server, "c2")), (0, 0), "con la campana cerrada no se pide nada");
+
+        wait_open(window, cx);
+        wait_until(cx, "la fila suelta de Bea dice lo suyo", |cx| label(window, "inbox-row-body-b1", cx) == "Te paso el acta");
+        assert_eq!(peeks(&server, "c1"), 0, "Diego, plegado, no se pide");
+
+        click(window, "inbox-toggle-dm:c1", cx);
+        wait_until(cx, "desplegado, cada fila con su mensaje", |cx| {
+            label(window, "inbox-row-body-d1", cx) == "¿Has visto el deploy?" && label(window, "inbox-row-body-d2", cx) == "Ya está, avísame"
+        });
+
+        click(window, "notifications-bell", cx);
+        wait_until(cx, "se cierra", |cx| !on_screen(window, "inbox", cx));
+        let before = peeks(&server, "c2");
+        wait_open(window, cx);
+        wait_until(cx, "al volver se pide otra vez", |cx| peeks(&server, "c2") > before && on_screen(window, "inbox-row-body-b1", cx));
+
+        click(window, "inbox-hide-previews", cx);
+        assert!(cx.update(|cx| Backend::core(cx).hide_direct_previews()), "el ajuste se guarda");
+        wait_until(cx, "sin texto", |cx| !on_screen(window, "inbox-row-body-b1", cx) && !on_screen(window, "inbox-row-body-d1", cx));
+        let asked = (peeks(&server, "c1"), peeks(&server, "c2"));
+        click(window, "notifications-bell", cx);
+        wait_open(window, cx);
+        cx.run_until_parked();
+        assert_eq!((peeks(&server, "c1"), peeks(&server, "c2")), asked, "y no se pide");
+        assert!(!on_screen(window, "inbox-row-body-b1", cx));
+        stop(cx);
+    }
+
+    /// Pulsar un directo abre su vista rápida sin cambiar de página: sus
+    /// últimos mensajes, la conversación leída y una caja que contesta ahí,
+    /// a esa conversación.
+    ///
+    /// Roturas que atrapa: irse de la página; no pedir los mensajes; no
+    /// marcar leída la conversación vista; mandar a otra conversación (o a
+    /// ninguna); dejar lo mandado en la caja.
+    #[gpui_kit::test]
+    fn a_direct_opens_its_quick_view_and_is_answered_there(cx: &mut TestAppContext) {
+        let server = server_with_directs();
+        server.install(cx);
+        let (window, workspace) = open_with_workspace(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        wait_open(window, cx);
+
+        click(window, "inbox-group-dm:c1", cx);
+        wait_until(cx, "enseña los últimos", |cx| {
+            label(window, "inbox-quick-line-m1", cx) == "Diego: ¿Has visto el deploy?" && label(window, "inbox-quick-line-m2", cx) == "Diego: Ya está, avísame"
+        });
+        assert_eq!(server.queries("/api/v1/dm/c1/messages").last().map(String::as_str), Some("limit=12"));
+        wait_until(cx, "la conversación, leída", |_| !posted(&server, "/api/v1/dm/c1/read").is_empty());
+        assert!(cx.update(|cx| !Backend::snapshot(cx).read(cx).comms.on_screen), "la página de debajo no cambia");
+
+        cx.update_window(window, |_, window, cx| {
+            let field = workspace.read(cx).inbox.quick.as_ref().unwrap().field.clone();
+            field.update(cx, |field, cx| field.focus(window, cx));
+            window.input("Voy", cx);
+        })
+        .unwrap();
+        click(window, "inbox-quick-send", cx);
+        wait_until(cx, "se manda a esa conversación", |_| posted(&server, "/api/v1/dm/c1/messages").iter().any(|(_, body)| *body == json!({ "body": "Voy" })));
+        wait_until(cx, "y la caja se vacía", |cx| cx.update(|cx| workspace.read(cx).inbox.quick.as_ref().is_some_and(|quick| quick.field.read(cx).value().is_empty())));
+        assert!(on_screen(window, "inbox-quick", cx), "sigue en la vista rápida");
+        assert!(cx.update(|cx| !Backend::snapshot(cx).read(cx).comms.on_screen), "sin cambiar de página");
+        stop(cx);
+    }
+
+    /// Lo que se escribe en la vista rápida y no se manda es el borrador de
+    /// esa conversación: está en su caja al abrirla, y vuelve a la vista
+    /// rápida. Rotura que atrapa: un segundo borrador que se pierde al
+    /// cerrar.
+    #[gpui_kit::test]
+    fn the_quick_view_shares_the_conversation_draft(cx: &mut TestAppContext) {
+        let server = server_with_directs();
+        server.install(cx);
+        let (window, workspace) = open_with_workspace(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        wait_open(window, cx);
+        click(window, "inbox-group-dm:c1", cx);
+        wait_until(cx, "se abre", |cx| on_screen(window, "inbox-quick-line-m1", cx));
+        cx.update_window(window, |_, window, cx| {
+            let field = workspace.read(cx).inbox.quick.as_ref().unwrap().field.clone();
+            field.update(cx, |field, cx| field.focus(window, cx));
+            window.input("a medias", cx);
+        })
+        .unwrap();
+        click(window, "inbox-quick-back", cx);
+        wait_until(cx, "vuelve a la bandeja", |cx| on_screen(window, "inbox-group-dm:c1", cx));
+        click(window, "inbox-group-dm:c1", cx);
+        wait_until(cx, "con lo escrito", |cx| cx.update(|cx| workspace.read(cx).inbox.quick.as_ref().is_some_and(|quick| quick.field.read(cx).value().as_ref() == "a medias")));
         stop(cx);
     }
 }

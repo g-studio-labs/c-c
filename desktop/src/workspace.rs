@@ -834,12 +834,12 @@ impl Workspace {
                     let opener = inbox_opener.clone();
                     Self::account_row("account-notifications", Lucide::Bell, tr(cx, "nav:account.notifications"), false, cx)
                         .cursor_pointer()
-                        .on_click(move |_, _, cx| {
+                        .on_click(move |_, window, cx| {
                             opener
                                 .update(cx, |this, cx| {
                                     this.account_menu_open = false;
                                     if !this.inbox.open {
-                                        this.toggle_inbox(cx);
+                                        this.toggle_inbox(window, cx);
                                     }
                                 })
                                 .ok();
@@ -1367,7 +1367,7 @@ impl Workspace {
                     // Con el panel abierto el globo de ayuda sobra, y se
                     // quedaba encima de su cabecera tapando «Marcar todo leído».
                     .when(!inbox_open, |this| this.tooltip(move |window, cx| Tooltip::new(bell_hint.clone()).build(window, cx)))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_inbox(cx)))
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_inbox(window, cx)))
                     .test_support(),
             )
             .test_support()
@@ -2129,6 +2129,7 @@ impl Render for Workspace {
         let task = snapshot.task.task_id.is_some().then(|| self.task.clone());
         let pinned = self.panel_pinned;
         let peeking = !pinned && (self.over_rail || self.over_panel);
+        let inbox = self.render_inbox(cx);
         div()
             .id("open")
             .test_support()
@@ -2140,10 +2141,10 @@ impl Render for Workspace {
             // que tiene el foco lo oye antes, y el editor de markdown se
             // queda con esa tecla para la negrita (`editor.rs` corta ahí la
             // subida). Qué pulsación es la del panel lo dice el core.
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 // Escape cierra el panel de la campana, que no tiene el foco.
                 if this.inbox.open && event.keystroke.key == "escape" {
-                    this.close_inbox(cx);
+                    this.close_inbox(window, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -2191,7 +2192,7 @@ impl Render for Workspace {
                             .child(div().flex_1().min_h_0().overflow_hidden().child(main)),
                     )
                     // El panel de la campana, por encima de todo lo de abajo.
-                    .children(self.render_inbox(cx))
+                    .children(inbox)
                     // Suelto y con el ratón en el riel o en él: asomado por
                     // encima de la vista, sin empujarla.
                     .when(peeking, |this| {

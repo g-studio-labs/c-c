@@ -196,6 +196,49 @@ impl Composer {
 }
 
 impl ChatView {
+    /// Lo escrito para esa conversación, que se lleva la vista rápida de la
+    /// campana: sale de la caja si es la suya, o de su borrador, y vuelve con
+    /// [`Self::give_draft`]. Así hay un solo borrador por conversación, y lo
+    /// que se empieza en un sitio se sigue en el otro. A qué se responde se
+    /// queda aquí: la vista rápida no lo enseña.
+    pub(crate) fn take_draft(&mut self, conversation: &Conversation, window: &mut Window, cx: &mut Context<Self>) -> InputContent {
+        if self.composer.of.as_ref() == Some(conversation) {
+            let content = self.composer.field.read(cx).content();
+            self.composer.field.update(cx, |field, cx| field.set_value("", window, cx));
+            return content;
+        }
+        let Some(at) = self.composer.drafts.iter().position(|draft| &draft.conversation == conversation) else { return InputContent::new("") };
+        let content = std::mem::replace(&mut self.composer.drafts[at].content, InputContent::new(""));
+        if self.composer.drafts[at].reply.is_none() {
+            self.composer.drafts.remove(at);
+        }
+        content
+    }
+
+    /// Devuelve lo que se llevó la vista rápida, tal como quedó.
+    pub(crate) fn give_draft(&mut self, conversation: Conversation, content: InputContent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.composer.of.as_ref() == Some(&conversation) {
+            self.composer.field.update(cx, |field, cx| {
+                field.set_value(content, window, cx);
+                let end = field.value().len();
+                field.set_selected_range(end..end, cx);
+            });
+            cx.notify();
+            return;
+        }
+        let blank = content.text().trim().is_empty();
+        match self.composer.drafts.iter().position(|draft| draft.conversation == conversation) {
+            Some(at) => {
+                self.composer.drafts[at].content = content;
+                if blank && self.composer.drafts[at].reply.is_none() {
+                    self.composer.drafts.remove(at);
+                }
+            }
+            None if !blank => self.composer.drafts.push(Draft { conversation, content, reply: None }),
+            None => {}
+        }
+    }
+
     /// De qué conversación es la caja: la que se tiene delante.
     pub(crate) fn composer_conversation(&self) -> Option<Conversation> {
         self.composer.of.clone()
