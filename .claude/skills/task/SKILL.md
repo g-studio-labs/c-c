@@ -49,7 +49,7 @@ cd <worktree> && (unset CLAUDE_CONFIG_DIR; command claude --bg \
   --name "<n>-builder" "$(cat <brief.md>)")
 ```
 
-`command` salta la función de zsh que pregunta la cuenta; cac va con la de `~/.claude`. `--model opus` si toca. El brief (en un fichero, fuera del repo) le dice que ya está aislado en su worktree, que lea `.claude/agents/builder.md` y lo siga, y lleva todo lo demás, porque empieza sin contexto:
+`command` salta la función de zsh que pregunta la cuenta; cac va con la de `~/.claude`. `--model opus` si toca. El brief (en un fichero, fuera del repo) le dice que ya está aislado en su worktree, que empiece con la skill `cac-work` (`sigue <ref>`) —así reclama, lee el handoff y deja el suyo, y jose ve en el tablero cuánto falta—, que lea `.claude/agents/builder.md` y lo siga, y lleva todo lo demás, porque empieza sin contexto:
 - la ref y qué se hace, en dos o tres frases;
 - el criterio de aceptación;
 - el plan, si lo hubo;

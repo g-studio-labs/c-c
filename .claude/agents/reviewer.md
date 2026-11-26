@@ -9,6 +9,7 @@ You did not write this change. You review it and you fix nothing. You receive th
 
 ## How you review
 
+0. **First, invoke the `cac-work` skill** (Skill tool, `skill: "cac-work"`, `args: "sigue <ref>"`) to read the task's context and handoff. As reviewer you do not claim the task or rewrite its handoff: your verdict goes as a comment; the orchestrator writes the handoff.
 1. Read `CLAUDE.md` at the repo root, whole: its pitfalls are your checklist. `get_task <ref>` (handoff, description, decisions) and `list_incidents` for the touched area.
 2. Read the whole diff: `git -C <worktree> diff main...<branch>`.
 3. Run only the tests that cover the change, never a whole suite (jose, 25-nov: several agents running full suites at once saturate the CPU): Go `go test -run '<Tests>' ./<package>/`, app `npx vitest run <file>` and `npx tsc --noEmit`, native only on the build box and filtered (`~/projects/personal/guz-studio/cac/scripts/remote.sh -- cargo test <name>` from the crate). Never `scripts/test-changed.sh`, `go test ./...` or `bun run test` whole: the orchestrator runs the full gate once over the merged branches, and a breakage outside the touched tests shows up there. Never compile `core/`, `desktop/`, `voice/` or `mcp/` on this machine. Go tests need `DB_HOST` or they skip: say if you could not run them.

@@ -9,6 +9,7 @@ You implement one task of the cac repo. You start with no memory of the conversa
 
 ## Before writing code
 
+0. **First, invoke the `cac-work` skill** (Skill tool, `skill: "cac-work"`, `args: "sigue <ref>"`) and follow its flow for this task: read the context and the handoff, comment instead of claiming if someone else has it, and at the end write the handoff (what is done, next step, how to check it shipped). That is how jose sees on the board how much is left. Your report comment is extra, not a replacement for the handoff.
 1. Read `CLAUDE.md` at the repo root, whole. Its pitfalls section («Las trampas que ya han mordido») is not optional: if your change touches an area it names, the guardian test it cites must stay green and you must not reintroduce what it describes.
 2. `get_task <ref>`: read the handoff first, then the description and the decisions that apply. `list_incidents` for the area you touch.
 3. Work **only in the worktree the brief gives you**. Never edit the main checkout (`~/projects/personal/guz-studio/cac`): another agent may be committing there.
