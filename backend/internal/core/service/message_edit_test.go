@@ -17,8 +17,10 @@ import (
 // nadie); no avisar a quien contestaba el original; avisar a quien corrige;
 // poner el texto de un directo en el aviso; no decir que lo corrigió un
 // agente; dejar que el token de un superadmin corrija o retire lo ajeno;
-// dejar que un token retire lo que la persona tecleó; avisar al retirar; y
-// no cambiar la marca `via` al corregir.
+// dejar que un token retire lo que la persona tecleó, también después de
+// corregirlo el agente; avisar al retirar; no cambiar la marca `via` al
+// corregir; avisar de lo que corrige quien no es el autor; y avisar a quien
+// nombra el texto nuevo en vez de a quien nombraba el original.
 
 // editSpy: un espía que guarda el aviso entero, cuerpo incluido.
 type editSpy struct{ all []domain.Aviso }
@@ -183,11 +185,85 @@ func TestATokenWithdrawsOnlyWhatAnAgentWrote(t *testing.T) {
 	if err := svc.WithdrawAs(anasAgent, byAgent.ID); err != nil {
 		t.Errorf("lo que escribió el agente sí: %v", err)
 	}
+	// Corregido por el agente, sigue siendo lo que ana tecleó: el agente no lo
+	// retira por haberle cambiado el texto.
+	if err := svc.EditAs(anasAgent, typed.ID, "lo tecleé yo, corregido"); err != nil {
+		t.Fatal(err)
+	}
+	spy.all = nil
+	if err := svc.WithdrawAs(anasAgent, typed.ID); !errors.Is(err, ErrTokenWithdrawsOnlyAgentWords) {
+		t.Errorf("corregir con el agente no lo vuelve retirable por un token: %v", err)
+	}
 	if err := svc.WithdrawAs(domain.MessageChanger{UserID: ana}, typed.ID); err != nil {
 		t.Errorf("ana en la app retira lo suyo: %v", err)
 	}
 	if len(spy.all) != 0 {
 		t.Errorf("retirar no deja aviso en la campana: %+v", spy.all)
+	}
+}
+
+// Sólo avisa la corrección de quien escribió el mensaje. Un superadmin que
+// limpia el de otro no le dice a nadie «<superadmin> editó su mensaje», que
+// sería falso: el mensaje no es suyo.
+func TestOnlyTheAuthorsCorrectionTellsAnyone(t *testing.T) {
+	db, cleanup := chatFollowDB(t)
+	defer cleanup()
+	spy := &editSpy{}
+	svc := NewChatService(repository.NewChatRepository(db), nil).WithNotifier(spy)
+
+	m, err := svc.Post("esp-1", "org-1", ana, "oye [bea](cac:user/"+bea+")")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spy.all = nil
+	root := domain.MessageChanger{UserID: caro, Superadmin: true}
+	if err := svc.EditAs(root, m.ID, "oye [bea](cac:user/"+bea+"), limpio"); err != nil {
+		t.Fatal(err)
+	}
+	if len(spy.all) != 0 {
+		t.Errorf("caro corrigió lo de ana: no hay «caro editó su mensaje», %+v", spy.all)
+	}
+
+	ddb, dcleanup := dmDB(t)
+	defer dcleanup()
+	repo := repository.NewDMRepository(ddb)
+	dspy := &editSpy{}
+	dms := NewDMService(repo, nil).WithNotifier(dspy)
+	c, _ := repo.OpenWith("org-1", "u-ana", "u-bea")
+	dm, err := dms.Post(c.ID, "u-ana", "¿vienes?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dspy.all = nil
+	// bea es superadmin y está en la conversación: corrige lo de ana, y ana
+	// no recibe «bea editó su mensaje».
+	if err := dms.EditAs(domain.MessageChanger{UserID: "u-bea", Superadmin: true}, c.ID, dm.ID, "limpio"); err != nil {
+		t.Fatal(err)
+	}
+	if len(dspy.all) != 0 {
+		t.Errorf("un superadmin que corrige un directo ajeno no avisa en nombre de nadie: %+v", dspy.all)
+	}
+}
+
+// El aviso de una corrección va a quien avisó **el original**, no a quien
+// nombra el texto nuevo: a ésa ya le llega su mención como siempre, y a quien
+// nombraba el original es a quien le cambiaron lo que leyó.
+func TestAnEditTellsWhoTheOriginalNamedNotTheNewText(t *testing.T) {
+	db, cleanup := chatFollowDB(t)
+	defer cleanup()
+	spy := &editSpy{}
+	svc := NewChatService(repository.NewChatRepository(db), nil).WithNotifier(spy)
+
+	m, err := svc.Post("esp-1", "org-1", ana, "[bea](cac:user/"+bea+") lo revisa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spy.all = nil
+	if err := svc.Edit(m.ID, ana, false, "[caro](cac:user/"+caro+") lo revisa"); err != nil {
+		t.Fatal(err)
+	}
+	if got := recipients(spy.of(domain.MessageEditedChat)); len(got) != 1 || got[0] != bea {
+		t.Errorf("el aviso de corrección es para bea, a quien nombraba el original: %v", got)
 	}
 }
 
@@ -233,8 +309,15 @@ func TestEditingADirectMessageTellsTheOtherWithoutTheText(t *testing.T) {
 	if err := dms.WithdrawAs(agent, c.ID, typed.ID); !errors.Is(err, ErrTokenWithdrawsOnlyAgentWords) {
 		t.Errorf("un token no retira lo que ana tecleó: %v", err)
 	}
-	// El que corrigió el agente quedó «vía agente», así que el agente sí.
-	if err := dms.WithdrawAs(agent, c.ID, m.ID); err != nil {
+	// m lo tecleó ana y lo corrigió su agente: sigue sin ser del agente.
+	if err := dms.WithdrawAs(agent, c.ID, m.ID); !errors.Is(err, ErrTokenWithdrawsOnlyAgentWords) {
+		t.Errorf("corregir con el agente no lo vuelve retirable por un token: %v", err)
+	}
+	byAgent, err := dms.ReplyVia(domain.ViaMCP, c.ID, "u-ana", "lo dejó el agente", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dms.WithdrawAs(agent, c.ID, byAgent.ID); err != nil {
 		t.Errorf("lo que dejó el agente sí: %v", err)
 	}
 	if len(spy.all) != 0 {

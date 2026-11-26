@@ -545,7 +545,7 @@ func (s *ChatService) WithdrawAs(by domain.MessageChanger, messageID string) err
 	if !authoredBy(m, by) {
 		return ErrNotTheAuthor
 	}
-	if !by.MayWithdraw(m.Via) {
+	if !by.MayWithdraw(m.CreatedVia) {
 		return ErrTokenWithdrawsOnlyAgentWords
 	}
 	if err := s.repo.Withdraw(messageID); err != nil {

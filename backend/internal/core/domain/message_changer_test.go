@@ -25,3 +25,27 @@ func TestATokenChangesMessagesAsAnAgentAndNeverAsSuperadmin(t *testing.T) {
 		t.Errorf("lo que dice venir del MCP queda marcado: %+v", viaHeader)
 	}
 }
+
+// Que corrijan un mensaje es de la misma familia que el mensaje: se calla con
+// el mismo interruptor (command-and-control-547).
+//
+// Roturas que detecta: sacar `dm:edited` o `chat:edited` de su caso, que los
+// dejaría sonar a quien calló los directos o los mensajes del canal.
+func TestAnEditIsSilencedLikeItsMessage(t *testing.T) {
+	quiet := DefaultPrefs("u")
+	quiet.DMs = false
+	if quiet.Allows(MessageEditedDM) {
+		t.Error("quien calló los directos no oye que corrigieron uno")
+	}
+	if !quiet.Allows(MessageEditedChat) {
+		t.Error("callar los directos no calla los canales")
+	}
+	quiet = DefaultPrefs("u")
+	quiet.Messages = false
+	if quiet.Allows(MessageEditedChat) {
+		t.Error("quien calló los mensajes del canal no oye que corrigieron uno")
+	}
+	if !quiet.Allows(MessageEditedDM) {
+		t.Error("callar los canales no calla los directos")
+	}
+}

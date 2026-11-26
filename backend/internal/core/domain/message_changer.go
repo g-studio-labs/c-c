@@ -47,10 +47,11 @@ func (c MessageChanger) WrittenVia() string {
 	return ViaApp
 }
 
-// MayWithdraw: un token sólo retira lo que escribió un agente (`via = mcp`),
-// nunca lo que la persona tecleó en la app. La autoría se comprueba aparte.
-func (c MessageChanger) MayWithdraw(messageVia string) bool {
-	return !c.ViaToken || messageVia == ViaMCP
+// MayWithdraw: un token sólo retira lo que **creó** un agente (`created_via
+// = mcp`), nunca lo que la persona tecleó en la app, aunque después lo haya
+// corregido un agente. La autoría se comprueba aparte.
+func (c MessageChanger) MayWithdraw(createdVia string) bool {
+	return !c.ViaToken || createdVia == ViaMCP
 }
 
 // Las clases del aviso «editó su mensaje». Una por familia y no una sola:

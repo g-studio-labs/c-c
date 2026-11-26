@@ -86,6 +86,9 @@ type DMMessage struct {
 	// Via: por dónde entró (ver via.go). `mcp` lo escribió un agente con el
 	// token de AuthorUserID; la app lo enseña «vía agente» (22-oct-2026).
 	Via string `gorm:"type:varchar(10);not null;default:''" json:"via,omitempty"`
+	// CreatedVia: por dónde se escribió al crearse; no cambia al corregir.
+	// Ver ChatMessage.CreatedVia.
+	CreatedVia string `gorm:"type:varchar(10);not null;default:''" json:"-"`
 	// ReplyToID: el mensaje de la misma conversación al que éste contesta. Ver
 	// domain/reply.go.
 	ReplyToID *string `gorm:"type:varchar(36)" json:"replyToId,omitempty"`
@@ -188,4 +191,10 @@ type DMAttachment struct {
 // DMAttachmentRef: relativa a propósito, como ChatAttachmentRef.
 func DMAttachmentRef(conversationID, attachmentID string) string {
 	return "/api/v1/dm/" + conversationID + "/attachments/" + attachmentID + "/raw"
+}
+
+// BeforeCreate: ver ChatMessage.BeforeCreate.
+func (m *DMMessage) BeforeCreate(tx *gorm.DB) error {
+	m.CreatedVia = NormalizeVia(m.Via)
+	return m.BaseModel.BeforeCreate(tx)
 }

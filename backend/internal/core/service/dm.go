@@ -300,7 +300,7 @@ func (s *DMService) WithdrawAs(by domain.MessageChanger, conversationID, message
 	if err != nil {
 		return err
 	}
-	if !by.MayWithdraw(m.Via) {
+	if !by.MayWithdraw(m.CreatedVia) {
 		return ErrTokenWithdrawsOnlyAgentWords
 	}
 	if err := s.repo.Withdraw(messageID); err != nil {

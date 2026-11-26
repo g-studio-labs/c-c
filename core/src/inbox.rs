@@ -808,9 +808,6 @@ mod tests {
         assert_eq!(flags(panel(true, true)), (false, false, true), "una relectura fallida no tapa lo que llegó");
     }
 
-    /// A dónde lleva cada enlace. Roturas que atrapa: confundir un canal con
-    /// un directo; no entender la documentación; llevar a un sitio que esta
-    /// app no tiene.
     /// «Ana editó su mensaje» (command-and-control-547). Roturas que atrapa:
     /// que caiga en «Sistema» sin etiqueta, como una clase desconocida; que no
     /// se pliegue con su canal o su directo; o que no lleve a la conversación.
@@ -832,6 +829,9 @@ mod tests {
         assert_eq!(link_target(&direct.link), InboxTarget::Conversation { conversation: Conversation::Direct { conversation_id: "c1".into() } });
     }
 
+    /// A dónde lleva cada enlace. Roturas que atrapa: confundir un canal con
+    /// un directo; no entender la documentación; llevar a un sitio que esta
+    /// app no tiene.
     #[test]
     fn where_a_link_goes() {
         assert_eq!(link_target("/chat?space=s1"), InboxTarget::Conversation { conversation: Conversation::Channel { space_id: "s1".into() } });

@@ -74,6 +74,8 @@ func DBConnection() {
 	migrateRanks(db)
 	// Y la última huella del widget, que ya no lee nadie. Ver widget_migration.go.
 	dropWidgetColumns(db)
+	// Y con qué vía se creó cada mensaje, rellenada una vez. Ver created_via_migration.go.
+	addCreatedVia(db)
 
 	if err := db.AutoMigrate(
 		&domain.User{},

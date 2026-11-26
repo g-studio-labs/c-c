@@ -71,6 +71,11 @@ type ChatMessage struct {
 	// Via: por dónde entró (ver via.go). `mcp` lo escribió un agente con el
 	// token de AuthorUserID; la app lo enseña «vía agente» (22-oct-2026).
 	Via string `gorm:"type:varchar(10);not null;default:''" json:"via,omitempty"`
+	// CreatedVia: por dónde se escribió **al crearse**, y no cambia nunca.
+	// `Via` sigue a la última corrección; esto decide si un token puede
+	// retirar el mensaje. Sin él, corregir con el agente lo que la persona
+	// tecleó lo dejaba «vía agente» y retirable (command-and-control-547).
+	CreatedVia string `gorm:"type:varchar(10);not null;default:''" json:"-"`
 	// ReplyToID: el mensaje del mismo canal al que éste contesta. Ver
 	// domain/reply.go.
 	ReplyToID *string `gorm:"type:varchar(36)" json:"replyToId,omitempty"`
@@ -325,4 +330,11 @@ type VoiceRingCancel struct {
 	SpaceID  string  `json:"spaceId"`
 	From     string  `json:"from"`
 	InviteID *string `json:"inviteId,omitempty"`
+}
+
+// BeforeCreate fija CreatedVia con la marca con la que nace el mensaje, por
+// cualquier camino que lo cree.
+func (m *ChatMessage) BeforeCreate(tx *gorm.DB) error {
+	m.CreatedVia = NormalizeVia(m.Via)
+	return m.BaseModel.BeforeCreate(tx)
 }
