@@ -3130,6 +3130,37 @@ fn tool_defs() -> Value {
             }
         },
         {
+            "name": "edit_message",
+            "description": "Correct one of your own messages in a channel or in a direct message: its text becomes `text`. Only messages the token's owner wrote (typed or by an agent); anyone else's is refused, and the answer says why. People see it was edited: in a direct message the other person, and in a channel whoever the message named or answered, get a notification saying the owner's agent edited their message, and the new text is marked as written by an agent. So, as with send_message: show the user the new text and get a yes first. `messageId` comes from read_messages or from send_message's answer. Needs `chat:manage`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "channel": { "type": "string", "description": "The space whose chat the message is in: its id, or its name. Give this or `person`." },
+                    "person": { "type": "string", "description": "The other person of the direct conversation: their username, or their full display name when only one person has it. Give this or `channel`." },
+                    "orgId": { "type": "string", "description": "Optional, for `person`: the organization of the conversation, when you have one with them in more than one." },
+                    "messageId": { "type": "string", "description": "The message's id, from read_messages or send_message." },
+                    "text": { "type": "string", "description": "The whole new text. Markdown, up to 8000 characters." },
+                    "dryRun": { "type": "boolean" }
+                },
+                "required": ["messageId", "text"]
+            }
+        },
+        {
+            "name": "withdraw_message",
+            "description": "Withdraw a message from a channel or a direct message: it disappears for everyone, without notifying anybody. A token only withdraws messages an agent wrote for its owner (`viaAgent: true` in read_messages); what the person typed themselves is refused, and only they can withdraw it, in cac. Confirm with the user before withdrawing. Needs `chat:manage`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "channel": { "type": "string", "description": "The space whose chat the message is in: its id, or its name. Give this or `person`." },
+                    "person": { "type": "string", "description": "The other person of the direct conversation: their username, or their full display name when only one person has it. Give this or `channel`." },
+                    "orgId": { "type": "string", "description": "Optional, for `person`: the organization of the conversation, when you have one with them in more than one." },
+                    "messageId": { "type": "string", "description": "The message's id, from read_messages or send_message." },
+                    "dryRun": { "type": "boolean" }
+                },
+                "required": ["messageId"]
+            }
+        },
+        {
             "name": "find_person",
             "description": "Find people in your organizations by first name, full name or username: each match's `username` (what send_message, read_messages, assignees and @mentions take), display `name`, `orgId`, role, and whether you already have a direct `conversation` with them. Exact username or full name first; otherwise every partial match. Without name, everyone. Use it when you know how someone is called but not their username. Read-only.",
             "inputSchema": {
@@ -4759,6 +4790,30 @@ fn run_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                 }
             }
             Ok(out)
+        }
+
+        "edit_message" | "withdraw_message" => {
+            let id = arg_str(args, "messageId").ok_or("messageId is required")?;
+            let editing = name == "edit_message";
+            let text = if editing { Some(arg_str(args, "text").ok_or("text is required")?) } else { None };
+            let (path, where_) = match chat_read_target(cfg, args)? {
+                (Some(p), w) => (p, w),
+                (None, w) => return Err(format!("You have no direct conversation with {w}: there is no message of yours there to change.")),
+            };
+            if arg_bool(args, "dryRun") {
+                return dry_run(cfg, "chat:manage", Ok(json!({})));
+            }
+            let url = format!("{path}/{}", urlencode(&id));
+            match text {
+                Some(t) => {
+                    api_patch(cfg, &url, json!({ "body": t })).map_err(|e| explain_message_refusal(&e, &where_))?;
+                    Ok(json!({ "edited": true, "where": where_, "id": id, "viaAgent": true }))
+                }
+                None => {
+                    api_delete(cfg, &url).map_err(|e| explain_message_refusal(&e, &where_))?;
+                    Ok(json!({ "withdrawn": true, "where": where_, "id": id }))
+                }
+            }
         }
 
         "find_person" => {
@@ -6940,7 +6995,7 @@ fn is_read_only(name: &str) -> bool {
 
 /// Lo que borra o reemplaza entero algo que otra persona pudo escribir.
 fn is_destructive(name: &str) -> bool {
-    name.starts_with("delete_") || matches!(name, "write_doc_tab" | "write_doc_page" | "revoke_doc_share" | "withdraw_request")
+    name.starts_with("delete_") || matches!(name, "write_doc_tab" | "write_doc_page" | "revoke_doc_share" | "withdraw_request" | "edit_message" | "withdraw_message")
 }
 
 /// La sección del overview donde va lo que ya mordió a alguien. El nombre es
@@ -7324,6 +7379,28 @@ fn chat_target(cfg: &Cfg, args: &Value) -> Result<ChatTarget, String> {
         }
         _ => Err("Pass exactly one of channel or person.".into()),
     }
+}
+
+/// El porqué de un «no» al corregir o retirar un mensaje, dicho para que el
+/// agente se lo cuente a la persona (command-and-control-547). El servidor
+/// contesta con la etiqueta (`not-the-author`), y `explain_write_failure` deja
+/// sólo ésa en un 403.
+fn explain_message_refusal(e: &str, where_: &str) -> String {
+    if e.contains("agent-messages-only") {
+        return "That message was typed by its author, not written by an agent: a token only withdraws what an agent wrote. \
+                Only they can withdraw it, in cac (it can still be corrected with edit_message)."
+            .into();
+    }
+    if e.contains("not-the-author") {
+        return "That message is not yours: a token only edits or withdraws what its owner wrote, never anyone else's.".into();
+    }
+    if e.contains("not-a-user-message") {
+        return "That line was written by cac, not by a person: nobody edits or withdraws it.".into();
+    }
+    if e.contains("not-found") || e.contains("404") {
+        return format!("There is no such message in {where_}: take its id from read_messages.");
+    }
+    e.to_string()
 }
 
 /// Dónde leer, sin abrir nada: un directo se busca en tus conversaciones (abrir
@@ -9975,6 +10052,51 @@ mod tests {
         let out = call_tool(&cfg, "read_messages", &json!({ "person": "nadie" })).unwrap();
         assert_eq!(out["messages"].as_array().unwrap().len(), 0);
         assert!(out["note"].as_str().unwrap().contains("no direct conversation"), "{out}");
+    }
+
+    /// Corregir y retirar un mensaje propio (command-and-control-547).
+    ///
+    /// Roturas que detecta: corregir o retirar en otra ruta que la del mensaje
+    /// (o con otro método); abrir un directo para corregir (abrir es escribir);
+    /// mandar el texto con otro nombre que `body`; contestar el «no» del
+    /// servidor con su etiqueta a secas en vez del porqué; pedir un scope que
+    /// no es `chat:manage` en el ensayo; o no marcarlas como destructivas.
+    #[test]
+    fn a_message_is_corrected_or_withdrawn_where_it_is_and_a_refusal_says_why() {
+        let msg = "0b9c2f4e-6a1d-4c3b-9e8f-1a2b3c4d5e6f";
+        let (cfg, log) = fake_cac(move |m, p, _| match (m, p) {
+            ("GET", "/api/v1/task-spaces/") => json!([{ "id": "s1", "name": "Proteus", "orgId": "o1" }]),
+            ("GET", "/api/v1/dm") => json!([{ "conversationId": "conv-d", "userId": "u-d", "orgId": "o1", "username": "diego" }]),
+            ("GET", "/api/v1/auth/me") => json!({ "scopes": ["chat:write", "chat:manage"] }),
+            ("GET", _) if p.ends_with("/members") => json!([{ "username": "diego", "userId": "u-d" }, { "username": "july", "userId": "u-y" }]),
+            ("PATCH", _) if p.ends_with("/ajeno") => json!({ "__status": 403, "error": "not-the-author", "message": "Only the person who wrote this can change it." }),
+            ("DELETE", _) if p.ends_with("/tecleado") => json!({ "__status": 403, "error": "agent-messages-only", "message": "A token can only withdraw messages an agent wrote" }),
+            _ => json!({}),
+        });
+
+        let out = call_tool(&cfg, "edit_message", &json!({ "channel": "Proteus", "messageId": msg, "text": "PR #12 listo" })).unwrap();
+        assert_eq!((out["edited"].as_bool(), out["where"].as_str()), (Some(true), Some("#Proteus")), "{out}");
+        call_tool(&cfg, "withdraw_message", &json!({ "person": "diego", "messageId": msg })).unwrap();
+        let calls: Vec<(String, String, Value)> = log.lock().unwrap().clone();
+        assert!(calls.iter().any(|(m, p, b)| m == "PATCH" && *p == format!("/api/v1/task-spaces/s1/chat/{msg}") && b["body"] == "PR #12 listo"), "{calls:?}");
+        assert!(calls.iter().any(|(m, p, _)| m == "DELETE" && *p == format!("/api/v1/dm/conv-d/messages/{msg}")), "{calls:?}");
+        assert!(!calls.iter().any(|(_, p, _)| p == "/api/v1/dm/open"), "corregir no abre un directo");
+
+        let e = call_tool(&cfg, "edit_message", &json!({ "channel": "Proteus", "messageId": "ajeno", "text": "x" })).unwrap_err();
+        assert!(e.contains("not yours") && e.contains("never anyone else's"), "{e}");
+        let e = call_tool(&cfg, "withdraw_message", &json!({ "person": "diego", "messageId": "tecleado" })).unwrap_err();
+        assert!(e.contains("typed by its author") && e.contains("only withdraws what an agent wrote"), "{e}");
+        let e = call_tool(&cfg, "withdraw_message", &json!({ "person": "july", "messageId": msg })).unwrap_err();
+        assert!(e.contains("no direct conversation with @july"), "{e}");
+
+        let dry = call_tool(&cfg, "edit_message", &json!({ "channel": "Proteus", "messageId": msg, "text": "x", "dryRun": true })).unwrap();
+        assert_eq!(dry["requiredScope"], "chat:manage", "{dry}");
+
+        let defs = tool_catalog();
+        for name in ["edit_message", "withdraw_message"] {
+            assert_eq!(tool(&defs, name)["annotations"]["destructiveHint"], true, "{name}");
+            assert!(tool(&defs, name)["description"].as_str().unwrap().contains("chat:manage"), "{name}");
+        }
     }
 
     /// Roturas que detecta: devolver la ruta suelta (`/tasks?…`, que pegada

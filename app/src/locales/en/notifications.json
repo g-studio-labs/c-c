@@ -36,7 +36,8 @@
     "backup": "backup",
     "post": "feedback",
     "postComment": "comment",
-    "postDraft": "draft"
+    "postDraft": "draft",
+    "edited": "edited"
   },
   "prefs": {
     "title": "What reaches you",

@@ -36,7 +36,8 @@
     "backup": "backup",
     "post": "feedback",
     "postComment": "comentario",
-    "postDraft": "borrador"
+    "postDraft": "borrador",
+    "edited": "editado"
   },
   "prefs": {
     "title": "Qué te llega",

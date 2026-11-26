@@ -176,6 +176,10 @@ fn kind_of(kind: &str) -> (InboxTab, Option<&'static str>, InboxIcon, InboxTone)
         "chat:mention" => (T::Talk, Some("mention"), I::Mention, C::Primary),
         "dm:message" => (T::Talk, Some("direct"), I::Direct, C::Primary),
         "chat:message" => (T::Talk, Some("channel"), I::Channel, C::Muted),
+        // Alguien corrigió un mensaje que te avisó (command-and-control-547):
+        // de la misma conversación que el original, apagado como lo corriente.
+        "chat:edited" => (T::Talk, Some("edited"), I::Channel, C::Muted),
+        "dm:edited" => (T::Talk, Some("edited"), I::Direct, C::Muted),
         "post:feedback" => (T::Talk, Some("post"), I::Post, C::Primary),
         "post:comment" => (T::Talk, Some("postComment"), I::Post, C::Muted),
         "post:draft" => (T::Tasks, Some("postDraft"), I::Post, C::Primary),
@@ -807,6 +811,27 @@ mod tests {
     /// A dónde lleva cada enlace. Roturas que atrapa: confundir un canal con
     /// un directo; no entender la documentación; llevar a un sitio que esta
     /// app no tiene.
+    /// «Ana editó su mensaje» (command-and-control-547). Roturas que atrapa:
+    /// que caiga en «Sistema» sin etiqueta, como una clase desconocida; que no
+    /// se pliegue con su canal o su directo; o que no lleve a la conversación.
+    #[test]
+    fn an_edited_message_reads_as_talk_and_leads_to_its_conversation() {
+        let edited = |kind: &str, link: &str| InboxItem { link: link.into(), ..item("e", kind, "2026-11-18T11:00:00Z", false) };
+        let channel = edited("chat:edited", "/chat?space=s1");
+        let direct = edited("dm:edited", "/dm?c=c1");
+        for (it, icon) in [(&channel, InboxIcon::Channel), (&direct, InboxIcon::Direct)] {
+            let (tab, _, _, _) = kind_of(&it.kind);
+            assert_eq!(tab, InboxTab::Talk, "{}", it.kind);
+            let row = row_of(it, &now(), Locale::Es);
+            assert_eq!((row.tag.as_deref(), row.icon), (Some("editado"), icon), "{}", it.kind);
+            assert_eq!(row_of(it, &now(), Locale::En).tag.as_deref(), Some("edited"));
+        }
+        assert_eq!(group_key_of(&channel), "space:s1");
+        assert_eq!(group_key_of(&direct), "dm:c1");
+        assert_eq!(link_target(&channel.link), InboxTarget::Conversation { conversation: Conversation::Channel { space_id: "s1".into() } });
+        assert_eq!(link_target(&direct.link), InboxTarget::Conversation { conversation: Conversation::Direct { conversation_id: "c1".into() } });
+    }
+
     #[test]
     fn where_a_link_goes() {
         assert_eq!(link_target("/chat?space=s1"), InboxTarget::Conversation { conversation: Conversation::Channel { space_id: "s1".into() } });
