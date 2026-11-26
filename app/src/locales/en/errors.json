@@ -54,6 +54,8 @@
   "basecamp-not-connected": "Basecamp isn't connected to this organization.",
   "basecamp-unreachable": "Basecamp didn't answer. Try again in a moment.",
   "basecamp-failed": "Basecamp failed on its side of the request.",
+  "basecamp-bad-url": "That link isn't from the connected Basecamp account.",
+  "basecamp-link-taken": "That Basecamp item is already linked to another task.",
   "user-outside-org": "That user isn't in this organization.",
   "github-off": "This cac server doesn't have the GitHub App configured.",
   "image-service-not-configured": "Images aren't set up on this server.",
