@@ -273,7 +273,7 @@ func (s *GitHubService) inheritance(repo *domain.GitHubRepo, tag, base string, a
 		return nil, err
 	}
 	if total > len(missing) {
-		lg.Warn(fmt.Sprintf("github: %s: %s no hereda de %s: le faltan %d commits de la base y sólo se listan %d",
+		lg.Warn(fmt.Sprintf("github: %s: %s does not inherit from %s: %d base commits are missing and only %d are listed",
 			repo.FullName, tag, base, total, len(missing)))
 		return nil, nil
 	}
