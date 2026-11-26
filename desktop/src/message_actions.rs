@@ -130,6 +130,16 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Lo que la burbuja deja libre a su derecha para la barra de acciones:
+    /// dos botones (responder, reaccionar) o cuatro si el mensaje es propio.
+    pub(crate) fn actions_gutter(line: &ThreadLine, can_write: bool) -> Pixels {
+        match (line.system || !can_write, line.can_edit) {
+            (true, _) => px(28.),
+            (false, false) => px(64.),
+            (false, true) => px(116.),
+        }
+    }
+
     /// La barra de acciones de un mensaje, en su esquina: se ve al pasar
     /// por él, o mientras se elige una reacción. Una línea de cac no tiene;
     /// quien no puede escribir, tampoco.
@@ -143,14 +153,16 @@ impl ChatView {
         let (replied, reacted, edited, withdrawn) = (line.clone(), id.clone(), id.clone(), id.clone());
         Some(
             div()
-                // Flota sobre el borde de arriba del mensaje: dentro de un
-                // mensaje corto taparía lo que dice.
+                // Dentro de la burbuja, arriba a la derecha (como en Tauri):
+                // sobre el borde de arriba caía en el hueco entre dos
+                // mensajes y no se sabía de cuál era. La burbuja reserva a su
+                // derecha lo que ocupa (`actions_gutter`) para no tapar el
+                // texto de un mensaje corto.
                 .absolute()
-                .top(px(-16.))
-                .right_2()
+                .top_1()
+                .right_1()
                 .flex()
                 .gap_0p5()
-                .p_0p5()
                 .rounded_md()
                 .border_1()
                 .border_color(border)
@@ -160,7 +172,7 @@ impl ChatView {
                 .child(
                     Button::new(SharedString::from(format!("thread-reply-{id}")))
                         .ghost()
-                        .small()
+                        .xsmall()
                         .icon(Icon::new(Lucide::CornerUpLeft).size_4())
                         .tooltip(tr(cx, "chat:reply"))
                         .on_click(cx.listener(move |this, _, window, cx| this.reply_to(&replied, window, cx))),
@@ -168,7 +180,7 @@ impl ChatView {
                 .child(
                     Button::new(SharedString::from(format!("thread-react-{id}")))
                         .ghost()
-                        .small()
+                        .xsmall()
                         .icon(Icon::new(Lucide::HeartPlus).size_4())
                         .tooltip(tr(cx, "chat:react"))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -180,7 +192,7 @@ impl ChatView {
                     this.child(
                         Button::new(SharedString::from(format!("thread-edit-{id}")))
                             .ghost()
-                            .small()
+                            .xsmall()
                             .icon(Icon::new(Lucide::Pencil).size_4())
                             .tooltip(tr(cx, "chat:edit"))
                             .on_click(cx.listener(move |this, _, window, cx| this.start_edit(edited.clone(), window, cx))),
@@ -188,7 +200,7 @@ impl ChatView {
                     .child(
                         Button::new(SharedString::from(format!("thread-withdraw-{id}")))
                             .ghost()
-                            .small()
+                            .xsmall()
                             .icon(Icon::new(Lucide::Trash).size_4())
                             .tooltip(tr(cx, "chat:withdraw"))
                             .on_click(cx.listener(move |this, _, window, cx| this.ask_withdraw(withdrawn.clone(), window, cx))),

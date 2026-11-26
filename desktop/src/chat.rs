@@ -754,15 +754,15 @@ impl ChatView {
             )
         });
         let flashed = self.flash.as_deref() == Some(id.as_str());
-        // Las acciones, en la esquina del mensaje al pasar por él (el hueco
-        // de `pr-12` es para esto).
+        // Las acciones, dentro de la burbuja, arriba a la derecha, al pasar
+        // por la fila (el hueco a la derecha de la burbuja es para esto).
         let can_write = Backend::snapshot(cx).read(cx).thread.can_write;
         let group = SharedString::from(format!("thread-row-{id}"));
         let actions = self.render_actions(&line, group.clone(), can_write, cx);
         let editor = self.render_editor(&line, cx);
         let editing = editor.is_some();
-        // `relative rounded-md py-1 pl-2 pr-12` (`pr-7` en una línea de
-        // cac); lo propio, `max-w-[75%] rounded-tr-sm border
+        // `relative rounded-md py-1 pl-2` más el hueco de las acciones (ver
+        // `actions_gutter`); lo propio, `max-w-[75%] rounded-tr-sm border
         // border-primary/25 bg-primary/10`; lo demás, su espejo con borde neutro.
         let bubble = div()
             .id(SharedString::from(format!("thread-bubble-{id}")))
@@ -771,7 +771,7 @@ impl ChatView {
             .rounded(px(8.))
             .py_1()
             .pl_2()
-            .map(|this| if line.system { this.pr_7() } else { this.pr_12() })
+            .pr(Self::actions_gutter(&line, can_write))
             .when(line.grouped, |this| this.mt_0p5())
             .map(|this| {
                 if line.mine {
@@ -804,8 +804,7 @@ impl ChatView {
         // `space-y-3`: cada fila deja doce píxeles con la de arriba, y la
         // primera, con el borde (el `p-3` de la caja).
         // Las acciones salen al pasar por la fila entera, no sólo por la
-        // burbuja: la barra flota sobre su borde de arriba, y subir el ratón
-        // hasta ella no la tiene que apagar.
+        // burbuja.
         div()
             .id(SharedString::from(format!("thread-line-{id}")))
             .group(group)
