@@ -2,6 +2,8 @@
   "title": "Notifications",
   "markAllRead": "Mark all read",
   "empty": "Nothing pending in this organization.",
+  "loadFailed": "Could not load your inbox.",
+  "markAllFailed": "Could not mark everything as read.",
   "read": "Read",
   "footer": "Clicking a system notification opens the thread here, in the app.",
   "expand": "Expand {{name}}",

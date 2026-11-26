@@ -14,13 +14,14 @@ use std::collections::HashSet;
 
 use cac_core::{InboxGroup, InboxIcon, InboxRow, InboxTab, InboxTarget, InboxTone, INBOX_TABS};
 use gpui_kit::assets::IconName as Lucide;
+use gpui_kit::component::button::Button;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme, Icon, IconName};
+use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::backend::Backend;
-use crate::lang::{locale, tr};
+use crate::lang::{error_text, locale, tr};
 use crate::theme::Leading as _;
 use crate::workspace::Workspace;
 
@@ -78,6 +79,22 @@ impl Workspace {
             Backend::run(cx, |core| async move { core.inbox().load().await });
         }
         cx.notify();
+    }
+
+    /// «Marcar todo leído». Si el servidor no lo acepta, lo dice: el número
+    /// ya bajó aquí, y sin aviso parecería hecho.
+    fn mark_all_read(&mut self, cx: &mut Context<Self>) {
+        self.inbox.said = None;
+        let answer = Backend::ask(cx, |core| async move { core.inbox().mark_all_read().await });
+        cx.spawn(async move |this, cx| {
+            let Ok(Err(error)) = answer.await else { return };
+            this.update(cx, |this, cx| {
+                this.inbox.said = Some(error_text(cx, &error, "notifications:markAllFailed"));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Lo cierra; Escape también (lo oye `workspace.rs`, que tiene el foco).
@@ -159,7 +176,7 @@ impl Workspace {
                                 .hover(move |style| style.text_color(foreground))
                                 .aria_label(label.clone())
                                 .child(label)
-                                .on_click(|_, _, cx| Backend::run(cx, |core| async move { let _ = core.inbox().mark_all_read().await; }))
+                                .on_click(cx.listener(|this, _, _, cx| this.mark_all_read(cx)))
                                 .test_support(),
                         )
                     })
@@ -206,6 +223,28 @@ impl Workspace {
         }));
 
         let mut list = div().id("inbox-list").flex_1().min_h_0().overflow_y_scroll().px_2().pb_2p5().pt_1p5().flex().flex_col();
+        if panel.loading {
+            list = list.child(div().id("inbox-loading").flex().flex_col().gap_1p5().px_1().py_1p5().children((0..4).map(|_| div().h(px(44.)).w_full().rounded_md().bg(muted.opacity(0.15)))).test_support());
+        }
+        if panel.failed {
+            let said = tr(cx, "notifications:loadFailed");
+            list = list.child(
+                div()
+                    .id("inbox-error")
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .px_2p5()
+                    .py_5()
+                    .leading_xs()
+                    .text_color(muted)
+                    .aria_label(said.clone())
+                    .child(said)
+                    .child(Button::new("inbox-retry").outline().small().label(tr(cx, "chat:retry")).on_click(|_, _, cx| Backend::run(cx, |core| async move { core.inbox().load().await })))
+                    .test_support(),
+            );
+        }
         if panel.empty {
             let said = tr(cx, "notifications:empty");
             list = list.child(div().id("inbox-empty").px_2p5().py_5().text_center().leading_xs().text_color(muted).aria_label(said.clone()).child(said).test_support());
@@ -711,6 +750,48 @@ mod tests {
         click(window, "notifications-bell", cx);
         wait_until(cx, "dice que no hay nada", |cx| label(window, "inbox-empty", cx) == "Nada pendiente en esta organización.");
         assert!(!on_screen(window, "inbox-mark-all", cx));
+        stop(cx);
+    }
+
+    /// Mientras no llega la bandeja no dice «Nada pendiente»: si la lectura
+    /// falla, dice que no pudo, con «Reintentar», y se recupera.
+    ///
+    /// Roturas que atrapa: «Nada pendiente» con la bandeja sin cargar; un
+    /// fallo mudo; un «Reintentar» que no vuelve a pedir.
+    #[gpui_kit::test]
+    fn a_failed_read_is_not_an_empty_inbox(cx: &mut TestAppContext) {
+        // El fallo se monta antes que la bandeja: con la misma prioridad gana el primero, y se agota tras una vez.
+        let server = server_with_tasks(vec![]);
+        let refusal = wiremock::ResponseTemplate::new(500).set_body_json(json!({ "success": false, "error": "boom", "message": "x" }));
+        server.mount(get("/api/v1/notifications/").and(query_param("limit", "50")).respond_with(refusal).up_to_n_times(1).with_priority(1));
+        let feed = json!({ "items": full_inbox(), "unread": 41, "groups": [{ "key": "chat:a", "label": "#Espacio a", "total": 40, "unread": 40 }] });
+        server.mount(get("/api/v1/notifications/").and(query_param("limit", "50")).respond_with(ok(feed)).with_priority(1));
+        server.mount(get("/api/v1/chat/latest").respond_with(ok(json!([]))));
+        server.mount(get("/api/v1/dm/").respond_with(ok(json!([]))));
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        click(window, "notifications-bell", cx);
+        wait_until(cx, "dice que no pudo", |cx| on_screen(window, "inbox-error", cx));
+        assert!(!on_screen(window, "inbox-empty", cx) && !on_screen(window, "inbox-loading", cx));
+
+        click(window, "inbox-retry", cx);
+        wait_until(cx, "llega la bandeja", |cx| on_screen(window, "inbox-group-chat:a", cx) && !on_screen(window, "inbox-error", cx));
+        stop(cx);
+    }
+
+    /// Si «Marcar todo leído» no lo acepta el servidor, el panel lo dice.
+    /// Rotura que atrapa: un fallo mudo.
+    #[gpui_kit::test]
+    fn mark_all_says_why_it_failed(cx: &mut TestAppContext) {
+        let server = server(full_inbox());
+        let refusal = wiremock::ResponseTemplate::new(500).set_body_json(json!({ "success": false, "error": "boom", "message": "Sin servicio" }));
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/notifications/read-all")).respond_with(refusal).with_priority(1));
+        server.install(cx);
+        let window = open(cx);
+        open_panel(window, cx);
+        click(window, "inbox-mark-all", cx);
+        wait_until(cx, "lo dice", |cx| !label(window, "inbox-said", cx).is_empty());
         stop(cx);
     }
 }

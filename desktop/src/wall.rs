@@ -43,6 +43,9 @@ struct Edit {
     title: Entity<InputState>,
     body: Entity<TextareaState>,
     audience: PostAudience,
+    /// Lo que tenía la publicación al empezar: con qué comparar para saber si
+    /// cerrar pierde algo.
+    original: (String, String),
     _subscriptions: Vec<Subscription>,
 }
 
@@ -51,6 +54,17 @@ struct Edit {
 enum Confirm {
     Post(String),
     Comment { post: String, comment: String },
+    /// Lo escrito en «Publicar» se perdería al cerrar.
+    DiscardCompose,
+    /// Lo cambiado de una publicación se perdería; con `close`, porque lo que
+    /// se pidió fue cerrarla entera.
+    DiscardEdit { close: bool },
+}
+
+/// Si lo que hay escrito difiere de con lo que se empezó (espacios de los
+/// extremos aparte): es lo que decide si cerrar pregunta antes.
+fn has_unsaved(title: &str, body: &str, original: (&str, &str)) -> bool {
+    title.trim() != original.0.trim() || body.trim() != original.1.trim()
 }
 
 /// De quién es el selector de reacciones abierto.
@@ -190,7 +204,7 @@ impl WallView {
         let body = cx.new(|cx| TextareaState::new(window, cx).auto_grow(6, 18));
         body.update(cx, |input, cx| input.set_value(post.body.clone(), window, cx));
         let subscriptions = vec![repaint_on_change(&body, cx)];
-        self.editing = Some(Edit { title, body, audience: post.audience, _subscriptions: subscriptions });
+        self.editing = Some(Edit { title, body, audience: post.audience, original: (post.title.clone(), post.body.clone()), _subscriptions: subscriptions });
         cx.notify();
     }
 
@@ -243,10 +257,67 @@ impl WallView {
         .detach();
     }
 
+    /// Cierra «Publicar»; con algo escrito, antes pregunta.
+    fn close_composer(&mut self, cx: &mut Context<Self>) {
+        let dirty = self.composing.as_ref().is_some_and(|compose| has_unsaved(&compose.title.read(cx).value(), &compose.body.read(cx).value(), ("", "")));
+        if dirty {
+            self.confirm = Some(Confirm::DiscardCompose);
+        } else {
+            self.composing = None;
+        }
+        cx.notify();
+    }
+
+    /// Deja de editar la publicación abierta (o, con `close`, la cierra); con
+    /// cambios sin guardar, antes pregunta.
+    fn close_edit(&mut self, close: bool, cx: &mut Context<Self>) {
+        let dirty = self.editing.as_ref().is_some_and(|edit| has_unsaved(&edit.title.read(cx).value(), &edit.body.read(cx).value(), (&edit.original.0, &edit.original.1)));
+        if dirty {
+            self.confirm = Some(Confirm::DiscardEdit { close });
+        } else {
+            self.editing = None;
+            if close {
+                Backend::core(cx).wall().close_post();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Cierra la publicación abierta, sin perder una edición a medias.
+    fn close_open_post(&mut self, cx: &mut Context<Self>) {
+        if self.editing.is_some() {
+            self.close_edit(true, cx);
+        } else {
+            Backend::core(cx).wall().close_post();
+        }
+    }
+
+    /// Hace una petición de reacción y, si falla, dice por qué: el clic de una
+    /// pastilla no tiene dónde mostrarlo.
+    fn react_reporting<F, Fut>(view: WeakEntity<Self>, work: F, cx: &mut App)
+    where
+        F: FnOnce(cac_core::Core) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), cac_core::ApiError>> + Send + 'static,
+    {
+        let answer = Backend::ask(cx, work);
+        cx.spawn(async move |cx| {
+            let Ok(Err(error)) = answer.await else { return };
+            view.update(cx, |this, cx| this.say(&error, cx)).ok();
+        })
+        .detach();
+    }
+
     /// Lo que se contestó a la pregunta de borrar.
     fn confirmed(&mut self, cx: &mut Context<Self>) {
         let Some(confirm) = self.confirm.take() else { return };
         match confirm {
+            Confirm::DiscardCompose => self.composing = None,
+            Confirm::DiscardEdit { close } => {
+                self.editing = None;
+                if close {
+                    Backend::core(cx).wall().close_post();
+                }
+            }
             Confirm::Post(id) => self.run(move |core| async move { core.wall().remove(&id).await }, cx),
             Confirm::Comment { post, comment } => self.run(move |core| async move { core.wall().remove_comment(&post, &comment).await }, cx),
         }
@@ -298,18 +369,47 @@ impl WallView {
         Self::badge(None, label, tone, cx)
     }
 
-    /// Markdown de una publicación para leer.
-    fn prose(id: String, text: &str, cx: &App) -> Div {
-        crate::theme::prose_with_links(
-            id,
-            text.to_string(),
-            |url, _, cx| {
-                if crate::theme::leads_somewhere(url) {
-                    cx.open_url(url);
+    /// Markdown de una publicación para leer, con sus enlaces seguidos por
+    /// [`Self::follow_link`].
+    fn prose(id: String, text: &str, cx: &mut Context<Self>) -> Div {
+        let view = cx.entity().downgrade();
+        crate::theme::prose_with_links(id, text.to_string(), move |url, _, cx| Self::follow_link(url, view.clone(), cx), cx)
+    }
+
+    /// Sigue un enlace de lo que se lee en el muro: el core abre lo de dentro
+    /// (una tarea, un documento) como en un mensaje, y aquí queda el navegador
+    /// y decir lo que no se pudo abrir.
+    fn follow_link(url: &str, view: WeakEntity<Self>, cx: &mut App) {
+        if !crate::theme::leads_somewhere(url) {
+            return;
+        }
+        let href = url.to_string();
+        let answer = Backend::ask(cx, move |core| async move { core.chat().follow_link(&href).await });
+        cx.spawn(async move |cx| {
+            let Ok(link) = answer.await else { return };
+            cx.update(|cx| match link {
+                cac_core::ThreadLink::Web { url } => cx.open_url(&url),
+                cac_core::ThreadLink::Task { .. } | cac_core::ThreadLink::Doc => Backend::core(cx).wall().close_post(),
+                cac_core::ThreadLink::NotHere => {
+                    let text = tr(cx, "common:misc.notInThisApp");
+                    view.update(cx, |this, cx| {
+                        this.problem = Some(text);
+                        cx.notify();
+                    })
+                    .ok();
                 }
-            },
-            cx,
-        )
+                cac_core::ThreadLink::Unknown => {
+                    let text = tr(cx, "common:last.openLinkFailed");
+                    view.update(cx, |this, cx| {
+                        this.problem = Some(text);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                cac_core::ThreadLink::File { .. } | cac_core::ThreadLink::Recording { .. } | cac_core::ThreadLink::Inert => {}
+            });
+        })
+        .detach();
     }
 
     /// Las reacciones de algo (`Reactions.tsx`): una pastilla por emoji con
@@ -455,11 +555,12 @@ impl WallView {
                 format!("wall-post-{id}"),
                 &post.reactions,
                 Pick::Card(id.clone()),
-                move |emoji: &str, on, cx: &mut App| {
-                    let (id, emoji) = (id.clone(), emoji.to_string());
-                    Backend::run(cx, move |core| async move {
-                        let _ = core.wall().react(&id, &emoji, on).await;
-                    });
+                {
+                    let view = cx.entity().downgrade();
+                    move |emoji: &str, on, cx: &mut App| {
+                        let (id, emoji) = (id.clone(), emoji.to_string());
+                        Self::react_reporting(view.clone(), move |core| async move { core.wall().react(&id, &emoji, on).await }, cx);
+                    }
                 },
                 &self.picking,
                 cx,
@@ -692,10 +793,7 @@ impl WallView {
                         .xsmall()
                         .icon(Icon::new(Lucide::X))
                         .tooltip(tr(cx, "common:action.close"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.composing = None;
-                            cx.notify();
-                        })),
+                        .on_click(cx.listener(|this, _, _, cx| this.close_composer(cx))),
                 ),
             )
             .child(Input::new(&compose.title).id("post-title"))
@@ -717,10 +815,7 @@ impl WallView {
             "post-composer-backdrop",
             PAGE_WIDTH,
             move |_, cx| {
-                let _ = view.update(cx, |this, cx| {
-                    this.composing = None;
-                    cx.notify();
-                });
+                let _ = view.update(cx, |this, cx| this.close_composer(cx));
             },
             content,
             cx,
@@ -731,9 +826,11 @@ impl WallView {
     fn render_confirm(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let confirm = self.confirm.clone()?;
         let muted = cx.theme().muted_foreground;
+        let discarding = matches!(confirm, Confirm::DiscardCompose | Confirm::DiscardEdit { .. });
         let (title, body) = match confirm {
             Confirm::Post(_) => (tr(cx, "common:feedback.deleteTitle"), Some(tr(cx, "common:feedback.deleteBody"))),
-            Confirm::Comment { .. } => (tr(cx, "common:feedback.deleteCommentTitle"), None),
+            Confirm::Comment { .. } => (tr(cx, "common:feedback.deleteCommentTitle"), Some(tr(cx, "common:feedback.deleteCommentBody"))),
+            Confirm::DiscardCompose | Confirm::DiscardEdit { .. } => (tr(cx, "common:feedback.discardTitle"), Some(tr(cx, "common:feedback.discardBody"))),
         };
         let view = cx.entity().downgrade();
         let content = div()
@@ -745,11 +842,11 @@ impl WallView {
                     .flex()
                     .justify_end()
                     .gap_2()
-                    .child(Button::new("wall-confirm-cancel").ghost().label(tr(cx, "common:feedback.cancel")).on_click(cx.listener(|this, _, _, cx| {
+                    .child(Button::new("wall-confirm-cancel").ghost().label(tr(cx, if discarding { "common:feedback.keepEditing" } else { "common:feedback.cancel" })).on_click(cx.listener(|this, _, _, cx| {
                         this.confirm = None;
                         cx.notify();
                     })))
-                    .child(Button::new("wall-confirm-delete").danger().label(tr(cx, "common:feedback.delete")).on_click(cx.listener(|this, _, _, cx| this.confirmed(cx)))),
+                    .child(Button::new("wall-confirm-delete").danger().label(tr(cx, if discarding { "common:feedback.discard" } else { "common:feedback.delete" })).on_click(cx.listener(|this, _, _, cx| this.confirmed(cx)))),
             );
         Some(dialog(
             "wall-confirm-backdrop",
@@ -813,7 +910,7 @@ impl WallView {
                     .small()
                     .icon(Icon::new(Lucide::X))
                     .tooltip(tr(cx, "common:action.close"))
-                    .on_click(|_, _, cx| Backend::core(cx).wall().close_post()),
+                    .on_click(cx.listener(|this, _, _, cx| this.close_open_post(cx))),
             );
         let header = div()
             .flex()
@@ -882,10 +979,7 @@ impl WallView {
                             .flex()
                             .justify_end()
                             .gap_2()
-                            .child(Button::new("wall-edit-cancel").ghost().label(tr(cx, "common:feedback.cancel")).on_click(cx.listener(|this, _, _, cx| {
-                                this.editing = None;
-                                cx.notify();
-                            })))
+                            .child(Button::new("wall-edit-cancel").ghost().label(tr(cx, "common:feedback.cancel")).on_click(cx.listener(|this, _, _, cx| this.close_edit(false, cx))))
                             .child(
                                 Button::new("wall-edit-save")
                                     .primary()
@@ -905,11 +999,12 @@ impl WallView {
                 "wall-open".to_string(),
                 &post.reactions,
                 Pick::Post,
-                move |emoji: &str, on, cx: &mut App| {
-                    let (id, emoji) = (id.clone(), emoji.to_string());
-                    Backend::run(cx, move |core| async move {
-                        let _ = core.wall().react(&id, &emoji, on).await;
-                    });
+                {
+                    let view = cx.entity().downgrade();
+                    move |emoji: &str, on, cx: &mut App| {
+                        let (id, emoji) = (id.clone(), emoji.to_string());
+                        Self::react_reporting(view.clone(), move |core| async move { core.wall().react(&id, &emoji, on).await }, cx);
+                    }
                 },
                 &self.picking,
                 cx,
@@ -969,10 +1064,13 @@ impl WallView {
             .child(div().id("wall-modal-scroll").min_h_0().flex_1().overflow_y_scroll().flex().flex_col().gap_4().pr_1().child(body).child(reactions).child(thread))
             .children(self.problem.clone().map(|problem| div().id("wall-modal-problem").leading_xs().text_color(danger).aria_label(problem.clone()).child(problem).test_support()))
             .child(composer);
+        let view = cx.entity().downgrade();
         dialog(
             "wall-modal-backdrop",
             PAGE_WIDTH,
-            |_, cx| Backend::core(cx).wall().close_post(),
+            move |_, cx| {
+                let _ = view.update(cx, |this, cx| this.close_open_post(cx));
+            },
             content,
             cx,
         )
@@ -980,7 +1078,7 @@ impl WallView {
 
     fn render_comment(&mut self, post_id: &str, comment: &WallComment, now: &chrono::DateTime<chrono::Utc>, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (muted_bg, muted) = (theme.muted, theme.muted_foreground);
+        let (muted_bg, muted, danger) = (theme.muted, theme.muted_foreground, theme.danger);
         let (post, cid) = (post_id.to_string(), comment.id.clone());
         let reactions = {
             let (post, cid) = (post.clone(), cid.clone());
@@ -988,11 +1086,12 @@ impl WallView {
                 format!("wall-comment-{cid}"),
                 &comment.reactions,
                 Pick::Comment(cid.clone()),
-                move |emoji: &str, on, cx: &mut App| {
-                    let (post, cid, emoji) = (post.clone(), cid.clone(), emoji.to_string());
-                    Backend::run(cx, move |core| async move {
-                        let _ = core.wall().react_comment(&post, &cid, &emoji, on).await;
-                    });
+                {
+                    let view = cx.entity().downgrade();
+                    move |emoji: &str, on, cx: &mut App| {
+                        let (post, cid, emoji) = (post.clone(), cid.clone(), emoji.to_string());
+                        Self::react_reporting(view.clone(), move |core| async move { core.wall().react_comment(&post, &cid, &emoji, on).await }, cx);
+                    }
                 },
                 &self.picking,
                 cx,
@@ -1038,7 +1137,7 @@ impl WallView {
                                         .id(SharedString::from(format!("wall-comment-{cid}-delete")))
                                         .ml_auto()
                                         .cursor_pointer()
-                                        .hover(|style| style.text_color(gpui_kit::red()))
+                                        .hover(|style| style.text_color(danger))
                                         .aria_label(tr(cx, "common:feedback.delete"))
                                         .on_click(cx.listener({
                                             let (post, cid) = (post.clone(), cid.clone());
@@ -1105,7 +1204,26 @@ impl Render for WallView {
                 )
             });
 
-        let status: AnyElement = if !state.loaded {
+        let status: AnyElement = if !state.loaded && state.failed {
+            div()
+                .id("wall-error")
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .rounded(px(12.))
+                .border_1()
+                .border_dashed()
+                .border_color(border)
+                .px_3()
+                .py(px(40.))
+                .child(div().leading_sm().text_color(danger).child(tr(cx, "common:feedback.failed")))
+                .child(Button::new("wall-retry").outline().label(tr(cx, "chat:retry")).on_click(|_, _, cx| {
+                    Backend::run(cx, |core| async move { core.wall().load().await });
+                }))
+                .test_support()
+                .into_any_element()
+        } else if !state.loaded {
             div()
                 .id("wall-loading")
                 .flex()
@@ -1164,7 +1282,6 @@ impl Render for WallView {
             .when(!permissions.can_publish() && permissions.org_id.is_some(), |this| {
                 this.child(div().id("wall-read-only").leading_xs().text_color(muted).child(tr(cx, "common:feedback.readOnlyHint")).test_support())
             })
-            .when(state.failed && !state.loaded, |this| this.child(div().id("wall-error").leading_sm().text_color(danger).child(tr(cx, "common:feedback.failed")).test_support()))
             .children(self.problem.clone().filter(|_| state.open.is_none() && self.composing.is_none()).map(|problem| {
                 div().id("wall-problem").leading_sm().text_color(danger).aria_label(problem.clone()).child(problem).test_support()
             }))
@@ -1464,6 +1581,146 @@ mod tests {
         wait_until(cx, "el borrador", |cx| on_screen(window, "wall-draft", cx));
         click(window, "wall-publish-draft", cx);
         wait_until(cx, "se publica", |_| !sent(&server, "POST", "/api/v1/posts/d/publish").is_empty());
+        stop(cx);
+    }
+
+    /// «Publicar» con algo escrito pregunta antes de cerrarse, por la equis
+    /// como por el fondo; «Seguir escribiendo» lo deja; en blanco se cierra
+    /// sin preguntar.
+    ///
+    /// Roturas que atrapa: cerrar con texto sin preguntar; preguntar con la
+    /// caja en blanco; que «Seguir escribiendo» cierre; que «Descartar» no
+    /// cierre.
+    #[gpui_kit::test]
+    fn closing_the_composer_asks_only_when_something_is_written(cx: &mut TestAppContext) {
+        let server = server("member", json!([card("a", json!({}))]));
+        server.install(cx);
+        let window = open(cx);
+        open_wall(window, cx);
+
+        click(window, "wall-publish", cx);
+        wait_until(cx, "el diálogo", |cx| on_screen(window, "post-composer", cx));
+        click(window, "post-composer-close", cx);
+        assert!(!on_screen(window, "post-composer", cx) && !on_screen(window, "wall-confirm", cx), "en blanco se cierra sin preguntar");
+
+        click(window, "wall-publish", cx);
+        wait_until(cx, "el diálogo", |cx| on_screen(window, "post-composer", cx));
+        type_in(window, "post-title", "Una idea", cx);
+        click(window, "post-composer-close", cx);
+        wait_until(cx, "pregunta", |cx| on_screen(window, "wall-confirm", cx));
+        click(window, "wall-confirm-cancel", cx);
+        assert!(on_screen(window, "post-composer", cx) && !on_screen(window, "wall-confirm", cx), "seguir escribiendo lo deja");
+        click(window, "post-composer-close", cx);
+        wait_until(cx, "pregunta otra vez", |cx| on_screen(window, "wall-confirm", cx));
+        click(window, "wall-confirm-delete", cx);
+        wait_until(cx, "se descarta", |cx| !on_screen(window, "post-composer", cx) && !on_screen(window, "wall-confirm", cx));
+        stop(cx);
+    }
+
+    /// Una reacción que el servidor rechaza lo dice, y la primera lectura que
+    /// falla enseña el error con «Reintentar» (sin el esqueleto) y se
+    /// recupera al reintentar.
+    ///
+    /// Roturas que atrapa: tragarse el fallo de una reacción; el esqueleto
+    /// cargando para siempre tras un fallo; un «Reintentar» que no vuelve a
+    /// pedir.
+    #[gpui_kit::test]
+    fn a_failed_reaction_says_so_and_a_failed_first_read_can_be_retried(cx: &mut TestAppContext) {
+        let server = server("member", json!([card("a", json!({}))]));
+        let refusal = wiremock::ResponseTemplate::new(403).set_body_json(json!({ "success": false, "error": "not-in-the-catalog", "message": "x" }));
+        server.mount(post("/api/v1/posts/a/reactions").respond_with(refusal));
+        server.mount(get("/api/v1/posts/a").respond_with(ok(detail("a", json!({}), json!([])))));
+        // Falla hasta que la prueba lo arregla: no depende de cuántas veces la app relea el muro antes de mirarlo.
+        let broken = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let still_broken = broken.clone();
+        let posts = json!({ "posts": [card("a", json!({}))] });
+        server.mount(get("/api/v1/posts").respond_with(move |_: &wiremock::Request| {
+            if still_broken.load(std::sync::atomic::Ordering::SeqCst) {
+                wiremock::ResponseTemplate::new(500).set_body_json(json!({ "success": false, "error": "boom", "message": "x" }))
+            } else {
+                ok(posts.clone())
+            }
+        }).with_priority(1));
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "rail-comms", cx));
+        click(window, "rail-comms", cx);
+        wait_until(cx, "la lista de comunicación", |cx| on_screen(window, "comms-wall", cx));
+        click(window, "comms-wall", cx);
+        wait_until(cx, "el error con reintento", |cx| on_screen(window, "wall-error", cx) && on_screen(window, "wall-retry", cx));
+        assert!(!on_screen(window, "wall-loading", cx), "sin esqueleto");
+
+        broken.store(false, std::sync::atomic::Ordering::SeqCst);
+        click(window, "wall-retry", cx);
+        wait_until(cx, "llega el muro", |cx| on_screen(window, "wall-post-a", cx) && !on_screen(window, "wall-error", cx));
+
+        click(window, "wall-post-a-open", cx);
+        wait_until(cx, "el diálogo", |cx| on_screen(window, "wall-modal", cx));
+        click(window, "wall-open-react", cx);
+        click(window, "wall-open-pick-1", cx);
+        wait_until(cx, "dice por qué", |cx| label(window, "wall-modal-problem", cx) == "No se pudo completar. Prueba otra vez.");
+        stop(cx);
+    }
+
+    /// Qué cuenta como «hay algo sin guardar»: cualquier cambio, no los
+    /// espacios de los extremos.
+    ///
+    /// Roturas que atrapa: no mirar el título; no mirar el cuerpo; contar
+    /// los espacios sobrantes como cambio.
+    #[test]
+    fn unsaved_means_the_text_differs_from_where_it_started() {
+        use super::has_unsaved;
+        assert!(!has_unsaved("", "", ("", "")));
+        assert!(!has_unsaved(" t ", "b\n", ("t", "b")));
+        assert!(has_unsaved("t2", "b", ("t", "b")));
+        assert!(has_unsaved("t", "b2", ("t", "b")));
+        assert!(has_unsaved("", "algo", ("", "")));
+    }
+
+    /// Editar una publicación y cerrarla (la equis, o «Cancelar» del
+    /// formulario) con cambios pregunta; sin cambios no. Seguir escribiendo
+    /// deja el formulario; descartar cierra lo que se pidió cerrar.
+    ///
+    /// Roturas que atrapa: cerrar la publicación con la edición a medias sin
+    /// preguntar; preguntar sin cambios; que descartar al cerrar deje abierta
+    /// la publicación.
+    #[gpui_kit::test]
+    fn closing_an_edit_asks_only_when_something_changed(cx: &mut TestAppContext) {
+        let server = server("member", json!([card("a", json!({ "canEdit": true }))]));
+        server.mount(get("/api/v1/posts/a").respond_with(ok(detail("a", json!({ "canEdit": true }), json!([])))));
+        server.install(cx);
+        let window = open(cx);
+        open_wall(window, cx);
+
+        click(window, "wall-post-a-open", cx);
+        wait_until(cx, "el diálogo con su detalle", |cx| on_screen(window, "wall-modal", cx) && on_screen(window, "wall-no-comments", cx));
+        click(window, "wall-edit", cx);
+        wait_until(cx, "el formulario", |cx| on_screen(window, "wall-edit-save", cx));
+        click(window, "wall-close", cx);
+        wait_until(cx, "sin cambios se cierra sin preguntar", |cx| !on_screen(window, "wall-modal", cx));
+        assert!(!on_screen(window, "wall-confirm", cx));
+
+        click(window, "wall-post-a-open", cx);
+        wait_until(cx, "el diálogo otra vez", |cx| on_screen(window, "wall-modal", cx) && on_screen(window, "wall-no-comments", cx));
+        click(window, "wall-edit", cx);
+        wait_until(cx, "el formulario otra vez", |cx| on_screen(window, "wall-edit-save", cx));
+        type_in(window, "wall-edit-title", " cambiado", cx);
+        click(window, "wall-close", cx);
+        wait_until(cx, "pregunta", |cx| on_screen(window, "wall-confirm", cx));
+        click(window, "wall-confirm-cancel", cx);
+        assert!(on_screen(window, "wall-edit-save", cx) && on_screen(window, "wall-modal", cx), "seguir escribiendo lo deja");
+        click(window, "wall-edit-cancel", cx);
+        wait_until(cx, "pregunta por el formulario", |cx| on_screen(window, "wall-confirm", cx));
+        click(window, "wall-confirm-delete", cx);
+        wait_until(cx, "sólo se cierra el formulario", |cx| !on_screen(window, "wall-edit-save", cx) && on_screen(window, "wall-modal", cx));
+
+        click(window, "wall-edit", cx);
+        wait_until(cx, "el formulario por tercera vez", |cx| on_screen(window, "wall-edit-save", cx));
+        type_in(window, "wall-edit-title", " otra vez", cx);
+        click(window, "wall-close", cx);
+        wait_until(cx, "pregunta al cerrar", |cx| on_screen(window, "wall-confirm", cx));
+        click(window, "wall-confirm-delete", cx);
+        wait_until(cx, "descartar al cerrar cierra la publicación", |cx| !on_screen(window, "wall-modal", cx) && !on_screen(window, "wall-confirm", cx));
         stop(cx);
     }
 }

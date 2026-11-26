@@ -99,6 +99,10 @@ pub struct InboxState {
     pub org_id: Option<String>,
     /// `false` mientras no ha llegado nada.
     pub loaded: bool,
+    /// La primera lectura de esta organización falló y sigue sin haber nada
+    /// que enseñar. Una relectura que falla con la bandeja ya llegada no lo
+    /// pone: se queda lo que había.
+    pub failed: bool,
     pub feed: InboxFeed,
 }
 
@@ -364,7 +368,12 @@ pub struct InboxPanel {
     pub can_mark_all: bool,
     pub unread: Vec<InboxGroup>,
     pub read: Vec<InboxGroup>,
+    /// Sólo si ya llegó la bandeja y no hay nada: antes de eso no se sabe.
     pub empty: bool,
+    /// Todavía no ha llegado nada y no ha fallado.
+    pub loading: bool,
+    /// No ha llegado nada y falló: se enseña el error, no «Nada pendiente».
+    pub failed: bool,
 }
 
 fn row_of<Viewer: TimeZone>(item: &InboxItem, now: &DateTime<Viewer>, locale: Locale) -> InboxRow {
@@ -460,7 +469,9 @@ pub fn inbox_panel<Viewer: TimeZone>(state: &InboxState, tab: InboxTab, expanded
     InboxPanel {
         badge: count_badge(Some(state.feed.unread), 99),
         can_mark_all: state.feed.unread > 0,
-        empty: unread.is_empty() && read.is_empty(),
+        empty: state.loaded && unread.is_empty() && read.is_empty(),
+        loading: !state.loaded && !state.failed,
+        failed: !state.loaded && state.failed,
         unread,
         read,
     }
@@ -516,18 +527,27 @@ impl Inbox {
 
     /// Trae la bandeja de la organización que se mira. Si falla se queda lo
     /// que hubiera: una bandeja que no carga es un número que no cambia, no
-    /// algo por lo que interrumpir a nadie.
+    /// algo por lo que interrumpir a nadie. Salvo que no hubiera nada: entonces
+    /// el panel tiene que poder decir que no lo sabe, y no «Nada pendiente».
     pub async fn load(&self) {
         self.data().wanted = true;
         let Some(org_id) = self.core.orgs().state().current_org_id.filter(|id| !id.is_empty()) else { return };
         let path = format!("/api/v1/notifications/?orgId={org_id}&limit={PAGE}");
-        let Ok(feed) = self.core.get::<InboxFeed>(&path).await else { return };
+        let answer = self.core.get::<InboxFeed>(&path).await;
         // La respuesta de una organización que ya no es la que se mira no se
         // pone.
         if self.core.orgs().state().current_org_id.as_deref() != Some(org_id.as_str()) {
             return;
         }
-        self.change(|state| *state = InboxState { org_id: Some(org_id), loaded: true, feed });
+        match answer {
+            Ok(feed) => self.change(|state| *state = InboxState { org_id: Some(org_id), loaded: true, failed: false, feed }),
+            Err(_) => self.change(|state| {
+                if state.org_id.as_deref() != Some(org_id.as_str()) {
+                    *state = InboxState { org_id: Some(org_id), ..InboxState::default() };
+                }
+                state.failed = !state.loaded;
+            }),
+        }
     }
 
     /// Unos avisos leídos. El número baja por los que de verdad no lo
@@ -718,6 +738,7 @@ mod tests {
         let state = InboxState {
             org_id: Some("o1".into()),
             loaded: true,
+            failed: false,
             feed: InboxFeed {
                 items,
                 unread: 60,
@@ -753,6 +774,24 @@ mod tests {
         assert_eq!(chat.rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), ["1", "2"]);
         assert_eq!(chat.showing.as_deref(), Some("Se ven 2 de 52. El resto sigue en la conversación."));
         assert!(open.unread[3].rows.is_empty(), "las demás siguen plegadas");
+    }
+
+    /// Antes de que llegue la bandeja el panel no sabe, y no dice «Nada
+    /// pendiente»; si la lectura falló, lo dice; con la bandeja llegada y
+    /// vacía, sí está vacío.
+    ///
+    /// Roturas que atrapa: `empty` sin mirar `loaded` (un falso «Nada
+    /// pendiente» mientras carga o tras un fallo); `loading` que sigue
+    /// encendido tras un fallo; `failed` que se enciende con la bandeja ya
+    /// llegada.
+    #[test]
+    fn the_panel_tells_loading_failed_and_empty_apart() {
+        let panel = |loaded, failed| inbox_panel(&InboxState { org_id: Some("o1".into()), loaded, failed, feed: InboxFeed::default() }, InboxTab::All, &HashSet::new(), Locale::Es, &now());
+        let flags = |panel: InboxPanel| (panel.loading, panel.failed, panel.empty);
+        assert_eq!(flags(panel(false, false)), (true, false, false), "cargando: no se sabe");
+        assert_eq!(flags(panel(false, true)), (false, true, false), "falló: no es «nada pendiente»");
+        assert_eq!(flags(panel(true, false)), (false, false, true), "llegó y está vacía");
+        assert_eq!(flags(panel(true, true)), (false, false, true), "una relectura fallida no tapa lo que llegó");
     }
 
     /// A dónde lleva cada enlace. Roturas que atrapa: confundir un canal con
