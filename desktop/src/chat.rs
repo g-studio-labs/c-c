@@ -551,6 +551,7 @@ impl ChatView {
         let group = SharedString::from(format!("thread-file-row-{}", file.path));
         div()
             .group(group.clone())
+            .min_w_0()
             .flex()
             .items_center()
             .gap_2()
@@ -688,6 +689,8 @@ impl ChatView {
             } else {
                 div()
                     .id(SharedString::from(format!("thread-author-{id}")))
+                    .min_w_0()
+                    .truncate()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(if line.mine { primary } else { foreground })
                     .aria_label(line.author.clone())
@@ -696,6 +699,8 @@ impl ChatView {
             };
             div()
                 .mb_0p5()
+                .min_w_0()
+                .max_w_full()
                 .flex()
                 .items_center()
                 .gap_2()
@@ -805,6 +810,7 @@ impl ChatView {
             .id(SharedString::from(format!("thread-line-{id}")))
             .group(group)
             .w_full()
+            .min_w_0()
             .px_3()
             .pt_3()
             .flex()
@@ -813,6 +819,7 @@ impl ChatView {
             .children(day)
             .child(
                 div()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .when(line.mine, |this| this.items_end())

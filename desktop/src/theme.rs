@@ -214,7 +214,9 @@ pub fn painted_prose_with_links(
 ) -> gpui_kit::Div {
     use gpui_kit::{ParentElement, Styled};
     // `md-body text-sm leading-relaxed` (`Markdown.tsx`).
-    gpui_kit::div().leading_sm().line_height(gpui_kit::relative(1.625)).child(
+    // `min_w_0` + `max_w_full`: sin ellos, una línea sin espacios fija el ancho mínimo
+    // del cuerpo y empuja la burbuja más allá de su tope.
+    gpui_kit::div().min_w_0().max_w_full().leading_sm().line_height(gpui_kit::relative(1.625)).child(
         // Un título de tercer nivel, como etiqueta de sección (`.md-body
         // h3`: pequeño, en mayúsculas y apagado).
         gpui_kit::component::text::TextView::markdown(id.into(), painted.into())
