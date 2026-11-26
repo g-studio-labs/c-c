@@ -841,3 +841,264 @@ fn two_quick_checkboxes_on_a_repo_are_saved_one_after_the_other(cx: &mut TestApp
     assert_eq!(bodies, [json!({ "spaceId": "a", "bareRefs": true, "showDocs": false }), json!({ "spaceId": "a", "bareRefs": true, "showDocs": true })]);
     stop_stream(cx);
 }
+
+const BASECAMP: &str = "/api/v1/organizations/o1/basecamp";
+
+fn basecamp_status(configured: bool, connected: bool, projects: serde_json::Value) -> serde_json::Value {
+    if !connected {
+        return json!({ "configured": configured, "connected": false, "projects": [], "unmatched": 0 });
+    }
+    json!({ "configured": configured, "connected": true, "accountId": 99, "accountName": "DWIT", "identityName": "Ana Ruiz", "projects": projects, "unmatched": 1 })
+}
+
+/// Una organización con Basecamp: su estado, los proyectos de la cuenta y su
+/// gente. Los PUT y los DELETE se montan en cada prueba, con lo que contestan.
+fn basecamp_server(role: &str, status: serde_json::Value, projects: serde_json::Value, people: serde_json::Value) -> FakeServer {
+    let server = org_server(role);
+    server.mount(Mock::given(method("GET")).and(path(BASECAMP)).respond_with(ok(status)));
+    server.mount(Mock::given(method("GET")).and(path(format!("{BASECAMP}/projects"))).respond_with(ok(projects)));
+    server.mount(Mock::given(method("GET")).and(path(format!("{BASECAMP}/people"))).respond_with(ok(people)));
+    server
+}
+
+/// Sale de la ventana y vuelve a ella, como quien va al navegador a
+/// autorizar y regresa.
+fn come_back_to_the_window(window: AnyWindowHandle, cx: &mut TestAppContext) {
+    gpui_kit::VisualTestContext::from_window(window.into(), cx).deactivate_window();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, _| window.activate_window()).unwrap();
+}
+
+/// Sin las credenciales de 37signals en el servidor se dice, y no queda
+/// ningún botón que no lleve a nada.
+///
+/// Rotura que atrapa: ofrecer conectar (o desconectar) con Basecamp sin
+/// configurar en el servidor.
+#[gpui_kit::test]
+fn without_basecamp_credentials_the_tab_says_so_and_offers_nothing(cx: &mut TestAppContext) {
+    let (_server, window) = open_org_with(basecamp_server("admin", basecamp_status(false, false, json!([])), json!([]), json!([])), cx);
+    click(window, "org-tab-basecamp", cx);
+    wait_until(cx, "lo dice", |cx| on_screen(window, "org-basecamp-off", cx));
+    assert!(!on_screen(window, "org-basecamp-connect", cx) && !on_screen(window, "org-basecamp-disconnect", cx));
+    stop_stream(cx);
+}
+
+/// Sólo quien administra ve la pestaña de Basecamp.
+///
+/// Rotura que atrapa: enseñarle la pestaña (con la gente y los proyectos de
+/// la cuenta) a un miembro; que el admin no la vea.
+#[gpui_kit::test]
+fn only_an_admin_sees_the_basecamp_tab(cx: &mut TestAppContext) {
+    let (server, window) = open_org_with(basecamp_server("member", basecamp_status(true, false, json!([])), json!([]), json!([])), cx);
+    assert!(on_screen(window, "org-tab-github", cx));
+    assert!(!on_screen(window, "org-tab-basecamp", cx), "un miembro ve la pestaña de Basecamp");
+    assert_eq!(count_of(&server, "GET", BASECAMP), 0, "pidió Basecamp para quien no administra");
+    stop_stream(cx);
+
+    let (_server, window) = open_org_with(basecamp_server("admin", basecamp_status(true, false, json!([])), json!([]), json!([])), cx);
+    assert!(on_screen(window, "org-tab-basecamp", cx), "un admin no ve la pestaña de Basecamp");
+    stop_stream(cx);
+}
+
+/// Conectar abre en el navegador la dirección del servidor y, al volver a la
+/// ventana (y sólo entonces), la pantalla vuelve a leer y enseña la cuenta
+/// conectada con sus proyectos.
+///
+/// Roturas que atrapa: conectar sin pedir la dirección o sin abrirla; la
+/// pantalla que sigue diciendo «sin conectar» con la cuenta ya conectada
+/// (no volver a leer al volver); volver a leer en cada vuelta a la ventana,
+/// con o sin haber ido a autorizar.
+#[gpui_kit::test]
+fn connecting_opens_the_browser_and_coming_back_shows_the_real_state(cx: &mut TestAppContext) {
+    let server = org_server("admin");
+    server.mount(Mock::given(method("GET")).and(path(BASECAMP)).respond_with(ok(basecamp_status(true, false, json!([])))).up_to_n_times(1));
+    server.mount(Mock::given(method("GET")).and(path(BASECAMP)).respond_with(ok(basecamp_status(true, true, json!([])))));
+    server.mount(Mock::given(method("GET")).and(path(format!("{BASECAMP}/projects"))).respond_with(ok(json!([{ "id": 7, "name": "Sitio", "appUrl": "https://3.basecamp.com/99/projects/7" }]))));
+    server.mount(Mock::given(method("GET")).and(path(format!("{BASECAMP}/people"))).respond_with(ok(json!([]))));
+    server.mount(Mock::given(method("POST")).and(path(format!("{BASECAMP}/connect"))).respond_with(ok(json!({ "url": "https://launchpad.37signals.com/authorization/new?state=s" }))));
+    let (server, window) = open_org_with(server, cx);
+    click(window, "org-tab-basecamp", cx);
+    wait_until(cx, "sale sin conectar", |cx| on_screen(window, "org-basecamp-connect", cx));
+    assert!(!on_screen(window, "org-basecamp-disconnect", cx));
+
+    // Ir y volver sin haber pedido autorizar no vuelve a leer.
+    come_back_to_the_window(window, cx);
+    cx.run_until_parked();
+    assert_eq!(count_of(&server, "GET", BASECAMP), 1, "volvió a leer sin haber ido a autorizar");
+
+    click(window, "org-basecamp-connect", cx);
+    wait_until(cx, "se abre fuera", |cx| cx.opened_url().is_some());
+    assert_eq!(cx.opened_url().as_deref(), Some("https://launchpad.37signals.com/authorization/new?state=s"));
+    assert_eq!(request_body(&server, "POST", &format!("{BASECAMP}/connect")), json!({}));
+    assert_eq!(count_of(&server, "GET", BASECAMP), 1, "leyó antes de volver");
+    assert!(on_screen(window, "org-basecamp-connect", cx));
+
+    come_back_to_the_window(window, cx);
+    wait_until(cx, "enseña la cuenta conectada", |cx| on_screen(window, "org-basecamp-disconnect", cx));
+    assert!(label(window, "org-basecamp-line", cx).contains("DWIT"), "{}", label(window, "org-basecamp-line", cx));
+    assert!(!on_screen(window, "org-basecamp-connect", cx), "sigue ofreciendo conectar con la cuenta conectada");
+    wait_until(cx, "salen sus proyectos", |cx| on_screen(window, "org-basecamp-project-7", cx));
+    stop_stream(cx);
+}
+
+/// Un servidor que rechaza conectar se dice con su motivo, y no se abre nada.
+///
+/// Roturas que atrapa: abrir el navegador con el error; callar el motivo
+/// (decir «falló» a secas o nada).
+#[gpui_kit::test]
+fn a_refused_connection_says_why_and_opens_nothing(cx: &mut TestAppContext) {
+    let server = basecamp_server("admin", basecamp_status(true, false, json!([])), json!([]), json!([]));
+    server.mount(Mock::given(method("POST")).and(path(format!("{BASECAMP}/connect"))).respond_with(wiremock::ResponseTemplate::new(503).set_body_json(json!({ "success": false, "error": "basecamp-off", "message": "No" }))));
+    let (_server, window) = open_org_with(server, cx);
+    click(window, "org-tab-basecamp", cx);
+    wait_until(cx, "sale conectar", |cx| on_screen(window, "org-basecamp-connect", cx));
+    click(window, "org-basecamp-connect", cx);
+    wait_until(cx, "lo dice", |cx| on_screen(window, "org-notice", cx));
+    assert_eq!(label(window, "org-notice", cx), "Este servidor de cac aún no tiene Basecamp configurado.");
+    assert!(cx.opened_url().is_none(), "abrió el navegador con el servidor diciendo que no");
+    stop_stream(cx);
+}
+
+/// Enlazar un proyecto manda sólo el espacio elegido, al proyecto de esa
+/// fila, y dice lo que contestó el servidor (un webhook que no se dio de alta
+/// es un problema); dejarlo «sin enlazar» lo quita y no vuelve a enlazar.
+///
+/// Roturas que atrapa: el cuerpo sin el espacio o con otro campo; el
+/// proyecto equivocado en la ruta; un webhook sin dar de alta dicho como
+/// éxito; quitar con PUT o no quitar; enlazar al elegir lo mismo que ya está.
+#[gpui_kit::test]
+fn linking_a_project_sends_its_space_and_unlinking_removes_it(cx: &mut TestAppContext) {
+    let projects = json!([
+        { "id": 7, "name": "Sitio", "appUrl": "https://x/7" },
+        { "id": 8, "name": "App", "appUrl": "https://x/8", "spaceId": "a" },
+    ]);
+    let status = basecamp_status(true, true, json!([{ "id": "l8", "spaceId": "a", "projectId": 8, "name": "App", "webhookId": 55 }]));
+    let server = basecamp_server("admin", status, projects, json!([]));
+    server.mount(Mock::given(method("PUT")).and(path(format!("{BASECAMP}/projects/7"))).respond_with(ok(json!({ "id": "l7", "spaceId": "a", "projectId": 7, "name": "Sitio", "webhookId": 0 }))));
+    server.mount(Mock::given(method("DELETE")).and(path(format!("{BASECAMP}/projects/8"))).respond_with(wiremock::ResponseTemplate::new(204)));
+    let (server, window) = open_org_with(server, cx);
+    click(window, "org-tab-basecamp", cx);
+    wait_until(cx, "salen los proyectos", |cx| on_screen(window, "org-basecamp-space-7", cx));
+    assert!(on_screen(window, "org-basecamp-hook-8", cx) && !on_screen(window, "org-basecamp-hook-7", cx), "el webhook se dice sólo del enlazado");
+
+    click(window, "org-basecamp-space-7", cx);
+    wait_until(cx, "se abre el menú", |cx| on_screen(window, "org-basecamp-space-7-a", cx));
+    click(window, "org-basecamp-space-7-a", cx);
+    wait_until(cx, "lo enlaza", |_| count_of(&server, "PUT", &format!("{BASECAMP}/projects/7")) == 1);
+    assert_eq!(request_body(&server, "PUT", &format!("{BASECAMP}/projects/7")), json!({ "spaceId": "a" }));
+    wait_until(cx, "lo dice como problema", |cx| on_screen(window, "org-notice", cx));
+    let said = label(window, "org-notice", cx);
+    assert!(said.contains("Sitio") && said.contains("Producto") && said.contains("webhook no se dio de alta"), "{said}");
+
+    // Elegir el mismo espacio que ya tiene no manda nada.
+    click(window, "org-basecamp-space-8", cx);
+    wait_until(cx, "se abre el menú", |cx| on_screen(window, "org-basecamp-space-8-a", cx));
+    click(window, "org-basecamp-space-8-a", cx);
+    cx.run_until_parked();
+    assert_eq!(count_of(&server, "PUT", &format!("{BASECAMP}/projects/8")), 0, "enlazó el que ya estaba enlazado");
+
+    click(window, "org-basecamp-space-8", cx);
+    wait_until(cx, "se abre el menú", |cx| on_screen(window, "org-basecamp-space-8-", cx));
+    click(window, "org-basecamp-space-8-", cx);
+    wait_until(cx, "lo quita", |_| count_of(&server, "DELETE", &format!("{BASECAMP}/projects/8")) == 1);
+    assert_eq!(count_of(&server, "PUT", &format!("{BASECAMP}/projects/8")), 0, "quitar volvió a enlazar");
+    stop_stream(cx);
+}
+
+/// Una persona que no casó se asigna a un miembro buscado por su nombre; las
+/// ya asignadas no salen.
+///
+/// Roturas que atrapa: listar a quien ya tiene usuario; el cuerpo sin el
+/// usuario elegido o a otra persona; el buscador que no filtra (o que busca
+/// por el usuario de acceso en vez del nombre que se enseña); asignar sin
+/// elegir miembro.
+#[gpui_kit::test]
+fn an_unmatched_person_is_assigned_to_a_member_found_by_name(cx: &mut TestAppContext) {
+    let people = json!([
+        { "id": "a", "personId": 31, "name": "Bob B", "email": "bobb@acme.io", "client": false, "userId": "" },
+        { "id": "b", "personId": 32, "name": "Casada", "email": "ana@x.com", "client": false, "userId": "u1", "matchedBy": "email" },
+    ]);
+    let server = basecamp_server("admin", basecamp_status(true, true, json!([])), json!([]), people);
+    server.mount(Mock::given(method("PUT")).and(path(format!("{BASECAMP}/people/31"))).respond_with(ok(json!({ "personId": 31, "name": "Bob B", "userId": "u1", "matchedBy": "manual" }))));
+    let (server, window) = open_org_with(server, cx);
+    click(window, "org-tab-basecamp", cx);
+    wait_until(cx, "sale la persona", |cx| on_screen(window, "org-basecamp-person-31", cx));
+    assert!(!on_screen(window, "org-basecamp-person-32", cx), "listó a una persona ya asignada");
+
+    click(window, "org-basecamp-assign-open-31", cx);
+    wait_until(cx, "salen los miembros", |cx| on_screen(window, "org-basecamp-assign-31-u1", cx) && on_screen(window, "org-basecamp-assign-31-u2", cx));
+    type_into(window, "org-basecamp-assign-query-31", "ruiz", cx);
+    wait_until(cx, "filtra por el nombre", |cx| !on_screen(window, "org-basecamp-assign-31-u2", cx));
+    assert!(on_screen(window, "org-basecamp-assign-31-u1", cx));
+    assert_eq!(count_of(&server, "PUT", &format!("{BASECAMP}/people/31")), 0, "asignó sin elegir");
+
+    click(window, "org-basecamp-assign-31-u1", cx);
+    wait_until(cx, "la asigna", |_| count_of(&server, "PUT", &format!("{BASECAMP}/people/31")) == 1);
+    assert_eq!(request_body(&server, "PUT", &format!("{BASECAMP}/people/31")), json!({ "userId": "u1" }));
+    wait_until(cx, "lo dice", |cx| on_screen(window, "org-notice", cx));
+    assert!(label(window, "org-notice", cx).contains("Ana Ruiz"), "{}", label(window, "org-notice", cx));
+    stop_stream(cx);
+}
+
+/// Cuando el servidor no puede leer los proyectos o la gente, cada lista lo
+/// dice con su motivo y no tapa a la otra; y sin nadie por asignar se dice.
+///
+/// Roturas que atrapa: una lista que falla y deja a la otra vacía o a medio
+/// pintar; un error mudo (la lista vacía en vez del motivo); la gente sin
+/// asignar que no dice que no queda nadie.
+#[gpui_kit::test]
+fn a_list_that_fails_says_why_and_does_not_hide_the_other(cx: &mut TestAppContext) {
+    let server = org_server("admin");
+    server.mount(Mock::given(method("GET")).and(path(BASECAMP)).respond_with(ok(basecamp_status(true, true, json!([])))));
+    server.mount(Mock::given(method("GET")).and(path(format!("{BASECAMP}/projects"))).respond_with(wiremock::ResponseTemplate::new(502).set_body_json(json!({ "success": false, "error": "basecamp-unreachable", "message": "No" }))));
+    server.mount(Mock::given(method("GET")).and(path(format!("{BASECAMP}/people"))).respond_with(ok(json!([{ "id": "b", "personId": 32, "name": "Casada", "email": "a@x.com", "userId": "u1" }]))));
+    let (_server, window) = open_org_with(server, cx);
+    click(window, "org-tab-basecamp", cx);
+    wait_until(cx, "sale el error de los proyectos", |cx| on_screen(window, "org-basecamp-projects-error", cx));
+    wait_until(cx, "dice que nadie falta", |cx| on_screen(window, "org-basecamp-people-none", cx));
+    assert!(!on_screen(window, "org-basecamp-people-error", cx));
+    stop_stream(cx);
+}
+
+/// Desconectar pregunta antes: cancelar no toca nada y aceptar quita la
+/// conexión.
+///
+/// Roturas que atrapa: desconectar sin preguntar o al cancelar; no mandar el
+/// DELETE al aceptar.
+#[gpui_kit::test]
+fn disconnecting_asks_first(cx: &mut TestAppContext) {
+    let server = basecamp_server("admin", basecamp_status(true, true, json!([])), json!([]), json!([]));
+    server.mount(Mock::given(method("DELETE")).and(path(BASECAMP)).respond_with(wiremock::ResponseTemplate::new(204)));
+    let (server, window) = open_org_with(server, cx);
+    click(window, "org-tab-basecamp", cx);
+    wait_until(cx, "sale desconectar", |cx| on_screen(window, "org-basecamp-disconnect", cx));
+    click(window, "org-basecamp-disconnect", cx);
+    let (title, _) = cx.pending_prompt().expect("desconectó sin preguntar");
+    assert!(title.contains("Basecamp"), "{title}");
+    cx.simulate_prompt_answer("Cancelar");
+    cx.run_until_parked();
+    assert_eq!(count_of(&server, "DELETE", BASECAMP), 0, "desconectó al cancelar");
+    click(window, "org-basecamp-disconnect", cx);
+    cx.simulate_prompt_answer("Desconectar");
+    wait_until(cx, "desconecta", |_| count_of(&server, "DELETE", BASECAMP) == 1);
+    stop_stream(cx);
+}
+
+/// Lo mismo al revés: la gente que no se pudo leer lo dice con su motivo y
+/// los proyectos se siguen viendo.
+///
+/// Roturas que atrapa: la lista de gente que falla y se pinta como «todos
+/// casados» (un error mudo); que el fallo de una tape los proyectos.
+#[gpui_kit::test]
+fn people_that_fail_to_load_say_why_and_the_projects_stay(cx: &mut TestAppContext) {
+    let server = org_server("admin");
+    server.mount(Mock::given(method("GET")).and(path(BASECAMP)).respond_with(ok(basecamp_status(true, true, json!([])))));
+    server.mount(Mock::given(method("GET")).and(path(format!("{BASECAMP}/projects"))).respond_with(ok(json!([{ "id": 7, "name": "Sitio", "appUrl": "https://x/7" }]))));
+    server.mount(Mock::given(method("GET")).and(path(format!("{BASECAMP}/people"))).respond_with(wiremock::ResponseTemplate::new(502).set_body_json(json!({ "success": false, "error": "basecamp-unreachable", "message": "No" }))));
+    let (_server, window) = open_org_with(server, cx);
+    click(window, "org-tab-basecamp", cx);
+    wait_until(cx, "sale el error de la gente", |cx| on_screen(window, "org-basecamp-people-error", cx));
+    assert!(on_screen(window, "org-basecamp-project-7", cx) && !on_screen(window, "org-basecamp-people-none", cx));
+    assert!(!on_screen(window, "org-basecamp-projects-error", cx));
+    stop_stream(cx);
+}

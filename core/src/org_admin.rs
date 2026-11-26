@@ -176,6 +176,7 @@ pub enum OrgTab {
     Spaces,
     Integrations,
     GitHub,
+    Basecamp,
     Meetings,
     General,
 }
@@ -188,6 +189,7 @@ impl OrgTab {
             OrgTab::Spaces => "org:tab.spaces",
             OrgTab::Integrations => "org:tab.integrations",
             OrgTab::GitHub => "org:tab.github",
+            OrgTab::Basecamp => "org:tab.basecamp",
             OrgTab::Meetings => "org:tab.meetings",
             OrgTab::General => "org:tab.general",
         }
@@ -200,6 +202,7 @@ impl OrgTab {
             OrgTab::Spaces => "spaces",
             OrgTab::Integrations => "integrations",
             OrgTab::GitHub => "github",
+            OrgTab::Basecamp => "basecamp",
             OrgTab::Meetings => "meetings",
             OrgTab::General => "general",
         }
@@ -212,12 +215,13 @@ pub fn can_manage_org(org: &Organization, superadmin: bool) -> bool {
     superadmin || org.role == "admin"
 }
 
-/// Las pestañas que se enseñan. Las invitaciones sólo a quien administra: a
-/// los demás el servidor no se las da.
+/// Las pestañas que se enseñan. Las invitaciones y Basecamp sólo a quien
+/// administra: a los demás el servidor no les da la primera, y Basecamp es de
+/// quien conecta la cuenta y asigna a la gente.
 pub fn org_tabs(can_manage: bool) -> Vec<OrgTab> {
-    [OrgTab::Members, OrgTab::Invites, OrgTab::Spaces, OrgTab::Integrations, OrgTab::GitHub, OrgTab::Meetings, OrgTab::General]
+    [OrgTab::Members, OrgTab::Invites, OrgTab::Spaces, OrgTab::Integrations, OrgTab::GitHub, OrgTab::Basecamp, OrgTab::Meetings, OrgTab::General]
         .into_iter()
-        .filter(|tab| *tab != OrgTab::Invites || can_manage)
+        .filter(|tab| !matches!(tab, OrgTab::Invites | OrgTab::Basecamp) || can_manage)
         .collect()
 }
 
@@ -671,12 +675,15 @@ mod tests {
         OrgMember { user_id: username.into(), username: username.into(), name: None, email: Some(email.into()), role: role.into(), last_seen_at: None, setup_pending: false }
     }
 
-    /// Roturas que atrapa: enseñar la pestaña de invitaciones a quien no
-    /// administra (el servidor le niega la lista); que un superadmin sin
-    /// papel en la organización no la administre.
+    /// Roturas que atrapa: enseñar la pestaña de invitaciones o la de
+    /// Basecamp a quien no administra (el servidor le niega la lista; y
+    /// Basecamp es de quien conecta la cuenta); que un superadmin sin papel
+    /// en la organización no la administre; que el admin no vea Basecamp.
     #[test]
     fn only_who_manages_sees_the_invitations_tab() {
         assert!(!org_tabs(false).contains(&OrgTab::Invites));
+        assert!(!org_tabs(false).contains(&OrgTab::Basecamp), "un miembro ve Basecamp");
+        assert!(org_tabs(true).contains(&OrgTab::Basecamp), "un admin no ve Basecamp");
         assert_eq!(org_tabs(true)[..3], [OrgTab::Members, OrgTab::Invites, OrgTab::Spaces]);
         let org: Organization = serde_json::from_value(serde_json::json!({
             "id": "o", "name": "O", "slug": "o", "role": "member", "createdAt": "2026-06-09T12:00:00Z",

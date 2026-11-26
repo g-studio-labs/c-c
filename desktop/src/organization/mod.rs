@@ -6,6 +6,7 @@
 //! Y las invitaciones que le llegan a quien mira (`Invitations.tsx`), en
 //! `received.rs`: otra pantalla, que se abre desde el pie del panel.
 
+mod basecamp;
 mod general;
 mod github;
 mod integrations;
@@ -88,9 +89,12 @@ pub struct OrgView {
     // Reuniones, GitHub e Integraciones: lo de cada pestaña.
     meetings: meetings::MeetingsTab,
     github: github::GitHubTab,
+    basecamp: basecamp::BasecampTab,
     integrations: integrations::IntegrationsTab,
     pending_key: Option<PendingKey>,
     repo_filter: Entity<InputState>,
+    /// Para buscar el miembro al que se asigna una persona de Basecamp.
+    assign_query: Entity<InputState>,
     /// La zona de la máquina, para decir a qué hora suena cada reunión «para ti».
     viewer_zone: String,
     _subscriptions: Vec<Subscription>,
@@ -107,7 +111,22 @@ impl OrgView {
         let domain_input = input("example.com".into(), window, cx);
         let zone_input = input(tr(cx, "org:timeZonePlaceholder"), window, cx);
         let repo_filter = input(tr(cx, "org:github.filter"), window, cx);
+        let assign_query = input(tr(cx, "org:basecamp.searchMember"), window, cx);
         let subscriptions = vec![
+            cx.subscribe_in(&assign_query, window, |_, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
+            // Al volver de autorizar en el navegador, se lee lo que Basecamp
+            // dice ahora: sin esto la pantalla seguiría diciendo «sin
+            // conectar» con la cuenta ya conectada.
+            cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() && this.basecamp.awaiting_return() {
+                    this.basecamp.stop_waiting();
+                    this.load_basecamp(cx);
+                }
+            }),
             cx.subscribe_in(&repo_filter, window, |_, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
@@ -178,9 +197,11 @@ impl OrgView {
             _on_new_space: None,
             meetings: Default::default(),
             github: Default::default(),
+            basecamp: Default::default(),
             integrations: Default::default(),
             pending_key: None,
             repo_filter,
+            assign_query,
             viewer_zone: cac_core::local_zone_name(),
             _subscriptions: subscriptions,
         }
@@ -238,12 +259,13 @@ impl OrgView {
         // Lo de las demás pestañas es de la organización anterior.
         self.meetings = Default::default();
         self.github = Default::default();
+        self.basecamp = Default::default();
         self.integrations = Default::default();
         let (name, domain, zone) = (org.name.clone(), org.domain.clone().unwrap_or_default(), org.timezone.clone());
         self.name_input.update(cx, |input, cx| input.set_value(name, window, cx));
         self.domain_input.update(cx, |input, cx| input.set_value(domain, window, cx));
         self.zone_input.update(cx, |input, cx| input.set_value(zone, window, cx));
-        if !manage && self.tab == OrgTab::Invites {
+        if !manage && matches!(self.tab, OrgTab::Invites | OrgTab::Basecamp) {
             self.tab = OrgTab::Members;
         }
         let id = org.id.clone();
@@ -472,6 +494,7 @@ impl Render for OrgView {
             OrgTab::General => self.render_general(&org, manage, cx),
             OrgTab::Integrations => self.render_integrations(&org, manage, cx),
             OrgTab::GitHub => self.render_github(manage, cx),
+            OrgTab::Basecamp => self.render_basecamp(manage, cx),
             OrgTab::Meetings => self.render_meetings(manage, cx),
         };
         let dialog = self.render_delete_dialog(&org, window, cx);

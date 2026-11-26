@@ -35,6 +35,7 @@ pub mod notes;
 pub mod notice;
 pub mod notice_sound;
 pub mod org_admin;
+pub mod org_basecamp;
 pub mod org_github;
 pub mod org_integrations;
 pub mod org_meetings;
@@ -122,6 +123,7 @@ pub use org_admin::{
 pub use org_github::{
     bare_refs_enabled, docs_line, linkable_spaces, shown_repos, GitHubInstallation, GitHubRepo, GitHubStatus, GitHubUnbound, RepoChange,
 };
+pub use org_basecamp::{assignable_members, ordered_projects, unmatched_people, BasecampAvailable, BasecampLinked, BasecampPerson, BasecampStatus};
 pub use org_integrations::{inbox_lists, list_path, lists_by_space, ListPath, ProjectForm, ProjectPatch};
 pub use org_meetings::{
     default_meeting_zone, dual_time, hour_in, is_zone, local_zone_name, meeting_preview, meeting_when, next_ring, normalized_wall_time, readable_rule, readable_weekdays, reached, toggled_exclusion, wall_time_today,
