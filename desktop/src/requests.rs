@@ -23,6 +23,24 @@ use crate::backend::Backend;
 use crate::lang::{error_text, locale, tr};
 use crate::theme::Leading as _;
 
+/// El texto de un pedido es texto, no markdown: lo que parezca marcado
+/// (`*`, `_`, `#`, una lista) se pinta tal cual, y un salto de línea es un
+/// salto.
+fn escape_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for ch in text.chars() {
+        match ch {
+            '\n' => out.push_str("\\\n"),
+            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '#' | '~' | '|' | '&' | '!' | '-' | '+' | '.' | '(' | ')' | '{' | '}' | '=' | '"' | '$' | '%' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Lo abierto en una tarjeta, además de sus botones.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Mode {
@@ -239,41 +257,54 @@ impl RequestsView {
         }
     }
 
-    /// Un texto del pedido con sus enlaces pintados y pulsables. Sin enlaces,
-    /// texto corriente.
+    /// Texto corriente que se puede seleccionar con el ratón y copiar (cursor
+    /// de texto, doble clic para una palabra, Ctrl/⌘+C).
+    fn selectable(id: String, text: String) -> AnyElement {
+        div().id(SharedString::from(id.clone())).cursor_text().child(gpui_kit::base::SelectableText::new(SharedString::from(format!("{id}-text")), text)).test_support().into_any_element()
+    }
+
+    /// Un texto del pedido, seleccionable, con sus enlaces pintados y
+    /// pulsables. Sin enlaces, texto corriente; con ellos, markdown pintado
+    /// por `TextView` (que sí deja seleccionar) donde cada enlace apunta a
+    /// `cac-link:N`, el índice del segmento que se sigue al pulsarlo.
     fn rich(&self, id: String, text: &str, org_id: &str, cx: &mut Context<Self>) -> AnyElement {
         let segments = cac_core::link_segments(text);
         if segments.iter().all(|segment| matches!(segment, LinkSegment::Text(_))) {
-            return div().id(SharedString::from(id)).child(text.to_string()).test_support().into_any_element();
+            return Self::selectable(id, text.to_string()).into_any_element();
         }
-        let primary = cx.theme().primary;
-        let (mut shown, mut highlights, mut ranges, mut targets) = (String::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut painted, mut targets) = (String::new(), Vec::new());
         for segment in segments {
-            let start = shown.len();
             match &segment {
-                LinkSegment::Text(text) => shown.push_str(text),
-                LinkSegment::Url(url) => shown.push_str(url),
-                LinkSegment::Path { shown: written, .. } | LinkSegment::AppRoute { shown: written, .. } => shown.push_str(written),
-            }
-            if !matches!(segment, LinkSegment::Text(_)) {
-                let range = start..shown.len();
-                let style = HighlightStyle { color: Some(primary), underline: Some(UnderlineStyle { thickness: px(1.), color: Some(primary), wavy: false }), ..Default::default() };
-                highlights.push((range.clone(), style));
-                ranges.push(range);
-                targets.push(segment);
+                LinkSegment::Text(text) => painted.push_str(&escape_markdown(text)),
+                LinkSegment::Url(shown) | LinkSegment::Path { shown, .. } | LinkSegment::AppRoute { shown, .. } => {
+                    // Dentro del texto de un enlace el pintor no deshace las barras: sólo se
+                    // protegen los corchetes.
+                    painted.push_str(&format!("[{}](cac-link:{})", shown.replace('[', "(").replace(']', ")"), targets.len()));
+                    targets.push(segment.clone());
+                }
             }
         }
+        let paths: Vec<bool> = targets.iter().map(|target| matches!(target, LinkSegment::Path { .. })).collect();
         let (view, org_id) = (cx.entity().downgrade(), org_id.to_string());
-        let path_ranges: Vec<std::ops::Range<usize>> = ranges.iter().zip(&targets).filter(|(_, target)| matches!(target, LinkSegment::Path { .. })).map(|(range, _)| range.clone()).collect();
         let hint = tr(cx, "work:requests.revealPath");
-        let text = InteractiveText::new(SharedString::from(format!("{id}-text")), StyledText::new(shown).with_highlights(highlights))
-            .tooltip(move |at, window, cx| path_ranges.iter().any(|range| range.contains(&at)).then(|| gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx)))
-            .on_click(ranges, move |at, _, cx| {
-            let target = targets[at].clone();
-            let org_id = org_id.clone();
-            view.update(cx, |this, cx| this.follow(target, org_id, cx)).ok();
-        });
-        div().id(SharedString::from(id)).child(text).test_support().into_any_element()
+        let at = |url: &str| url.strip_prefix("cac-link:").and_then(|n| n.parse::<usize>().ok());
+        let follow = move |url: &SharedString, _: &ClickEvent, _: &mut Window, cx: &mut App| {
+            if let Some(target) = at(url).and_then(|n| targets.get(n)).cloned() {
+                let org_id = org_id.clone();
+                view.update(cx, |this, cx| this.follow(target, org_id, cx)).ok();
+            }
+        };
+        let view_text = gpui_kit::component::text::TextView::markdown(SharedString::from(format!("{id}-text")), painted)
+            .style(crate::theme::md_body_style(cx))
+            .on_link_click(follow)
+            .link_tooltip(move |url, window, cx| {
+                if at(url).and_then(|n| paths.get(n).copied()).unwrap_or(false) {
+                    gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx)
+                } else {
+                    gpui_kit::component::tooltip::Tooltip::new(url.clone()).build(window, cx)
+                }
+            });
+        div().id(SharedString::from(id)).min_w_0().max_w_full().leading_sm().child(view_text).test_support().into_any_element()
     }
 
     fn copy(&mut self, text: String, code: Option<String>, cx: &mut Context<Self>) {
@@ -435,9 +466,9 @@ impl RequestsView {
             .map(|(n, line)| {
                 let content = match org_id {
                     Some(org) => self.rich(format!("{id}-line-{n}"), line, org, cx),
-                    None => div().child(line.to_string()).into_any_element(),
+                    None => Self::selectable(format!("{id}-line-{n}"), line.to_string()).into_any_element(),
                 };
-                div().when(mono, |this| this.whitespace_nowrap()).child(content).into_any_element()
+                div().min_w_0().child(content).into_any_element()
             })
             .collect();
         div()
@@ -447,7 +478,7 @@ impl RequestsView {
             .p_3()
             .rounded(px(6.))
             .bg(theme.muted)
-            .when(mono, |this| this.font_family(theme.mono_font_family.clone()).overflow_x_scroll())
+            .when(mono, |this| this.font_family(theme.mono_font_family.clone()))
             .children(lines)
     }
 
@@ -462,7 +493,7 @@ impl RequestsView {
             RequestKind::ApproveMessage => {
                 let draft_block = self.block(format!("request-draft-{code}"), body.draft.clone(), false, Some(&org), cx);
                 let destination: AnyElement = if body.destination_url.is_empty() {
-                    div().child(body.destination.clone()).into_any_element()
+                    Self::selectable(format!("request-destination-{code}"), body.destination.clone()).into_any_element()
                 } else {
                     let (url, org) = (body.destination_url.clone(), request.org_id.clone());
                     div()
@@ -474,9 +505,23 @@ impl RequestsView {
                         .child(body.destination.clone())
                         .into_any_element()
                 };
+                let draft = body.draft.clone();
+                let copy_draft = Button::new(SharedString::from(format!("request-copy-draft-{code}")))
+                    .outline()
+                    .small()
+                    .icon(Icon::new(Lucide::Copy))
+                    .tooltip(tr(cx, "work:requests.copyDraft"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.copy(draft.clone(), None, cx);
+                        this.said = Some(tr(cx, "work:requests.draftCopied"));
+                    }));
                 column
                     .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.destination"), cx)).child(destination))
-                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.draft"), cx)).child(draft_block.test_support()))
+                    .child(
+                        div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.draft"), cx)).child(
+                            div().flex().items_start().gap_2().child(draft_block.flex_1().test_support()).child(copy_draft),
+                        ),
+                    )
                     .into_any_element()
             }
             RequestKind::Test => {
@@ -743,9 +788,9 @@ impl RequestsView {
             .rounded(px(6.))
             .bg(theme.muted)
             .child(div().id(SharedString::from(format!("request-outcome-{code}"))).font_weight(FontWeight::MEDIUM).child(cac_core::request_outcome(request, language)).test_support())
-            .when(!answer.note.is_empty() && request.kind != RequestKind::Test, |this| this.child(div().child(answer.note.clone())))
+            .when(!answer.note.is_empty() && request.kind != RequestKind::Test, |this| this.child(Self::selectable(format!("request-outcome-note-{code}"), answer.note.clone())))
             .children(output_block)
-            .when(answer.edited && !answer.final_text.is_empty(), |this| this.child(div().leading_xs().child(answer.final_text.clone())))
+            .when(answer.edited && !answer.final_text.is_empty(), |this| this.child(div().leading_xs().child(Self::selectable(format!("request-outcome-final-{code}"), answer.final_text.clone()))))
             .children(by.map(|line| div().leading_xs().text_color(theme.muted_foreground).child(line)))
             .when(!published.is_empty(), |this| {
                 this.child(
@@ -1362,6 +1407,48 @@ mod tests {
         click_start(window, "request-summary-req-r1", cx);
         assert_eq!(cx.opened_url().as_deref(), Some("https://supabase.example/sql/new"), "la pantalla de la app no se le da al navegador");
         wait_until(cx, "la tarea se abre dentro", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).task.task_id.clone()).as_deref() == Some("t1"));
+        stop(cx);
+    }
+
+    /// Arrastra el ratón de un extremo a otro de un texto y pulsa Ctrl+C.
+    fn select_and_copy(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) -> Option<String> {
+        let found = bounds(window, id, cx).unwrap_or_else(|| panic!("{id} no está en pantalla"));
+        let y = found.top() + px(8.);
+        let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+        visual.simulate_mouse_down(point(found.left() + px(1.), y), gpui_kit::MouseButton::Left, gpui_kit::Modifiers::default());
+        visual.simulate_mouse_move(point(found.right() - px(1.), y), Some(gpui_kit::MouseButton::Left), gpui_kit::Modifiers::default());
+        visual.simulate_mouse_up(point(found.right() - px(1.), y), gpui_kit::MouseButton::Left, gpui_kit::Modifiers::default());
+        visual.simulate_keystrokes("ctrl-c");
+        cx.read_from_clipboard().and_then(|item| item.text())
+    }
+
+    /// El texto de un pedido se selecciona con el ratón y se copia con Ctrl+C
+    /// (también el que lleva enlaces, tal como está escrito), y el borrador
+    /// tiene su botón «Copiar» (command-and-control-543).
+    ///
+    /// Roturas que atrapa: texto del pedido que no deja seleccionar; un texto
+    /// con enlaces que se copia con la marca del markdown (`\_`, `[…](…)`) en
+    /// vez de lo escrito; el botón de copiar el borrador que no copia.
+    #[gpui_kit::test]
+    fn the_text_of_a_request_can_be_selected_and_copied(cx: &mut TestAppContext) {
+        let listed: Shared = Arc::new(Mutex::new(vec![
+            approve("req-u1", "1. ver https://supabase.example/sql/new_x y *listo* #1 (ok)."),
+            approve("req-d1", "resumen llano"),
+        ]));
+        let server = live_server(&listed, &Arc::new(Mutex::new(Vec::new())));
+        let window = open_sized(&server, 2400., cx);
+        show_list(window, "req-u1", cx);
+        wait_until(cx, "los pedidos", |cx| on_screen(window, "request-draft-req-d1", cx));
+
+        assert_eq!(select_and_copy(window, "request-summary-req-d1", cx).as_deref(), Some("resumen llano"));
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new()));
+        assert_eq!(select_and_copy(window, "request-summary-req-u1", cx).as_deref(), Some("1. ver https://supabase.example/sql/new_x y *listo* #1 (ok)."));
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new()));
+        assert_eq!(select_and_copy(window, "request-draft-req-d1-line-0", cx).as_deref(), Some("Hola"));
+
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new()));
+        click(window, "request-copy-draft-req-d1", cx);
+        assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("Hola"));
         stop(cx);
     }
 

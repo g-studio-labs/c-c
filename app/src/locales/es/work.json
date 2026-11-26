@@ -683,6 +683,8 @@
     "command": "Comando",
     "copyCommand": "Copiar el comando",
     "commandCopied": "Comando copiado",
+    "copyDraft": "Copiar el borrador",
+    "draftCopied": "Borrador copiado",
     "pathMissing": "Esa ruta no existe: {{path}}",
     "pathCopied": "Ruta copiada",
     "revealPath": "Mostrar en la carpeta",

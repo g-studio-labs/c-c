@@ -683,6 +683,8 @@
     "command": "Command",
     "copyCommand": "Copy the command",
     "commandCopied": "Command copied",
+    "copyDraft": "Copy the draft",
+    "draftCopied": "Draft copied",
     "pathMissing": "That path does not exist: {{path}}",
     "pathCopied": "Path copied",
     "revealPath": "Show in folder",
