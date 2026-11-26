@@ -53,6 +53,7 @@
   "basecamp-off": "Este servidor de cac aún no tiene Basecamp configurado.",
   "basecamp-not-connected": "Basecamp no está conectado a esta organización.",
   "basecamp-unreachable": "Basecamp no contestó. Prueba de nuevo en un momento.",
+  "basecamp-reconnect": "Basecamp ya no acepta la conexión de esta organización. Conéctalo de nuevo.",
   "basecamp-failed": "Basecamp falló de su lado en esta petición.",
   "basecamp-bad-url": "Ese enlace no es de la cuenta de Basecamp conectada.",
   "basecamp-link-taken": "Ese elemento de Basecamp ya está enlazado a otra tarea.",

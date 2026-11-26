@@ -58,6 +58,8 @@ func (h *BasecampHandler) Setup(w http.ResponseWriter, r *http.Request) {
 		setupPage(w, http.StatusBadRequest, "No Basecamp account", "That login has no Basecamp account cac can use.")
 	case errors.Is(err, domain.ErrBasecampBadState):
 		setupPage(w, http.StatusBadRequest, "This link has expired", "Start again from cac: Organization → Integrations.")
+	case errors.Is(err, domain.ErrBasecampReconnect):
+		setupPage(w, http.StatusBadRequest, "Basecamp did not accept the authorization", "Start again from cac: Organization → Integrations.")
 	default:
 		setupPage(w, http.StatusBadGateway, "Basecamp did not answer", "Try again in a moment from cac: Organization → Integrations.")
 	}
@@ -79,6 +81,8 @@ func basecampError(w http.ResponseWriter, err error) {
 		SendErrorResponse(w, http.StatusBadRequest, "That space is not in this organization", "space-outside-org")
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		SendErrorResponse(w, http.StatusNotFound, "Not found", "not-found")
+	case errors.Is(err, domain.ErrBasecampReconnect):
+		SendErrorResponse(w, http.StatusConflict, "Basecamp asks to connect again", "basecamp-reconnect")
 	case errors.Is(err, domain.ErrBasecampUnreachable):
 		SendErrorResponse(w, http.StatusBadGateway, "Basecamp did not answer", "basecamp-unreachable")
 	default:

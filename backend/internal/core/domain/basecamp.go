@@ -47,9 +47,12 @@ var (
 	ErrBasecampBadState     = errors.New("basecamp-bad-state")
 	ErrBasecampNoAccount    = errors.New("basecamp-no-account")
 	ErrBasecampUnreachable  = errors.New("basecamp-unreachable")
-	ErrBasecampBadURL       = errors.New("basecamp-bad-url")
-	ErrBasecampLinkTaken    = errors.New("basecamp-link-taken")
-	ErrBasecampUserOutside  = errors.New("basecamp-user-outside-org")
+	// Launchpad contestó y dijo que no (el refresh o el code ya no valen):
+	// no es un silencio, y lo que arregla es conectar de nuevo.
+	ErrBasecampReconnect   = errors.New("basecamp-reconnect")
+	ErrBasecampBadURL      = errors.New("basecamp-bad-url")
+	ErrBasecampLinkTaken   = errors.New("basecamp-link-taken")
+	ErrBasecampUserOutside = errors.New("basecamp-user-outside-org")
 )
 
 // BasecampConnection: la cuenta de Basecamp de una organización. Una por org.
@@ -274,13 +277,29 @@ var (
 	reBlocks = regexp.MustCompile(`(?i)</?(div|p|br|li|h[1-6]|blockquote|figure)\b[^>]*>`)
 	reSpaces = regexp.MustCompile(`[ \t\r\f\v]+`)
 	reBlank  = regexp.MustCompile(`\n{3,}`)
+	// Una mención entera, con lo que lleva dentro: Basecamp la pinta como un
+	// `<figure>` con el nombre en el `<figcaption>`, pero en la frase es una
+	// palabra, no un bloque.
+	reMentionElement = regexp.MustCompile(`(?is)<bc-attachment\b([^>]*)>(.*?)</bc-attachment>`)
 )
+
+// inlineMentions cambia cada mención por el nombre que enseña, para que el
+// extracto diga «Ana please review» y no parta la línea en el `<figure>`.
+func inlineMentions(content string) string {
+	return reMentionElement.ReplaceAllStringFunc(content, func(el string) string {
+		m := reMentionElement.FindStringSubmatch(el)
+		if !reAttrMention.MatchString(m[1]) {
+			return el
+		}
+		return strings.Join(strings.Fields(html.UnescapeString(reTags.ReplaceAllString(m[2], " "))), " ")
+	})
+}
 
 // BasecampPlainText: el texto de un HTML de Basecamp, sin etiquetas y cortado
 // a `max` runas. Lo que se copia a una tarea o a un aviso es un extracto, no el
 // documento.
 func BasecampPlainText(content string, max int) string {
-	s := reBlocks.ReplaceAllString(content, "\n")
+	s := reBlocks.ReplaceAllString(inlineMentions(content), "\n")
 	s = reTags.ReplaceAllString(s, "")
 	s = html.UnescapeString(s)
 	s = reSpaces.ReplaceAllString(s, " ")

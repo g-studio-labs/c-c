@@ -208,12 +208,14 @@ func (s *BasecampService) Setup(code, state string) error {
 	if !s.Configured() {
 		return domain.ErrBasecampOff
 	}
+	// El code antes que el state: verificarlo lo gasta, y un callback sin code
+	// dejaría inservible el enlace bueno que llegue después.
+	if strings.TrimSpace(code) == "" {
+		return domain.ErrBasecampBadState
+	}
 	orgID, userID, err := s.verifyState(state)
 	if err != nil {
 		return err
-	}
-	if strings.TrimSpace(code) == "" {
-		return domain.ErrBasecampBadState
 	}
 	tok, err := s.launchpadToken(url.Values{"type": {"web_server"}, "code": {code}})
 	if err != nil {
@@ -299,6 +301,10 @@ func (s *BasecampService) launchpadToken(form url.Values) (*launchpadToken, erro
 		return nil, domain.ErrBasecampUnreachable
 	}
 	defer res.Body.Close()
+	if res.StatusCode == http.StatusBadRequest || res.StatusCode == http.StatusUnauthorized {
+		// `invalid_grant` y compañía: Launchpad sí contestó.
+		return nil, fmt.Errorf("%w: launchpad token %d", domain.ErrBasecampReconnect, res.StatusCode)
+	}
 	if res.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("%w: launchpad token %d", domain.ErrBasecampUnreachable, res.StatusCode)
 	}

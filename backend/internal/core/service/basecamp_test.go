@@ -1089,3 +1089,53 @@ func TestAFailedEventLetsTheRetryIn(t *testing.T) {
 		t.Fatalf("the retry left %d lines", len(cs))
 	}
 }
+
+// Un callback sin `code` no gasta el `state`: verificarlo lo consume, y el
+// enlace bueno que llegue después diría «caducado» (QA command-and-control-555).
+//
+// Rotura que atrapa: volver a verificar el state antes de mirar el code.
+func TestASetupWithoutACodeLeavesTheStateUsable(t *testing.T) {
+	f := newBasecampFixture(t)
+	u, err := f.svc.ConnectURL("org-1", "u-ana")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, _ := url.Parse(u)
+	state := parsed.Query().Get("state")
+	if err := f.svc.Setup(" ", state); !errors.Is(err, domain.ErrBasecampBadState) {
+		t.Fatalf("a callback without a code gave %v", err)
+	}
+	if err := f.svc.Setup("good-code", state); err != nil {
+		t.Fatalf("the state was spent by a callback without a code: %v", err)
+	}
+}
+
+// Un refresh que Launchpad rechaza no es «Basecamp no contestó»: contestó que
+// no, y lo que arregla es conectar de nuevo (QA command-and-control-555).
+//
+// Rotura que atrapa: tratar el 4xx de Launchpad como un silencio
+// (`basecamp-unreachable`).
+func TestARefusedRenewalAsksToConnectAgain(t *testing.T) {
+	f := newBasecampFixture(t)
+	f.fake.failRefresh = true
+	f.now = f.now.Add(15 * 24 * time.Hour)
+	_, err := f.svc.AvailableProjects("org-1")
+	if !errors.Is(err, domain.ErrBasecampReconnect) || errors.Is(err, domain.ErrBasecampUnreachable) {
+		t.Fatalf("a refused renewal gave %v, want basecamp-reconnect", err)
+	}
+}
+
+// El extracto de una mención no parte la frase: Basecamp la pinta como un
+// `<figure>`, pero se lee como una palabra (QA command-and-control-555). Lo
+// demás que es bloque sigue partiendo la línea.
+//
+// Roturas que atrapa: tratar el `<figure>` de una mención como bloque; tragarse
+// el nombre de quien se menciona; poner en línea un adjunto que no es mención
+// (una imagen sigue siendo un bloque).
+func TestAMentionReadsInlineInTheExcerpt(t *testing.T) {
+	html := `<div>` + mentionHTML("sgid-ana", "Ana &amp; Co") + ` please review</div><div>Gracias</div>` +
+		`<bc-attachment sgid="img" content-type="image/png"><figure><img src="x.png"><figcaption>foto</figcaption></figure></bc-attachment>`
+	if got, want := domain.BasecampPlainText(html, 0), "Ana & Co please review\n\nGracias\n\nfoto"; got != want {
+		t.Fatalf("excerpt %q, want %q", got, want)
+	}
+}
