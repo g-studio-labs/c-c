@@ -90,6 +90,12 @@ func BasecampProjectGroup(projectID int64) string {
 	return prefijo(groupBasecamp, strconv.FormatInt(projectID, 10))
 }
 
+// BasecampAccountGroup: los avisos de una conexión de Basecamp que dejó de
+// renovarse, juntos: una racha de fallos es una fila.
+func BasecampAccountGroup(accountID int64) string {
+	return prefijo(groupBasecamp, "account-"+strconv.FormatInt(accountID, 10))
+}
+
 // BackupTargetGroup: los avisos de una base respaldada, juntos.
 func BackupTargetGroup(targetID string) string { return prefijo(groupBackup, targetID) }
 

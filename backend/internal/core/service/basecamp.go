@@ -402,7 +402,7 @@ func (s *BasecampService) refreshFailed(conn *domain.BasecampConnection) {
 	for _, uid := range admins {
 		s.inbox.Notify(domain.Aviso{UserID: uid, OrgID: conn.OrgID, Kind: domain.BasecampAuthKind,
 			TitleKey: "notify.basecamp.auth_failed", Body: conn.AccountName, Link: "/organization",
-			Label: conn.AccountName})
+			Group: domain.BasecampAccountGroup(conn.AccountID), Label: conn.AccountName})
 	}
 }
 
