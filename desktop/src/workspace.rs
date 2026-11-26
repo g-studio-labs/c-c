@@ -3287,7 +3287,7 @@ mod tests {
 
         let server = server();
         server.install(cx);
-        cx.update(|cx| cx.set_global(McpSetup { machine, server_url: "https://cac.example".into() }));
+        cx.update(|cx| cx.set_global(McpSetup { machine, server_url: "https://cac.example".into(), claude: std::sync::Arc::new(cac_mcp::claude_code::fake::FakeClaude::new(None)) }));
         let (window, workspace) = open_with_view(1100., cx);
         wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
         let work = |cx: &mut TestAppContext| cx.update(|cx| workspace.read(cx).connect.read(cx).work.clone());
@@ -3317,9 +3317,12 @@ mod tests {
         assert!(!on_screen(window, "connect-installed", cx));
 
         // La orden apunta a donde va a quedar, con el sitio del token marcado.
+        // Está debajo del token: la ventana de prueba es baja y hay que bajar.
+        wheel_in(window, "connect-dialog", 3000., cx);
         click(window, "connect-copy", cx);
+        wheel_in(window, "connect-dialog", -3000., cx);
         let copied = cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
-        assert_eq!(copied, format!("claude mcp add cac -e CAC_URL=https://cac.example -e CAC_TOKEN=PASTE_YOUR_TOKEN -- \"{}\"", binary.display()));
+        assert_eq!(copied, format!("claude mcp add cac -s user -e CAC_URL=https://cac.example -e CAC_TOKEN=PASTE_YOUR_TOKEN -- \"{}\"", binary.display()));
 
         click(window, "connect-run", cx);
         wait_until(cx, "se instala", |cx| on_screen(window, "connect-done", cx));
@@ -3360,6 +3363,129 @@ mod tests {
         assert!(matches!(work(cx), Work::Failed(reason) if reason.contains("checksum mismatch")), "{:?}", work(cx));
         assert_eq!(std::fs::read(&binary).unwrap(), b"#!/bin/sh\necho 'cac-mcp 1.35.0'\n", "una descarga rechazada tocó lo instalado");
         assert!(on_screen(window, "connect-run", cx), "tras un fallo no se puede reintentar");
+
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    /// «Conectar Claude Code» crea el token personal y registra `cac-mcp` en
+    /// Claude Code sin enseñar el token; «Seleccionar todos» marca y desmarca
+    /// los permisos; con otro registro `cac` puesto, pregunta antes de
+    /// quitarlo; y el paso a mano enseña el token una vez, hasta cerrar.
+    ///
+    /// El `claude` es de mentira (`claude_code::fake`) y el binario, un
+    /// guion que contesta su versión.
+    ///
+    /// Roturas que atrapa: «Seleccionar todos» que deja alguno sin marcar o
+    /// que no desmarca; crear un token (o quitar el registro) antes del sí;
+    /// mandar sólo algunos permisos; el token en la orden que se pinta o en
+    /// el portapapeles sin pulsar «Copiar»; una tarjeta que no distingue este
+    /// `cac-mcp` de otro; un token enseñado que sigue ahí al volver a abrir.
+    #[gpui_kit::test]
+    #[cfg(target_os = "linux")]
+    fn claude_code_registers_cac_mcp_with_a_new_token_without_showing_it(cx: &mut TestAppContext) {
+        use crate::connect::{McpSetup, TokenWork};
+        use cac_mcp::claude_code::fake::{FakeClaude, TOKEN};
+        use cac_mcp::update::{fake::FakeReleases, Machine};
+        use std::os::unix::fs::PermissionsExt;
+
+        let releases = FakeReleases::start();
+        releases.announce("1.34.0");
+        let scratch = std::env::temp_dir().join(format!("cac-desktop-register-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let binary = scratch.join("bin").join("cac-mcp");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, "#!/bin/sh\necho 'cac-mcp 1.34.0'\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let machine = Machine { source: releases.source(), state_dir: Some(scratch.join("state")), look_in: vec![binary.clone()], install_to: Some(binary.clone()) };
+        let claude = std::sync::Arc::new(FakeClaude::new(Some(("/opt/cac.AppImage", "user"))));
+
+        let server = server();
+        server.mount(
+            Mock::given(method("POST"))
+                .and(path("/api/v1/auth/tokens"))
+                .respond_with(ok(json!({ "token": { "id": "t1", "name": "Claude Code", "preview": "cac_…", "createdAt": "2026-11-26T00:00:00Z" }, "value": TOKEN }))),
+        );
+        server.install(cx);
+        let fake: std::sync::Arc<dyn cac_mcp::claude_code::Cli> = claude.clone();
+        cx.update(|cx| cx.set_global(McpSetup { machine, server_url: "https://cac.example".into(), claude: fake }));
+        let (window, workspace) = open_with_view(1100., cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        let view = |cx: &mut TestAppContext| cx.update(|cx| workspace.read(cx).connect.clone());
+        let visible = |cx: &mut TestAppContext| {
+            let connect = view(cx);
+            cx.update(|cx| connect.read(cx).visible_command("https://cac.example", &binary))
+        };
+        let clipboard = |cx: &mut TestAppContext| cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
+
+        click(window, "account-menu", cx);
+        wait_until(cx, "el menú se abre", |cx| on_screen(window, "account-connect", cx));
+        click(window, "account-connect", cx);
+        wait_until(cx, "la ventana se abre", |cx| on_screen(window, "connect-dialog", cx));
+        wait_until(cx, "dice que usa otro programa", |cx| on_screen(window, "connect-claude-other", cx));
+        wait_until(cx, "ve el cac-mcp instalado", |cx| on_screen(window, "connect-installed", cx));
+
+        // «Seleccionar todos», y otra vez para desmarcar, y otra para marcar.
+        let scopes = |cx: &mut TestAppContext| {
+            let connect = view(cx);
+            cx.update(|cx| connect.read(cx).scopes.clone())
+        };
+        click(window, "connect-select-all", cx);
+        assert_eq!(scopes(cx).len(), cac_core::TOKEN_SCOPES.len(), "no marcó todos");
+        click(window, "connect-select-all", cx);
+        assert!(scopes(cx).is_empty(), "no desmarcó");
+        click(window, "connect-select-all", cx);
+        wheel_in(window, "connect-dialog", 3000., cx);
+        click(window, "connect-scope-chat:write", cx);
+        assert_eq!(scopes(cx).len(), cac_core::TOKEN_SCOPES.len() - 1, "un permiso no se desmarca solo");
+        wheel_in(window, "connect-dialog", -3000., cx);
+        click(window, "connect-select-all", cx);
+        assert_eq!(scopes(cx).len(), cac_core::TOKEN_SCOPES.len(), "con uno sin marcar no completó");
+
+        // Hay otro registro: se pregunta, sin crear token ni quitar nada.
+        wheel_in(window, "connect-dialog", 3000., cx);
+        click(window, "connect-register", cx);
+        wait_until(cx, "pregunta antes de quitar", |cx| on_screen(window, "connect-replace-ask", cx));
+        assert_eq!(server.hits("/api/v1/auth/tokens"), 0, "creó un token antes del sí");
+        assert!(claude.calls().iter().all(|call| call[1] == "get"), "tocó el registro antes del sí: {:?}", claude.calls());
+
+        wheel_in(window, "connect-dialog", 3000., cx);
+        click(window, "connect-replace", cx);
+        wait_until(cx, "queda registrado", |cx| on_screen(window, "connect-registered", cx));
+        wait_until(cx, "la tarjeta dice que es éste", |cx| on_screen(window, "connect-claude-this", cx));
+        let registered = claude.registered.lock().unwrap().clone();
+        assert_eq!(registered.map(|(command, _)| command), Some(binary.display().to_string()));
+        let sent: serde_json::Value = server
+            .requests()
+            .iter()
+            .find(|request| request.url.path() == "/api/v1/auth/tokens")
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .unwrap();
+        assert_eq!(sent["scopes"].as_array().unwrap().len(), cac_core::TOKEN_SCOPES.len(), "{sent}");
+        assert!(claude.calls().iter().any(|call| call.contains(&format!("CAC_TOKEN={TOKEN}"))), "el token no llegó a claude");
+        // Y no se ve ni se copió.
+        assert!(!visible(cx).contains(TOKEN), "la orden pintada lleva el token");
+        assert!(!on_screen(window, "connect-token-shown", cx));
+        assert!(!clipboard(cx).contains(TOKEN), "el token acabó en el portapapeles");
+        assert_eq!(cx.update(|cx| workspace.read(cx).connect.read(cx).token_work.clone()), TokenWork::Registered);
+
+        // El paso a mano: se enseña, se copia al pulsar, y se olvida al cerrar.
+        wheel_in(window, "connect-dialog", 3000., cx);
+        click(window, "connect-show-token", cx);
+        wait_until(cx, "enseña el token", |cx| on_screen(window, "connect-token-shown", cx));
+        assert!(visible(cx).contains(&format!("CAC_TOKEN={TOKEN}")), "la orden a mano no sale rellena");
+        assert!(!clipboard(cx).contains(TOKEN));
+        wheel_in(window, "connect-dialog", 3000., cx);
+        click(window, "connect-copy-token", cx);
+        assert_eq!(clipboard(cx), TOKEN);
+        press(window, "escape", cx);
+        wait_until(cx, "Escape la cierra", |cx| !on_screen(window, "connect-dialog", cx));
+        click(window, "account-menu", cx);
+        wait_until(cx, "el menú se abre", |cx| on_screen(window, "account-connect", cx));
+        click(window, "account-connect", cx);
+        wait_until(cx, "la ventana se abre", |cx| on_screen(window, "connect-dialog", cx));
+        assert!(!on_screen(window, "connect-token-shown", cx), "el token sigue a la vista al volver");
+        assert!(!visible(cx).contains(TOKEN));
 
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
         let _ = std::fs::remove_dir_all(scratch);

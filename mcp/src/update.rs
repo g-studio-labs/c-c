@@ -610,14 +610,26 @@ impl Machine {
     }
 }
 
-/// El marcador que va en la orden donde iría el token. Esta lógica no ve
-/// tokens: ni los crea, ni los lee, ni los imprime.
+/// El marcador que va en la orden donde iría el token cuando no se tiene.
 pub const TOKEN_PLACEHOLDER: &str = "PASTE_YOUR_TOKEN";
 
 /// La orden que registra el binario en Claude Code, con el sitio del token
-/// marcado. La misma forma que enseña la app de siempre para `cac --mcp`.
+/// marcado. Para toda la cuenta (`-s user`), como la registra «Registrar en
+/// Claude Code» (`claude_code::add_args`): sin `-s` quedaría sólo para la
+/// carpeta desde la que se pega.
 pub fn register_command(cac_url: &str, binary: &Path) -> String {
-    format!("claude mcp add cac -e CAC_URL={} -e CAC_TOKEN={TOKEN_PLACEHOLDER} -- \"{}\"", cac_url.trim_end_matches('/'), binary.display())
+    register_command_with(cac_url, None, binary)
+}
+
+/// La misma orden, ya rellena con un token: la del paso a mano, que se
+/// enseña una sola vez al crearlo.
+pub fn register_command_with(cac_url: &str, token: Option<&str>, binary: &Path) -> String {
+    format!(
+        "claude mcp add cac -s user -e CAC_URL={} -e CAC_TOKEN={} -- \"{}\"",
+        cac_url.trim_end_matches('/'),
+        token.unwrap_or(TOKEN_PLACEHOLDER),
+        binary.display()
+    )
 }
 
 /// Lo que se le dice al agente cuando hay una versión más nueva que la que
@@ -1066,7 +1078,9 @@ mod tests {
     #[test]
     fn the_register_command_marks_where_the_token_goes_and_never_carries_one() {
         let command = register_command("https://cac.example/", Path::new("/home/ana/.local/bin/cac-mcp"));
-        assert_eq!(command, "claude mcp add cac -e CAC_URL=https://cac.example -e CAC_TOKEN=PASTE_YOUR_TOKEN -- \"/home/ana/.local/bin/cac-mcp\"");
+        assert_eq!(command, "claude mcp add cac -s user -e CAC_URL=https://cac.example -e CAC_TOKEN=PASTE_YOUR_TOKEN -- \"/home/ana/.local/bin/cac-mcp\"");
+        let filled = register_command_with("https://cac.example", Some("cac_pat_X"), Path::new("/b/cac-mcp"));
+        assert_eq!(filled, "claude mcp add cac -s user -e CAC_URL=https://cac.example -e CAC_TOKEN=cac_pat_X -- \"/b/cac-mcp\"");
         assert_eq!(version_line("cac-mcp 1.33.0\navailable: 1.34.0\n").as_deref(), Some("1.33.0"));
         assert_eq!(version_line("git version 2.50.0\n"), None);
         assert_eq!(version_line("cac-mcp desconocida\n"), None);

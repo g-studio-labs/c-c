@@ -162,7 +162,11 @@ fn main() {
         .detach();
         // Para «Conectar Claude Code»: dónde está `cac-mcp` en esta máquina y
         // de dónde se baja. Lo decide el MCP (`cac_mcp::update`).
-        cx.set_global(connect::McpSetup { machine: cac_mcp::update::Machine::from_env(), server_url: server_url.clone() });
+        cx.set_global(connect::McpSetup {
+            machine: cac_mcp::update::Machine::from_env(),
+            server_url: server_url.clone(),
+            claude: std::sync::Arc::new(cac_mcp::claude_code::SystemClaude),
+        });
 
         // El aviso de versión nueva (`updater.rs`): una vez al arrancar y una
         // al día. Sin `CAC_DESKTOP_NO_UPDATE_CHECK`, y nada se instala solo.

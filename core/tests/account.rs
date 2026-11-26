@@ -604,3 +604,50 @@ async fn choosing_a_language_changes_it_here_and_saves_it_on_the_account() {
     assert!(matches!(failed, ApiError::Server { status: 500, ref code, .. } if code == "locale-not-saved"));
     assert_eq!(core.locale_preference(), None);
 }
+
+/// Crear un token personal manda el nombre y sólo los permisos que el
+/// servidor conoce, y devuelve el valor que contesta.
+///
+/// Roturas que atrapa: mandar un nombre vacío (el servidor le pondría uno
+/// que nadie reconoce en la lista); colar un permiso inventado; perder el
+/// valor (sin él no hay nada que registrar); dar por bueno un rechazo; dar por
+/// creado un token que llegó sin valor.
+#[tokio::test]
+async fn creating_a_personal_token_sends_name_and_known_scopes_and_returns_the_value() {
+    let server = MockServer::start().await;
+    let (core, _) = core_at(&server).await;
+    core.sign_in(ana(false), "access".into(), "refresh".into()).unwrap();
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/tokens"))
+        .and(header("Authorization", "Bearer access"))
+        .and(body_json(serde_json::json!({ "name": "Claude Code", "scopes": ["tasks:write", "chat:write"] })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true,
+            "data": { "token": { "id": "t1", "name": "Claude Code", "preview": "cac_…", "scopes": ["tasks:write", "chat:write"], "createdAt": "2026-11-26T00:00:00Z" }, "value": "cac_pat_SECRET" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let scopes = vec!["chat:write".to_string(), "made:up".to_string(), "tasks:write".to_string()];
+    let created = core.create_personal_token("   ", &scopes).await.unwrap();
+    assert_eq!(created.id, "t1");
+    assert_eq!(created.value.expose(), "cac_pat_SECRET");
+
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": { "token": { "id": "t2" } } })))
+        .mount(&server)
+        .await;
+    assert!(core.create_personal_token("x", &[]).await.is_err(), "un token sin valor se dio por creado");
+
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/tokens"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({ "success": false, "error": "forbidden", "message": "no" })))
+        .mount(&server)
+        .await;
+    assert!(matches!(core.create_personal_token("x", &[]).await, Err(ApiError::Server { status: 403, .. })));
+}
