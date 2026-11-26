@@ -1371,12 +1371,12 @@ fn my_work_ids(rig: &Rig) -> Vec<String> {
 }
 
 /// Antes de borrar se pregunta nombrando la tarea y diciendo qué se va con
-/// ella; si tiene subtareas, va **como aviso aparte**: cuántas son y que
-/// dejarán de verse y de poder abrirse desde la vista principal.
+/// ella; si tiene subtareas, va **como aviso aparte**: cuántas son y que se
+/// borran con ella (el servidor hace cascada).
 ///
 /// Roturas que atrapa: una pregunta que no dice qué tarea se borra; dejar lo
 /// de las subtareas como una frase más del cuerpo, donde no se lee (lo que
-/// había); un aviso que no dice que dejan de verse; no decir cuántas son, o
+/// había); un aviso que dice que se quedan (lo que había) o que no lo dice; no decir cuántas son, o
 /// «1 subtareas»; y avisar de subtareas a una que no tiene ninguna.
 #[tokio::test]
 async fn the_question_before_deleting_names_the_task_and_what_goes_with_it() {
@@ -1389,7 +1389,7 @@ async fn the_question_before_deleting_names_the_task_and_what_goes_with_it() {
     assert_eq!(question.body, "La quita con sus comentarios y sus adjuntos. No se puede deshacer.");
     assert_eq!(
         question.warning.as_deref(),
-        Some("Tiene 1 subtarea enlazada. No se borra con ella, pero dejará de verse y de poder abrirse desde la vista principal.")
+        Some("Se borra también su subtarea enlazada (1).")
     );
     assert_eq!((question.confirm.as_str(), question.cancel.as_str()), ("Borrar", "Cancelar"));
 
@@ -1403,7 +1403,7 @@ async fn the_question_before_deleting_names_the_task_and_what_goes_with_it() {
     // Las terminadas también dejan de verse: cuentan todas las enlazadas.
     assert_eq!(
         rig.core.tasks().delete_question(Locale::En).unwrap().warning.as_deref(),
-        Some("It has 2 linked subtasks. They are not deleted with it, but they will no longer be visible or reachable from the main view.")
+        Some("Its 2 linked subtasks are deleted too.")
     );
 
     let mut alone = detail("t9", "Suelta", "pending", "", "");

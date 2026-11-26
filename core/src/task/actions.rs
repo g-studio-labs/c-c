@@ -258,10 +258,9 @@ impl Tasks {
     /// va con ella.
     ///
     /// El servidor (`TaskRepository.DeleteTask`) borra la tarea con sus
-    /// comentarios y sus adjuntos, y **no** sus subtareas: se quedan, pero
-    /// colgadas de una madre que ya no existe, y desde la vista principal no
-    /// se ven ni se llega a ellas. Eso va como **aviso** y no como una frase
-    /// más del cuerpo (jose, 17-nov-2026, command-and-control-387): quien
+    /// comentarios y sus adjuntos, **y con sus subtareas** (cascada, jose,
+    /// 25-nov-2026, command-and-control-386). Que se vayan va como **aviso**
+    /// y no como una frase más del cuerpo (jose, 17-nov-2026, command-and-control-387): quien
     /// borra una tarea partida en pasos tiene que enterarse antes de
     /// contestar, y una frase más al final de un párrafo no se lee.
     pub fn delete_question(&self, locale: Locale) -> Option<Question> {
@@ -270,7 +269,7 @@ impl Tasks {
         Some(Question {
             title: text_with(locale, "work:task.deleteTaskTitle", &[("name", &detail.task.title)]),
             body: text(locale, "work:task.deleteTaskBody"),
-            warning: (linked > 0).then(|| text_count(locale, "work:task.deleteTaskKeepsSubtasks", linked)),
+            warning: (linked > 0).then(|| text_count(locale, "work:task.deleteTaskTakesSubtasks", linked)),
             confirm: text(locale, "work:task.delete"),
             cancel: text(locale, "work:task.cancel"),
         })

@@ -4655,10 +4655,10 @@ mod tests {
         let (question, detail) = shown_question(window, cx).expect("no preguntó antes de borrar");
         assert!(question.contains("«Subir el backend»"), "no dice qué tarea: {question}");
         assert!(detail.contains("comentarios") && !detail.contains("subtarea"), "lo de las subtareas va aparte, como aviso: {detail}");
-        // El aviso, en su caja: cuántas tiene enlazadas y que dejan de verse.
+        // El aviso, en su caja: cuántas tiene enlazadas y que se borran con ella.
         assert!(on_screen(window, "task-confirm-warning", cx), "no avisa de las subtareas enlazadas");
         let warning = label_of(window, "task-confirm-warning", cx);
-        assert_eq!(warning, "Tiene 1 subtarea enlazada. No se borra con ella, pero dejará de verse y de poder abrirse desde la vista principal.");
+        assert_eq!(warning, "Se borra también su subtarea enlazada (1).");
         // Mientras se pregunta, lo de debajo no se pulsa.
         click(window, "task-add-subtask", cx);
         assert!(!on_screen(window, "task-new-subtask", cx), "se pulsó la página por debajo de la pregunta");
