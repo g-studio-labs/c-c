@@ -3101,7 +3101,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "send_message",
-            "description": "Write in a channel (a space's chat) or in a direct message to a person. It goes out under the token owner's name and is shown to everyone as written by an agent. People read this, and it notifies them (mentions with @username notify that person): send what the user asked you to send, and when you wrote the words yourself, show them the text and get a yes first. Not for task findings (add_task_comment) or facts for the next session (remember). Needs `chat:write`.",
+            "description": "Write in a channel (a space's chat) or in a direct message to a person. It goes out under the token owner's name and is shown to everyone as written by an agent. People read this and are notified: a direct message notifies its recipient, and in a channel writing `@username` (find_person gives it) of a member of that organization turns into a mention that notifies that person and shows as one; an `@` inside code, an e-mail address or a name that is not a member stays plain text. Send what the user asked you to send, and when you wrote the words yourself, show them the text and get a yes first. Not for task findings (add_task_comment) or facts for the next session (remember). Needs `chat:write`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -8829,6 +8829,19 @@ mod tests {
         assert_eq!(tool(&defs, "wait_request")["annotations"]["readOnlyHint"], true);
         assert_eq!(tool(&defs, "withdraw_request")["annotations"]["destructiveHint"], true);
         assert_eq!(tool(&defs, "open_request")["annotations"]["readOnlyHint"], false);
+    }
+
+    /// `send_message` dice cómo se menciona a alguien en un canal y que eso
+    /// avisa (command-and-control-550): el servidor convierte un `@usuario` de
+    /// un miembro en mención, y un agente que no lo sabe escribe nombres que
+    /// no avisan a nadie.
+    #[test]
+    fn send_message_says_how_to_mention_someone() {
+        let defs = annotate(tool_defs());
+        let said = tool(&defs, "send_message")["description"].as_str().unwrap();
+        for hint in ["`@username`", "find_person", "member of that organization", "notifies that person", "plain text"] {
+            assert!(said.contains(hint), "{hint}: {said}");
+        }
     }
 
     /// Esperar es 300 s si no se dice, y de 1 a 600.
