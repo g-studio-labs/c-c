@@ -53,7 +53,7 @@ const COALESCE: Duration = Duration::from_millis(400);
 const PEOPLE_LIMIT: usize = 50;
 
 /// Una conversación: el canal de un espacio o un directo con alguien.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Conversation {

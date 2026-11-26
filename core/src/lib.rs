@@ -54,6 +54,7 @@ pub mod transport;
 pub mod tree;
 pub mod hue;
 pub mod inbox;
+pub mod inbox_peek;
 pub mod tree_rows;
 pub mod ring_tone;
 pub mod voice;
@@ -108,6 +109,7 @@ pub use mywork::{
 };
 pub use notice::{channel_notice, direct_notice, Announcement, NoticeKind, NoticeTarget, Notices, Viewer};
 pub use inbox::{group_key_of, inbox_panel, link_target, time_ago, GroupTally, Inbox, InboxFeed, InboxGroup, InboxIcon, InboxItem, InboxPanel, InboxRow, InboxState, InboxTab, InboxTarget, InboxTone, INBOX_TABS};
+pub use inbox_peek::{peek_path, previews_wanted, quick_lines, row_preview, with_previews, PreviewWanted, QuickLine, PEEK_LIMIT};
 pub use notice_sound::{render, tone_for, Chime, Tone, TONE_GAP};
 pub use nav::{docs_reachable_from_scope, tree_click, Looking, NodeKind, TreeClick};
 pub use hue::{hue_index, HUES};

@@ -326,6 +326,9 @@ pub struct InboxRow {
     /// A dónde lleva, y de qué organización es.
     pub link: String,
     pub org_id: String,
+    /// Tal como llegó: con él se encuentra el mensaje de un directo, cuyo
+    /// aviso no dice cuál es (`inbox_peek::row_preview`).
+    pub created_at: String,
 }
 
 /// Una conversación de la bandeja tal como se pinta: su resumen plegado y,
@@ -390,6 +393,7 @@ fn row_of<Viewer: TimeZone>(item: &InboxItem, now: &DateTime<Viewer>, locale: Lo
         unread: item.read_at.is_none(),
         link: item.link.clone(),
         org_id: item.org_id.clone(),
+        created_at: item.created_at.clone(),
     }
 }
 
@@ -479,7 +483,7 @@ pub fn inbox_panel<Viewer: TimeZone>(state: &InboxState, tab: InboxTab, expanded
 
 /// La bandeja de este core.
 pub struct Inbox {
-    core: Core,
+    pub(crate) core: Core,
 }
 
 impl Core {

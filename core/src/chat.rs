@@ -290,7 +290,7 @@ pub(crate) fn page_path(conversation: &Conversation, before: Option<&str>) -> St
 }
 
 /// La ruta que marca leída esa conversación.
-fn read_path(conversation: &Conversation) -> String {
+pub(crate) fn read_path(conversation: &Conversation) -> String {
     match conversation {
         Conversation::Channel { space_id } => format!("/api/v1/task-spaces/{space_id}/chat/read"),
         Conversation::Direct { conversation_id } => format!("/api/v1/dm/{conversation_id}/read"),

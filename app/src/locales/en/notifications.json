@@ -64,7 +64,16 @@
     "backups": "Database backups",
     "backupsHint": "A backup failed, a database went too long without one, or a restore test did not pass. Separate from CI: this one matters more.",
     "sound": "Notification sound",
-    "soundHint": "A short tone when a notification arrives: a drop for messages and two notes for everything else. Silent while you are in a call or deafened. This device only."
+    "soundHint": "A short tone when a notification arrives: a drop for messages and two notes for everything else. Silent while you are in a call or deafened. This device only.",
+    "hidePreviews": "Hide direct message previews",
+    "hidePreviewsHint": "For screen sharing: direct message rows don't show what they say. This device only."
+  },
+  "quick": {
+    "back": "Back to notifications",
+    "open": "Open the conversation",
+    "reply": "Reply here…",
+    "empty": "No messages yet.",
+    "failed": "Couldn't read the latest messages."
   },
   "wrote": "{{who}} wrote",
   "wroteToYou": "{{who}} wrote to you",
