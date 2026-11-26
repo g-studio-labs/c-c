@@ -104,6 +104,11 @@ func TestEachEndpointAsksForTheRightScope(t *testing.T) {
 		{http.MethodPost, "/api/v1/task-spaces/s1/chat", domain.ScopeChatWrite},
 		{http.MethodPost, "/api/v1/dm/open", domain.ScopeChatWrite},
 		{http.MethodPost, "/api/v1/dm/c1/messages", domain.ScopeChatWrite},
+		// Corregir y retirar lo propio (command-and-control-547).
+		{http.MethodPatch, "/api/v1/task-spaces/s1/chat/0b9c2f4e-6a1d-4c3b-9e8f-1a2b3c4d5e6f", domain.ScopeChatManage},
+		{http.MethodDelete, "/api/v1/task-spaces/s1/chat/0b9c2f4e-6a1d-4c3b-9e8f-1a2b3c4d5e6f", domain.ScopeChatManage},
+		{http.MethodPatch, "/api/v1/dm/c1/messages/0b9c2f4e-6a1d-4c3b-9e8f-1a2b3c4d5e6f", domain.ScopeChatManage},
+		{http.MethodDelete, "/api/v1/dm/c1/messages/0b9c2f4e-6a1d-4c3b-9e8f-1a2b3c4d5e6f", domain.ScopeChatManage},
 		// La config de un servidor y las plantillas (31-oct-2026).
 		{http.MethodPut, "/api/v1/servers/s1/config", domain.ScopeServersManage},
 		{http.MethodPost, "/api/v1/organizations/o1/server-templates", domain.ScopeServersManage},
@@ -129,11 +134,11 @@ func TestEachEndpointAsksForTheRightScope(t *testing.T) {
 // mover la marca de leído de nadie (22-oct-2026).
 func TestChatWriteOnlyAdds(t *testing.T) {
 	for _, c := range []struct{ method, path string }{
-		{http.MethodPatch, "/api/v1/task-spaces/s1/chat/m1"},
-		{http.MethodDelete, "/api/v1/task-spaces/s1/chat/m1"},
+		{http.MethodPatch, "/api/v1/task-spaces/s1/chat/0b9c2f4e-6a1d-4c3b-9e8f-1a2b3c4d5e6f"},
+		{http.MethodDelete, "/api/v1/task-spaces/s1/chat/0b9c2f4e-6a1d-4c3b-9e8f-1a2b3c4d5e6f"},
 		{http.MethodPost, "/api/v1/task-spaces/s1/chat/m1/reactions"},
-		{http.MethodPatch, "/api/v1/dm/c1/messages/m1"},
-		{http.MethodDelete, "/api/v1/dm/c1/messages/m1"},
+		{http.MethodPatch, "/api/v1/dm/c1/messages/0b9c2f4e-6a1d-4c3b-9e8f-1a2b3c4d5e6f"},
+		{http.MethodDelete, "/api/v1/dm/c1/messages/0b9c2f4e-6a1d-4c3b-9e8f-1a2b3c4d5e6f"},
 		{http.MethodPost, "/api/v1/dm/c1/read"},
 	} {
 		if scope, ok := patScopeFor(req(c.method, c.path)); ok && scope == domain.ScopeChatWrite {
@@ -142,6 +147,25 @@ func TestChatWriteOnlyAdds(t *testing.T) {
 	}
 	if !domain.ValidScope(domain.ScopeChatWrite) {
 		t.Fatal("chat:write tiene que poder pedirse al crear un token")
+	}
+}
+
+// chat:manage corrige y retira mensajes, y nada más del canal: dejar de seguir
+// uno, reaccionar o mover la marca de leído no son corregir lo dicho
+// (command-and-control-547). `DELETE …/chat/follow` tiene la misma forma que
+// retirar un mensaje cuyo id fuera «follow».
+func TestChatManageOnlyTouchesMessages(t *testing.T) {
+	for _, c := range []struct{ method, path string }{
+		{http.MethodDelete, "/api/v1/task-spaces/s1/chat/follow"},
+		{http.MethodPost, "/api/v1/task-spaces/s1/chat/follow"},
+		{http.MethodPost, "/api/v1/task-spaces/s1/chat/read"},
+		{http.MethodPost, "/api/v1/task-spaces/s1/chat/m1/reactions"},
+		{http.MethodPost, "/api/v1/dm/c1/messages/m1/reactions"},
+		{http.MethodPost, "/api/v1/dm/c1/read"},
+	} {
+		if scope, ok := patScopeFor(req(c.method, c.path)); ok && scope == domain.ScopeChatManage {
+			t.Errorf("%s %s no puede abrirse con chat:manage", c.method, c.path)
+		}
 	}
 }
 

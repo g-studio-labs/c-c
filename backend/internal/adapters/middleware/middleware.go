@@ -379,6 +379,15 @@ var patWritable = []struct {
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/task-spaces/[^/]+/chat/?$`), domain.ScopeChatWrite},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/dm/open/?$`), domain.ScopeChatWrite},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/dm/[^/]+/messages/?$`), domain.ScopeChatWrite},
+	// Corregir y retirar un mensaje propio de canal o de directo
+	// (command-and-control-547). Manage: pisa lo que ya se dijo. El servicio
+	// sigue exigiendo la autoría —también al token de un superadmin— y, para
+	// retirar, que lo escribiera un agente (domain.MessageChanger). El id es un
+	// UUID y no `[^/]+`: si no, `DELETE …/chat/follow` también entraría.
+	{http.MethodPatch, regexp.MustCompile(`^/api/v1/task-spaces/[^/]+/chat/[0-9a-fA-F-]{36}$`), domain.ScopeChatManage},
+	{http.MethodDelete, regexp.MustCompile(`^/api/v1/task-spaces/[^/]+/chat/[0-9a-fA-F-]{36}$`), domain.ScopeChatManage},
+	{http.MethodPatch, regexp.MustCompile(`^/api/v1/dm/[^/]+/messages/[0-9a-fA-F-]{36}$`), domain.ScopeChatManage},
+	{http.MethodDelete, regexp.MustCompile(`^/api/v1/dm/[^/]+/messages/[0-9a-fA-F-]{36}$`), domain.ScopeChatManage},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/reports/[^/]+/comments/?$`), domain.ScopeReportsWrite},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/reports/[^/]+/images/?$`), domain.ScopeReportsWrite},
 	// Changes what already exists.

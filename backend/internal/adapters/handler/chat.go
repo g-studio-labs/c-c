@@ -92,7 +92,7 @@ func (h *taskHandler) EditChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user, _ := currentUser(r)
-	err = h.chat.Edit(chi.URLParam(r, "messageId"), user.UserID, user.Superadmin, req.Body)
+	err = h.chat.EditAs(domain.ChangerFrom(r.Context(), user), chi.URLParam(r, "messageId"), req.Body)
 	if mapChatError(w, err) {
 		return
 	}
@@ -124,7 +124,7 @@ func (h *taskHandler) WithdrawChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user, _ := currentUser(r)
-	err := h.chat.Withdraw(chi.URLParam(r, "messageId"), user.UserID, user.Superadmin)
+	err := h.chat.WithdrawAs(domain.ChangerFrom(r.Context(), user), chi.URLParam(r, "messageId"))
 	if mapChatError(w, err) {
 		return
 	}
@@ -423,6 +423,10 @@ func streamStoredWith(store *mediastore.Store, w http.ResponseWriter, r *http.Re
 	io.Copy(w, obj.Body)
 }
 
+// tokenWithdrawRefusal: el porqué, igual en canal y en directo, para que el
+// agente se lo diga a la persona (command-and-control-547).
+const tokenWithdrawRefusal = "A token can only withdraw messages an agent wrote; this one was typed by its author in the app, so only they can withdraw it there."
+
 func mapChatError(w http.ResponseWriter, err error) bool {
 	switch {
 	case err == nil:
@@ -436,6 +440,8 @@ func mapChatError(w http.ResponseWriter, err error) bool {
 	case errors.Is(err, service.ErrNotTheAuthor):
 		SendErrorResponse(w, http.StatusForbidden,
 			"Only the person who wrote this can change it.", "not-the-author")
+	case errors.Is(err, service.ErrTokenWithdrawsOnlyAgentWords):
+		SendErrorResponse(w, http.StatusForbidden, tokenWithdrawRefusal, "agent-messages-only")
 	case errors.Is(err, service.ErrBadReaction):
 		SendErrorResponse(w, http.StatusBadRequest,
 			"That reaction is not one of the accepted emoji.", "bad-reaction")

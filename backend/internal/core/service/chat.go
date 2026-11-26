@@ -392,11 +392,17 @@ func (s *ChatService) write(
 }
 
 // authoredBy answers whether this caller may change this message.
-func authoredBy(m *domain.ChatMessage, userID string, superadmin bool) bool {
-	return m.AuthorUserID == userID || superadmin
+func authoredBy(m *domain.ChatMessage, by domain.MessageChanger) bool {
+	return m.AuthorUserID == by.UserID || by.MayChangeOthers()
 }
 
 func (s *ChatService) Edit(messageID, userID string, superadmin bool, body string) error {
+	return s.EditAs(domain.MessageChanger{UserID: userID, Superadmin: superadmin}, messageID, body)
+}
+
+// EditAs corrige un mensaje diciendo quién lo corrige y por dónde
+// (command-and-control-547).
+func (s *ChatService) EditAs(by domain.MessageChanger, messageID, body string) error {
 	m, err := s.repo.Find(messageID)
 	if err != nil {
 		return err
@@ -407,10 +413,10 @@ func (s *ChatService) Edit(messageID, userID string, superadmin bool, body strin
 	if m.Kind != domain.ChatKindUser {
 		return ErrNotAUserMessage
 	}
-	if !authoredBy(m, userID, superadmin) {
+	if !authoredBy(m, by) {
 		return ErrNotTheAuthor
 	}
-	if err := s.repo.UpdateBody(messageID, body); err != nil {
+	if err := s.repo.Rewrite(messageID, body, by.WrittenVia()); err != nil {
 		return err
 	}
 	// Same event as a new message: the receiver reloads the channel either way,
@@ -418,10 +424,57 @@ func (s *ChatService) Edit(messageID, userID string, superadmin bool, body strin
 	// Marked as an edit, so it is not announced as new nor rings the bell (see
 	// `publish`).
 	s.publish(broadcast{
-		orgID: m.OrgID, spaceID: m.SpaceID, messageID: m.ID, actorID: userID,
+		orgID: m.OrgID, spaceID: m.SpaceID, messageID: m.ID, actorID: by.UserID,
 		kind: m.Kind, body: body, mentions: s.mentioned(m.OrgID, body), edited: true,
 	})
+	s.announceEdit(m, by, body)
 	return nil
+}
+
+// announceEdit: «Ana editó su mensaje», a quien el original avisó por su
+// nombre —los que nombraba y aquel a quien contestaba—, y a nadie más
+// (command-and-control-547). No a quien sigue el canal: una corrección no es
+// algo nuevo que decir en él, y la campana no es una copia del chat.
+//
+// Sólo si quien corrige es el autor: lo que limpia un superadmin no es «su
+// mensaje». Lleva el texto nuevo como los avisos de canal, que ya lee toda la
+// organización.
+func (s *ChatService) announceEdit(original *domain.ChatMessage, by domain.MessageChanger, body string) {
+	if s.notifier == nil || original.AuthorUserID != by.UserID {
+		return
+	}
+	told := s.mentioned(original.OrgID, original.Body)
+	if original.ReplyToID != nil {
+		if target, err := s.repo.Find(*original.ReplyToID); err == nil &&
+			target.Kind == domain.ChatKindUser && !slices.Contains(told, target.AuthorUserID) {
+			told = append(told, target.AuthorUserID)
+		}
+	}
+	if len(told) == 0 {
+		return
+	}
+	channel, author := s.repo.Rotulos(original.SpaceID, by.UserID)
+	where := "a channel"
+	if channel != "" {
+		where = "#" + channel
+	}
+	key := "notify.message.edited.in"
+	if by.AsAgent() {
+		key = "notify.message.edited.agent.in"
+	}
+	for _, uid := range told {
+		if uid == by.UserID {
+			continue
+		}
+		s.notifier.Notify(domain.Aviso{
+			UserID: uid, OrgID: original.OrgID, Kind: domain.MessageEditedChat,
+			TitleKey:  key,
+			TitleArgs: map[string]string{"who": author, "where": where},
+			Body:      Adelanto(body),
+			Link:      "/chat?space=" + original.SpaceID, Via: by.WrittenVia(),
+			Group: domain.ChannelGroup(original.SpaceID), Label: where,
+		})
+	}
 }
 
 // UpdateSystem reescribe una línea del sistema: el resumen de una llamada
@@ -471,6 +524,17 @@ func (s *ChatService) RetractSystem(spaceID, ref string) error {
 }
 
 func (s *ChatService) Withdraw(messageID, userID string, superadmin bool) error {
+	return s.WithdrawAs(domain.MessageChanger{UserID: userID, Superadmin: superadmin}, messageID)
+}
+
+// ErrTokenWithdrawsOnlyAgentWords: un token quiso retirar lo que la persona
+// tecleó en la app (command-and-control-547). Lo que escribió un agente lo
+// puede retirar un agente; lo que dijo ella, sólo ella.
+var ErrTokenWithdrawsOnlyAgentWords = errors.New("a token only withdraws what an agent wrote")
+
+// WithdrawAs retira diciendo quién. Sin aviso en la campana, como siempre:
+// retirar no es decir nada nuevo.
+func (s *ChatService) WithdrawAs(by domain.MessageChanger, messageID string) error {
 	m, err := s.repo.Find(messageID)
 	if err != nil {
 		return err
@@ -478,8 +542,11 @@ func (s *ChatService) Withdraw(messageID, userID string, superadmin bool) error 
 	if m.Kind != domain.ChatKindUser {
 		return ErrNotAUserMessage
 	}
-	if !authoredBy(m, userID, superadmin) {
+	if !authoredBy(m, by) {
 		return ErrNotTheAuthor
+	}
+	if !by.MayWithdraw(m.Via) {
+		return ErrTokenWithdrawsOnlyAgentWords
 	}
 	if err := s.repo.Withdraw(messageID); err != nil {
 		return err
@@ -488,7 +555,7 @@ func (s *ChatService) Withdraw(messageID, userID string, superadmin bool) error 
 	// would be the opposite of retracting it. Marked as an edit for the same
 	// reason: the channel moves, nothing new was said.
 	s.publish(broadcast{
-		orgID: m.OrgID, spaceID: m.SpaceID, messageID: m.ID, actorID: userID,
+		orgID: m.OrgID, spaceID: m.SpaceID, messageID: m.ID, actorID: by.UserID,
 		kind: m.Kind, edited: true,
 	})
 	return nil

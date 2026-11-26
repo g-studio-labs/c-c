@@ -105,6 +105,15 @@ func (r *ChatRepository) UpdateBody(id, body string) error {
 	return r.db.Model(&domain.ChatMessage{}).Where("id = ?", id).Update("body", body).Error
 }
 
+// Rewrite es lo que hace una persona al corregir: el texto nuevo y por dónde
+// entró. La marca es la de quien escribió **el texto que queda**: corregido
+// por un agente se lee «vía agente», y corregido a mano deja de leerse así
+// (command-and-control-547).
+func (r *ChatRepository) Rewrite(id, body, via string) error {
+	return r.db.Model(&domain.ChatMessage{}).Where("id = ?", id).
+		Updates(map[string]any{"body": body, "via": domain.NormalizeVia(via)}).Error
+}
+
 // Withdraw hides a message. The row stays: what somebody wrote is not ours to
 // destroy, and the read above already refuses to show it.
 func (r *ChatRepository) Withdraw(id string) error {

@@ -15,7 +15,10 @@ type PersonalAccessToken struct {
 	Preview string `gorm:"type:varchar(40)" json:"preview"`
 	// Scopes granted beyond reading. Empty — the default, and what every token
 	// minted before this existed has — means read-only.
-	Scopes     string     `gorm:"type:varchar(200)" json:"scopes"`
+	//
+	// 400 y no 200: con chat:manage, todos juntos pasaban de 200 y un token
+	// con todo no se podía guardar (command-and-control-547).
+	Scopes     string     `gorm:"type:varchar(400)" json:"scopes"`
 	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
 	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
 }
@@ -153,17 +156,31 @@ const (
 	// queda marcado `via: mcp` y la app lo enseña «vía agente»: el token **es**
 	// la persona, y quien lo lee tiene que saber que no lo tecleó ella.
 	ScopeChatWrite = "chat:write"
+	// ScopeChatManage: corregir y retirar mensajes propios de canal y de
+	// directo (command-and-control-547). Aparte de chat:write por el mismo
+	// corte que el resto: cambia lo que ya se dijo. El servicio sólo deja tocar
+	// lo del dueño del token —ni el de un superadmin toca lo ajeno— y retirar,
+	// sólo lo que escribió un agente (domain.MessageChanger).
+	ScopeChatManage = "chat:manage"
 )
 
+// AllScopes: todos los que se pueden conceder. Una lista y no sólo el switch
+// de antes porque la columna `scopes` tiene tamaño, y un token con todos
+// tiene que caber (TestEveryScopeFitsInOneToken).
+var AllScopes = []string{
+	ScopeTasksWrite, ScopeTasksManage,
+	ScopeNotesWrite, ScopeNotesManage,
+	ScopeReportsWrite, ScopeReportsManage,
+	ScopeDocsWrite, ScopeDocsManage, ScopeDocsShare,
+	ScopeCollectionsWrite, ScopeDeploysManage, ScopeServersManage, ScopeNotifyMe, ScopePostsWrite,
+	ScopeChatWrite, ScopeChatManage,
+}
+
 func ValidScope(s string) bool {
-	switch s {
-	case ScopeTasksWrite, ScopeTasksManage,
-		ScopeNotesWrite, ScopeNotesManage,
-		ScopeReportsWrite, ScopeReportsManage,
-		ScopeDocsWrite, ScopeDocsManage, ScopeDocsShare,
-		ScopeCollectionsWrite, ScopeDeploysManage, ScopeServersManage, ScopeNotifyMe, ScopePostsWrite, ScopeChatWrite:
-		return true
-	default:
-		return false
+	for _, known := range AllScopes {
+		if s == known {
+			return true
+		}
 	}
+	return false
 }

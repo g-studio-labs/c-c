@@ -123,8 +123,8 @@ func (h *taskHandler) EditDM(w http.ResponseWriter, r *http.Request) {
 		SendErrorResponse(w, http.StatusBadRequest, "Invalid request", err.Error())
 		return
 	}
-	err = h.dms.Edit(chi.URLParam(r, "id"), chi.URLParam(r, "messageId"),
-		user.UserID, user.Superadmin, req.Body)
+	err = h.dms.EditAs(domain.ChangerFrom(r.Context(), user),
+		chi.URLParam(r, "id"), chi.URLParam(r, "messageId"), req.Body)
 	if mapDMError(w, err) {
 		return
 	}
@@ -156,8 +156,8 @@ func (h *taskHandler) WithdrawDM(w http.ResponseWriter, r *http.Request) {
 		SendErrorResponse(w, http.StatusUnauthorized, "Unauthorized", "unauthorized")
 		return
 	}
-	err := h.dms.Withdraw(chi.URLParam(r, "id"), chi.URLParam(r, "messageId"),
-		user.UserID, user.Superadmin)
+	err := h.dms.WithdrawAs(domain.ChangerFrom(r.Context(), user),
+		chi.URLParam(r, "id"), chi.URLParam(r, "messageId"))
 	if mapDMError(w, err) {
 		return
 	}
@@ -188,6 +188,8 @@ func mapDMError(w http.ResponseWriter, err error) bool {
 	case errors.Is(err, service.ErrNotTheAuthor):
 		SendErrorResponse(w, http.StatusForbidden,
 			"Only the person who wrote this can change it.", "not-the-author")
+	case errors.Is(err, service.ErrTokenWithdrawsOnlyAgentWords):
+		SendErrorResponse(w, http.StatusForbidden, tokenWithdrawRefusal, "agent-messages-only")
 	case errors.Is(err, service.ErrReplyElsewhere):
 		SendErrorResponse(w, http.StatusBadRequest,
 			"The message you reply to is not in this conversation", "reply-elsewhere")

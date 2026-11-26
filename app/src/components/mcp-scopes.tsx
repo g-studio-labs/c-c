@@ -111,6 +111,11 @@ export const SCOPES: ScopeOption[] = [
     labelKey: "common:scopes.chatWrite",
     detailKey: "scopes.chatWriteDetail",
   },
+  {
+    id: "chat:manage",
+    labelKey: "common:scopes.chatManage",
+    detailKey: "scopes.chatManageDetail",
+  },
 ];
 
 export function ScopeChecklist({

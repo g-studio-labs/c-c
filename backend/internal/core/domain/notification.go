@@ -142,13 +142,17 @@ func (p NotificationPrefs) Allows(kind string) bool {
 	switch kind {
 	case "chat:mention":
 		return true // never silenced; see the field comment
-	case "dm:message":
-		return p.DMs
 	case "task:comment":
 		return p.Comments
 	case "report:new":
 		return p.Reports
+	case "dm:message", MessageEditedDM:
+		return p.DMs
 	case "chat:message":
+		return p.Messages
+	// Que corrijan un mensaje que te nombraba o te contestaba: lo corriente
+	// del canal, no una mención nueva (command-and-control-547).
+	case MessageEditedChat:
 		return p.Messages
 	case "task:assigned", "task:status":
 		return !p.WorkQuiet

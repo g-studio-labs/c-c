@@ -649,7 +649,9 @@
     "postsWrite": "Publicar en Feedback",
     "postsWriteDetail": "Que un agente publique feedback, comente y reaccione en el muro, a tu nombre y marcado <1>vía agente</1>. Un comunicado no lo publica: lo deja como borrador para que tú lo revises y lo publiques.",
     "chatWrite": "Escribir en canales y directos",
-    "chatWriteDetail": "Que un agente escriba en un canal o te escriba por ti a una persona, a tu nombre y marcado <1>vía agente</1>. Sólo añadir: no edita ni retira mensajes."
+    "chatWriteDetail": "Que un agente escriba en un canal o te escriba por ti a una persona, a tu nombre y marcado <1>vía agente</1>. Sólo añadir: no edita ni retira mensajes.",
+    "chatManage": "Corregir y retirar tus mensajes",
+    "chatManageDetail": "Que un agente corrija tus mensajes de canales y directos (a la otra persona le llega que lo editaste, marcado <1>vía agente</1>) y retire los que escribió un agente. Nunca retira lo que tecleaste tú, ni toca mensajes de otros."
   },
   "last": {
     "webviewRecovered": "La página se cerró inesperadamente y se volvió a cargar. Ya quedó reportado.",

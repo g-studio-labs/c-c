@@ -649,7 +649,9 @@
     "postsWrite": "Post on Feedback",
     "postsWriteDetail": "Let an agent post feedback, comment and react on the wall, in your name and marked <1>via agent</1>. It does not publish announcements: it leaves them as a draft for you to review and publish.",
     "chatWrite": "Write in channels and direct messages",
-    "chatWriteDetail": "Lets an agent write in a channel or message a person for you, in your name and marked <1>via agent</1>. Adding only: it cannot edit or withdraw messages."
+    "chatWriteDetail": "Lets an agent write in a channel or message a person for you, in your name and marked <1>via agent</1>. Adding only: it cannot edit or withdraw messages.",
+    "chatManage": "Edit and withdraw your messages",
+    "chatManageDetail": "Lets an agent correct your own messages in channels and direct messages (the other person is told you edited it, marked <1>via agent</1>), and withdraw the ones an agent wrote. It never withdraws what you typed yourself, and never touches anyone else's messages."
   },
   "last": {
     "webviewRecovered": "The page closed unexpectedly and was reloaded. It has been reported.",

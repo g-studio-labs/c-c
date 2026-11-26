@@ -228,48 +228,85 @@ func (s *DMService) ReplyVia(via, conversationID, userID, body, replyToID string
 }
 
 func (s *DMService) Edit(conversationID, messageID, userID string, superadmin bool, body string) error {
-	c, err := s.mine(conversationID, userID)
+	return s.EditAs(domain.MessageChanger{UserID: userID, Superadmin: superadmin}, conversationID, messageID, body)
+}
+
+// own: el mensaje de esta conversación que quien cambia puede tocar.
+func (s *DMService) own(by domain.MessageChanger, conversationID, messageID string) (*domain.DMConversation, *domain.DMMessage, error) {
+	c, err := s.mine(conversationID, by.UserID)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	m, err := s.repo.Find(messageID)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	// Belonging to the conversation is not enough: rewriting what the other
 	// person said is not a thing either of them may do.
 	if m.ConversationID != c.ID {
-		return repository.ErrDMMessageNotFound
+		return nil, nil, repository.ErrDMMessageNotFound
 	}
-	if m.AuthorUserID != userID && !superadmin {
-		return ErrNotTheAuthor
+	if m.AuthorUserID != by.UserID && !by.MayChangeOthers() {
+		return nil, nil, ErrNotTheAuthor
 	}
-	if err := s.repo.UpdateBody(messageID, body); err != nil {
+	return c, m, nil
+}
+
+// EditAs corrige diciendo quién y por dónde (command-and-control-547).
+func (s *DMService) EditAs(by domain.MessageChanger, conversationID, messageID, body string) error {
+	c, m, err := s.own(by, conversationID, messageID)
+	if err != nil {
 		return err
 	}
-	s.publish(c.Other(userID), c.OrgID, c.ID, m.ID, userID, true)
+	if err := s.repo.Rewrite(messageID, body, by.WrittenVia()); err != nil {
+		return err
+	}
+	s.publish(c.Other(by.UserID), c.OrgID, c.ID, m.ID, by.UserID, true)
+	s.announceEdit(c, m, by)
 	return nil
 }
 
+// announceEdit: «Ana editó su mensaje», al otro de la conversación
+// (command-and-control-547). **Sin el texto**, por lo mismo que el aviso de
+// un directo nuevo (ver publish): una fila de la campana la puede leer quien
+// mire la pantalla. Sólo si corrige el autor: lo que limpia un superadmin no
+// es «su mensaje».
+func (s *DMService) announceEdit(c *domain.DMConversation, m *domain.DMMessage, by domain.MessageChanger) {
+	to := c.Other(by.UserID)
+	if s.notifier == nil || m.AuthorUserID != by.UserID || to == "" || to == by.UserID {
+		return
+	}
+	who := s.repo.NombreDe(by.UserID)
+	key := "notify.message.edited"
+	if by.AsAgent() {
+		key = "notify.message.edited.agent"
+	}
+	s.notifier.Notify(domain.Aviso{
+		UserID: to, OrgID: c.OrgID, Kind: domain.MessageEditedDM,
+		TitleKey: key, TitleArgs: map[string]string{"who": who},
+		Body: "", Link: "/dm?c=" + c.ID, Via: by.WrittenVia(),
+		Group: domain.DMGroup(c.ID), Label: who,
+	})
+}
+
 func (s *DMService) Withdraw(conversationID, messageID, userID string, superadmin bool) error {
-	c, err := s.mine(conversationID, userID)
+	return s.WithdrawAs(domain.MessageChanger{UserID: userID, Superadmin: superadmin}, conversationID, messageID)
+}
+
+// WithdrawAs retira diciendo quién. Un token sólo lo que escribió un agente;
+// sin aviso en la campana (command-and-control-547).
+func (s *DMService) WithdrawAs(by domain.MessageChanger, conversationID, messageID string) error {
+	c, m, err := s.own(by, conversationID, messageID)
 	if err != nil {
 		return err
 	}
-	m, err := s.repo.Find(messageID)
-	if err != nil {
-		return err
-	}
-	if m.ConversationID != c.ID {
-		return repository.ErrDMMessageNotFound
-	}
-	if m.AuthorUserID != userID && !superadmin {
-		return ErrNotTheAuthor
+	if !by.MayWithdraw(m.Via) {
+		return ErrTokenWithdrawsOnlyAgentWords
 	}
 	if err := s.repo.Withdraw(messageID); err != nil {
 		return err
 	}
-	s.publish(c.Other(userID), c.OrgID, c.ID, m.ID, userID, true)
+	s.publish(c.Other(by.UserID), c.OrgID, c.ID, m.ID, by.UserID, true)
 	return nil
 }
 

@@ -21,6 +21,24 @@ var catalogo = map[string]map[Locale]string{
 		EN: "New direct message",
 		ES: "Mensaje directo nuevo",
 	},
+	// Corregir un mensaje que ya avisó (command-and-control-547). Con agente,
+	// la firma de la 522: «el agente de Ana», no Ana.
+	"notify.message.edited": {
+		EN: "{{who}} edited their message",
+		ES: "{{who}} editó su mensaje",
+	},
+	"notify.message.edited.agent": {
+		EN: "{{who}}'s agent edited their message",
+		ES: "El agente de {{who}} editó su mensaje",
+	},
+	"notify.message.edited.in": {
+		EN: "{{who}} edited their message in {{where}}",
+		ES: "{{who}} editó su mensaje en {{where}}",
+	},
+	"notify.message.edited.agent.in": {
+		EN: "{{who}}'s agent edited their message in {{where}}",
+		ES: "El agente de {{who}} editó su mensaje en {{where}}",
+	},
 
 	// Un agente —o alguien— cambió un documento y pide que se lea.
 	"notify.doc.review": {
