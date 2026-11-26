@@ -678,6 +678,7 @@
     "screenshot": "Attach a screenshot",
     "screenshotAttached": "Screenshot: {{name}}",
     "errScreenshot": "Couldn't upload the screenshot",
+    "choose": "Choose",
     "recommended": "Recommended",
     "where": "Where",
     "command": "Command",

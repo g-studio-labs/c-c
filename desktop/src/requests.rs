@@ -268,6 +268,14 @@ impl RequestsView {
     /// por `TextView` (que sí deja seleccionar) donde cada enlace apunta a
     /// `cac-link:N`, el índice del segmento que se sigue al pulsarlo.
     fn rich(&self, id: String, text: &str, org_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        // El markdown se come la sangría del principio (y con cuatro espacios la
+        // pinta como bloque de código): se saca y se devuelve como margen.
+        let body = text.trim_start();
+        let indent: usize = text[..text.len() - body.len()].chars().map(|ch| if ch == '\t' { 4 } else { 1 }).sum();
+        if indent > 0 && !body.is_empty() {
+            let inner = self.rich(id, body, org_id, cx);
+            return div().pl(px(indent as f32 * 7.)).child(inner).into_any_element();
+        }
         let segments = cac_core::link_segments(text);
         if segments.iter().all(|segment| matches!(segment, LinkSegment::Text(_))) {
             return Self::selectable(id, text.to_string()).into_any_element();
@@ -710,27 +718,31 @@ impl RequestsView {
             RequestKind::Decide => {
                 let options = request.body.options.iter().enumerate().map(|(n, option)| {
                     let (choose_code, label, chosen_note) = (code.clone(), option.label.clone(), note.clone());
+                    // El texto va fuera del botón: arrastrar para seleccionarlo
+                    // terminaría con un mouse-up sobre «Elegir» y elegiría sin querer.
+                    let text = div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .py_1()
+                        .child(
+                            div().flex().items_center().gap_2().child(Self::selectable(format!("request-option-label-{code}-{n}"), option.label.clone())).when(option.recommended, |this| {
+                                this.child(div().px_1p5().rounded(px(4.)).border_1().leading_xs().child(tr(cx, "work:requests.recommended")))
+                            }),
+                        )
+                        .child(div().leading_xs().whitespace_normal().opacity(0.8).child(Self::selectable(format!("request-option-consequence-{code}-{n}"), option.consequence.clone())));
                     let button = Button::new(SharedString::from(format!("request-option-{code}-{n}")))
                         .small()
                         .disabled(busy)
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .items_start()
-                                .py_1()
-                                .child(
-                                    div().flex().items_center().gap_2().child(option.label.clone()).when(option.recommended, |this| {
-                                        this.child(div().px_1p5().rounded(px(4.)).border_1().leading_xs().child(tr(cx, "work:requests.recommended")))
-                                    }),
-                                )
-                                .child(div().leading_xs().whitespace_normal().opacity(0.8).child(option.consequence.clone())),
-                        )
+                        .label(tr(cx, "work:requests.choose"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let note = Self::value(&chosen_note, cx);
                             this.send(choose_code.clone(), AnswerDraft::Choose { option: label.clone(), note }, cx)
                         }));
-                    if option.recommended { button.primary() } else { button.outline() }
+                    let button = if option.recommended { button.primary() } else { button.outline() };
+                    div().flex().items_center().gap_2().child(text).child(button)
                 });
                 div().flex().flex_col().gap_2().children(options.collect::<Vec<_>>()).child(note_box(false, cx)).into_any_element()
             }
@@ -787,11 +799,11 @@ impl RequestsView {
             .p_3()
             .rounded(px(6.))
             .bg(theme.muted)
-            .child(div().id(SharedString::from(format!("request-outcome-{code}"))).font_weight(FontWeight::MEDIUM).child(cac_core::request_outcome(request, language)).test_support())
+            .child(div().font_weight(FontWeight::MEDIUM).child(Self::selectable(format!("request-outcome-{code}"), cac_core::request_outcome(request, language))))
             .when(!answer.note.is_empty() && request.kind != RequestKind::Test, |this| this.child(Self::selectable(format!("request-outcome-note-{code}"), answer.note.clone())))
             .children(output_block)
             .when(answer.edited && !answer.final_text.is_empty(), |this| this.child(div().leading_xs().child(Self::selectable(format!("request-outcome-final-{code}"), answer.final_text.clone()))))
-            .children(by.map(|line| div().leading_xs().text_color(theme.muted_foreground).child(line)))
+            .children(by.map(|line| div().leading_xs().text_color(theme.muted_foreground).child(Self::selectable(format!("request-outcome-by-{code}"), line))))
             .when(!published.is_empty(), |this| {
                 this.child(
                     div()
@@ -1449,6 +1461,59 @@ mod tests {
         cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new()));
         click(window, "request-copy-draft-req-d1", cx);
         assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("Hola"));
+        stop(cx);
+    }
+
+    /// Las opciones de un «decide» se seleccionan y se copian sin elegir; sólo
+    /// «Elegir» contesta. Lo mismo con la línea del resultado, y una línea de
+    /// comando sangrada que lleva un enlace conserva su sangría
+    /// (command-and-control-543).
+    ///
+    /// Roturas que atrapa: el texto de la opción dentro del área de clic (soltar
+    /// el arrastre elige); «Elegir» que no contesta; la línea del resultado que no
+    /// se deja seleccionar; la sangría que se pierde al pasar por el markdown.
+    #[gpui_kit::test]
+    fn an_option_is_copied_without_being_chosen_and_choose_answers(cx: &mut TestAppContext) {
+        let mut decide = request("req-o1", "decide", "t1", ("u1", "Ana Ruiz"), true, json!({ "question": "¿Cuál?", "options": [{ "label": "Opción A", "consequence": "rápido", "recommended": true }] }));
+        decide["summary"] = json!("elige");
+        let mut flat = approve("req-i0", "plano");
+        flat["body"]["draft"] = json!("sin sangría https://x.example");
+        let mut indented = approve("req-i1", "con sangría");
+        indented["body"]["draft"] = json!("    con sangría https://x.example");
+        let listed: Shared = Arc::new(Mutex::new(vec![decide, flat, indented]));
+        let closed: Shared = Arc::new(Mutex::new(Vec::new()));
+        let server = live_server(&listed, &closed);
+        let mut done = request("req-o1", "decide", "t1", ("u1", "Ana Ruiz"), true, json!({ "question": "¿Cuál?", "options": [{ "label": "Opción A", "consequence": "rápido" }] }));
+        done["status"] = json!("answered");
+        done["answer"] = json!({ "option": "Opción A" });
+        done["answeredBy"] = json!({ "id": "u1", "name": "Ana Ruiz" });
+        done["answeredAt"] = json!("2026-11-24T11:00:00Z");
+        server.mount(Mock::given(method("POST")).and(path("/api/v1/requests/req-o1/answer")).respond_with(ok(done.clone())));
+        let window = open_sized(&server, 2400., cx);
+        show_list(window, "req-o1", cx);
+        wait_until(cx, "los pedidos", |cx| on_screen(window, "request-draft-req-i1", cx));
+
+        assert_eq!(select_and_copy(window, "request-option-label-req-o1-0", cx).as_deref(), Some("Opción A"));
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new()));
+        assert_eq!(select_and_copy(window, "request-option-consequence-req-o1-0", cx).as_deref(), Some("rápido"));
+        assert!(answers(&server, "req-o1").is_empty(), "seleccionar el texto no elige la opción");
+
+        let left = |id: &str, cx: &mut TestAppContext| f32::from(bounds(window, id, cx).unwrap().left());
+        let (plain, shifted) = (left("request-draft-req-i0-line-0", cx), left("request-draft-req-i1-line-0", cx));
+        assert!(shifted - plain > 20., "la sangría se conserva: {plain} contra {shifted}");
+
+        click(window, "request-option-req-o1-0", cx);
+        wait_until(cx, "la opción elegida", |_| answers(&server, "req-o1").len() == 1);
+        assert_eq!(answers(&server, "req-o1")[0]["option"], "Opción A");
+        listed.lock().unwrap().retain(|request| request["code"] != "req-o1");
+        *closed.lock().unwrap() = vec![done];
+        wait_until(cx, "pasa a «Resueltos»", |cx| on_screen(window, "requests-resolved", cx) && !on_screen(window, "request-req-o1", cx));
+        click(window, "requests-resolved", cx);
+        wait_until(cx, "el resultado", |cx| on_screen(window, "request-outcome-req-o1", cx));
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new()));
+        assert!(select_and_copy(window, "request-outcome-req-o1", cx).is_some_and(|text| text.contains("Opción A")));
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new()));
+        assert!(select_and_copy(window, "request-outcome-by-req-o1", cx).is_some_and(|text| text.contains("Ana Ruiz")));
         stop(cx);
     }
 

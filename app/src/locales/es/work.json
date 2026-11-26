@@ -678,6 +678,7 @@
     "screenshot": "Adjuntar captura",
     "screenshotAttached": "Captura: {{name}}",
     "errScreenshot": "No se pudo subir la captura",
+    "choose": "Elegir",
     "recommended": "Recomendada",
     "where": "Dónde",
     "command": "Comando",
