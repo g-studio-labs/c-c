@@ -691,8 +691,8 @@ impl ChannelTabsView {
                             .gap_2()
                             .leading_xs()
                             .text_color(muted)
-                            .child(div().font_weight(FontWeight::MEDIUM).text_color(foreground).child(author))
-                            .child(when),
+                            .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_color(foreground).child(author))
+                            .child(div().flex_none().child(when)),
                     )
                     .child(div().leading_sm().child(body))
                     .test_support()

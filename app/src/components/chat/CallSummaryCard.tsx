@@ -100,7 +100,7 @@ export default function CallSummaryCard({
               </span>
             ))}
           </div>
-          <span className="truncate text-xs text-muted-foreground">
+          <span className="min-w-0 truncate text-xs text-muted-foreground">
             {t("chat:callPeople", { count: people.length, names: people.map((p) => p.name).join(", ") })}
           </span>
         </div>

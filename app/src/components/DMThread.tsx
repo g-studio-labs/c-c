@@ -290,7 +290,7 @@ function DMLine({
           // El hueco de los iconos (la carita y la flecha). Sin él el texto
           // pasa por debajo y los iconos tapan justo las primeras letras de la
           // línea que ibas a leer.
-          "relative min-w-0 max-w-full rounded-md py-1 pl-2 pr-12 hover:bg-muted/40",
+          "relative min-w-0 rounded-md py-1 pl-2 pr-12 hover:bg-muted/40",
           grouped && "mt-0.5",
           mine
             ? "max-w-[75%] rounded-tr-sm border border-primary/25 bg-primary/10"
