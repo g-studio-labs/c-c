@@ -57,7 +57,11 @@ cd <worktree> && (unset CLAUDE_CONFIG_DIR; command claude --bg \
 - su Postgres desechable, si toca Go, en memoria y sin `fsync` (`docker run -d --rm --name cac-test-pg-<n> --tmpfs /var/lib/postgresql/data -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=cac -p 127.0.0.1:<puerto>:5432 postgres:16 -c fsync=off -c synchronous_commit=off -c full_page_writes=off`), nunca la de otro proyecto;
 - que sólo corra sus propias pruebas, nunca una suite entera (paso 6).
 
-Una sesión de fondo no avisa al terminar: vigílala con `claude agents --json --all` (sale de `busy` al acabar) en un bucle en segundo plano, y lee su informe en la tarea (`get_task`), no en sus logs.
+Una sesión de fondo no avisa al terminar, y `idle` no quiere decir que haya acabado: también se queda `idle` mientras espera sus propias pruebas. Para enterarte:
+- `SendMessage` a su nombre con `notify_when_idle: true`: un aviso cuando se pare, que no gasta nada; luego confirma que acabó de verdad.
+- La señal de verdad: el brief le pide, como último paso, `touch <job tmp>/done-<nombre>`; un fichero que aparece es que terminó.
+- Su informe se lee en la tarea (`get_task`); los logs (`claude logs`) vienen llenos de códigos de terminal.
+- **En cuanto leas su informe, `claude stop <id>`**: las sesiones paradas en `idle` se quedan con 300–500 MB cada una, y con varias la máquina de jose (15 GB) se queda sin memoria y el sistema mata procesos (25-nov).
 
 ## 5. Reviewer
 
@@ -84,7 +88,9 @@ git push origin HEAD:main
 - Si la puerta sale en rojo, `test-changed.sh` dice qué suite: averigua de qué rama viene (`git log` de los ficheros), quita esa rama del lote y devuélvesela a su builder con el fallo; el resto sale.
 - Si un cherry-pick choca, esa rama vuelve a su builder para rebasarla; el resto sale.
 - Go necesita su base desechable; para la puerta, una rápida: `docker run -d --rm --name cac-gate-pg --tmpfs /var/lib/postgresql/data -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=cac -p 127.0.0.1:55499:5432 postgres:16 -c fsync=off -c synchronous_commit=off -c full_page_writes=off` (en disco, `service` tarda ~10 min aquí; en CI, 72 s).
-- Después borra los worktrees y ramas de lo que salió.
+- Un worktree nuevo no tiene `app/node_modules`: enlázalo antes (`ln -s ~/projects/personal/guz-studio/cac/app/node_modules app/node_modules`) o la app sale en rojo por entorno (`tsc` no existe), no por código. Bórralo antes de subir.
+- Si la puerta sale en rojo por algo de una línea (un log en castellano que atrapa `TestElServidorNoEscribeEnCastellano`), arréglalo en la rama de su tarea con un commit propio y repite la puerta con lo que haya aprobado entretanto: una corrida más, no una sesión más.
+- Después borra los worktrees y ramas de lo que salió, y para la base de la puerta.
 
 ## 7. Cerrar
 
