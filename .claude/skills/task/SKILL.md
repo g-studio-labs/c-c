@@ -68,7 +68,8 @@ Una sesión de fondo no avisa al terminar, y `idle` no quiere decir que haya aca
 Con el builder en `listo`: otra sesión, igual, con `--model opus`, `--name "<n>-reviewer"` y un brief que le diga que lea `.claude/agents/reviewer.md`, con la ref, el plan si lo hubo y el worktree con su rama. **No le pases el resumen del builder ni tu opinión.**
 
 - `FALLA` → un builder nuevo con los hallazgos, una vez. Segundo `FALLA` → builder en Opus con todo el historial; si vuelve a fallar, `create_request` decidir con los hallazgos y para.
-- `PASA` → paso 6.
+- `PASA` → si la tarea cruza piezas (backend y app, una integración, un webhook), una sesión **`qa`** (`.claude/agents/qa.md`, Opus) la usa de punta a punta con datos desechables y servicios de fuera falsos; `FALLA` de QA vuelve al builder como un hallazgo más. Si no, paso 6.
+- Con PASA (y QA, si tocaba) → paso 6.
 
 ## 6. Juntar y compilar una sola vez
 
