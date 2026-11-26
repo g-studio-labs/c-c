@@ -121,43 +121,64 @@ func (s *BasecampService) Configured() bool { return s.cfg.Configured() }
 // ─── Conectar (OAuth de Launchpad) ───────────────────────────────────────────
 //
 // La app manda al navegador a Launchpad con un `state` firmado que lleva la
-// org y quién conecta; Launchpad lo devuelve a `/webhooks/basecamp/setup` con
-// el `code`. Sin la firma, cualquiera podría atar su cuenta a la org que
-// quisiera.
+// org, quién conecta y un nonce de un solo uso; Launchpad lo devuelve a
+// `/webhooks/basecamp/setup` con el `code`. Sin la firma, cualquiera podría
+// atar su cuenta a la org que quisiera; sin el nonce, quien viera la URL de un
+// admin podría volver con su propio `code` mientras no caduque.
 
 func (s *BasecampService) ConnectURL(orgID, userID string) (string, error) {
 	if !s.Configured() {
 		return "", domain.ErrBasecampOff
 	}
+	raw := make([]byte, 24)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	nonce := base64.RawURLEncoding.EncodeToString(raw)
+	exp := s.now().Add(basecampStateTTL)
+	if err := s.repo.SaveState(&domain.BasecampOAuthState{Nonce: nonce, OrgID: orgID, ExpiresAt: exp}, s.now()); err != nil {
+		return "", err
+	}
 	q := url.Values{"type": {"web_server"}, "client_id": {s.cfg.ClientID}, "redirect_uri": {s.cfg.RedirectURI},
-		"state": {s.signState(orgID, userID, s.now().Add(basecampStateTTL))}}
+		"state": {s.signState(orgID, userID, nonce, exp)}}
 	return s.cfg.LaunchpadURL + "/authorization/new?" + q.Encode(), nil
 }
 
-func (s *BasecampService) stateMAC(orgID, userID string, exp int64) string {
+func (s *BasecampService) stateMAC(orgID, userID, nonce string, exp int64) string {
 	mac := hmac.New(sha256.New, []byte(s.cfg.ClientSecret))
-	fmt.Fprintf(mac, "basecamp-link:%s:%s:%d", orgID, userID, exp)
+	fmt.Fprintf(mac, "basecamp-link:%s:%s:%s:%d", orgID, userID, nonce, exp)
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func (s *BasecampService) signState(orgID, userID string, exp time.Time) string {
+func (s *BasecampService) signState(orgID, userID, nonce string, exp time.Time) string {
 	e := exp.Unix()
 	enc := base64.RawURLEncoding.EncodeToString
-	return enc([]byte(orgID)) + "." + enc([]byte(userID)) + "." + strconv.FormatInt(e, 10) + "." + s.stateMAC(orgID, userID, e)
+	return enc([]byte(orgID)) + "." + enc([]byte(userID)) + "." + nonce + "." + strconv.FormatInt(e, 10) + "." +
+		s.stateMAC(orgID, userID, nonce, e)
 }
 
+// verifyState comprueba la firma y la caducidad y gasta el nonce: un state
+// sirve una sola vez.
 func (s *BasecampService) verifyState(state string) (orgID, userID string, err error) {
 	parts := strings.Split(state, ".")
-	if len(parts) != 4 {
+	if len(parts) != 5 {
 		return "", "", domain.ErrBasecampBadState
 	}
 	org, err1 := base64.RawURLEncoding.DecodeString(parts[0])
 	user, err2 := base64.RawURLEncoding.DecodeString(parts[1])
-	exp, err3 := strconv.ParseInt(parts[2], 10, 64)
-	if err1 != nil || err2 != nil || err3 != nil || len(org) == 0 {
+	nonce := parts[2]
+	exp, err3 := strconv.ParseInt(parts[3], 10, 64)
+	if err1 != nil || err2 != nil || err3 != nil || len(org) == 0 || nonce == "" {
 		return "", "", domain.ErrBasecampBadState
 	}
-	if !hmac.Equal([]byte(parts[3]), []byte(s.stateMAC(string(org), string(user), exp))) || s.now().Unix() > exp {
+	if !hmac.Equal([]byte(parts[4]), []byte(s.stateMAC(string(org), string(user), nonce, exp))) || s.now().Unix() > exp {
+		return "", "", domain.ErrBasecampBadState
+	}
+	fresh, err := s.repo.ConsumeState(nonce, string(org), s.now())
+	if err != nil {
+		return "", "", err
+	}
+	if !fresh {
 		return "", "", domain.ErrBasecampBadState
 	}
 	return string(org), string(user), nil
@@ -223,7 +244,35 @@ func (s *BasecampService) Setup(code, state string) error {
 	if conn.RefreshToken, err = repository.EncryptTelemetry([]byte(tok.RefreshToken)); err != nil {
 		return err
 	}
+	if err := s.dropOtherAccount(orgID, conn.AccountID); err != nil {
+		return err
+	}
 	return s.repo.SaveConnection(conn)
+}
+
+// dropOtherAccount: conectar otra cuenta deja huérfanos los proyectos de la
+// vieja. Sus webhooks se quitan con el token de la vieja, mientras aún es el
+// guardado (contra la nueva, esos ids no existen o son de otro), y sus
+// proyectos se borran: su secreto deja de valer aunque Basecamp no conteste.
+func (s *BasecampService) dropOtherAccount(orgID string, accountID int64) error {
+	old, err := s.repo.Connection(orgID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if old.AccountID == accountID {
+		return nil
+	}
+	projects, err := s.repo.Projects(orgID)
+	if err != nil {
+		return err
+	}
+	for _, p := range projects {
+		s.dropWebhook(orgID, &p)
+	}
+	return s.repo.DeleteProjects(orgID)
 }
 
 func (s *BasecampService) expiry(seconds int64) time.Time {
@@ -566,14 +615,19 @@ func (s *BasecampService) LinkProject(orgID, userID string, projectID int64, spa
 	}, &hook); err != nil {
 		return nil, err
 	}
-	if old, err := s.repo.Project(orgID, projectID); err == nil {
-		s.dropWebhook(orgID, old)
-	}
+	old, _ := s.repo.Project(orgID, projectID)
 	p := &domain.BasecampProject{OrgID: orgID, SpaceID: spaceID, ProjectID: projectID, Name: wire.Name,
 		AppURL: domain.SafeBasecampURL(wire.AppURL), WebhookID: hook.ID,
 		SecretHash: domain.BasecampSecretHash(secret), LinkedByID: userID}
 	if err := s.repo.SaveProject(p); err != nil {
+		// El webhook nuevo no tiene fila que lo reciba: fuera, para que no
+		// quede uno huérfano mandando a una dirección muerta. El viejo sigue.
+		s.dropWebhook(orgID, &domain.BasecampProject{ProjectID: projectID, WebhookID: hook.ID})
 		return nil, err
+	}
+	// El viejo, sólo cuando el nuevo ya está guardado.
+	if old != nil {
+		s.dropWebhook(orgID, old)
 	}
 	s.syncPeople(orgID, projectID)
 	return p, nil
@@ -686,8 +740,9 @@ func (s *BasecampService) HandleWebhook(secret string, body []byte) error {
 	default:
 		return nil
 	}
-	if ev.Recording.Bucket.ID != 0 && ev.Recording.Bucket.ID != proj.ProjectID {
-		// El secreto de un proyecto no habla por otro.
+	if ev.Recording.Bucket.ID != proj.ProjectID {
+		// El secreto de un proyecto no habla por otro; y un cuerpo que no dice
+		// de qué proyecto es no se cree.
 		return nil
 	}
 	first, err := s.repo.ClaimEvent(proj.OrgID, ev.ID)
@@ -761,12 +816,15 @@ func (s *BasecampService) process(proj *domain.BasecampProject, ev domain.Baseca
 		mentioned = append(mentioned, p.UserID)
 	}
 
+	// Un enlace a un recording de otro proyecto no es de este secreto.
 	var item *domain.Item
-	if link, err := s.repo.LinkFor(proj.OrgID, targetID); err == nil {
+	link, err := s.repo.LinkFor(proj.OrgID, targetID)
+	switch {
+	case err == nil && link.ProjectID == proj.ProjectID:
 		if it, err := s.repo.Item(link.ItemID); err == nil {
 			item = it
 		}
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+	case err != nil && !errors.Is(err, gorm.ErrRecordNotFound):
 		return err
 	}
 	if item == nil {
@@ -774,8 +832,8 @@ func (s *BasecampService) process(proj *domain.BasecampProject, ev domain.Baseca
 		return nil
 	}
 
-	created, err := s.repo.AddSourcedComment(newSourcedComment(item.ID,
-		fmt.Sprintf("bc:%s:%d", ev.Kind, ev.Recording.ID), basecampLine(ev.Kind, note, targetTitle, targetURL)))
+	created, err := s.repo.AddSourcedComment(newSourcedComment(item.ID, basecampLineKey(ev),
+		basecampLine(ev.Kind, note, targetTitle, targetURL)))
 	if err != nil {
 		return err
 	}
@@ -793,11 +851,33 @@ func (s *BasecampService) process(proj *domain.BasecampProject, ev domain.Baseca
 		if note.url != "" {
 			answer += "\n\n" + note.url
 		}
-		if _, err := s.requests.AnswerFromBasecamp(item.OrgID, item.ID, actorID, answer); err != nil {
+		answered, open, err := s.requests.AnswerFromBasecamp(item.OrgID, item.ID, actorID, answer)
+		if err != nil {
 			lg.Warn("basecamp: answering a request from a comment: " + err.Error())
+		}
+		if !answered && open > 1 && s.inbox != nil {
+			// No se adivina a cuál contesta: se le dice que lo haga en cac.
+			s.inbox.Notify(domain.Aviso{UserID: actorID, OrgID: item.OrgID, Kind: domain.RequestNotifyKind,
+				TitleKey: "notify.basecamp.request_ambiguous", TitleArgs: map[string]string{"count": strconv.Itoa(open)},
+				Body: item.Title, Link: "/tasks?task=" + item.ID, Group: domain.ItemGroup(item.ID), Label: item.Title})
 		}
 	}
 	return nil
+}
+
+// basecampLineKey: la procedencia de la línea, una por cosa que pasó. Un
+// comentario o un mensaje nacen una vez, así que basta su recording (otra
+// entrega del mismo no lo repite); un to-do se puede reabrir y completar otra
+// vez, y cada completada es otra línea: lleva su hora.
+func basecampLineKey(ev domain.BasecampWebhookEvent) string {
+	key := fmt.Sprintf("bc:%s:%d", ev.Kind, ev.Recording.ID)
+	if ev.Kind != domain.BasecampTodoCompleted {
+		return key
+	}
+	if ev.CreatedAt.IsZero() {
+		return key + ":e" + strconv.FormatInt(ev.ID, 10)
+	}
+	return key + ":" + strconv.FormatInt(ev.CreatedAt.Unix(), 10)
 }
 
 // basecampLine: la línea que queda en la tarea. Interna: lo de Basecamp lo ve

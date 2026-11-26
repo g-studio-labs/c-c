@@ -72,20 +72,45 @@ func (r *BasecampRepository) ExpiringConnections(before time.Time) ([]domain.Bas
 // las personas y los enlaces se quedan, por si vuelve a conectar.
 func (r *BasecampRepository) DeleteConnection(orgID string) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
-		var projects []domain.BasecampProject
-		if err := tx.Where("org_id = ?", orgID).Find(&projects).Error; err != nil {
-			return err
-		}
-		for _, p := range projects {
-			if err := deleteProjectSource(tx, &p); err != nil {
-				return err
-			}
-		}
-		if err := tx.Where("org_id = ?", orgID).Delete(&domain.BasecampProject{}).Error; err != nil {
+		if err := deleteProjects(tx, orgID); err != nil {
 			return err
 		}
 		return tx.Where("org_id = ?", orgID).Delete(&domain.BasecampConnection{}).Error
 	})
+}
+
+// DeleteProjects: los proyectos de la org y sus fuentes. Al conectar otra
+// cuenta, los de la vieja ya no son de nadie.
+func (r *BasecampRepository) DeleteProjects(orgID string) error {
+	return r.db.Transaction(func(tx *gorm.DB) error { return deleteProjects(tx, orgID) })
+}
+
+func deleteProjects(tx *gorm.DB, orgID string) error {
+	var projects []domain.BasecampProject
+	if err := tx.Where("org_id = ?", orgID).Find(&projects).Error; err != nil {
+		return err
+	}
+	for _, p := range projects {
+		if err := deleteProjectSource(tx, &p); err != nil {
+			return err
+		}
+	}
+	return tx.Where("org_id = ?", orgID).Delete(&domain.BasecampProject{}).Error
+}
+
+// SaveState apunta un enlace de conectar recién dado, y de paso barre los
+// caducados.
+func (r *BasecampRepository) SaveState(st *domain.BasecampOAuthState, now time.Time) error {
+	r.db.Where("expires_at < ?", now).Delete(&domain.BasecampOAuthState{})
+	return r.db.Create(st).Error
+}
+
+// ConsumeState borra el nonce y dice si estaba (y vivo): sólo la primera
+// vuelta con ese state lo encuentra.
+func (r *BasecampRepository) ConsumeState(nonce, orgID string, now time.Time) (bool, error) {
+	res := r.db.Where("nonce = ? AND org_id = ? AND expires_at >= ?", nonce, orgID, now).
+		Delete(&domain.BasecampOAuthState{})
+	return res.RowsAffected == 1, res.Error
 }
 
 // ─── Proyectos ───────────────────────────────────────────────────────────────

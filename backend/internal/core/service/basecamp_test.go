@@ -46,10 +46,15 @@ type fakeBasecamp struct {
 	// Cómo contesta.
 	failRefresh bool
 	access      string
+	nextHook    int
 }
 
+// bcOtherAccount: la cuenta que autoriza el code `other-code`, con su propio
+// token: conectar otra cuenta a la misma org.
+const bcOtherAccount = int64(1000)
+
 func newFakeBasecamp(t *testing.T) *fakeBasecamp {
-	f := &fakeBasecamp{access: "at-1"}
+	f := &fakeBasecamp{access: "at-1", nextHook: 7}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /authorization/token", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -64,11 +69,14 @@ func newFakeBasecamp(t *testing.T) *fakeBasecamp {
 		defer f.mu.Unlock()
 		switch r.PostForm.Get("type") {
 		case "web_server":
-			if r.PostForm.Get("code") != "good-code" {
+			switch r.PostForm.Get("code") {
+			case "good-code":
+				fmt.Fprint(w, `{"access_token":"at-1","refresh_token":"rt-1","expires_in":1209600}`)
+			case "other-code":
+				fmt.Fprint(w, `{"access_token":"at-other","refresh_token":"rt-other","expires_in":1209600}`)
+			default:
 				w.WriteHeader(http.StatusBadRequest)
-				return
 			}
-			fmt.Fprint(w, `{"access_token":"at-1","refresh_token":"rt-1","expires_in":1209600}`)
 		case "refresh":
 			f.refreshes++
 			if f.failRefresh || r.PostForm.Get("refresh_token") != "rt-1" {
@@ -94,10 +102,17 @@ func newFakeBasecamp(t *testing.T) *fakeBasecamp {
 			h(w, r)
 		}
 	}
-	mux.HandleFunc("GET /authorization.json", authed(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"identity":{"first_name":"Jose","last_name":"G"},"accounts":[
-			{"product":"bcx","id":1,"name":"Viejo"},{"product":"bc3","id":%d,"name":"Dwit"}]}`, bcAccount)
-	}))
+	mux.HandleFunc("GET /authorization.json", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer at-other" {
+			fmt.Fprintf(w, `{"identity":{"first_name":"Otra","last_name":"Cuenta"},"accounts":[
+				{"product":"bc3","id":%d,"name":"Otra"}]}`, bcOtherAccount)
+			return
+		}
+		authed(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"identity":{"first_name":"Jose","last_name":"G"},"accounts":[
+				{"product":"bcx","id":1,"name":"Viejo"},{"product":"bc3","id":%d,"name":"Dwit"}]}`, bcAccount)
+		})(w, r)
+	})
 	mux.HandleFunc(fmt.Sprintf("GET /%d/projects/%d.json", bcAccount, bcProject), authed(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"id":%d,"name":"Proteus","app_url":"https://3.basecamp.com/%d/projects/%d"}`, bcProject, bcAccount, bcProject)
 	}))
@@ -109,9 +124,11 @@ func newFakeBasecamp(t *testing.T) *fakeBasecamp {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.mu.Lock()
 		f.hookPayloadURL, f.hookTypes = body.PayloadURL, body.Types
+		id := f.nextHook
+		f.nextHook++
 		f.mu.Unlock()
 		w.WriteHeader(http.StatusCreated)
-		fmt.Fprint(w, `{"id":7,"active":true}`)
+		fmt.Fprintf(w, `{"id":%d,"active":true}`, id)
 	}))
 	mux.HandleFunc(fmt.Sprintf("DELETE /%d/buckets/%d/webhooks/{hook}", bcAccount, bcProject), authed(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -139,19 +156,19 @@ func newFakeBasecamp(t *testing.T) *fakeBasecamp {
 	return f
 }
 
-// avisosCapturados: el Notifier de las pruebas.
-type avisosCapturados struct {
+// capturedNotices: el Notifier de las pruebas.
+type capturedNotices struct {
 	mu   sync.Mutex
 	list []domain.Aviso
 }
 
-func (a *avisosCapturados) Notify(x domain.Aviso) {
+func (a *capturedNotices) Notify(x domain.Aviso) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.list = append(a.list, x)
 }
 
-func (a *avisosCapturados) of(userID string) []domain.Aviso {
+func (a *capturedNotices) of(userID string) []domain.Aviso {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var out []domain.Aviso
@@ -163,7 +180,7 @@ func (a *avisosCapturados) of(userID string) []domain.Aviso {
 	return out
 }
 
-func (a *avisosCapturados) reset() {
+func (a *capturedNotices) reset() {
 	a.mu.Lock()
 	a.list = nil
 	a.mu.Unlock()
@@ -206,7 +223,7 @@ func basecampDB(t *testing.T) *gorm.DB {
 		&domain.TaskList{}, &domain.Item{}, &domain.ItemAssignee{}, &domain.ItemComment{}, &domain.SpaceSource{},
 		&domain.Request{}, &domain.RequestVersion{},
 		&domain.BasecampConnection{}, &domain.BasecampProject{}, &domain.BasecampPerson{},
-		&domain.BasecampLink{}, &domain.BasecampEvent{}); err != nil {
+		&domain.BasecampLink{}, &domain.BasecampEvent{}, &domain.BasecampOAuthState{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := repository.EnsureGitHubIndexes(db); err != nil {
@@ -219,7 +236,7 @@ type bcFixture struct {
 	db     *gorm.DB
 	fake   *fakeBasecamp
 	svc    *BasecampService
-	inbox  *avisosCapturados
+	inbox  *capturedNotices
 	now    time.Time
 	secret string
 }
@@ -232,7 +249,7 @@ func newBasecampFixture(t *testing.T) *bcFixture {
 	t.Helper()
 	t.Setenv("REPORTS_KEK", base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
 	db := basecampDB(t)
-	f := &bcFixture{db: db, fake: newFakeBasecamp(t), inbox: &avisosCapturados{}, now: time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)}
+	f := &bcFixture{db: db, fake: newFakeBasecamp(t), inbox: &capturedNotices{}, now: time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)}
 	org := &domain.Organization{Name: "org-1", Slug: "org-1"}
 	org.ID = "org-1"
 	mustCreate(t, db, org)
@@ -322,9 +339,9 @@ func commentEvent(eventID, commentID int64, who domain.BasecampPersonWire, conte
 }
 
 var (
-	bcAna     = domain.BasecampPersonWire{ID: 101, Name: "Ana Bc", EmailAddress: "ana@dwit.mx", AttachableSGID: "sgid-ana"}
-	bcCliente = domain.BasecampPersonWire{ID: 200, Name: "Cliente", EmailAddress: "cliente@proteus.com", AttachableSGID: "sgid-cliente", Client: true}
-	bcNuevo   = domain.BasecampPersonWire{ID: 300, Name: "Nuevo", EmailAddress: "nuevo@otra.com", AttachableSGID: "sgid-nuevo"}
+	bcAna      = domain.BasecampPersonWire{ID: 101, Name: "Ana Bc", EmailAddress: "ana@dwit.mx", AttachableSGID: "sgid-ana"}
+	bcClient   = domain.BasecampPersonWire{ID: 200, Name: "Cliente", EmailAddress: "cliente@proteus.com", AttachableSGID: "sgid-cliente", Client: true}
+	bcNewcomer = domain.BasecampPersonWire{ID: 300, Name: "Nuevo", EmailAddress: "nuevo@otra.com", AttachableSGID: "sgid-nuevo"}
 )
 
 func (f *bcFixture) comments(t *testing.T, itemID string) []domain.ItemComment {
@@ -336,9 +353,9 @@ func (f *bcFixture) comments(t *testing.T, itemID string) []domain.ItemComment {
 	return out
 }
 
-func kinds(avisos []domain.Aviso) []string {
+func kinds(notices []domain.Aviso) []string {
 	var out []string
-	for _, a := range avisos {
+	for _, a := range notices {
 		out = append(out, a.Kind)
 	}
 	return out
@@ -348,8 +365,8 @@ func kinds(avisos []domain.Aviso) []string {
 // cambia el code por tokens que se guardan cifrados, con la cuenta bc3.
 //
 // Roturas que atrapa: guardar los tokens en claro; quedarse con la primera
-// cuenta aunque no sea bc3; aceptar un state cambiado de org, o caducado;
-// conectar sin la app configurada.
+// cuenta aunque no sea bc3; aceptar un state cambiado de org, caducado o ya
+// usado; conectar sin la app configurada.
 func TestConnectingBasecampStoresTheAccountWithEncryptedTokens(t *testing.T) {
 	f := newBasecampFixture(t)
 	var conn domain.BasecampConnection
@@ -378,6 +395,25 @@ func TestConnectingBasecampStoresTheAccountWithEncryptedTokens(t *testing.T) {
 	parts[0] = base64.RawURLEncoding.EncodeToString([]byte("org-2"))
 	if err := f.svc.Setup("good-code", strings.Join(parts, ".")); !errors.Is(err, domain.ErrBasecampBadState) {
 		t.Fatalf("a state moved to another org gave %v", err)
+	}
+	// Un state vale una vez: quien vio la URL de conectar no vuelve con ella.
+	u, _ = f.svc.ConnectURL("org-1", "u-ana")
+	parsed, _ = url.Parse(u)
+	once := parsed.Query().Get("state")
+	if err := f.svc.Setup("good-code", once); err != nil {
+		t.Fatalf("a fresh state gave %v", err)
+	}
+	if err := f.svc.Setup("good-code", once); !errors.Is(err, domain.ErrBasecampBadState) {
+		t.Fatalf("a state used twice gave %v", err)
+	}
+	// El nonce va firmado: no se le pone a un state el de otro enlace vivo.
+	u, _ = f.svc.ConnectURL("org-1", "u-ana")
+	parsed, _ = url.Parse(u)
+	live := strings.Split(parsed.Query().Get("state"), ".")
+	swapped := strings.Split(state, ".")
+	swapped[2] = live[2]
+	if err := f.svc.Setup("good-code", strings.Join(swapped, ".")); !errors.Is(err, domain.ErrBasecampBadState) {
+		t.Fatalf("a state with another link's nonce gave %v", err)
 	}
 	// Caducado.
 	f.now = f.now.Add(11 * time.Minute)
@@ -550,7 +586,7 @@ func TestAMentionInBasecampTellsThatPerson(t *testing.T) {
 // proyecto un evento de otro.
 func TestWithoutALinkedTaskOnlyANoticeWithTheBasecampLink(t *testing.T) {
 	f := newBasecampFixture(t)
-	if err := f.svc.HandleWebhook(f.secret, commentEvent(30, 9030, bcCliente, "<div>Hola "+mentionHTML("sgid-carla", "Carla")+"</div>")); err != nil {
+	if err := f.svc.HandleWebhook(f.secret, commentEvent(30, 9030, bcClient, "<div>Hola "+mentionHTML("sgid-carla", "Carla")+"</div>")); err != nil {
 		t.Fatal(err)
 	}
 	var n int64
@@ -568,7 +604,7 @@ func TestWithoutALinkedTaskOnlyANoticeWithTheBasecampLink(t *testing.T) {
 	}
 
 	f.inbox.reset()
-	if err := f.svc.HandleWebhook(f.secret, commentEvent(31, 9031, bcCliente, "<div>¿Alguien?</div>")); err != nil {
+	if err := f.svc.HandleWebhook(f.secret, commentEvent(31, 9031, bcClient, "<div>¿Alguien?</div>")); err != nil {
 		t.Fatal(err)
 	}
 	ana := f.inbox.of("u-ana")
@@ -578,7 +614,7 @@ func TestWithoutALinkedTaskOnlyANoticeWithTheBasecampLink(t *testing.T) {
 
 	// El secreto de un proyecto no habla por otro.
 	f.inbox.reset()
-	other := []byte(strings.ReplaceAll(string(commentEvent(33, 9033, bcCliente, "<div>otro</div>")),
+	other := []byte(strings.ReplaceAll(string(commentEvent(33, 9033, bcClient, "<div>otro</div>")),
 		fmt.Sprintf(`"bucket":{"id":%d`, bcProject), `"bucket":{"id":43`))
 	if err := f.svc.HandleWebhook(f.secret, other); err != nil {
 		t.Fatal(err)
@@ -604,7 +640,7 @@ func TestWithoutALinkedTaskOnlyANoticeWithTheBasecampLink(t *testing.T) {
 func TestAnUnmatchedPersonIsLeftForAnAdminToAssign(t *testing.T) {
 	f := newBasecampFixture(t)
 	f.linkTodo(t)
-	if err := f.svc.HandleWebhook(f.secret, commentEvent(40, 9040, bcNuevo, "<div>Soy nuevo</div>")); err != nil {
+	if err := f.svc.HandleWebhook(f.secret, commentEvent(40, 9040, bcNewcomer, "<div>Soy nuevo</div>")); err != nil {
 		t.Fatal(err)
 	}
 	st, err := f.svc.Status("org-1")
@@ -624,7 +660,7 @@ func TestAnUnmatchedPersonIsLeftForAnAdminToAssign(t *testing.T) {
 	}
 	// Un evento después no lo despega, y lo que escribe ya no le avisa a él.
 	f.inbox.reset()
-	if err := f.svc.HandleWebhook(f.secret, commentEvent(41, 9041, bcNuevo, "<div>Otra vez</div>")); err != nil {
+	if err := f.svc.HandleWebhook(f.secret, commentEvent(41, 9041, bcNewcomer, "<div>Otra vez</div>")); err != nil {
 		t.Fatal(err)
 	}
 	if bob := f.inbox.of("u-bob"); len(bob) != 0 {
@@ -644,14 +680,14 @@ func TestAnUnmatchedPersonIsLeftForAnAdminToAssign(t *testing.T) {
 func TestARepeatedEventTellsOnlyOnce(t *testing.T) {
 	f := newBasecampFixture(t)
 	f.linkTodo(t)
-	body := commentEvent(50, 9050, bcCliente, "<div>Hola "+mentionHTML("sgid-carla", "Carla")+"</div>")
+	body := commentEvent(50, 9050, bcClient, "<div>Hola "+mentionHTML("sgid-carla", "Carla")+"</div>")
 	for range 3 {
 		if err := f.svc.HandleWebhook(f.secret, body); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// Otro id de evento, el mismo comentario.
-	if err := f.svc.HandleWebhook(f.secret, commentEvent(51, 9050, bcCliente, "<div>Hola</div>")); err != nil {
+	if err := f.svc.HandleWebhook(f.secret, commentEvent(51, 9050, bcClient, "<div>Hola</div>")); err != nil {
 		t.Fatal(err)
 	}
 	if cs := f.comments(t, "t-1"); len(cs) != 1 {
@@ -666,7 +702,7 @@ func TestARepeatedEventTellsOnlyOnce(t *testing.T) {
 
 	// Sin tarea enlazada no hay comentario que lo frene: sólo el id del evento.
 	f.inbox.reset()
-	unlinked := commentEvent(52, 9052, bcCliente, "<div>"+mentionHTML("sgid-carla", "Carla")+"</div>")
+	unlinked := commentEvent(52, 9052, bcClient, "<div>"+mentionHTML("sgid-carla", "Carla")+"</div>")
 	unlinked = []byte(strings.ReplaceAll(string(unlinked), fmt.Sprintf(`"id":%d`, bcTodo), `"id":7777`))
 	for range 2 {
 		if err := f.svc.HandleWebhook(f.secret, unlinked); err != nil {
@@ -786,5 +822,270 @@ func TestBasecampMentionsAndURLs(t *testing.T) {
 		if err != nil || acc != 999 || proj != 42 || rec != 77 {
 			t.Fatalf("%q gave %d %d %d %v", good, acc, proj, rec, err)
 		}
+	}
+}
+
+// addSecondOrg: org-2, de la que sólo es Dan, con una persona de Basecamp
+// propia (Eve, sgid-eve) casada con él.
+func (f *bcFixture) addSecondOrg(t *testing.T) {
+	t.Helper()
+	org := &domain.Organization{Name: "org-2", Slug: "org-2"}
+	org.ID = "org-2"
+	mustCreate(t, f.db, org)
+	mustCreate(t, f.db, &domain.OrgMembership{OrgID: "org-2", UserID: "u-dan", Role: domain.OrgRoleMember})
+	mustCreate(t, f.db, &domain.BasecampPerson{OrgID: "org-2", PersonID: 400, SGID: "sgid-eve", Name: "Eve",
+		Email: "eve@otra.com", UserID: "u-dan", MatchedBy: "manual"})
+}
+
+var bcDan = domain.BasecampPersonWire{ID: 401, Name: "Dan Bc", EmailAddress: "dan@dwit.mx", AttachableSGID: "sgid-dan"}
+
+// Una persona de Basecamp con el correo de alguien que sólo es de otra org no
+// se casa con él en ésta: le llegarían las menciones de una org que no es la
+// suya y su comentario contestaría pedidos.
+//
+// Rotura que atrapa: casar por correo sin mirar la org del miembro.
+func TestAnEmailOfAnotherOrgsMemberDoesNotMatch(t *testing.T) {
+	f := newBasecampFixture(t)
+	f.addSecondOrg(t)
+	if err := f.svc.HandleWebhook(f.secret, commentEvent(80, 9080, bcDan, "<div>hola</div>")); err != nil {
+		t.Fatal(err)
+	}
+	var p domain.BasecampPerson
+	if err := f.db.First(&p, "org_id = ? AND person_id = ?", "org-1", bcDan.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if p.UserID != "" {
+		t.Fatalf("a Basecamp person of org-1 was matched with %q, who is only in org-2", p.UserID)
+	}
+}
+
+// Una mención en un proyecto de org-1 sólo busca a la persona entre las de
+// org-1, aunque otra org tenga guardada a alguien con ese sgid.
+//
+// Rotura que atrapa: buscar la persona mencionada sin la org.
+func TestAMentionLooksOnlyAtThePeopleOfItsOrg(t *testing.T) {
+	f := newBasecampFixture(t)
+	f.addSecondOrg(t)
+	if err := f.svc.HandleWebhook(f.secret, commentEvent(81, 9081, bcAna, "<div>"+mentionHTML("sgid-eve", "Eve")+"</div>")); err != nil {
+		t.Fatal(err)
+	}
+	if dan := f.inbox.of("u-dan"); len(dan) != 0 {
+		t.Fatalf("a mention in org-1 reached a user of org-2: %+v", dan)
+	}
+}
+
+// Enlazar una tarea a un recording de otra cuenta de Basecamp no se puede: no
+// llegaría nada, y el enlace taparía el de la cuenta de verdad.
+//
+// Rotura que atrapa: no comparar la cuenta de la URL con la conectada.
+func TestLinkingATaskToAnotherAccountIsRefused(t *testing.T) {
+	f := newBasecampFixture(t)
+	item, err := f.svc.Task("t-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.svc.LinkTask(item, fmt.Sprintf("https://3.basecamp.com/%d/buckets/%d/todos/%d", bcOtherAccount, bcProject, bcTodo))
+	if !errors.Is(err, domain.ErrBasecampBadURL) {
+		t.Fatalf("a URL of another account gave %v", err)
+	}
+}
+
+// El secreto de un proyecto sólo habla por ese proyecto: un cuerpo que no dice
+// de cuál es no se cree, y un recording enlazado que es de otro proyecto no se
+// escribe desde éste.
+//
+// Roturas que atrapa: aceptar un cuerpo sin `bucket.id`; escribir en la tarea
+// enlazada a un recording de otro proyecto.
+func TestOneProjectsSecretSpeaksOnlyForItsProject(t *testing.T) {
+	f := newBasecampFixture(t)
+	noBucket := []byte(strings.ReplaceAll(string(commentEvent(90, 9090, bcClient, "<div>"+mentionHTML("sgid-carla", "Carla")+"</div>")),
+		fmt.Sprintf(`"bucket":{"id":%d,`, bcProject), `"bucket":{`))
+	if err := f.svc.HandleWebhook(f.secret, noBucket); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.inbox.list; len(got) != 0 {
+		t.Fatalf("a body without its project told %+v", got)
+	}
+
+	// t-1 enlazada a un to-do del proyecto 43; el evento llega por el secreto
+	// del 42 diciendo que es del 42.
+	item, _ := f.svc.Task("t-1")
+	if _, err := f.svc.LinkTask(item, fmt.Sprintf("https://3.basecamp.com/%d/buckets/43/todos/6001", bcAccount)); err != nil {
+		t.Fatal(err)
+	}
+	other := []byte(strings.ReplaceAll(string(commentEvent(91, 9091, bcClient, "<div>de otro</div>")),
+		fmt.Sprintf(`"id":%d`, bcTodo), `"id":6001`))
+	if err := f.svc.HandleWebhook(f.secret, other); err != nil {
+		t.Fatal(err)
+	}
+	if cs := f.comments(t, "t-1"); len(cs) != 0 {
+		t.Fatalf("project 42's secret wrote in a task linked to project 43: %+v", cs)
+	}
+}
+
+// Conectar otra cuenta a la org quita los webhooks de la vieja con el token de
+// la vieja, y sus proyectos: su secreto deja de valer.
+//
+// Roturas que atrapa: dejar los proyectos de la cuenta vieja; quitar sus
+// webhooks después de guardar la nueva (con su token y contra su cuenta).
+func TestConnectingAnotherAccountDropsTheOldProjects(t *testing.T) {
+	f := newBasecampFixture(t)
+	u, _ := f.svc.ConnectURL("org-1", "u-ana")
+	parsed, _ := url.Parse(u)
+	if err := f.svc.Setup("other-code", parsed.Query().Get("state")); err != nil {
+		t.Fatalf("connecting another account: %v", err)
+	}
+	if strings.Join(f.fake.hooksDeleted, ",") != "7.json" {
+		t.Fatalf("hooks removed from the old account: %v", f.fake.hooksDeleted)
+	}
+	st, err := f.svc.Status("org-1")
+	if err != nil || st.AccountID != bcOtherAccount || len(st.Projects) != 0 {
+		t.Fatalf("after connecting another account: %+v %v", st, err)
+	}
+	var n int64
+	f.db.Model(&domain.SpaceSource{}).Where("space_id = ?", "sp-1").Count(&n)
+	if n != 0 {
+		t.Fatal("the old account's project is still a source of the space")
+	}
+	if err := f.svc.HandleWebhook(f.secret, commentEvent(95, 9095, bcAna, "hola")); !errors.Is(err, ErrBasecampUnknownHook) {
+		t.Fatalf("the old account's secret still works: %v", err)
+	}
+}
+
+// Si guardar el proyecto falla, el webhook recién dado de alta se quita (no
+// se queda uno huérfano), y el que ya había sigue.
+//
+// Roturas que atrapa: dejar el webhook nuevo; quitar el viejo antes de saber
+// que el nuevo quedó guardado.
+func TestARelinkThatFailsToSaveRemovesTheNewWebhook(t *testing.T) {
+	f := newBasecampFixture(t)
+	if err := f.db.Migrator().DropTable(&domain.SpaceSource{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.LinkProject("org-1", "u-ana", bcProject, "sp-1"); err == nil {
+		t.Fatal("saving the project could not work and linking said yes")
+	}
+	if strings.Join(f.fake.hooksDeleted, ",") != "8.json" {
+		t.Fatalf("hooks removed: %v (want only the new one, 8)", f.fake.hooksDeleted)
+	}
+	var p domain.BasecampProject
+	if err := f.db.First(&p, "org_id = ? AND project_id = ?", "org-1", bcProject).Error; err != nil || p.WebhookID != 7 {
+		t.Fatalf("the old project row: %+v %v", p, err)
+	}
+}
+
+// todoCompleted: el to-do enlazable, completado a la hora `at`.
+func todoCompleted(eventID int64, at string) []byte {
+	ev := map[string]any{
+		"id": eventID, "kind": "todo_completed", "created_at": at,
+		"recording": map[string]any{
+			"id": bcTodo, "type": "Todo", "title": "Arreglar el login",
+			"app_url": fmt.Sprintf("https://3.basecamp.com/%d/buckets/%d/todos/%d", bcAccount, bcProject, bcTodo),
+			"bucket":  map[string]any{"id": bcProject, "name": "Proteus", "type": "Project"},
+		},
+		"creator": bcClient,
+	}
+	raw, _ := json.Marshal(ev)
+	return raw
+}
+
+// Un to-do reabierto y completado otra vez es otra cosa que pasó: otra línea
+// y otro aviso. La misma completada entregada dos veces, no.
+//
+// Rotura que atrapa: la clave de la línea sólo por el to-do (la segunda
+// completada no se apunta ni avisa).
+func TestATodoCompletedAgainIsAnotherLine(t *testing.T) {
+	f := newBasecampFixture(t)
+	f.linkTodo(t)
+	for _, b := range [][]byte{todoCompleted(70, "2026-11-26T12:00:00Z"), todoCompleted(71, "2026-11-26T12:00:00Z"),
+		todoCompleted(72, "2026-11-26T15:00:00Z")} {
+		if err := f.svc.HandleWebhook(f.secret, b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if cs := f.comments(t, "t-1"); len(cs) != 2 {
+		t.Fatalf("two completions left %d lines", len(cs))
+	}
+	if bob := f.inbox.of("u-bob"); len(bob) != 2 {
+		t.Fatalf("Bob was told %d times of two completions", len(bob))
+	}
+}
+
+// Un comentario contesta un pedido sólo si esa persona tiene uno abierto que
+// se contesta con texto; con dos, no adivina: no contesta ninguno y le avisa.
+// En un «correr», lo que escribe es la salida.
+//
+// Roturas que atrapa: contestar todos los abiertos; contestar uno de dos;
+// no avisar a quien se quedó sin contestar; poner el texto de un «correr» en
+// la nota y no en la salida.
+func TestABasecampCommentAnswersOnlyAnUnambiguousRequest(t *testing.T) {
+	f := newBasecampFixture(t)
+	f.linkTodo(t)
+	mk := func(code string, kind domain.RequestKind) {
+		mustCreate(t, f.db, &domain.Request{Code: code, OrgID: "org-1", TaskID: "t-1", Kind: kind, Summary: "falta " + code,
+			Body: []byte(`{"what":"el acceso","from":"el cliente","command":"make","where":"gstd"}`), RequestedOfID: "u-ana",
+			RequestedByID: "u-bob", Status: domain.RequestOpen})
+	}
+	get := func(code string) domain.Request {
+		var q domain.Request
+		if err := f.db.First(&q, "code = ?", code).Error; err != nil {
+			t.Fatal(err)
+		}
+		return q
+	}
+	mk("req-two001", domain.RequestObtain)
+	mk("req-two002", domain.RequestRun)
+	if err := f.svc.HandleWebhook(f.secret, commentEvent(100, 9100, bcAna, "<div>gracias</div>")); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []string{"req-two001", "req-two002"} {
+		if q := get(c); q.Status != domain.RequestOpen {
+			t.Fatalf("with two open requests, %s was answered", c)
+		}
+	}
+	ana := f.inbox.of("u-ana")
+	if len(ana) != 1 || ana[0].TitleKey != "notify.basecamp.request_ambiguous" || ana[0].TitleArgs["count"] != "2" {
+		t.Fatalf("Ana got %+v", ana)
+	}
+
+	// Con uno solo, un «correr»: el texto es la salida.
+	f.db.Model(&domain.Request{}).Where("code = ?", "req-two001").Update("status", domain.RequestWithdrawn)
+	if err := f.svc.HandleWebhook(f.secret, commentEvent(101, 9101, bcAna, "<div>ok: 3 passed</div>")); err != nil {
+		t.Fatal(err)
+	}
+	q := get("req-two002")
+	var a domain.RequestAnswer
+	_ = json.Unmarshal(q.Answer, &a)
+	if q.Status != domain.RequestAnswered || !strings.Contains(a.Output, "ok: 3 passed") {
+		t.Fatalf("the run request: %s, answer %+v", q.Status, a)
+	}
+}
+
+// Si atender un evento falla, el evento se suelta: el reintento de Basecamp
+// entra y se apunta.
+//
+// Rotura que atrapa: no soltar el evento (el reintento se toma por repetido y
+// se pierde).
+func TestAFailedEventLetsTheRetryIn(t *testing.T) {
+	f := newBasecampFixture(t)
+	f.linkTodo(t)
+	if err := f.db.Migrator().DropTable(&domain.ItemComment{}); err != nil {
+		t.Fatal(err)
+	}
+	body := commentEvent(110, 9110, bcClient, "<div>hola</div>")
+	if err := f.svc.HandleWebhook(f.secret, body); err == nil {
+		t.Fatal("handling the event could not work and it said yes")
+	}
+	if err := f.db.AutoMigrate(&domain.ItemComment{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.EnsureGitHubIndexes(f.db); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.HandleWebhook(f.secret, body); err != nil {
+		t.Fatal(err)
+	}
+	if cs := f.comments(t, "t-1"); len(cs) != 1 {
+		t.Fatalf("the retry left %d lines", len(cs))
 	}
 }

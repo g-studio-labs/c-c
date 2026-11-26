@@ -276,31 +276,41 @@ func (s *RequestService) answerVia(q *domain.Request, callerID, answeredVia stri
 }
 
 // AnswerFromBasecamp: lo que `userID` escribió en el hilo de Basecamp enlazado
-// a la tarea contesta sus pedidos abiertos en ella (command-and-control-516,
+// a la tarea contesta su pedido abierto en ella (command-and-control-516,
 // punto 5). Sólo los que se contestan con texto (conseguir y correr): un
 // «decide» o un «probar» piden un botón, y adivinarlo de una frase sería
-// contestar por la persona. Y sólo los suyos: nadie contesta por otro.
-func (s *RequestService) AnswerFromBasecamp(orgID, taskID, userID, text string) (int, error) {
+// contestar por la persona. Sólo los suyos: nadie contesta por otro. Y sólo
+// si es **uno**: con dos abiertos, un comentario no dice a cuál contesta (ni
+// si contesta alguno: puede ser un «gracias»), así que no contesta ninguno y
+// devuelve cuántos hay para que se le avise.
+func (s *RequestService) AnswerFromBasecamp(orgID, taskID, userID, text string) (answered bool, open int, err error) {
 	if s == nil || orgID == "" || taskID == "" || userID == "" || strings.TrimSpace(text) == "" {
-		return 0, nil
+		return false, 0, nil
 	}
-	open, err := s.repo.List(repository.RequestFilter{OrgIDs: []string{orgID}, TaskID: taskID, RequestedOf: userID,
+	list, err := s.repo.List(repository.RequestFilter{OrgIDs: []string{orgID}, TaskID: taskID, RequestedOf: userID,
 		Statuses: []domain.RequestStatus{domain.RequestOpen}})
 	if err != nil {
-		return 0, err
+		return false, 0, err
 	}
-	n := 0
-	for i := range open {
-		q := &open[i]
-		if q.Kind != domain.RequestObtain && q.Kind != domain.RequestRun {
-			continue
+	var textual []*domain.Request
+	for i := range list {
+		if list[i].Kind == domain.RequestObtain || list[i].Kind == domain.RequestRun {
+			textual = append(textual, &list[i])
 		}
-		if _, err := s.answerVia(q, userID, domain.AnsweredViaBasecamp, domain.RequestAnswer{Note: text}); err != nil {
-			return n, err
-		}
-		n++
 	}
-	return n, nil
+	if len(textual) != 1 {
+		return false, len(textual), nil
+	}
+	q := textual[0]
+	a := domain.RequestAnswer{Note: text}
+	if q.Kind == domain.RequestRun {
+		// Lo que se pega en un «correr» es lo que salió del comando.
+		a = domain.RequestAnswer{Output: text}
+	}
+	if _, err := s.answerVia(q, userID, domain.AnsweredViaBasecamp, a); err != nil {
+		return false, 1, err
+	}
+	return true, 1, nil
 }
 
 // Withdraw: el agente ya no lo necesita. Cualquiera que escriba en la org: la

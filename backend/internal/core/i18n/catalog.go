@@ -95,6 +95,12 @@ var catalogo = map[string]map[Locale]string{
 		EN: "{{who}} mentioned you in Basecamp",
 		ES: "{{who}} te nombró en Basecamp",
 	},
+	// Un comentario en Basecamp de quien tiene varios pedidos abiertos en la
+	// tarea: no se adivina a cuál contesta.
+	"notify.basecamp.request_ambiguous": {
+		EN: "Your Basecamp comment did not answer your {{count}} open requests: answer them in cac",
+		ES: "Tu comentario en Basecamp no contestó tus {{count}} pedidos abiertos: contéstalos en cac",
+	},
 	"notify.basecamp.auth_failed": {
 		EN: "Basecamp stopped renewing: connect it again",
 		ES: "Basecamp dejó de renovarse: vuelve a conectarlo",

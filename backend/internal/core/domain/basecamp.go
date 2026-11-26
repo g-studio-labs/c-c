@@ -138,6 +138,18 @@ type BasecampEvent struct {
 
 func (BasecampEvent) TableName() string { return "basecamp_events" }
 
+// BasecampOAuthState: un enlace de conectar que aún no se ha usado. El state
+// firmado lleva su nonce, y la vuelta de Launchpad lo borra: un state vale una
+// vez, no los diez minutos que dura. Quien viera la URL de conectar de un
+// admin no puede volver con el `code` de su propia cuenta.
+type BasecampOAuthState struct {
+	Nonce     string    `gorm:"type:varchar(64);primaryKey"`
+	OrgID     string    `gorm:"type:varchar(36);not null"`
+	ExpiresAt time.Time `gorm:"not null;index"`
+}
+
+func (BasecampOAuthState) TableName() string { return "basecamp_oauth_states" }
+
 // ─── Lo que manda Basecamp ───────────────────────────────────────────────────
 
 // BasecampWebhookEvent: el cuerpo de una entrega de webhook (bc3-api,
