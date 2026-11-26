@@ -146,6 +146,11 @@ impl Core {
         }
         Ok(CreatedToken { id: created.token.id, name: created.token.name, scopes: created.token.scopes.unwrap_or_default(), value: created.value })
     }
+
+    /// Revoca un token personal de quien está dentro (deja de valer ya).
+    pub async fn revoke_personal_token(&self, id: &str) -> Result<(), ApiError> {
+        self.call_ok("DELETE", &format!("/api/v1/auth/tokens/{id}"), None).await
+    }
 }
 
 #[cfg(test)]

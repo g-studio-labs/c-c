@@ -3491,6 +3491,133 @@ mod tests {
         let _ = std::fs::remove_dir_all(scratch);
     }
 
+    /// Un token creado para registrar que no llegó a registrarse sólo se
+    /// reusa si se pide lo mismo: cambiar un permiso o el nombre lo descarta
+    /// (y se revoca), y el siguiente «Registrar» o «Crear» crea otro con lo
+    /// marcado ahora.
+    ///
+    /// Roturas que atrapa: registrar (o enseñar) el token de antes, con
+    /// permisos que la pantalla ya no marca; no revocar el descartado; crear
+    /// uno nuevo en cada reintento sin cambios.
+    #[gpui_kit::test]
+    #[cfg(target_os = "linux")]
+    fn a_pending_token_is_dropped_when_the_scopes_or_the_name_change(cx: &mut TestAppContext) {
+        use crate::connect::{McpSetup, TokenWork};
+        use cac_mcp::claude_code::fake::FakeClaude;
+        use cac_mcp::update::{fake::FakeReleases, Machine};
+        use std::os::unix::fs::PermissionsExt;
+
+        let releases = FakeReleases::start();
+        releases.announce("1.34.0");
+        let scratch = std::env::temp_dir().join(format!("cac-desktop-pending-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let binary = scratch.join("bin").join("cac-mcp");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, "#!/bin/sh\necho 'cac-mcp 1.34.0'\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let machine = Machine { source: releases.source(), state_dir: Some(scratch.join("state")), look_in: vec![binary.clone()], install_to: Some(binary.clone()) };
+        // `claude mcp add` falla siempre: el token se queda pendiente.
+        let claude = std::sync::Arc::new(FakeClaude { add_fails_echoing: true, ..FakeClaude::new(None) });
+
+        let value = |n: u32| format!("cac_pat_VALUE{n}xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+        let server = server();
+        for n in 1..=4 {
+            server.mount(
+                Mock::given(method("POST"))
+                    .and(path("/api/v1/auth/tokens"))
+                    .respond_with(ok(json!({ "token": { "id": format!("t{n}"), "name": "x", "preview": "cac_…", "createdAt": "2026-11-26T00:00:00Z" }, "value": value(n) })))
+                    .up_to_n_times(1)
+                    .with_priority(n as u8),
+            );
+            server.mount(Mock::given(method("DELETE")).and(path(format!("/api/v1/auth/tokens/t{n}"))).respond_with(ok(json!(null))));
+        }
+        server.install(cx);
+        let fake: std::sync::Arc<dyn cac_mcp::claude_code::Cli> = claude.clone();
+        cx.update(|cx| cx.set_global(McpSetup { machine, server_url: "https://cac.example".into(), claude: fake }));
+        let (window, workspace) = open_with_view(1100., cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        let created = |cx: &mut TestAppContext| -> Vec<serde_json::Value> {
+            let _ = cx;
+            server
+                .requests()
+                .iter()
+                .filter(|request| request.method.as_str() == "POST" && request.url.path() == "/api/v1/auth/tokens")
+                .map(|request| serde_json::from_slice(&request.body).unwrap())
+                .collect()
+        };
+        let adds = |cx: &mut TestAppContext| {
+            let _ = cx;
+            claude.calls().into_iter().filter(|call| call[1] == "add").collect::<Vec<_>>()
+        };
+        let failed = |cx: &mut TestAppContext| matches!(cx.update(|cx| workspace.read(cx).connect.read(cx).token_work.clone()), TokenWork::Failed { .. });
+        let register = |n: usize, cx: &mut TestAppContext| {
+            wheel_in(window, "connect-dialog", 3000., cx);
+            click(window, "connect-register", cx);
+            wait_until(cx, "registrar falla", |cx| adds(cx).len() == n && failed(cx));
+        };
+
+        click(window, "account-menu", cx);
+        wait_until(cx, "el menú se abre", |cx| on_screen(window, "account-connect", cx));
+        click(window, "account-connect", cx);
+        wait_until(cx, "la ventana se abre", |cx| on_screen(window, "connect-dialog", cx));
+        wait_until(cx, "no hay registro", |cx| on_screen(window, "connect-claude-missing", cx));
+        wait_until(cx, "ve el cac-mcp instalado", |cx| on_screen(window, "connect-installed", cx));
+
+        click(window, "connect-select-all", cx);
+        register(1, cx);
+        assert_eq!(created(cx).len(), 1);
+        assert!(adds(cx)[0].contains(&format!("CAC_TOKEN={}", value(1))));
+
+        // Reintentar sin cambiar nada usa el mismo.
+        register(2, cx);
+        assert_eq!(created(cx).len(), 1, "un reintento sin cambios creó otro token");
+        assert!(adds(cx)[1].contains(&format!("CAC_TOKEN={}", value(1))));
+        assert_eq!(server.hits("/api/v1/auth/tokens/t1"), 0, "revocó el que se iba a reusar");
+
+        // Se quitan los permisos: el de antes ya no vale.
+        wheel_in(window, "connect-dialog", -3000., cx);
+        click(window, "connect-select-all", cx);
+        register(3, cx);
+        let sent = created(cx);
+        assert_eq!(sent.len(), 2, "registró el token de antes con otros permisos");
+        assert_eq!(sent[1]["scopes"], json!([]), "{sent:?}");
+        assert!(adds(cx)[2].contains(&format!("CAC_TOKEN={}", value(2))), "{:?}", adds(cx)[2]);
+        wait_until(cx, "revoca el descartado", |_| server.hits("/api/v1/auth/tokens/t1") == 1);
+
+        // Se cambia el nombre: lo mismo.
+        wheel_in(window, "connect-dialog", -3000., cx);
+        let id = gpui_kit::SharedString::from("connect-token-name");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(id, cx);
+            window.input("Portátil", cx);
+        })
+        .unwrap();
+        register(4, cx);
+        let sent = created(cx);
+        assert_eq!(sent.len(), 3, "registró el token de antes con otro nombre");
+        assert_eq!(sent[2]["name"], json!("Portátil"), "{sent:?}");
+        assert!(adds(cx)[3].contains(&format!("CAC_TOKEN={}", value(3))));
+        wait_until(cx, "revoca el descartado", |_| server.hits("/api/v1/auth/tokens/t2") == 1);
+
+        // «Crear el token y enseñarlo» tras cambiar un permiso: otro, nuevo.
+        wheel_in(window, "connect-dialog", -3000., cx);
+        click(window, "connect-select-all", cx);
+        wheel_in(window, "connect-dialog", 3000., cx);
+        click(window, "connect-show-token", cx);
+        wait_until(cx, "enseña el token", |cx| on_screen(window, "connect-token-shown", cx));
+        let sent = created(cx);
+        assert_eq!(sent.len(), 4, "enseñó el token de antes con otros permisos");
+        assert_eq!(sent[3]["scopes"].as_array().unwrap().len(), cac_core::TOKEN_SCOPES.len());
+        let shown = cx.update(|cx| workspace.read(cx).connect.read(cx).shown_token.as_ref().map(|token| token.expose().to_string()));
+        assert_eq!(shown, Some(value(4)));
+        wait_until(cx, "revoca el descartado", |_| server.hits("/api/v1/auth/tokens/t3") == 1);
+        assert_eq!(server.hits("/api/v1/auth/tokens/t4"), 0, "revocó el que se enseña");
+
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
     /// El menú de la cuenta ofrece los tres temas y los tres idiomas a la
     /// vez, y elegir uno lo cambia sin cerrar el menú; «Salir» saca.
     ///

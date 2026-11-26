@@ -651,3 +651,35 @@ async fn creating_a_personal_token_sends_name_and_known_scopes_and_returns_the_v
         .await;
     assert!(matches!(core.create_personal_token("x", &[]).await, Err(ApiError::Server { status: 403, .. })));
 }
+
+/// Revocar un token personal es `DELETE /api/v1/auth/tokens/{id}`, y un
+/// rechazo se dice.
+///
+/// Roturas que atrapa: revocar otro (sin el id, o por otra ruta); dar por
+/// revocado lo que el servidor rechazó.
+#[tokio::test]
+async fn revoking_a_personal_token_deletes_it_by_id() {
+    let server = MockServer::start().await;
+    let (core, _) = core_at(&server).await;
+    core.sign_in(ana(false), "access".into(), "refresh".into()).unwrap();
+
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/auth/tokens/t1"))
+        .and(header("Authorization", "Bearer access"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": null })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    core.revoke_personal_token("t1").await.unwrap();
+    server.verify().await;
+
+    server.reset().await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/auth/tokens/t2"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({ "success": false, "error": "not-found", "message": "no" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(core.revoke_personal_token("t2").await.is_err(), "un rechazo se dio por revocado");
+    server.verify().await;
+}

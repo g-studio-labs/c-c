@@ -95,8 +95,9 @@ pub struct ConnectView {
     /// Hay un registro `cac` (que lanza esto) y se espera el sí para quitarlo.
     pub(crate) confirm_replace: Option<String>,
     /// El token creado para registrar que aún no se registró (se pidió el sí,
-    /// o falló): reintentar no crea otro. Nunca se pinta.
-    pending_token: Option<TokenValue>,
+    /// o falló): reintentar no crea otro, salvo que se cambie lo marcado.
+    /// Nunca se pinta.
+    pending_token: Option<PendingToken>,
     /// El del paso a mano: se enseña mientras la ventana sigue abierta.
     pub(crate) shown_token: Option<TokenValue>,
     token_copied: bool,
@@ -108,6 +109,24 @@ impl Focusable for ConnectView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
+}
+
+/// Un token creado que aún no se usó, con el nombre y los permisos con los
+/// que se creó: si la persona cambia algo, ya no es el que pide.
+struct PendingToken {
+    id: String,
+    value: TokenValue,
+    name: String,
+    scopes: Vec<String>,
+}
+
+/// Lo que se pide, comparable con lo que se pidió: el nombre sin espacios
+/// alrededor y los permisos sin importar el orden.
+fn asked(name: &str, scopes: &[String]) -> (String, Vec<String>) {
+    let mut scopes = scopes.to_vec();
+    scopes.sort();
+    scopes.dedup();
+    (name.trim().to_string(), scopes)
 }
 
 /// Lo que llega del hilo que instala.
@@ -198,6 +217,23 @@ impl ConnectView {
         self.name.as_ref().map(|name| name.read(cx).value().to_string()).unwrap_or_default()
     }
 
+    /// El token pendiente, si se creó con esto mismo. Si se cambió el nombre
+    /// o un permiso, el de antes se descarta y se revoca: registrarlo (o
+    /// enseñarlo) daría permisos que la pantalla ya no marca.
+    fn pending_for(&mut self, name: &str, scopes: &[String], cx: &App) -> Option<(String, TokenValue)> {
+        let pending = self.pending_token.take()?;
+        if (pending.name.clone(), pending.scopes.clone()) == asked(name, scopes) {
+            return Some((pending.id, pending.value));
+        }
+        let id = pending.id;
+        Backend::run(cx, move |core| async move {
+            if let Err(error) = core.revoke_personal_token(&id).await {
+                log::warn!("no se pudo revocar el token personal descartado {id}: {error}");
+            }
+        });
+        None
+    }
+
     /// «Registrar en Claude Code». Con un registro `cac` ya puesto, primero
     /// se pregunta (`replace` es el sí), antes incluso de crear el token.
     pub(crate) fn register(&mut self, replace: bool, cx: &mut Context<Self>) {
@@ -216,17 +252,18 @@ impl ConnectView {
         self.confirm_replace = None;
         self.token_work = TokenWork::Busy { registering: true };
         cx.notify();
-        let pending = self.pending_token.clone();
         let (name, scopes) = (self.token_name(cx), self.scopes.clone());
+        let pending = self.pending_for(&name, &scopes, cx);
+        let (made_name, made_scopes) = asked(&name, &scopes);
         let created = Backend::ask(cx, move |core| async move {
             match pending {
                 Some(token) => Ok(token),
-                None => core.create_personal_token(&name, &scopes).await.map(|created| created.value),
+                None => core.create_personal_token(&name, &scopes).await.map(|created| (created.id, created.value)),
             }
         });
         cx.spawn(async move |this, cx| {
             let Ok(created) = created.await else { return };
-            let token = match created {
+            let (id, token) = match created {
                 Ok(token) => token,
                 Err(error) => {
                     this.update(cx, |this, cx| {
@@ -254,7 +291,7 @@ impl ConnectView {
                     // Lo pusieron mientras tanto: se pregunta, con el token
                     // ya creado guardado para no crear otro.
                     Err(RegisterError::NeedsConfirmation { command }) => {
-                        this.pending_token = Some(token);
+                        this.pending_token = Some(PendingToken { id, value: token, name: made_name, scopes: made_scopes });
                         this.confirm_replace = Some(command);
                     }
                     // Sin `claude`, el paso a mano con el token ya creado.
@@ -266,7 +303,7 @@ impl ConnectView {
                     Err(RegisterError::Failed(reason)) => {
                         // `reason` viene sin token (`claude_code::RegisterError`).
                         log::warn!("no se pudo registrar cac-mcp en Claude Code: {reason}");
-                        this.pending_token = Some(token);
+                        this.pending_token = Some(PendingToken { id, value: token, name: made_name, scopes: made_scopes });
                         this.token_work = TokenWork::Failed { key: "nav:mcp.registerFailed", reason };
                     }
                 }
@@ -285,8 +322,8 @@ impl ConnectView {
         self.token_work = TokenWork::Busy { registering: false };
         self.confirm_replace = None;
         cx.notify();
-        let pending = self.pending_token.take();
         let (name, scopes) = (self.token_name(cx), self.scopes.clone());
+        let pending = self.pending_for(&name, &scopes, cx).map(|(_, token)| token);
         let created = Backend::ask(cx, move |core| async move {
             match pending {
                 Some(token) => Ok(token),

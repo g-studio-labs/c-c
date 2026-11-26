@@ -105,7 +105,9 @@ pub fn parse_get(output: &Output) -> Registration {
         if said.contains("No MCP server") {
             return Registration::Missing;
         }
-        return Registration::Unknown(first_line(&said));
+        // La salida de `get` lleva el token del registro que haya: se tapa
+        // antes de recortar.
+        return Registration::Unknown(first_line(&redact(&said, "")));
     }
     let mut command = None;
     let mut scope = None;
@@ -185,17 +187,61 @@ impl std::fmt::Display for RegisterError {
     }
 }
 
-/// Tapa el token en un texto que viene de `claude`.
-fn scrub(text: &str, token: &str) -> String {
-    if token.is_empty() {
-        return text.to_string();
+const MASK: &str = "•••";
+
+/// Lo más corto de un token que todavía se tapa al aparecer suelto: un trozo
+/// de 8 ya es medio secreto, y uno más corto choca con texto cualquiera.
+const SHORTEST_PIECE: usize = 8;
+
+/// Tapa el token en un texto que viene de `claude`: entero, cualquier trozo
+/// suyo de [`SHORTEST_PIECE`] o más (por si alguien ya lo partió al recortar)
+/// y cualquier `cac_pat_…` o `CAC_TOKEN=…`, que puede ser el de otro registro.
+/// Siempre antes de recortar: recortado primero, el corte puede caer en mitad
+/// del token y el trozo que queda ya no es «el token».
+fn redact(text: &str, token: &str) -> String {
+    let token: Vec<char> = token.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        let piece = longest_piece_of(&token, &text[i..]);
+        if piece >= SHORTEST_PIECE {
+            out.push_str(MASK);
+            i += piece;
+        } else {
+            out.push(text[i]);
+            i += 1;
+        }
     }
-    text.replace(token, "•••")
+    redact_marked(&out)
+}
+
+/// Lo largo del principio de `text` que es un trozo seguido de `token`.
+fn longest_piece_of(token: &[char], text: &[char]) -> usize {
+    (0..token.len()).map(|start| token[start..].iter().zip(text).take_while(|(a, b)| a == b).count()).max().unwrap_or(0)
+}
+
+fn redact_marked(text: &str) -> String {
+    let mut out = text.to_string();
+    for marker in ["CAC_TOKEN=", "cac_pat_"] {
+        let mut from = 0;
+        while let Some(found) = out[from..].find(marker) {
+            let start = from + found + marker.len();
+            let end = out[start..].find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',').map_or(out.len(), |n| start + n);
+            if start == end || &out[start..end] == MASK {
+                from = start;
+                continue;
+            }
+            out.replace_range(start..end, MASK);
+            from = start + MASK.len();
+        }
+    }
+    out
 }
 
 fn failed(what: &str, output: &Output, token: &str) -> RegisterError {
-    let said = first_line(&format!("{}\n{}", output.stderr, output.stdout));
-    RegisterError::Failed(scrub(&format!("{what}: {said}"), token))
+    let said = redact(&format!("{}\n{}", output.stderr, output.stdout), token);
+    RegisterError::Failed(first_line(&format!("{what}: {}", first_line(&said))))
 }
 
 /// Registra `binary` como `cac` en Claude Code, para toda la cuenta.
@@ -217,11 +263,11 @@ pub fn register(cli: &dyn Cli, cac_url: &str, token: &str, binary: &Path, replac
         }
         Registration::Missing => {}
         // Sin saber si hay uno, no se pisa nada.
-        Registration::Unknown(reason) => return Err(RegisterError::Failed(scrub(&reason, token))),
+        Registration::Unknown(reason) => return Err(RegisterError::Failed(first_line(&redact(&reason, token)))),
     }
     let added = cli.run(&add_args(cac_url, token, binary)).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => RegisterError::NoClaude,
-        _ => RegisterError::Failed(scrub(&error.to_string(), token)),
+        _ => RegisterError::Failed(first_line(&redact(&error.to_string(), token))),
     })?;
     if !added.success {
         return Err(failed("claude mcp add", &added, token));
@@ -260,6 +306,10 @@ pub mod fake {
         pub registered: Mutex<Option<(String, String)>>,
         pub calls: Mutex<Vec<Vec<String>>>,
         pub add_fails_echoing: bool,
+        /// Cuánto texto va delante de los argumentos que repite al fallar.
+        pub echo_padding: usize,
+        /// `add` sale bien pero deja registrado esto, no lo que se le pidió.
+        pub add_registers: Option<String>,
         pub absent: bool,
     }
 
@@ -269,6 +319,8 @@ pub mod fake {
                 registered: Mutex::new(registered.map(|(c, s)| (c.to_string(), s.to_string()))),
                 calls: Mutex::new(vec![]),
                 add_fails_echoing: false,
+                echo_padding: 0,
+                add_registers: None,
                 absent: false,
             }
         }
@@ -295,13 +347,14 @@ pub mod fake {
                     Output { success: true, ..Default::default() }
                 }
                 "add" if self.add_fails_echoing => {
-                    Output { success: false, stdout: String::new(), stderr: format!("error: bad env {}", args.join(" ")) }
+                    Output { success: false, stdout: String::new(), stderr: format!("error: bad env {}{}", "x".repeat(self.echo_padding), args.join(" ")) }
                 }
                 "add" => {
                     if registered.is_some() {
                         return Ok(Output { success: false, stderr: "MCP server cac already exists".into(), ..Default::default() });
                     }
-                    *registered = Some((args.last().unwrap().clone(), "user".into()));
+                    let command = self.add_registers.clone().unwrap_or_else(|| args.last().unwrap().clone());
+                    *registered = Some((command, "user".into()));
                     Output { success: true, ..Default::default() }
                 }
                 _ => unreachable!(),
@@ -408,6 +461,86 @@ mod tests {
         assert!(!error.to_string().contains(TOKEN), "{error}");
         assert!(!format!("{error:?}").contains(TOKEN), "{error:?}");
         assert!(error.to_string().contains("claude mcp add"), "{error}");
+    }
+
+    /// Un token de verdad: `cac_pat_` y 43 más, como `GeneratePAT`.
+    const LONG_TOKEN: &str = "cac_pat_Q7vR2mXk9LpT4wZs8NcY1bHf6JdGa3UeKo5iVrW0qEt";
+
+    fn no_piece_of(token: &str, text: &str) -> Result<(), String> {
+        let chars: Vec<char> = token.chars().collect();
+        for window in chars.windows(SHORTEST_PIECE) {
+            let piece: String = window.iter().collect();
+            if text.contains(&piece) {
+                return Err(format!("«{piece}» del token está en: {text}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// `claude` repite sus argumentos en una línea larga y el corte de 200
+    /// caracteres cae en mitad del token: no sale ningún trozo suyo, ni en
+    /// lo que se pinta ni en lo que va al log (los dos son este texto).
+    ///
+    /// Rotura que atrapa: recortar primero y tapar después sólo el token
+    /// entero (el trozo cortado ya no es «el token» y pasa).
+    #[test]
+    fn a_long_failure_cut_through_the_token_shows_no_piece_of_it() {
+        assert_eq!(LONG_TOKEN.len(), 51);
+        let binary = Path::new("/b/cac-mcp");
+        // Lo que va delante del token en lo que se cuenta: «claude mcp add: »,
+        // «error: bad env », el relleno y los argumentos hasta `CAC_TOKEN=`.
+        let before_args = "claude mcp add: error: bad env ".chars().count();
+        let up_to_token = add_args("https://cac.example", LONG_TOKEN, binary)
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .find("CAC_TOKEN=")
+            .unwrap()
+            + "CAC_TOKEN=".len();
+        // El corte (200) deja 30 caracteres del token dentro.
+        let padding = 200 - 30 - before_args - up_to_token;
+        let claude = FakeClaude { add_fails_echoing: true, echo_padding: padding, ..FakeClaude::new(None) };
+        let error = register(&claude, "https://cac.example", LONG_TOKEN, binary, false).unwrap_err();
+        assert!(matches!(error, RegisterError::Failed(_)), "{error:?}");
+        no_piece_of(LONG_TOKEN, &error.to_string()).unwrap();
+        no_piece_of(LONG_TOKEN, &format!("{error:?}")).unwrap();
+        assert!(error.to_string().contains("claude mcp add"), "{error}");
+    }
+
+    /// Lo que ya llega cortado (o es otro token) también se tapa: un trozo
+    /// del token de 8 o más, cualquier `cac_pat_…` y cualquier `CAC_TOKEN=…`.
+    ///
+    /// Roturas que atrapa: tapar sólo el token entero; dejar pasar el token
+    /// de otro registro (el que contesta `claude mcp get`).
+    #[test]
+    fn a_piece_of_the_token_or_another_token_is_hidden_too() {
+        let piece = &LONG_TOKEN[12..40];
+        let hidden = redact(&format!("could not parse {piece}"), LONG_TOKEN);
+        no_piece_of(LONG_TOKEN, &hidden).unwrap();
+        assert!(hidden.starts_with("could not parse "), "{hidden}");
+
+        let other = "cac_pat_OTHERxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        let hidden = redact(&format!("env CAC_TOKEN={other} and {other}, ok"), "");
+        assert!(!hidden.contains("OTHER"), "{hidden}");
+        assert!(hidden.ends_with(", ok"), "{hidden}");
+        let hidden = redact("CAC_TOKEN=plainsecret rest", "");
+        assert!(!hidden.contains("plainsecret"), "{hidden}");
+        // Un texto sin token se queda igual.
+        assert_eq!(redact("No MCP server named cac", LONG_TOKEN), "No MCP server named cac");
+    }
+
+    /// Después de añadir se vuelve a mirar, y lo que se ve decide: si `cac`
+    /// sigue apuntando a otro programa, no se registró.
+    ///
+    /// Rotura que atrapa: dar por bueno cualquier cosa que conteste el `get`
+    /// de después.
+    #[test]
+    fn an_add_that_leaves_another_program_is_a_failure() {
+        let claude = FakeClaude { add_registers: Some("/opt/cac.AppImage".into()), ..FakeClaude::new(None) };
+        let result = register(&claude, "https://cac.example", TOKEN, Path::new("/home/ana/.local/bin/cac-mcp"), false);
+        assert!(matches!(result, Err(RegisterError::Failed(_))), "{result:?}");
+        assert_eq!(claude.calls().len(), 3, "{:?}", claude.calls());
     }
 
     /// Sin `claude` se dice, para ofrecer el paso a mano.
