@@ -3,6 +3,7 @@
 use unicode_normalization::UnicodeNormalization;
 
 use super::types::OpenTask;
+use crate::org_admin::{member_face, OrgMember};
 
 /// El valor de «sin asignar». No puede chocar con un id: los ids son UUID.
 pub const NOBODY: &str = "-";
@@ -75,31 +76,52 @@ pub fn matches_filter(task: &OpenTask, filter: &TaskFilter) -> bool {
 /// Las prioridades, de la peor a la mejor: el orden en que se ofrecen.
 pub const PRIORITIES: [&str; 5] = ["urgent", "high", "normal", "low", "none"];
 
+/// Una persona del desplegable: se filtra por `value` (su usuario, que es lo
+/// que trae cada tarea) y se enseña `label` (su nombre).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AssigneeOption {
+    pub value: String,
+    pub label: String,
+}
+
 /// Qué se puede elegir en cada desplegable de filtro. Una lista vacía es «no
 /// ofrezcas ese desplegable».
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct FilterOptions {
-    /// Los responsables, por nombre y en orden alfabético.
-    pub assignees: Vec<String>,
+    /// Las personas, por nombre y en orden alfabético.
+    pub assignees: Vec<AssigneeOption>,
     /// Si alguna tarea no tiene responsable: entonces se ofrece «sin asignar».
     pub unassigned: bool,
     pub priorities: Vec<String>,
 }
 
-/// Las opciones salen de las tareas que hay, no de un catálogo: filtrar por
-/// alguien que no tiene ninguna sólo enseña una lista vacía.
+/// Los responsables son los miembros de la organización, no los de las tareas
+/// que hay cargadas: quien no tiene ninguna visible también es alguien por
+/// quien filtrar (y se ve que no tiene nada). Un responsable de una tarea que
+/// ya no es miembro se añade con su usuario, para que su tarea no quede sin
+/// forma de encontrarse. Las prioridades sí salen de las tareas.
 ///
 /// Un desplegable se ofrece si hay algo que separar (dos valores o más), o si
 /// ya tiene algo elegido: sin eso, un filtro puesto no tendría cómo quitarse
 /// cuando las tareas cambian por debajo.
-pub fn filter_options(tasks: &[OpenTask], filter: &TaskFilter) -> FilterOptions {
-    let mut people: Vec<String> = Vec::new();
+pub fn filter_options(tasks: &[OpenTask], members: &[OrgMember], filter: &TaskFilter) -> FilterOptions {
+    let mut people: Vec<AssigneeOption> = Vec::new();
+    for member in members {
+        if member.username.is_empty() || people.iter().any(|known| known.value == member.username) {
+            continue;
+        }
+        let label = member_face(member).0;
+        people.push(AssigneeOption { value: member.username.clone(), label });
+    }
     let mut unassigned = false;
     let mut priorities: Vec<&str> = Vec::new();
     for task in tasks {
         match task.assignee.as_deref() {
-            Some(name) if !people.iter().any(|known| known == name) => people.push(name.to_string()),
+            Some(name) if !people.iter().any(|known| known.value == name) => {
+                people.push(AssigneeOption { value: name.to_string(), label: name.to_string() })
+            }
             Some(_) => {}
             None => unassigned = true,
         }
@@ -108,7 +130,7 @@ pub fn filter_options(tasks: &[OpenTask], filter: &TaskFilter) -> FilterOptions 
             priorities.push(priority);
         }
     }
-    people.sort_by_key(|name| fold(name));
+    people.sort_by_key(|person| fold(&person.label));
     let offer = |count: usize, chosen: &str| count >= 2 || !chosen.is_empty();
     FilterOptions {
         assignees: if offer(people.len() + usize::from(unassigned), &filter.assignee) { people } else { Vec::new() },
@@ -180,28 +202,77 @@ mod tests {
         assert!(!matches_filter(&task(1, "a", "none", Some("luis")), &ana));
     }
 
-    /// Roturas que atrapa: ofrecer a alguien dos veces; desordenar los
-    /// nombres o las prioridades; olvidar «sin asignar»; ofrecer la prioridad
-    /// guardada `medium` aparte de `normal`.
+    fn member(username: &str, name: Option<&str>) -> OrgMember {
+        OrgMember {
+            user_id: format!("id-{username}"),
+            username: username.into(),
+            name: name.map(str::to_string),
+            email: None,
+            role: "member".into(),
+            last_seen_at: None,
+            setup_pending: false,
+        }
+    }
+
+    fn labels(options: &FilterOptions) -> Vec<&str> {
+        options.assignees.iter().map(|person| person.label.as_str()).collect()
+    }
+
+    /// Roturas que atrapa: sacar las personas de las tareas cargadas en vez de
+    /// los miembros (Itzel, sin ninguna visible, no salía); enseñar el usuario
+    /// y no el nombre; filtrar por el nombre y no por el usuario; desordenar.
     #[test]
-    fn the_options_are_what_the_tasks_have() {
+    fn the_people_are_the_members_by_name_even_with_no_visible_task() {
+        let members = [member("diegotsx", Some("Diego Torres")), member("itzel", Some("Itzel Mora")), member("ana", None)];
+        let tasks = [task(1, "a", "low", Some("diegotsx")), task(2, "b", "low", None)];
+        let options = filter_options(&tasks, &members, &TaskFilter::default());
+        assert_eq!(labels(&options), ["ana", "Diego Torres", "Itzel Mora"]);
+        let itzel = options.assignees.iter().find(|person| person.label == "Itzel Mora").unwrap();
+        assert_eq!(itzel.value, "itzel", "se filtra por el usuario que trae la tarea");
+        assert!(options.unassigned);
+    }
+
+    /// Roturas que atrapa: ofrecer a alguien dos veces (miembro y responsable
+    /// de una tarea); perder el responsable de una tarea que ya no es miembro;
+    /// enseñar el usuario provisional de quien no terminó el registro.
+    #[test]
+    fn a_member_is_offered_once_and_a_former_member_with_tasks_is_not_lost() {
+        let pending = OrgMember { setup_pending: true, email: Some("dan@x.com".into()), ..member("pending-7f3a", None) };
+        let members = [member("ana", Some("Ana")), member("ana", Some("Ana")), pending];
+        let tasks = [task(1, "a", "low", Some("ana")), task(2, "b", "low", Some("gone"))];
+        let options = filter_options(&tasks, &members, &TaskFilter::default());
+        assert_eq!(labels(&options), ["Ana", "dan@x.com", "gone"]);
+    }
+
+    /// Rotura que atrapa: quedarse con los miembros de la organización
+    /// anterior al cambiar de organización.
+    #[test]
+    fn another_organization_has_other_people() {
+        let tcg = [member("ana", Some("Ana")), member("itzel", Some("Itzel"))];
+        let dwit = [member("luis", Some("Luis")), member("rosa", Some("Rosa"))];
+        assert_eq!(labels(&filter_options(&[], &tcg, &TaskFilter::default())), ["Ana", "Itzel"]);
+        assert_eq!(labels(&filter_options(&[], &dwit, &TaskFilter::default())), ["Luis", "Rosa"]);
+    }
+
+    /// Roturas que atrapa: desordenar las prioridades; olvidar «sin asignar»;
+    /// ofrecer la prioridad guardada `medium` aparte de `normal`.
+    #[test]
+    fn the_priorities_are_what_the_tasks_have() {
         let tasks = [
             task(1, "a", "low", Some("Luis")),
             task(2, "b", "urgent", Some("ana")),
             task(3, "c", "medium", Some("Luis")),
             task(4, "d", "normal", None),
         ];
-        let options = filter_options(&tasks, &TaskFilter::default());
-        // Por nombre como lo lee una persona: la mayúscula no va delante.
-        assert_eq!(options.assignees, ["ana", "Luis"]);
+        let options = filter_options(&tasks, &[], &TaskFilter::default());
         assert!(options.unassigned);
         assert_eq!(options.priorities, ["urgent", "normal", "low"]);
 
-        let assigned = filter_options(&tasks[..3], &TaskFilter::default());
+        let assigned = filter_options(&tasks[..3], &[], &TaskFilter::default());
         assert!(!assigned.unassigned);
 
         // La guardada y la de la API son la misma prioridad: no separan nada.
-        let one = filter_options(&tasks[2..], &TaskFilter::default());
+        let one = filter_options(&tasks[2..], &[], &TaskFilter::default());
         assert!(one.priorities.is_empty(), "ofrece {:?}", one.priorities);
     }
 
@@ -210,20 +281,20 @@ mod tests {
     #[test]
     fn a_picker_is_offered_when_it_separates_or_is_already_set() {
         let same = [task(1, "a", "high", Some("ana")), task(2, "b", "high", Some("ana"))];
-        let nothing = filter_options(&same, &TaskFilter::default());
+        let nothing = filter_options(&same, &[], &TaskFilter::default());
         assert!(nothing.assignees.is_empty() && nothing.priorities.is_empty());
 
         // Cada desplegable mira lo suyo: elegir persona no ofrece prioridades.
-        let person = filter_options(&same, &TaskFilter { assignee: "ana".into(), ..TaskFilter::default() });
-        assert_eq!(person.assignees, ["ana"]);
+        let person = filter_options(&same, &[], &TaskFilter { assignee: "ana".into(), ..TaskFilter::default() });
+        assert_eq!(labels(&person), ["ana"]);
         assert!(person.priorities.is_empty());
-        let priority = filter_options(&same, &TaskFilter { priority: "high".into(), ..TaskFilter::default() });
+        let priority = filter_options(&same, &[], &TaskFilter { priority: "high".into(), ..TaskFilter::default() });
         assert_eq!(priority.priorities, ["high"]);
         assert!(priority.assignees.is_empty());
 
         // Una persona y tareas sin nadie ya son dos cosas que separar.
         let mixed = [task(1, "a", "high", Some("ana")), task(2, "b", "high", None)];
-        assert_eq!(filter_options(&mixed, &TaskFilter::default()).assignees, ["ana"]);
+        assert_eq!(labels(&filter_options(&mixed, &[], &TaskFilter::default())), ["ana"]);
     }
 
     /// Rotura que atrapa: dar por puesto un filtro de espacios.

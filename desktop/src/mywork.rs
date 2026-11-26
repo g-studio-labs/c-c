@@ -5,7 +5,7 @@
 //! cada lente lo decide el core. Aquí está el buscador, que es lo único que
 //! esta pantalla tiene propio, y la pintura.
 
-use cac_core::{DueState, TaskFilter, WorkGroup, WorkLayout, WorkLens, WorkRow, NOBODY};
+use cac_core::{DueState, OrgMember, TaskFilter, WorkGroup, WorkLayout, WorkLens, WorkRow, NOBODY};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::Button;
@@ -130,6 +130,13 @@ pub struct MyWorkView {
     /// Lo elegido en los desplegables; vacío es «cualquiera».
     assignee: String,
     priority: String,
+    /// Los miembros de la organización que se mira, con la organización de la
+    /// que son: el desplegable de responsable ofrece a todos, no sólo a los
+    /// que tienen tareas cargadas.
+    members: Option<(String, Vec<OrgMember>)>,
+    /// La organización cuyos miembros se están pidiendo, para no pedirlos en
+    /// cada pintado.
+    members_asked: Option<String>,
     /// La fila de «tarea nueva», mientras está abierta.
     pub(crate) new_task: Option<Entity<NewTaskRow>>,
     _new_task_closed: Option<Subscription>,
@@ -148,6 +155,8 @@ impl MyWorkView {
             search: cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)),
             assignee: String::new(),
             priority: String::new(),
+            members: None,
+            members_asked: None,
             new_task: None,
             _new_task_closed: None,
             lifted: None,
@@ -180,6 +189,37 @@ impl MyWorkView {
         }
     }
 
+    /// Pide los miembros de la organización que se mira si aún no se tienen.
+    /// Al cambiar de organización se tira la persona elegida: es de la otra.
+    fn ensure_members(&mut self, cx: &mut Context<Self>) {
+        let Some(org_id) = Backend::core(cx).orgs().state().current_org_id else { return };
+        if self.members_asked.as_deref() == Some(org_id.as_str()) {
+            return;
+        }
+        if self.members_asked.is_some() {
+            self.assignee.clear();
+        }
+        self.members_asked = Some(org_id.clone());
+        let id = org_id.clone();
+        let answer = Backend::ask(cx, move |core| async move { (id.clone(), core.orgs().members(&id).await) });
+        cx.spawn(async move |this, cx| {
+            let Ok((id, members)) = answer.await else { return };
+            this.update(cx, |this, cx| {
+                if this.members_asked.as_deref() != Some(id.as_str()) {
+                    return;
+                }
+                // Si falla, el desplegable sigue con los responsables de las
+                // tareas; reintentar en cada pintado sería un bucle.
+                if let Ok(members) = members {
+                    this.members = Some((id, members));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(crate) fn choose_assignee(&mut self, assignee: String, cx: &mut Context<Self>) {
         self.assignee = assignee;
         cx.notify();
@@ -202,7 +242,12 @@ impl MyWorkView {
     /// Los desplegables de filtro y, si algo filtra, cómo quitarlo. Qué se
     /// ofrece en cada uno lo decide el core con las tareas que hay.
     fn render_filters(&self, filter: &TaskFilter, cx: &mut Context<Self>) -> impl IntoElement {
-        let options = Backend::core(cx).my_work().filter_options(filter);
+        let current = Backend::core(cx).orgs().state().current_org_id;
+        let members: &[OrgMember] = match &self.members {
+            Some((org, members)) if current.as_deref() == Some(org.as_str()) => members,
+            _ => &[],
+        };
+        let options = Backend::core(cx).my_work().filter_options(members, filter);
         let here = locale(cx);
         let phrase = move |key: &str| cac_core::text(here, key);
         let view = cx.entity().downgrade();
@@ -212,13 +257,17 @@ impl MyWorkView {
             let label = match chosen.as_str() {
                 "" => phrase("work:board.filter.anyone"),
                 NOBODY => phrase("work:board.filter.nobody"),
-                name => name.to_string(),
+                value => options
+                    .assignees
+                    .iter()
+                    .find(|person| person.value == value)
+                    .map_or_else(|| value.to_string(), |person| person.label.clone()),
             };
             let mut choices = vec![(String::new(), phrase("work:board.filter.anyone"))];
             if options.unassigned {
                 choices.push((NOBODY.to_string(), phrase("work:board.filter.nobody")));
             }
-            choices.extend(options.assignees.iter().map(|name| (name.clone(), name.clone())));
+            choices.extend(options.assignees.iter().map(|person| (person.value.clone(), person.label.clone())));
             let view = view.clone();
             picker("filter-assignee", label, None, cx, move |mut menu, _, _| {
                 for (value, label) in choices.clone() {
@@ -654,6 +703,7 @@ impl MyWorkView {
 
 impl Render for MyWorkView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_members(cx);
         let theme = cx.theme();
         let (background, foreground, muted) = (theme.background, theme.foreground, theme.muted_foreground);
         let filter = self.filter(cx);

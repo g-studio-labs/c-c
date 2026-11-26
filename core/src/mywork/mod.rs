@@ -30,7 +30,7 @@ pub use calendar::{
     week_start, week_title, week_view, weekday_name, CalendarChip, CalendarCursor, CalendarDay, CalendarView, CalendarWeek, MonthView,
     ToneCount, WeekSummary, WeekView, CALENDAR_TONES,
 };
-pub use filter::{filter_options, matches_filter, FilterOptions, TaskFilter, NOBODY, PRIORITIES};
+pub use filter::{filter_options, AssigneeOption, matches_filter, FilterOptions, TaskFilter, NOBODY, PRIORITIES};
 pub use list::{day_and_month, due_label, empty_reason, work_groups, DueLabel, WorkGroup, WorkRow};
 pub use types::{MyWorkState, OpenTask, ScopeKind, WorkLens, WorkScope};
 

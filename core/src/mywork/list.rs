@@ -147,8 +147,8 @@ impl MyWork {
     /// Qué ofrecen los filtros: lo que hay en el ámbito, antes de filtrar.
     /// Sacarlo de lo ya filtrado dejaría cada desplegable con una sola opción
     /// en cuanto se elige algo.
-    pub fn filter_options(&self, filter: &TaskFilter) -> FilterOptions {
-        filter_options(&self.visible(), filter)
+    pub fn filter_options(&self, members: &[crate::OrgMember], filter: &TaskFilter) -> FilterOptions {
+        filter_options(&self.visible(), members, filter)
     }
 
     /// Lo que la lista pinta ahora: lo visible que pasa el filtro, agrupado.
