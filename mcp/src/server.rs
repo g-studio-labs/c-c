@@ -2692,6 +2692,20 @@ fn tool_defs() -> Value {
             }
         },
         {
+            "name": "link_basecamp",
+            "description": "Link a task to its Basecamp to-do, message or card by URL, or unlink it with `unlink: true`. The URL must belong to the Basecamp account connected to the task's organization. Once linked, what happens there (comments, completions, assignments) lands on this task instead of as loose notices; one Basecamp item belongs to one task, so a link already held by another task is refused (`basecamp-link-taken`). Creating or editing a task whose description carries such a URL links it by itself; use this for the rest. It never writes to Basecamp. Linking needs `tasks:write`; unlinking removes what someone set, so it needs `tasks:manage`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The task." },
+                    "url": { "type": "string", "description": "https://3.basecamp.com/{account}/buckets/{project}/todos/{id} (or …/messages/{id}, …/card_tables/cards/{id})" },
+                    "unlink": { "type": "boolean", "description": "Remove this link instead of adding it." },
+                    "dryRun": { "type": "boolean", "description": "Validate without writing." }
+                },
+                "required": ["id", "url"]
+            }
+        },
+        {
             "name": "edit_task_comment",
             "description": "Correct a comment you wrote on a task. Only your own: cac refuses anyone else's. Replaces the text outright — there is no history. Needs `tasks:manage`.",
             "inputSchema": {
@@ -4013,7 +4027,7 @@ fn merge_secret_refs(current: &[Value], set: &[Value], remove: &[String], replac
 fn task_id_fields(tool: &str) -> &'static [&'static str] {
     match tool {
         "update_task" | "add_task_comment" | "edit_task_comment" | "delete_task_comment"
-        | "add_task_attachment" | "link_pull_request" | "report_to_task" => &["id"],
+        | "add_task_attachment" | "link_pull_request" | "link_basecamp" | "report_to_task" => &["id"],
         "create_task" => &["parentId"],
         "create_request" | "list_requests" => &["taskId"],
         "record_decision" | "record_incident" => &["originTaskId"],
@@ -5337,6 +5351,35 @@ fn run_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                 "title": link.get("title"),
                 "state": link.get("state"),
                 "url": link.get("htmlUrl"),
+            }))
+        }
+        "link_basecamp" => {
+            let id = arg_str(args, "id").ok_or("id is required")?;
+            let url = arg_str(args, "url").ok_or("url is required")?;
+            let unlink = arg_bool(args, "unlink");
+            // Soltar va por el id del recording, que es el último número de la
+            // URL: se lee aquí para no pedirle al agente un id que no ve.
+            let recording = basecamp_recording_id(&url)
+                .ok_or("url is not a Basecamp to-do, message or card link")?;
+            if arg_bool(args, "dryRun") {
+                let target = api_get(cfg, &format!("/api/v1/tasks/{}", urlencode(&id)));
+                return dry_run(cfg, if unlink { "tasks:manage" } else { "tasks:write" }, target);
+            }
+            if unlink {
+                api_delete(cfg, &format!("/api/v1/tasks/{}/basecamp/{recording}", urlencode(&id)))?;
+                return Ok(json!({ "taskId": id, "recordingId": recording, "unlinked": true }));
+            }
+            let link = api_post(
+                cfg,
+                &format!("/api/v1/tasks/{}/basecamp", urlencode(&id)),
+                json!({ "url": url }),
+            )?;
+            Ok(json!({
+                "taskId": id,
+                "recordingId": link.get("recordingId"),
+                "projectId": link.get("projectId"),
+                "url": link.get("appUrl"),
+                "linked": true,
             }))
         }
         "add_task_comment" => {
@@ -6986,6 +7029,20 @@ fn annotate(mut tools: Value) -> Value {
         }
     }
     tools
+}
+
+/// El recording de una URL de Basecamp: el último tramo numérico de su ruta
+/// (`…/todos/5001`, `…/card_tables/cards/7001`), sin `#…`, `?…` ni `.json`.
+fn basecamp_recording_id(url: &str) -> Option<u64> {
+    let rest = url.trim().strip_prefix("https://")?;
+    let (host, path) = rest.split_once('/')?;
+    let host = host.to_ascii_lowercase();
+    if host != "basecamp.com" && !host.ends_with(".basecamp.com") {
+        return None;
+    }
+    let path = path.split(['#', '?']).next().unwrap_or("");
+    let last = path.trim_end_matches('/').rsplit('/').next()?;
+    last.trim_end_matches(".json").parse().ok().filter(|n| *n > 0)
 }
 
 fn is_read_only(name: &str) -> bool {
@@ -10719,6 +10776,34 @@ mod tests {
         assert_eq!(sent(&seen)["visibility"], "internal");
         call_tool(&cfg, "update_task", &json!({ "id": "t1", "comment": "Listo, ya puede probarlo.", "commentVisibility": "public" })).unwrap();
         assert_eq!(sent(&seen)["visibility"], "public");
+    }
+
+    /// `link_basecamp` enlaza con un POST de la URL y suelta con un DELETE por
+    /// el recording que lee de ella. Roturas que detecta: soltar por otro id
+    /// (el del proyecto, o con el `#…` pegado); enlazar cuando se pidió
+    /// soltar; aceptar una URL que no es de Basecamp.
+    #[test]
+    fn link_basecamp_links_and_unlinks_by_the_recording_of_its_url() {
+        let (cfg, seen) = fake_cac(|method, _, body| match method {
+            "POST" => json!({ "recordingId": 5001, "projectId": 42, "taskId": "t1", "appUrl": body["url"] }),
+            _ => Value::Null,
+        });
+        let url = "https://3.basecamp.com/999/buckets/42/todos/5001";
+        let out = call_tool(&cfg, "link_basecamp", &json!({ "id": "t1", "url": url })).unwrap();
+        assert_eq!(out["recordingId"], 5001);
+        assert_eq!(out["linked"], true);
+        let calls: Vec<_> = seen.lock().unwrap().drain(..).collect();
+        assert!(calls.iter().any(|(m, p, b)| m == "POST" && p == "/api/v1/tasks/t1/basecamp" && b["url"] == url), "{calls:?}");
+
+        let out = call_tool(&cfg, "link_basecamp",
+            &json!({ "id": "t1", "url": "https://3.basecamp.com/999/buckets/42/card_tables/cards/7001#__recording_9", "unlink": true })).unwrap();
+        assert_eq!(out["unlinked"], true);
+        let calls: Vec<_> = seen.lock().unwrap().drain(..).collect();
+        assert!(calls.iter().any(|(m, p, _)| m == "DELETE" && p == "/api/v1/tasks/t1/basecamp/7001"), "{calls:?}");
+        assert!(calls.iter().all(|(m, _, _)| m != "POST"), "unlinking linked: {calls:?}");
+
+        call_tool(&cfg, "link_basecamp", &json!({ "id": "t1", "url": "https://3.basecamp.com.evil.io/1/buckets/2/todos/3", "unlink": true })).unwrap_err();
+        assert!(seen.lock().unwrap().iter().all(|(m, _, _)| m != "DELETE"), "unlinked by a URL that is not Basecamp's");
     }
 
     /// Claude Code no pide permiso para lo que sólo lee y lo puede correr en
