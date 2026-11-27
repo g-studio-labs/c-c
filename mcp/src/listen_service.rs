@@ -255,21 +255,27 @@ pub fn restart_after_update_here() -> Option<String> {
     restart_after_update(unit_path_here().as_deref(), &systemctl)
 }
 
+/// El camino de `main` sin tocar el sistema: el sistema operativo se decide
+/// **antes** de buscar la carpeta de usuario, que en Windows no existe.
+pub fn run_cli(os: &str, args: &[&str], setup: &dyn Fn() -> Result<Setup, String>, sys: Systemctl) -> Report {
+    if os != "linux" && matches!(args, ["install"] | ["uninstall"] | ["status"]) {
+        return Report::fail(2, by_hand(os));
+    }
+    let setup = match setup() {
+        Ok(setup) => setup,
+        Err(e) => return Report::fail(1, format!("cac-mcp listen: {e}")),
+    };
+    match args {
+        ["install"] => install(&setup, sys),
+        ["uninstall"] => uninstall(&setup, sys),
+        ["status"] => status(&setup, sys),
+        _ => Report::fail(2, format!("cac-mcp listen: unknown arguments `{}`. Usage: cac-mcp listen install | uninstall | status", args.join(" "))),
+    }
+}
+
 /// `cac-mcp listen install|uninstall|status`.
 pub fn main(args: &[&str]) -> i32 {
-    let setup = match setup_here() {
-        Ok(setup) => setup,
-        Err(e) => {
-            eprintln!("cac-mcp listen: {e}");
-            return 1;
-        }
-    };
-    let report = match args {
-        ["install"] => install(&setup, &systemctl),
-        ["uninstall"] => uninstall(&setup, &systemctl),
-        ["status"] => status(&setup, &systemctl),
-        _ => Report::fail(2, format!("cac-mcp listen: unknown arguments `{}`. Usage: cac-mcp listen install | uninstall | status", args.join(" "))),
-    };
+    let report = run_cli(std::env::consts::OS, args, &setup_here, &systemctl);
     print!("{}", report.out);
     if !report.err.is_empty() {
         eprintln!("{}", report.err);
@@ -409,6 +415,25 @@ mod tests {
             }
             assert!(sys.calls().is_empty() && !s.unit_path().exists());
         }
+    }
+
+    /// Roturas que atrapa: buscar la carpeta de usuario antes de decidir el
+    /// sistema (en Windows no hay `HOME` y salía código 1 sin el texto), o que
+    /// `status` conteste otro código que 2 fuera de Linux.
+    #[test]
+    fn outside_linux_the_cli_says_no_without_needing_a_home_folder() {
+        for os in ["macos", "windows"] {
+            for args in [&["install"][..], &["uninstall"], &["status"]] {
+                let sys = Fake::new(vec![]);
+                let report = run_cli(os, args, &|| Err("no home folder to keep the unit in".into()), &|a| sys.run(a));
+                assert_eq!(report.code, 2, "{os} {args:?}: {}", report.err);
+                assert!(report.err.contains("not supported on this system yet") && report.err.contains("cac-mcp listen run"), "{}", report.err);
+                assert!(sys.calls().is_empty());
+            }
+        }
+        let sys = Fake::new(vec![]);
+        let report = run_cli("linux", &["install"], &|| Err("no home folder to keep the unit in".into()), &|a| sys.run(a));
+        assert_eq!(report.code, 1);
     }
 
     /// Roturas que atrapa: que `uninstall` borre el fichero de eventos, que no
