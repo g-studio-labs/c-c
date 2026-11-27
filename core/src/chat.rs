@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use crate::comms::Conversation;
 use crate::comms_text::{instant, quote_text, was_read};
 use crate::comms_wire::{ChatFile, ChatMessage, DmMessage, MessageQuote, ReactionSummary};
+use crate::app_link::{AppLink, LinkOpened};
 use crate::doc_links::{doc_link, DocLink};
 use crate::error::ApiError;
 use crate::stream::ServerEvent;
@@ -902,33 +903,20 @@ impl Chat {
         thread_link(href, self.core.base_url())
     }
 
-    /// Sigue un enlace de un mensaje, hasta donde llega el core: una tarea
-    /// se abre en su página y un documento, en la documentación (saliendo
-    /// de comunicación). Lo demás lo devuelve para quien pinta: un fichero
+    /// Sigue un enlace de un mensaje, hasta donde llega el core: lo de cac
+    /// (una tarea, un documento, otro canal…) se abre en su sitio con
+    /// `Core::open_link`. Lo demás lo devuelve para quien pinta: un fichero
     /// hay que bajarlo, y lo de fuera es del navegador.
     pub async fn follow_link(&self, href: &str) -> ThreadLink {
         let link = self.link(href);
-        match &link {
-            ThreadLink::Task { id } => {
-                if self.core.tasks().open_written(id).await {
-                    link
-                } else {
-                    ThreadLink::Unknown
-                }
-            }
-            ThreadLink::Doc => {
-                let known = match doc_link(href) {
-                    DocLink::Doc { kind, id, .. } => crate::tree_rows::find_node(&self.core.tree().state().spaces, &id).map(|(found, _)| found) == Some(kind),
-                    _ => false,
-                };
-                if !known {
-                    return ThreadLink::Unknown;
-                }
-                self.core.comms().leave();
-                self.core.docs().follow_link(href).await;
-                link
-            }
-            _ => link,
+        if !matches!(link, ThreadLink::Task { .. } | ThreadLink::Doc | ThreadLink::Place) {
+            return link;
+        }
+        match self.core.open_link(href).await {
+            LinkOpened::Opened => link,
+            LinkOpened::Organization => ThreadLink::Organization,
+            LinkOpened::Browser { url } => ThreadLink::Web { url },
+            LinkOpened::Failed => ThreadLink::Unknown,
         }
     }
 
@@ -1451,6 +1439,11 @@ pub enum ThreadLink {
     Web { url: String },
     /// Nombra a alguien sin llevar a ningún sitio.
     Inert,
+    /// Otra pantalla de la app (un canal, un directo, «Por atender», el
+    /// muro, las notas): la abre `Core::open_link`.
+    Place,
+    /// La pantalla de la organización, que abre quien pinta.
+    Organization,
     /// De cac, pero esta app todavía no lo abre: una llamada.
     NotHere,
     /// No se sabe abrir, o ya no está.
@@ -1470,16 +1463,23 @@ pub(crate) fn thread_link(href: &str, base_url: &str) -> ThreadLink {
         let well_formed = id.len() == 36 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
         return if well_formed { ThreadLink::Recording { id: id.to_string() } } else { ThreadLink::Unknown };
     }
+    // Un enlace de cac en cualquiera de sus formas (`https://…/app/…`, sin
+    // `/app`, `cac://…`) es de dentro; lo que la app no tiene, a la web.
+    match crate::app_link::app_link(href, base_url) {
+        AppLink::Task { id } => return ThreadLink::Task { id },
+        AppLink::Doc { .. } => return ThreadLink::Doc,
+        AppLink::Browser { url } => return ThreadLink::Web { url },
+        AppLink::Organization => return ThreadLink::Organization,
+        AppLink::Unopenable => {}
+        _ => return ThreadLink::Place,
+    }
     match doc_link(href) {
-        DocLink::Task { id } => ThreadLink::Task { id },
-        DocLink::Doc { .. } => ThreadLink::Doc,
-        DocLink::Web { url } => ThreadLink::Web { url },
         DocLink::Inert => ThreadLink::Inert,
+        // `cac:call/…`: de cac, pero sin pantalla aquí ni en la web.
+        DocLink::Unknown if href.starts_with("cac:") => ThreadLink::NotHere,
         // Un ancla es de un documento: en un mensaje no hay títulos a los
         // que saltar.
-        DocLink::Anchor { .. } => ThreadLink::Unknown,
-        DocLink::Unknown if href.starts_with("cac:") => ThreadLink::NotHere,
-        DocLink::Unknown => ThreadLink::Unknown,
+        _ => ThreadLink::Unknown,
     }
 }
 
@@ -1839,7 +1839,10 @@ mod tests {
 
     /// A qué lleva cada enlace de un mensaje.
     ///
-    /// Roturas que atrapa: una tarea citada que sale al navegador; un
+    /// Roturas que atrapa: una tarea citada que sale al navegador (también
+    /// con su dirección de la web o `cac://`); otro canal, un directo o la
+    /// organización que no se abren aquí; una ruta de cac que esta app no
+    /// tiene dicha como enlace roto en vez de llevarla a la web; un
     /// fichero de la conversación dado al navegador, que no tiene la
     /// sesión; una mención que intenta abrirse; una llamada tomada por un
     /// enlace roto en vez de decir que aún no está aquí; una grabación que
@@ -1849,6 +1852,12 @@ mod tests {
         let link = |href: &str| thread_link(href, BASE);
         assert_eq!(link("/tasks?task=cac-12"), ThreadLink::Task { id: "cac-12".into() });
         assert_eq!(link("/tasks?doc=list:l1&page=p2"), ThreadLink::Doc);
+        assert_eq!(link(&format!("{BASE}/app/tasks?task=cac-12")), ThreadLink::Task { id: "cac-12".into() });
+        assert_eq!(link("cac://tasks?task=cac-12"), ThreadLink::Task { id: "cac-12".into() });
+        assert_eq!(link("/chat?space=s1"), ThreadLink::Place);
+        assert_eq!(link(&format!("{BASE}/dm?c=c1")), ThreadLink::Place);
+        assert_eq!(link("/organization"), ThreadLink::Organization);
+        assert_eq!(link("/servers/x"), ThreadLink::Web { url: format!("{BASE}/app/servers/x") });
         assert_eq!(link("https://example.com/a"), ThreadLink::Web { url: "https://example.com/a".into() });
         assert_eq!(link("/api/v1/dm/c1/attachments/a1/raw"), ThreadLink::File { path: "/api/v1/dm/c1/attachments/a1/raw".into() });
         assert_eq!(link("cac:user/11111111-1111-4111-8111-111111111111"), ThreadLink::Inert);
