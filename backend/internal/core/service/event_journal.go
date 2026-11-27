@@ -44,7 +44,7 @@ func (j *EventJournal) Append(in domain.UserEventInput) (domain.EventEnvelope, b
 	if len(data) > domain.UserEventMaxData {
 		data, _ = json.Marshal(map[string]any{"truncated": true, "bytes": len(data)})
 	}
-	row, created, err := j.repo.Append(in, data, j.now())
+	row, created, err := j.repo.Append(in, data, j.now)
 	if err != nil || !created {
 		return domain.EventEnvelope{}, false, err
 	}
@@ -74,7 +74,14 @@ func (j *EventJournal) Read(userID string, after int64, limit int, orgs map[stri
 		return domain.EventPage{}, err
 	}
 	page := domain.EventPage{Events: []domain.EventEnvelope{}, Head: head}
-	if after >= head {
+	if after > head {
+		// Un cursor por delante de la cabecera (un diario reiniciado): no se
+		// acepta en silencio, es un hueco y se sigue desde la cabecera.
+		page.Gap = true
+		page.Events = append(page.Events, domain.GapEnvelope(head, head, j.now()))
+		return page, nil
+	}
+	if after == head {
 		return page, nil
 	}
 	rows, oldest, err := j.repo.After(userID, after, limit)

@@ -28,7 +28,7 @@ func NewUserEventRepository(db *gorm.DB) *UserEventRepository {
 // Todo dentro de una transacción que bloquea la cabecera de la persona: el
 // número se da y se confirma con la fila bloqueada, así que nadie confirma un
 // número menor después de que otro confirmara uno mayor.
-func (r *UserEventRepository) Append(in domain.UserEventInput, data json.RawMessage, now time.Time) (domain.UserEvent, bool, error) {
+func (r *UserEventRepository) Append(in domain.UserEventInput, data json.RawMessage, now func() time.Time) (domain.UserEvent, bool, error) {
 	var out domain.UserEvent
 	created := false
 	err := r.db.Transaction(func(tx *gorm.DB) error {
@@ -56,6 +56,8 @@ func (r *UserEventRepository) Append(in domain.UserEventInput, data json.RawMess
 				return nil
 			}
 		}
+		// La hora se toma con la cabecera bloqueada: así `created_at` va en el
+		// orden de `seq` y la retención por edad nunca deja un hueco en medio.
 		next := head.LastSeq + 1
 		if err := tx.Model(&domain.UserEventHead{}).Where("user_id = ?", in.UserID).
 			Update("last_seq", next).Error; err != nil {
@@ -63,7 +65,7 @@ func (r *UserEventRepository) Append(in domain.UserEventInput, data json.RawMess
 		}
 		out = domain.UserEvent{
 			UserID: in.UserID, Seq: next, ID: uuid.NewString(), Type: in.Type, OrgID: in.OrgID,
-			Key: key, Mine: in.Mine, External: in.External, Data: data, CreatedAt: now,
+			Key: key, Mine: in.Mine, External: in.External, Data: data, CreatedAt: now(),
 		}
 		if err := tx.Create(&out).Error; err != nil {
 			return err

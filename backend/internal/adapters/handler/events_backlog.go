@@ -89,6 +89,18 @@ func (h *eventsHandler) streamToken(w http.ResponseWriter, r *http.Request, clai
 		return true
 	}
 	orgs := service.OrgSet(claims)
+	// Un Last-Event-ID por delante de la cabecera es un hueco: se avisa y se
+	// sigue desde la cabecera, no se calla.
+	if resume != "" {
+		head, err := h.journal.Head(claims.UserID)
+		if err == nil && cursor > head {
+			cursor = head
+			payload, _ := json.Marshal(domain.GapEnvelope(head, head, time.Now()))
+			if !write(fmt.Sprintf("id: %d\nevent: %s\ndata: %s\n\n", head, domain.UserEventGap, payload)) {
+				return
+			}
+		}
+	}
 	// send entrega un sobre si es el siguiente; lo que ya se entregó se salta.
 	send := func(env domain.EventEnvelope) bool {
 		if env.Seq <= cursor {

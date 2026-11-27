@@ -282,3 +282,72 @@ func journalDB(t *testing.T) (*gorm.DB, func()) {
 		adminSQL.Close()
 	}
 }
+
+// Un cursor por delante de la cabecera es un hueco, no un «al día».
+func TestACursorAheadOfTheHeadIsAGap(t *testing.T) {
+	db, cleanup := journalDB(t)
+	defer cleanup()
+	j := NewEventJournal(repository.NewUserEventRepository(db), nil)
+	for i := 0; i < 2; i++ {
+		if _, _, err := j.Append(domain.UserEventInput{UserID: "u-ana", Type: domain.UserEventNotification}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := j.Read("u-ana", 9, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.Gap || len(page.Events) != 1 || page.Events[0].Type != domain.UserEventGap || page.Events[0].Seq != 2 {
+		t.Fatalf("un cursor por delante de la cabecera no avisa del hueco: %+v", page)
+	}
+	page, err = j.Read("u-ana", 2, 10, nil)
+	if err != nil || page.Gap || len(page.Events) != 0 {
+		t.Errorf("un cursor igual a la cabecera está al día: %+v err=%v", page, err)
+	}
+}
+
+// La hora de cada evento se toma con la cabecera bloqueada: `created_at` va en
+// el orden de `seq`, y la retención por edad no corta en medio.
+func TestCreatedAtFollowsSeqUnderConcurrentAppends(t *testing.T) {
+	db, cleanup := journalDB(t)
+	defer cleanup()
+	j := NewEventJournal(repository.NewUserEventRepository(db), nil)
+	var tick int64
+	var mu sync.Mutex
+	base := time.Now().Add(-time.Hour)
+	j.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		tick++
+		return base.Add(time.Duration(tick) * time.Millisecond)
+	}
+
+	const n = 50
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, _, err := j.Append(domain.UserEventInput{UserID: "u-ana", Type: domain.UserEventNotification}); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	var rows []struct {
+		Seq       int64
+		CreatedAt time.Time
+	}
+	if err := db.Raw("SELECT seq, created_at FROM user_events WHERE user_id = ? ORDER BY seq", "u-ana").Scan(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != n {
+		t.Fatalf("%d filas, se esperaban %d", len(rows), n)
+	}
+	for i := 1; i < len(rows); i++ {
+		if rows[i].CreatedAt.Before(rows[i-1].CreatedAt) {
+			t.Fatalf("seq %d tiene created_at anterior al de seq %d", rows[i].Seq, rows[i-1].Seq)
+		}
+	}
+}

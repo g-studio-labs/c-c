@@ -411,3 +411,26 @@ func TestAnEventOfAnOrgYouLeftOnlyKeepsItsNumber(t *testing.T) {
 		t.Fatalf("lo de org-2 llegó con contenido: %+v", got)
 	}
 }
+
+// Un Last-Event-ID por delante de la cabecera (un diario reiniciado) no se
+// acepta en silencio: llega un cac:gap y se sigue desde la cabecera.
+func TestACursorAheadOfTheHeadIsAGapNotSilence(t *testing.T) {
+	withTokenAuth(t, nil)
+	original := latido
+	latido = time.Hour
+	defer func() { latido = original }()
+
+	hub := events.NewHub()
+	j := newMemJournal(hub)
+	j.add(tokenOwner, "org-1", false)
+	j.add(tokenOwner, "org-1", false)
+
+	r, _ := openStream(t, NewEventsHandler(hub, nil, j), goodToken, "50")
+	if got := r.next(t); got.env.Type != domain.UserEventGap || got.env.Seq != 2 {
+		t.Fatalf("un cursor por delante de la cabecera no avisó del hueco: %+v", got)
+	}
+	j.add(tokenOwner, "org-1", true)
+	if got := r.next(t); got.env.Seq != 3 {
+		t.Fatalf("después del hueco no siguió desde la cabecera: %+v", got)
+	}
+}
