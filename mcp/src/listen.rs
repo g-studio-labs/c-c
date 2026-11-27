@@ -39,6 +39,12 @@ const BACKLOG_PAGE: u64 = 500;
 /// muerta aunque el socket no lo diga.
 const IDLE: Duration = Duration::from_secs(75);
 const DEFAULT_URL: &str = "https://cac.guz-studio.dev";
+/// El evento con el que el backend avisa, antes de colgar, de que el token
+/// dejó de valer.
+const TOKEN_REVOKED: &str = "token:revoked";
+/// La razón de un `cac:gap` local que dice que el diario del backend volvió a
+/// empezar: el `seq` baja, y lo confirmado de cada consumidor también.
+pub const RESET: &str = "reset";
 
 const USAGE: &str = "Usage: cac-mcp listen run | follow --consumer <name> [--project <id|name>] [--type <type>] [--mine] [--once] | ack --consumer <name> <seq>";
 
@@ -133,17 +139,34 @@ impl Journal {
 
     /// El último `seq` que ya está a salvo, al arrancar. Primero quita una
     /// línea a medias (el proceso murió escribiéndola: no se entregó, y el
-    /// stream la vuelve a mandar). Después, el mayor entre el cursor guardado y
-    /// la última línea: si murió entre escribir la línea y guardar el cursor,
-    /// la línea manda, y no se escribe dos veces. `None` es que no hay ni
-    /// fichero ni estado: la primera vez.
+    /// stream la vuelve a mandar). Después, la última línea manda sobre el
+    /// cursor guardado: la línea se escribe antes que el cursor, así que si
+    /// murió entre las dos, la línea es lo último que pasó. Y no vale el mayor
+    /// de los dos: tras un reinicio del diario del backend (`reset`) la línea
+    /// está por **debajo** del cursor viejo, y subirlo otra vez se tragaría
+    /// todo lo que llegue hasta alcanzarlo. Sin líneas (la compactación lo
+    /// vació todo), el cursor guardado. `None` es que no hay ni fichero ni
+    /// estado: la primera vez.
     pub fn recover(&self) -> io::Result<Option<u64>> {
         let from_file = self.trim_and_last_seq()?;
-        let saved = self.saved_cursor();
-        Ok(match (from_file, saved) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (a, b) => a.or(b),
-        })
+        Ok(from_file.or_else(|| self.saved_cursor()))
+    }
+
+    /// El `seq` de la última línea entera, sin tocar el fichero. Lee sólo el
+    /// final: una línea cabe de sobra en 256 KB (el backend corta `data` a
+    /// 32 KB).
+    pub fn last_seq(&self) -> io::Result<Option<u64>> {
+        let mut file = match File::open(&self.events) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let len = file.metadata()?.len();
+        file.seek(SeekFrom::Start(len.saturating_sub(256 * 1024)))?;
+        let mut tail = Vec::new();
+        file.read_to_end(&mut tail)?;
+        let whole = tail.iter().rposition(|b| *b == b'\n').map(|i| &tail[..i]).unwrap_or(&[]);
+        Ok(whole.split(|b| *b == b'\n').rev().find_map(|line| serde_json::from_slice::<Value>(line).ok().and_then(|v| v["seq"].as_u64())))
     }
 
     fn trim_and_last_seq(&self) -> io::Result<Option<u64>> {
@@ -171,14 +194,45 @@ impl Journal {
     /// aparte, después (`save_cursor`): ese orden es el que hace que una caída
     /// en medio no pierda ni repita (ver `recover`).
     pub fn append(&self, event: &Value) -> io::Result<()> {
+        self.append_with(event, &mut |file, line| {
+            file.write_all(line)?;
+            file.sync_data()
+        })
+    }
+
+    /// `append` con la escritura de fuera, para poder hacerla fallar a mitad.
+    /// Si falla (el disco lleno), el fichero vuelve a su largo de antes: el
+    /// reintento sigue en este proceso, sin pasar por `recover`, y una línea
+    /// a medias se pegaría a la siguiente y la dejaría ilegible.
+    fn append_with(&self, event: &Value, write: &mut dyn FnMut(&mut File, &[u8]) -> io::Result<()>) -> io::Result<()> {
         if let Some(dir) = self.events.parent() {
             fs::create_dir_all(dir)?;
         }
         let mut line = serde_json::to_vec(event).map_err(io::Error::other)?;
         line.push(b'\n');
         let mut file = private_options().append(true).create(true).open(&self.events)?;
-        file.write_all(&line)?;
-        file.sync_data()
+        let before = file.metadata()?.len();
+        write(&mut file, &line).inspect_err(|_| {
+            let _ = file.set_len(before);
+        })
+    }
+
+    /// Empieza el fichero de nuevo con sólo esta línea (el diario del backend
+    /// se reinició: lo de antes lleva números de otro diario). Escribe al lado
+    /// y renombra, como la compactación: quien sigue el fichero ve otro inodo.
+    fn restart_with(&self, event: &Value) -> io::Result<()> {
+        if let Some(dir) = self.events.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let tmp = self.events.with_extension("jsonl.reset");
+        {
+            let mut out = private_options().write(true).create(true).truncate(true).open(&tmp)?;
+            let mut line = serde_json::to_vec(event).map_err(io::Error::other)?;
+            line.push(b'\n');
+            out.write_all(&line)?;
+            out.sync_all()?;
+        }
+        fs::rename(&tmp, &self.events)
     }
 
     pub fn save_cursor(&self, seq: u64) -> io::Result<()> {
@@ -419,11 +473,11 @@ pub struct Listener {
     client: reqwest::Client,
 }
 
-/// Una página del diario del backend.
+/// Una página del diario del backend. Su `gap` no hace falta: lo perdido
+/// viene dentro de `events`, como un `cac:gap` que ocupa su último número.
 struct Backlog {
     events: Vec<Value>,
     head: u64,
-    gap: bool,
 }
 
 impl Listener {
@@ -501,6 +555,11 @@ impl Listener {
                 Ok(Ok(Some(chunk))) => chunk,
             };
             for message in parser.feed(&chunk) {
+                // El backend lo manda justo antes de colgar, al ver en un
+                // latido que el token ya no vale: es un «no», no un corte.
+                if message.event.as_deref() == Some(TOKEN_REVOKED) {
+                    return (true, Failure::Auth { status: 401, code: TOKEN_REVOKED.into() });
+                }
                 if let Err(f) = self.deliver(creds, &message).await {
                     return (true, f);
                 }
@@ -514,6 +573,9 @@ impl Listener {
     /// tampoco lo tiene, se reconecta desde el cursor.
     async fn deliver(&mut self, creds: &Credentials, message: &SseMessage) -> Result<(), Failure> {
         let Ok(event) = serde_json::from_str::<Value>(&message.data) else { return Ok(()) };
+        if self.behind_the_head(&event) {
+            return self.reset(&event);
+        }
         let Some(seq) = event["seq"].as_u64().filter(|s| *s > 0) else { return Ok(()) };
         if seq <= self.cursor.unwrap_or(0) {
             return Ok(());
@@ -541,18 +603,36 @@ impl Listener {
     /// recuperar. Lleva `seq = to`, para que quien lee la vea una vez y pueda
     /// confirmarla como cualquier otra.
     fn write_gap(&mut self, from: u64, to: u64, reason: &str) -> Result<(), Failure> {
-        let line = json!({
-            "seq": to,
-            "id": format!("{GAP}:{to}"),
-            "type": GAP,
-            "at": iso_of_unix(now()),
-            "orgId": null,
-            "key": null,
-            "mine": false,
-            "external": false,
-            "data": { "from": from, "to": to, "reason": reason },
-        });
+        let line = gap_line(format!("{GAP}:{to}"), from, to, json!({ "reason": reason }));
         self.write(&line, to)
+    }
+
+    /// Un `cac:gap` del backend con un número por detrás del cursor: el
+    /// diario del backend volvió a empezar (se borró, se restauró de un
+    /// respaldo, o el token es de otra persona) y su cabecera es ese número.
+    /// Igual al cursor no: eso es el mismo hueco que ya se escribió.
+    fn behind_the_head(&self, event: &Value) -> bool {
+        event["type"] == GAP && event["seq"].as_u64().is_some_and(|seq| seq < self.cursor.unwrap_or(0))
+    }
+
+    /// El diario del backend volvió a empezar en `seq`. El cursor **baja**
+    /// allí (si no, todo lo que llegue hasta el número viejo se saltaría como
+    /// ya escrito) y el fichero vuelve a empezar con una línea `cac:gap` de
+    /// razón `reset`: lo de antes lleva números del diario viejo. Su `id` es
+    /// único, porque es lo que `follow` usa para saber si ya bajó lo
+    /// confirmado de un consumidor por este reinicio.
+    fn reset(&mut self, event: &Value) -> Result<(), Failure> {
+        let seq = event["seq"].as_u64().unwrap_or(0);
+        let previous = self.cursor.unwrap_or(0);
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let line = gap_line(format!("{GAP}:reset:{seq}:{nanos}"), seq, seq, json!({ "reason": RESET, "previousCursor": previous }));
+        let failed = |e: io::Error| Failure::Transient(format!("could not write {}: {e}", self.journal.events.display()));
+        self.journal.restart_with(&line).map_err(failed)?;
+        self.journal.save_cursor(seq).map_err(failed)?;
+        eprintln!("cac-mcp listen: cac's event journal starts again at {seq} (we were at {previous})");
+        self.cursor = Some(seq);
+        self.status.last_event = Some(now());
+        Ok(())
     }
 
     /// Lee del diario del backend lo que falta desde el cursor. La primera vez
@@ -575,22 +655,22 @@ impl Listener {
             events.sort_by_key(|e| e["seq"].as_u64().unwrap_or(0));
             let before = cursor;
             for event in events {
+                if self.behind_the_head(&event) {
+                    self.reset(&event)?;
+                    cursor = self.cursor.unwrap_or(0);
+                    continue;
+                }
                 let Some(seq) = event["seq"].as_u64().filter(|s| *s > cursor) else { continue };
-                if seq > cursor + 1 {
-                    self.write_gap(cursor + 1, seq - 1, if page.gap { "expired" } else { "missing" })?;
+                // Lo que el diario ya no guarda llega como un `cac:gap` que
+                // ocupa el último número perdido: ése es el hueco, y no se
+                // escribe otro delante.
+                if seq > cursor + 1 && event["type"] != GAP {
+                    self.write_gap(cursor + 1, seq - 1, "missing")?;
                 }
                 self.write(&event, seq)?;
                 cursor = seq;
             }
-            if cursor == before {
-                // Nada nuevo en la página. Si el backend dice que lo que hay
-                // entre el cursor y su cabeza ya no lo guarda, se salta allí.
-                if page.gap && page.head > cursor {
-                    self.write_gap(cursor + 1, page.head, "expired")?;
-                }
-                return Ok(());
-            }
-            if cursor >= page.head {
+            if cursor == before || cursor >= page.head {
                 return Ok(());
             }
         }
@@ -620,13 +700,28 @@ impl Listener {
         Ok(Backlog {
             events: body["events"].as_array().cloned().unwrap_or_default(),
             head: body["head"].as_u64().unwrap_or(0),
-            gap: match &body["gap"] {
-                Value::Bool(b) => *b,
-                Value::Null => false,
-                _ => true,
-            },
         })
     }
+}
+
+/// Una línea `cac:gap` escrita aquí, con la forma del sobre del backend
+/// (`orgId` y `key` vacíos, nunca nulos).
+fn gap_line(id: String, from: u64, to: u64, extra: Value) -> Value {
+    let mut data = json!({ "from": from, "to": to });
+    if let (Some(data), Value::Object(extra)) = (data.as_object_mut(), extra) {
+        data.extend(extra);
+    }
+    json!({
+        "seq": to,
+        "id": id,
+        "type": GAP,
+        "at": iso_of_unix(now()),
+        "orgId": "",
+        "key": "",
+        "mine": false,
+        "external": false,
+        "data": data,
+    })
 }
 
 fn refused(status: u16) -> Option<impl FnOnce(String) -> Failure> {
@@ -708,20 +803,41 @@ fn consumer_path(state_dir: &Path, consumer: &str) -> PathBuf {
     state_dir.join("consumers").join(format!("{consumer}.json"))
 }
 
+/// Por dónde va un consumidor: hasta qué `seq` confirmó (`None`: nada desde
+/// el último reinicio, así que hasta el `seq` 0 se le entrega) y el `id` de
+/// la última línea `cac:gap` de reinicio que ya le bajó lo confirmado.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Progress {
+    pub acked: Option<u64>,
+    pub epoch: Option<String>,
+}
+
+pub fn progress(state_dir: &Path, consumer: &str) -> Progress {
+    let value = fs::read_to_string(consumer_path(state_dir, consumer)).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()).unwrap_or(Value::Null);
+    Progress { acked: value["acked"].as_u64(), epoch: value["epoch"].as_str().map(String::from) }
+}
+
+fn save_progress(state_dir: &Path, consumer: &str, progress: &Progress) -> io::Result<()> {
+    write_atomic(&consumer_path(state_dir, consumer), &json!({ "acked": progress.acked, "epoch": progress.epoch }))
+}
+
 pub fn acked(state_dir: &Path, consumer: &str) -> u64 {
-    fs::read_to_string(consumer_path(state_dir, consumer))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|v| v["acked"].as_u64())
-        .unwrap_or(0)
+    progress(state_dir, consumer).acked.unwrap_or(0)
 }
 
 /// Confirma hasta `seq`. Nunca retrocede: confirmar uno viejo (un Monitor que
 /// llega tarde) deja lo que había. Devuelve lo que queda confirmado.
 pub fn ack(state_dir: &Path, consumer: &str, seq: u64) -> io::Result<u64> {
-    let kept = acked(state_dir, consumer).max(seq);
-    write_atomic(&consumer_path(state_dir, consumer), &json!({ "acked": kept }))?;
+    let mut progress = progress(state_dir, consumer);
+    let kept = progress.acked.map_or(seq, |acked| acked.max(seq));
+    progress.acked = Some(kept);
+    save_progress(state_dir, consumer, &progress)?;
     Ok(kept)
+}
+
+/// Una línea `cac:gap` de reinicio (ver `Listener::reset`).
+fn is_reset(event: &Value) -> bool {
+    event["type"] == GAP && event["data"]["reason"] == RESET
 }
 
 /// Por dónde va la lectura del fichero: qué fichero (su inodo) y hasta qué
@@ -753,6 +869,9 @@ impl Tail {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e),
         };
+        // Otro inodo es otro fichero (la compactación o un reinicio lo
+        // renombran encima), aunque ya sea tan largo como `pos`: seguir desde
+        // ese byte caería a mitad de una línea.
         if self.file.is_none() || file_id(&meta) != self.id || meta.len() < self.pos {
             self.file = Some(File::open(path)?);
             self.id = file_id(&meta);
@@ -760,6 +879,18 @@ impl Tail {
             self.partial.clear();
         }
         let file = self.file.as_mut().expect("abierto arriba");
+        // Media línea leída que ya no está: `recover` la cortó (el que
+        // escribía murió) y se escribió otra encima, en el mismo inodo. El
+        // corte cae justo donde empezaba, así que se vuelve a leer desde ahí.
+        if !self.partial.is_empty() {
+            let start = self.pos - self.partial.len() as u64;
+            let mut there = vec![0; self.partial.len()];
+            file.seek(SeekFrom::Start(start))?;
+            if file.read_exact(&mut there).is_err() || there != self.partial {
+                self.pos = start;
+                self.partial.clear();
+            }
+        }
         file.seek(SeekFrom::Start(self.pos))?;
         let mut fresh = Vec::new();
         file.read_to_end(&mut fresh)?;
@@ -777,17 +908,29 @@ impl Tail {
 /// Imprime, una por línea, las líneas con `seq` mayor que lo que ese
 /// consumidor confirmó y que pasan el filtro, y sigue el fichero. Con `once`,
 /// imprime lo que hay y vuelve. `keep_going` la para (las pruebas).
+///
+/// Una línea `cac:gap` de reinicio que este consumidor aún no vio se entrega
+/// aunque su `seq` no pase de lo confirmado, y **baja** lo confirmado: los
+/// números vuelven a empezar, y sin bajarlo todo lo que llegue hasta el
+/// número viejo se daría por visto.
 pub fn follow(events: &Path, state_dir: &Path, consumer: &str, filter: &Filter, once: bool, out: &mut dyn Write, poll: Duration, keep_going: &dyn Fn() -> bool) -> io::Result<()> {
-    let mut seen = acked(state_dir, consumer);
+    let mut progress = progress(state_dir, consumer);
+    let mut seen = progress.acked;
     let mut tail = Tail { file: None, id: 0, pos: 0, partial: Vec::new() };
     loop {
         for line in tail.read(events)? {
             let Ok(event) = serde_json::from_slice::<Value>(&line) else { continue };
             let Some(seq) = event["seq"].as_u64() else { continue };
-            if seq <= seen {
+            let new_epoch = is_reset(&event).then(|| event["id"].as_str().unwrap_or("").to_string()).filter(|id| progress.epoch.as_ref() != Some(id));
+            if let Some(epoch) = new_epoch {
+                // Lo confirmado queda en «nada»: la línea de reinicio sigue
+                // pendiente hasta que el consumidor la confirme.
+                progress = Progress { acked: None, epoch: Some(epoch) };
+                save_progress(state_dir, consumer, &progress)?;
+            } else if seen.is_some_and(|seen| seq <= seen) {
                 continue;
             }
-            seen = seq;
+            seen = Some(seq);
             if filter.passes(&event) {
                 out.write_all(&line)?;
                 out.write_all(b"\n")?;
@@ -928,13 +1071,22 @@ fn ack_command(args: &[&str]) -> i32 {
         eprintln!("cac-mcp listen: `{seq}` is not a seq. {USAGE}");
         return 2;
     };
-    let state = match crate::update::state_dir() {
-        Some(s) => s,
-        None => {
-            eprintln!("cac-mcp listen: no home folder to keep the state in");
+    let (events, state) = match dirs() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("{e}");
             return 1;
         }
     };
+    // Nada por encima de lo que hay en el fichero: tras un reinicio, el `ack`
+    // tardío de un número del diario viejo dejaría al consumidor sordo hasta
+    // alcanzarlo. Se deja lo que había.
+    if let Ok(Some(last)) = Journal::new(events, state.clone()).last_seq() {
+        if seq > last {
+            println!("{consumer}: {seq} is not in the events file (it ends at {last}); acknowledged stays at {}", progress(&state, &consumer).acked.map_or("nothing".into(), |a| a.to_string()));
+            return 0;
+        }
+    }
     match ack(&state, &consumer, seq) {
         Ok(kept) => {
             println!("{consumer}: acknowledged up to {kept}");
@@ -954,7 +1106,11 @@ fn ack_command(args: &[&str]) -> i32 {
 /// esta máquina y apunta lo que le piden. Ninguna prueba sale a internet.
 #[doc(hidden)]
 pub mod fake {
-    use std::collections::BTreeMap;
+    //! Contesta como el backend de producción: el backlog como
+    //! `EventJournal.Read` (`service/event_journal.go`) y el stream como
+    //! `streamToken` (`handler/events_backlog.go`). Si cambian allí, cambia
+    //! aquí: lo que el fake no dice, las pruebas no lo ven.
+    use std::collections::{BTreeMap, BTreeSet};
     use std::io::{BufRead, BufReader, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Condvar, Mutex};
@@ -975,6 +1131,12 @@ pub mod fake {
     struct State {
         /// El diario de la persona: lo que el backlog sabe.
         journal: BTreeMap<u64, Value>,
+        /// El último número dado (`user_event_heads`): la retención no lo
+        /// baja; sólo un diario que vuelve a empezar.
+        head: u64,
+        /// Los números de una organización que la persona dejó: se entregan
+        /// como `cac:skipped`.
+        hidden: BTreeSet<u64>,
         /// Lo que el hub reparte en vivo, en el orden en que se reparte.
         live: Vec<Value>,
         /// Lo que se le ha pedido, en orden.
@@ -1007,6 +1169,54 @@ pub mod fake {
         })
     }
 
+    /// `domain.GapEnvelope`: se perdió de `from` a `to`, y ocupa `to`.
+    pub fn gap_envelope(from: u64, to: u64) -> Value {
+        json!({
+            "seq": to, "id": "gap", "type": super::GAP, "at": "2026-11-27T00:00:00Z",
+            "orgId": "", "key": "", "mine": false, "external": false,
+            "data": { "from": from, "to": to },
+        })
+    }
+
+    /// `EventEnvelope.Skipped`: el número y nada más.
+    fn skipped(event: &Value) -> Value {
+        json!({
+            "seq": event["seq"], "id": event["id"], "type": "cac:skipped", "at": event["at"],
+            "orgId": "", "key": "", "mine": false, "external": false, "data": null,
+        })
+    }
+
+    impl State {
+        fn visible(&self, event: &Value) -> Value {
+            if self.hidden.contains(&event["seq"].as_u64().unwrap_or(0)) {
+                skipped(event)
+            } else {
+                event.clone()
+            }
+        }
+
+        /// `EventJournal.Read`: `(events, head, gap)`.
+        fn read(&self, after: u64, limit: usize) -> (Vec<Value>, u64, bool) {
+            let limit = if limit == 0 || limit > 500 { 500 } else { limit };
+            let head = self.head;
+            if after > head {
+                return (vec![gap_envelope(head, head)], head, true);
+            }
+            if after == head {
+                return (Vec::new(), head, false);
+            }
+            let mut events = Vec::new();
+            let mut gap = false;
+            let first_kept = self.journal.keys().next().copied().unwrap_or(head + 1);
+            if after + 1 < first_kept {
+                gap = true;
+                events.push(gap_envelope(after + 1, first_kept - 1));
+            }
+            events.extend(self.journal.range(after + 1..).take(limit).map(|(_, v)| self.visible(v)));
+            (events, head, gap)
+        }
+    }
+
     impl FakeCac {
         pub fn start(token: &str) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("un puerto libre en esta máquina");
@@ -1023,37 +1233,57 @@ pub mod fake {
             fake
         }
 
-        /// Un evento que se guarda en el diario y se reparte en vivo.
+        /// Un evento que se apunta en el diario y se publica en el hub, en
+        /// ese orden (`EventJournal.Append`).
         pub fn push(&self, event: Value) {
             let (lock, wake) = &*self.state;
             let mut state = lock.lock().unwrap();
-            state.journal.insert(event["seq"].as_u64().unwrap(), event.clone());
+            let seq = event["seq"].as_u64().unwrap();
+            state.head = state.head.max(seq);
+            state.journal.insert(seq, event.clone());
             state.live.push(event);
             wake.notify_all();
         }
 
-        /// Un evento que se guarda en el diario pero que el hub tiró: sólo el
-        /// backlog lo sabe.
+        /// Un evento que se apunta en el diario pero que el hub tiró (un
+        /// consumidor lento, el bus caído): sólo el backlog lo sabe.
         pub fn record_only(&self, event: Value) {
             let (lock, _) = &*self.state;
-            lock.lock().unwrap().journal.insert(event["seq"].as_u64().unwrap(), event);
+            let mut state = lock.lock().unwrap();
+            let seq = event["seq"].as_u64().unwrap();
+            state.head = state.head.max(seq);
+            state.journal.insert(seq, event);
         }
 
-        /// Un evento que el hub reparte pero que no está en el diario (un
-        /// diario que ya no lo guarda, o uno que salta).
-        pub fn send_live_only(&self, event: Value) {
-            let (lock, wake) = &*self.state;
-            lock.lock().unwrap().live.push(event);
-            wake.notify_all();
+        /// La persona dejó la organización de este evento: desde ahora se
+        /// entrega como `cac:skipped`.
+        pub fn hide(&self, seq: u64) {
+            self.state.0.lock().unwrap().hidden.insert(seq);
         }
 
-        /// El diario olvida todo lo anterior a `seq` (la retención).
+        /// El diario olvida todo lo anterior a `seq` (la retención). La
+        /// cabecera no baja.
         pub fn forget_before(&self, seq: u64) {
             let (lock, _) = &*self.state;
             lock.lock().unwrap().journal.retain(|s, _| *s >= seq);
         }
 
-        /// Todo contesta este estado (401, 403…) hasta `accept`.
+        /// El diario vuelve a empezar vacío, como tras un `DROP TABLE
+        /// user_events, user_event_heads` o un Postgres restaurado: la
+        /// cabecera vuelve a 0. Corta los streams (un despliegue).
+        pub fn restart_journal(&self) {
+            let (lock, wake) = &*self.state;
+            let mut state = lock.lock().unwrap();
+            state.journal.clear();
+            state.hidden.clear();
+            state.head = 0;
+            state.generation += 1;
+            wake.notify_all();
+        }
+
+        /// Todo contesta este estado (401, 403…) hasta `accept`. Un stream
+        /// abierto lo ve en su siguiente latido: manda `token:revoked` y
+        /// cuelga.
         pub fn refuse(&self, status: u16) {
             let (lock, wake) = &*self.state;
             let mut state = lock.lock().unwrap();
@@ -1076,10 +1306,6 @@ pub mod fake {
 
         pub fn asked(&self) -> Vec<Asked> {
             self.state.0.lock().unwrap().asked.clone()
-        }
-
-        fn head(state: &State) -> u64 {
-            state.journal.keys().next_back().copied().unwrap_or(0)
         }
 
         fn answer(&self, stream: TcpStream) {
@@ -1117,11 +1343,12 @@ pub mod fake {
             }
             if let Some(query) = path.strip_prefix("/api/v1/events/backlog?") {
                 let param = |name: &str| query.split('&').find_map(|kv| kv.strip_prefix(&format!("{name}="))).and_then(|v| v.parse::<u64>().ok());
-                let after = param("after").unwrap_or(0);
-                let limit = param("limit").unwrap_or(500) as usize;
-                let oldest = state.journal.keys().next().copied().unwrap_or(0);
-                let events: Vec<Value> = state.journal.range(after + 1..).take(limit).map(|(_, v)| v.clone()).collect();
-                let body = json!({ "data": { "events": events, "head": Self::head(&state), "gap": oldest > after + 1 } }).to_string();
+                let (events, head, gap) = state.read(param("after").unwrap_or(0), param("limit").unwrap_or(200) as usize);
+                let mut page = json!({ "events": events, "head": head });
+                if gap {
+                    page["gap"] = json!(true);
+                }
+                let body = json!({ "success": true, "data": page }).to_string();
                 drop(state);
                 let _ = write!(out, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 return;
@@ -1131,47 +1358,90 @@ pub mod fake {
                 let _ = write!(out, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                 return;
             }
-            // El stream: lo del diario desde `Last-Event-ID`, y después lo que
-            // se reparta en vivo, tal cual (si el hub salta, salta).
+            // `streamToken`: sin `Last-Event-ID` se empieza en la cabecera; uno
+            // por delante de ella es un `cac:gap` con `seq = head` y se sigue
+            // desde la cabecera; después, ponerse al día con el diario y en
+            // vivo, sólo lo que pasa del cursor.
             let generation = state.generation;
-            let from: Option<u64> = last_event_id.as_deref().and_then(|id| id.parse().ok());
-            let replay: Vec<Value> = from.map(|from| state.journal.range(from + 1..).map(|(_, v)| v.clone()).collect()).unwrap_or_default();
+            let head = state.head;
+            let resume: Option<u64> = last_event_id.as_deref().and_then(|id| id.parse().ok());
+            let mut cursor = resume.unwrap_or(head);
             let mut next_live = state.live.len();
             drop(state);
             let send = |out: &mut TcpStream, event: &Value| -> bool {
                 let text = format!("id: {}\nevent: {}\ndata: {}\n\n", event["seq"], event["type"].as_str().unwrap_or(""), event);
                 out.write_all(text.as_bytes()).and_then(|_| out.flush()).is_ok()
             };
-            if write!(out, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n: connected\n\n").is_err() {
+            if write!(out, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").is_err() {
                 return;
             }
-            for event in &replay {
-                if !send(&mut out, event) {
+            if resume.is_some() && cursor > head {
+                cursor = head;
+                if !send(&mut out, &gap_envelope(head, head)) {
                     return;
                 }
+            }
+            let catch_up = |out: &mut TcpStream, cursor: &mut u64| -> bool {
+                loop {
+                    let (events, head, _) = lock.lock().unwrap().read(*cursor, 500);
+                    if events.is_empty() {
+                        return true;
+                    }
+                    for event in &events {
+                        let seq = event["seq"].as_u64().unwrap_or(0);
+                        if seq <= *cursor {
+                            continue;
+                        }
+                        if !send(out, event) {
+                            return false;
+                        }
+                        *cursor = seq;
+                    }
+                    if *cursor >= head {
+                        return true;
+                    }
+                }
+            };
+            if out.write_all(b": connected\n\n").is_err() || !catch_up(&mut out, &mut cursor) {
+                return;
             }
             loop {
                 let pending: Vec<Value> = {
                     let state = lock.lock().unwrap();
                     let (state, _) = wake.wait_timeout_while(state, Duration::from_millis(200), |s| s.live.len() == next_live && s.generation == generation).unwrap();
                     if state.generation != generation {
+                        if state.refuse.is_some() {
+                            let _ = out.write_all(b"event: token:revoked\ndata: {}\n\n");
+                        }
                         return;
                     }
-                    let pending = state.live[next_live..].to_vec();
+                    let pending: Vec<Value> = state.live[next_live..].iter().map(|e| state.visible(e)).collect();
                     next_live = state.live.len();
                     pending
                 };
                 if pending.is_empty() {
-                    // Un latido: además descubre que quien escuchaba se fue.
-                    if out.write_all(b": ping\n\n").is_err() {
+                    // El latido: además vuelve a mirar el diario, por si el
+                    // hub tiró algo.
+                    if out.write_all(b"event: ping\ndata: {}\n\n").is_err() || !catch_up(&mut out, &mut cursor) {
                         return;
                     }
                     continue;
                 }
                 for event in &pending {
+                    let seq = event["seq"].as_u64().unwrap_or(0);
+                    if seq <= cursor {
+                        continue;
+                    }
+                    if seq > cursor + 1 {
+                        if !catch_up(&mut out, &mut cursor) {
+                            return;
+                        }
+                        continue;
+                    }
                     if !send(&mut out, event) {
                         return;
                     }
+                    cursor = seq;
                 }
             }
         }
@@ -1494,6 +1764,7 @@ mod tests {
         assert_eq!(lines[0]["type"], GAP);
         assert_eq!(lines[0]["seq"], 5);
         assert_eq!(lines[0]["data"]["reason"], "first-run");
+        assert_eq!((&lines[0]["key"], &lines[0]["orgId"]), (&json!(""), &json!("")));
 
         let dir = scratch("expired");
         let mut listener = Listener::new(journal(&dir)).unwrap();
@@ -1504,5 +1775,227 @@ mod tests {
         let shape: Vec<(u64, &str)> = lines.iter().map(|l| (l["seq"].as_u64().unwrap(), l["type"].as_str().unwrap())).collect();
         assert_eq!(shape, vec![(3, GAP), (4, "notification:new"), (5, "notification:new")]);
         assert_eq!(lines[0]["data"]["from"], 2);
+        assert_eq!(lines[0]["id"], "gap", "el hueco es el del backend, sin otro local delante");
+    }
+
+    fn lines_of(path: &Path) -> Vec<Value> {
+        fs::read_to_string(path).unwrap_or_default().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+    }
+
+    /// Roturas que atrapa: descartar un `cac:gap` del backend por estar por
+    /// detrás del cursor (todo lo que llegue hasta el número viejo se
+    /// saltaría como ya escrito), no bajar el cursor guardado, o que
+    /// `recover` lo vuelva a subir con el mayor de la línea y el estado.
+    #[test]
+    fn a_journal_that_starts_again_lowers_the_cursor() {
+        let dir = scratch("reset");
+        let fake = FakeCac::start("cac_pat_T");
+        for seq in 1..=3 {
+            fake.record_only(ev(seq));
+        }
+        let mut listener = Listener::new(journal(&dir)).unwrap();
+        listener.journal.record(&ev(799)).unwrap();
+        listener.journal.record(&ev(800)).unwrap();
+        listener.cursor = Some(800);
+        let c = creds(&fake);
+        rt().block_on(listener.catch_up(&c)).unwrap();
+        let lines = lines_of(listener.journal.events_path());
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!((lines[0]["seq"].as_u64(), lines[0]["type"].as_str(), lines[0]["data"]["reason"].as_str()), (Some(3), Some(GAP), Some(RESET)));
+        assert_eq!(lines[0]["data"]["previousCursor"], 800);
+        assert_eq!(listener.cursor, Some(3));
+        assert_eq!(listener.journal.saved_cursor(), Some(3));
+
+        // Lo siguiente del diario nuevo se escribe.
+        rt().block_on(listener.deliver(&c, &SseMessage { id: None, event: None, data: ev(4).to_string() })).unwrap();
+        assert_eq!(seqs(listener.journal.events_path()), vec![3, 4]);
+
+        // Murió entre reescribir el fichero y guardar el cursor: manda la
+        // línea, no el mayor.
+        listener.journal.save_cursor(800).unwrap();
+        assert_eq!(listener.journal.recover().unwrap(), Some(4));
+    }
+
+    /// Rotura que atrapa: descartar el `cac:gap` que manda el stream cuando
+    /// `Last-Event-ID` está por delante de la cabecera.
+    #[test]
+    fn a_gap_behind_the_cursor_on_the_stream_starts_again() {
+        let dir = scratch("reset-sse");
+        let fake = FakeCac::start("cac_pat_T");
+        let mut listener = Listener::new(journal(&dir)).unwrap();
+        listener.cursor = Some(800);
+        let c = creds(&fake);
+        let gap = fake::gap_envelope(0, 0);
+        rt().block_on(listener.deliver(&c, &SseMessage { id: Some("0".into()), event: Some(GAP.into()), data: gap.to_string() })).unwrap();
+        assert_eq!(listener.cursor, Some(0));
+        assert_eq!(seqs(listener.journal.events_path()), vec![0]);
+        // Un hueco que ya se escribió (su número es el cursor) y que llega
+        // otra vez no es otro reinicio: no se lleva lo que hay.
+        let expired = fake::gap_envelope(1, 1);
+        rt().block_on(listener.deliver(&c, &SseMessage { id: Some("1".into()), event: Some(GAP.into()), data: expired.to_string() })).unwrap();
+        rt().block_on(listener.deliver(&c, &SseMessage { id: Some("1".into()), event: Some(GAP.into()), data: expired.to_string() })).unwrap();
+        assert_eq!(seqs(listener.journal.events_path()), vec![0, 1]);
+        assert_eq!(listener.cursor, Some(1));
+    }
+
+    /// Rotura que atrapa: que `cac:skipped` no se escriba (el cursor se
+    /// quedaría atrás y el hueco se pediría para siempre).
+    #[test]
+    fn a_skipped_event_keeps_the_numbers_together() {
+        let dir = scratch("skipped");
+        let fake = FakeCac::start("cac_pat_T");
+        for seq in 1..=3 {
+            fake.record_only(ev(seq));
+        }
+        fake.hide(2);
+        let mut listener = Listener::new(journal(&dir)).unwrap();
+        listener.cursor = Some(0);
+        rt().block_on(listener.catch_up(&creds(&fake))).unwrap();
+        let kinds: Vec<String> = lines_of(listener.journal.events_path()).iter().map(|l| l["type"].as_str().unwrap().to_string()).collect();
+        assert_eq!(kinds, vec!["notification:new", "cac:skipped", "notification:new"]);
+        assert_eq!(listener.cursor, Some(3));
+    }
+
+    /// Rotura que atrapa: tomar `token:revoked` por un corte cualquiera
+    /// (reintentaría en un segundo y diría «retrying» en vez de por qué).
+    #[test]
+    fn a_revoked_token_is_a_no_not_a_cut() {
+        let dir = scratch("revoked");
+        let fake = FakeCac::start("cac_pat_T");
+        let mut listener = Listener::new(journal(&dir)).unwrap();
+        listener.cursor = Some(0);
+        let c = creds(&fake);
+        let revoker = fake.clone();
+        let thread = std::thread::spawn(move || {
+            assert!(revoker.wait_until(Duration::from_secs(30), |asked| asked.iter().any(|a| a.path == "/api/v1/events")));
+            revoker.refuse(401);
+        });
+        let (connected, failure) = rt().block_on(listener.session(&c));
+        thread.join().unwrap();
+        assert!(connected);
+        assert_eq!(failure, Failure::Auth { status: 401, code: TOKEN_REVOKED.into() });
+    }
+
+    /// Rotura que atrapa: crear cualquiera de los cuatro ficheros legible por
+    /// otros. El de eventos lleva el texto de mensajes directos.
+    #[cfg(unix)]
+    #[test]
+    fn everything_it_writes_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("modes");
+        let listener = Listener::new(journal(&dir)).unwrap();
+        listener.journal.record(&ev(1)).unwrap();
+        listener.status.write("connected", None, Some(1), None);
+        let state = dir.join("state");
+        ack(&state, "tcg", 1).unwrap();
+        let mut listener = listener;
+        listener.cursor = Some(5);
+        listener.reset(&fake::gap_envelope(2, 2)).unwrap();
+        for path in [listener.journal.events_path().to_path_buf(), state.join("listen.json"), state.join("listen.status.json"), state.join("consumers").join("tcg.json")] {
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{}", path.display());
+        }
+    }
+
+    /// Rotura que atrapa: no devolver el fichero a su largo cuando una
+    /// escritura falla a mitad (el disco lleno): la línea rota se pegaría a
+    /// la siguiente y ese evento quedaría ilegible.
+    #[test]
+    fn a_write_that_fails_halfway_leaves_nothing() {
+        let dir = scratch("halfway");
+        let j = journal(&dir);
+        j.record(&ev(1)).unwrap();
+        let failed = j.append_with(&ev(2), &mut |file, line| {
+            file.write_all(&line[..line.len() / 2])?;
+            Err(io::Error::other("no space left on device"))
+        });
+        assert!(failed.is_err());
+        j.record(&ev(2)).unwrap();
+        assert_eq!(seqs(j.events_path()), vec![1, 2]);
+    }
+
+    fn follow_rounds(j: &Journal, state: &Path, consumer: &str, between: &[&dyn Fn()]) -> Vec<u64> {
+        let round = std::cell::Cell::new(0);
+        let mut out = Vec::new();
+        follow(j.events_path(), state, consumer, &Filter::default(), false, &mut out, Duration::ZERO, &|| {
+            let at = round.get();
+            round.set(at + 1);
+            between.get(at).map(|f| f()).is_some()
+        })
+        .unwrap();
+        String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str::<Value>(l).unwrap()["seq"].as_u64().unwrap()).collect()
+    }
+
+    /// Rotura que atrapa: reabrir sólo si el fichero encoge. Al arrancar, el
+    /// servicio compacta y escribe enseguida lo pendiente; si antes del
+    /// siguiente sondeo el fichero nuevo ya pasa de donde iba la lectura,
+    /// seguir desde ese byte cae a mitad de una línea y la pierde.
+    #[test]
+    fn follow_notices_a_new_file_that_is_already_longer() {
+        let dir = scratch("inode");
+        let j = journal(&dir);
+        let state = dir.join("state");
+        for seq in 1..=4 {
+            j.record(&ev(seq)).unwrap();
+        }
+        let got = follow_rounds(&j, &state, "s", &[&|| {
+            let before = fs::metadata(j.events_path()).unwrap().len();
+            let last = fs::read_to_string(j.events_path()).unwrap().lines().last().unwrap().len() + 1;
+            compact_file(j.events_path(), now(), 365 * 86_400, last as u64).unwrap();
+            let mut seq = 5;
+            while fs::metadata(j.events_path()).unwrap().len() <= before {
+                j.record(&ev(seq)).unwrap();
+                seq += 1;
+            }
+        }]);
+        let last = *seqs(j.events_path()).last().unwrap();
+        assert_eq!(got, (1..=last).collect::<Vec<u64>>());
+    }
+
+    /// Rotura que atrapa: pegar la media línea leída antes de que el que
+    /// escribía muriera con el resto de la línea que se escribió encima en
+    /// el mismo inodo (`recover` la corta).
+    #[test]
+    fn follow_drops_a_half_line_that_was_cut_away() {
+        let dir = scratch("partial");
+        let j = journal(&dir);
+        let state = dir.join("state");
+        j.record(&ev(1)).unwrap();
+        let mut file = OpenOptions::new().append(true).open(j.events_path()).unwrap();
+        file.write_all(br#"{"at":"2026-11-27T00:00:00Z","data":{"n":2},"external":false,"id":"lo-que-se"#).unwrap();
+        drop(file);
+        let got = follow_rounds(&j, &state, "s", &[&|| {
+            j.recover().unwrap();
+            j.record(&envelope(2, GAP, &iso_of_unix(now()), json!({ "from": 2, "to": 2 }))).unwrap();
+            j.record(&ev(3)).unwrap();
+        }]);
+        assert_eq!(got, vec![1, 2, 3]);
+    }
+
+    /// Roturas que atrapa: que `follow` no entregue la línea de reinicio a
+    /// quien ya confirmó más allá de su número, que no le baje lo
+    /// confirmado (lo siguiente se daría por visto), o que la entregue otra
+    /// vez a quien ya la confirmó.
+    #[test]
+    fn follow_delivers_a_reset_once_and_lowers_the_ack() {
+        let dir = scratch("follow-reset");
+        let state = dir.join("state");
+        let fake = FakeCac::start("cac_pat_T");
+        fake.record_only(ev(1));
+        let mut listener = Listener::new(journal(&dir)).unwrap();
+        for seq in 799..=800 {
+            listener.journal.record(&ev(seq)).unwrap();
+        }
+        listener.cursor = Some(800);
+        ack(&state, "tcg", 800).unwrap();
+        rt().block_on(listener.catch_up(&creds(&fake))).unwrap();
+        listener.journal.record(&ev(2)).unwrap();
+        assert_eq!(follow_once(&listener.journal, &state, "tcg", &Filter::default()), vec![1, 2]);
+        assert_eq!(progress(&state, "tcg").acked, None);
+        assert_eq!(follow_once(&listener.journal, &state, "tcg", &Filter { types: vec!["nada".into()], ..Filter::default() }), vec![1]);
+        ack(&state, "tcg", 1).unwrap();
+        assert_eq!(follow_once(&listener.journal, &state, "tcg", &Filter::default()), vec![2]);
+        ack(&state, "tcg", 2).unwrap();
+        assert_eq!(follow_once(&listener.journal, &state, "tcg", &Filter::default()), Vec::<u64>::new());
     }
 }

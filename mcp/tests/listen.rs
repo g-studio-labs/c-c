@@ -192,3 +192,46 @@ fn follow_gives_each_event_once_per_consumer() {
     assert_eq!(run(binary(&dir).args(["listen", "follow"])).status.code(), Some(2));
     assert_eq!(run(binary(&dir).args(["listen", "nada"])).status.code(), Some(2));
 }
+
+/// Roturas que atrapa: que el cursor no baje cuando el diario de cac vuelve a
+/// empezar (cursor 800, cabecera 3: todo lo nuevo se saltaría como ya
+/// escrito), que `recover` lo vuelva a subir, que `follow` no entregue la
+/// línea de reinicio a quien confirmó hasta 800 o no le baje lo confirmado, o
+/// que un `ack` tardío del diario viejo lo vuelva a dejar sordo.
+#[test]
+fn a_journal_that_starts_again_is_followed_from_its_new_head() {
+    let dir = scratch("reset");
+    let fake = FakeCac::start(TOKEN);
+    for seq in 1..=3 {
+        fake.record_only(ev(seq));
+    }
+    std::fs::create_dir_all(events_path(&dir).parent().unwrap()).unwrap();
+    std::fs::write(events_path(&dir), format!("{}\n{}\n", ev(799), ev(800))).unwrap();
+    std::fs::create_dir_all(dir.join("state")).unwrap();
+    std::fs::write(dir.join("state").join("listen.json"), json!({ "cursor": 800 }).to_string()).unwrap();
+    assert!(run(binary(&dir).args(["listen", "ack", "--consumer", "tcg", "800"])).status.success());
+
+    let mut child = binary(&dir).env("CAC_TOKEN", TOKEN).env("CAC_URL", &fake.base).args(["listen", "run"]).spawn().unwrap();
+    eventually("abre el stream desde la cabecera nueva", &mut child, || streams_opened(&fake) == vec![Some("3".to_string())]);
+    fake.push(ev(4));
+    eventually("escribe el 4", &mut child, || seqs(&dir) == vec![3, 4]);
+    let said = stop(child);
+    assert!(!said.contains(TOKEN), "{said}");
+    assert_eq!(lines(&dir)[0]["data"]["reason"], "reset");
+
+    // Arranca otra vez: la línea manda sobre el estado, aunque éste diga más.
+    std::fs::write(dir.join("state").join("listen.json"), json!({ "cursor": 800 }).to_string()).unwrap();
+    let mut again = binary(&dir).env("CAC_TOKEN", TOKEN).env("CAC_URL", &fake.base).args(["listen", "run"]).spawn().unwrap();
+    eventually("vuelve desde el 4", &mut again, || streams_opened(&fake).len() == 2);
+    fake.push(ev(5));
+    eventually("escribe el 5", &mut again, || seqs(&dir) == vec![3, 4, 5]);
+    stop(again);
+    assert_eq!(streams_opened(&fake)[1], Some("4".to_string()));
+
+    let follow = |consumer: &str| run(binary(&dir).args(["listen", "follow", "--consumer", consumer, "--once"]));
+    assert_eq!(printed(&follow("tcg")), vec![3, 4, 5]);
+    assert!(run(binary(&dir).args(["listen", "ack", "--consumer", "tcg", "4"])).status.success());
+    assert!(run(binary(&dir).args(["listen", "ack", "--consumer", "tcg", "800"])).status.success());
+    assert_eq!(printed(&follow("tcg")), vec![5]);
+    assert_eq!(printed(&follow("otro")), vec![3, 4, 5]);
+}
