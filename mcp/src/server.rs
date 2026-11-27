@@ -11164,6 +11164,14 @@ mod tests {
             "| `cac:gap` |",
             "| `cac:skipped` |",
             "barrido a mano",
+            "`ack` es acumulativo",
+            "**en orden**",
+            "nunca un número por delante de una",
+            "`reason: \"reset\"`",
+            "no se confirma ningún `seq` de las líneas impresas antes de ella",
+            "aunque `external` sea `false`",
+            "`data.sourceKey` empieza por `bc:`",
+            "`data.kind`\nempieza por `basecamp:`",
         ] {
             assert!(LISTEN_SKILL.contains(needle), "la skill de escuchar ya no dice {needle}");
         }
