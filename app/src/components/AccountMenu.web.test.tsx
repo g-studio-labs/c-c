@@ -37,3 +37,34 @@ describe("el menú de cuenta en la web", () => {
     expect(screen.getByText(/^(log out|cerrar sesión)$/i)).toBeTruthy();
   });
 });
+
+describe("la elección de «Abrir en la app» en el menú de cuenta", () => {
+  const open = () => {
+    render(
+      <MemoryRouter>
+        <AccountMenu onChangePassword={() => {}} onNotificationPrefs={() => {}} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+  };
+  beforeEach(() => {
+    localStorage.clear();
+    Object.defineProperty(navigator, "userAgent", { value: "Mozilla/5.0 (X11; Linux x86_64) Chrome/120", configurable: true });
+  });
+
+  it("cambia y deshace lo recordado", () => {
+    localStorage.setItem("cac.openInApp", "app");
+    open();
+    expect(screen.getByRole("button", { name: "App" }).getAttribute("data-active")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Web" }));
+    expect(localStorage.getItem("cac.openInApp")).toBe("web");
+    fireEvent.click(screen.getByRole("button", { name: /^(Ask|Preguntar)$/ }));
+    expect(localStorage.getItem("cac.openInApp")).toBeNull();
+  });
+
+  it("no se ofrece en móvil", () => {
+    Object.defineProperty(navigator, "userAgent", { value: "Mozilla/5.0 (Linux; Android 14) Mobile", configurable: true });
+    open();
+    expect(screen.queryByRole("button", { name: /^(Ask|Preguntar)$/ })).toBeNull();
+  });
+});

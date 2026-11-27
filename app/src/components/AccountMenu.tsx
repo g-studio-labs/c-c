@@ -2,6 +2,7 @@ import { usePresence } from "@/lib/use-presence";
 import TabIndicator from "@/components/ui/tab-indicator";
 import { useSlidingIndicator } from "@/lib/use-sliding-indicator";
 import { isWebBuild } from "@/lib/platform";
+import { isDesktopBrowser, readChoice, writeChoice, type OpenInAppChoice } from "@/lib/open-in-app";
 import { nombreDe, inicialesDe } from "@/lib/nombres";
 import type { ReactNode } from "react";
 import { useT, type MessageKey } from "@/lib/i18n";
@@ -10,7 +11,7 @@ import { useNavigate } from "react-router-dom";
 import {
   UserRound,
   ChevronsUpDown, KeyRound, Bot, Bell, LogOut, Moon, CheckCircle2, Download, Loader2,
-  Languages,
+  Languages, ExternalLink,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useAuthStore } from "@/store/auth.store";
@@ -87,6 +88,9 @@ export default function AccountMenu({
   const preference = useThemeStore((s) => s.preference);
   const setPreference = useThemeStore((s) => s.setPreference);
   const language = useLocaleStore((s) => s.preference);
+  // Se relee al abrir el menú: la barra «Abrir en la app» también la escribe.
+  const [openInApp, setOpenInApp] = useState<OpenInAppChoice | null>(readChoice);
+  const offersApp = isWebBuild && typeof navigator !== "undefined" && isDesktopBrowser(navigator.userAgent, navigator.maxTouchPoints ?? 0);
 
   const version = useAppVersion();
   const available = useUpdaterStore((s) => s.available);
@@ -101,6 +105,10 @@ export default function AccountMenu({
 
   // Click-away and Escape, because a menu that only closes by re-clicking the
   // row it came from is a menu people leave open.
+  useEffect(() => {
+    if (open) setOpenInApp(readChoice());
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
     const outside = (e: MouseEvent) => {
@@ -203,6 +211,21 @@ export default function AccountMenu({
               onClick: () => void chooseLocale(l.key),
             })),
           )}
+
+          {offersApp &&
+            optionsRow(
+              <ExternalLink className="size-3.5 shrink-0" />,
+              t("common:openInApp.setting"),
+              ([null, "app", "web"] as const).map((choice) => ({
+                key: choice ?? "ask",
+                label: t(`common:openInApp.choice.${choice ?? "ask"}` as MessageKey),
+                active: openInApp === choice,
+                onClick: () => {
+                  writeChoice(choice);
+                  setOpenInApp(choice);
+                },
+              })),
+            )}
 
           {/* Encima de «cambiar la contraseña» porque es lo que se busca más:
               la contraseña se toca una vez, el nombre se pone al entrar. */}

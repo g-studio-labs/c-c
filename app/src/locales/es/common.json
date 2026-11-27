@@ -1564,6 +1564,8 @@
     "title": "¿Abrir esto en la app de escritorio?",
     "open": "Abrir en la app",
     "stay": "No, seguir en la web",
-    "remember": "Recordar mi elección"
+    "remember": "Recordar mi elección",
+    "setting": "Abrir en la app, siempre",
+    "choice": { "ask": "Preguntar", "app": "App", "web": "Web" }
   }
 }

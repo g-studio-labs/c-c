@@ -101,17 +101,21 @@ export function currentMode(): OpenInAppMode {
 }
 
 /**
- * Lanza el `cac://` con un enlace invisible y no con `location.href`: sin
- * manejador registrado el navegador no hace nada y la página sigue donde está,
- * en vez de irse a una pantalla en blanco.
+ * Lanza el `cac://` en un `<iframe>` oculto y no con `location.href` ni con un
+ * enlace: sin manejador registrado Firefox lleva la pestaña a su página de
+ * «protocolo desconocido» (con un `<a>` también), y la persona pierde la web.
+ * Navegar un marco que no se ve falla en silencio y la página se queda donde
+ * está; con la app instalada el sistema la abre igual. Chrome y Safari ya no
+ * navegaban, así que no pierden nada.
  */
 export function launchApp(url: string): void {
   markTried();
-  const a = document.createElement("a");
-  a.href = url;
-  a.rel = "noopener";
-  a.style.display = "none";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  const frame = document.createElement("iframe");
+  frame.style.display = "none";
+  frame.setAttribute("aria-hidden", "true");
+  frame.tabIndex = -1;
+  frame.src = url;
+  document.body.appendChild(frame);
+  // Se quita después: el intento ya salió y un marco que se queda es basura.
+  setTimeout(() => frame.remove(), 1000);
 }

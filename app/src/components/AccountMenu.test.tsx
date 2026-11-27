@@ -49,6 +49,13 @@ describe("el menú de cuenta", () => {
     expect(screen.getByText("romanshk")).toBeTruthy();
   });
 
+  it("en la app de escritorio no ofrece «Abrir en la app»: es de la web", () => {
+    Object.defineProperty(navigator, "userAgent", { value: "Mozilla/5.0 (X11; Linux x86_64) Chrome/120", configurable: true });
+    montar();
+    abrir();
+    expect(screen.queryByRole("button", { name: /^(Ask|Preguntar)$/ })).toBeNull();
+  });
+
   it("abierto enseña quién eres, con el email que distingue dos cuentas", () => {
     montar();
     abrir();
