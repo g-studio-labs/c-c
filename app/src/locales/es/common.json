@@ -1559,5 +1559,11 @@
       "encode": "Codificar",
       "encodePlaceholder": "Texto para codificar o decodificar…"
     }
+  },
+  "openInApp": {
+    "title": "¿Abrir esto en la app de escritorio?",
+    "open": "Abrir en la app",
+    "stay": "No, seguir en la web",
+    "remember": "Recordar mi elección"
   }
 }

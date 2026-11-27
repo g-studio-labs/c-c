@@ -17,6 +17,7 @@ import IncomingCall from "@/components/voice/IncomingCall";
 import FollowMove from "@/components/voice/FollowMove";
 import MeetingCall from "@/components/meetings/MeetingCall";
 import ConnectionBanner from "@/components/ConnectionBanner";
+import OpenInAppBar from "@/components/OpenInAppBar";
 import MobileTabBar from "@/components/mobile/MobileTabBar";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { isWebBuild } from "@/lib/platform";
@@ -206,6 +207,7 @@ export default function AppLayout() {
         {/* Cada sección entra al llegar a ella (`motion-page`): la clave es el
             primer tramo de la ruta, así que cambiar de pestaña dentro de un
             servidor no vuelve a animar la pantalla entera. */}
+        {isWebBuild && <OpenInAppBar />}
         <div key={section} className="motion-page flex min-h-0 min-w-0 flex-1 flex-col">
           <Suspense fallback={null}>
             <Outlet />

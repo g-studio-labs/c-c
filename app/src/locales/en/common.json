@@ -1559,5 +1559,11 @@
       "encode": "Encode",
       "encodePlaceholder": "Text to encode or decode…"
     }
+  },
+  "openInApp": {
+    "title": "Open this in the desktop app?",
+    "open": "Open in the app",
+    "stay": "No, stay on the web",
+    "remember": "Remember my choice"
   }
 }
