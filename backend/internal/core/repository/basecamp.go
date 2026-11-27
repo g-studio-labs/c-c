@@ -423,26 +423,13 @@ func (r *BasecampRepository) FirstListOf(spaceID string) string {
 // CreateLinkedTask crea la tarea y su enlace al recording en una sola
 // transacción, o devuelve la que ya estaba enlazada (created=false).
 //
-// El candado consultivo por org y recording es lo que hace que dos entregas
-// a la vez (el alta y la asignación del mismo to-do llegan casi juntas) no
-// creen dos tareas; y si a la vez alguien lo enlazó a mano, el índice único
-// de basecamp_links tumba ésta entera y se contesta con la de esa persona.
+// Quien llama ya miró el enlace; lo que queda es la carrera: dos entregas a
+// la vez del mismo to-do (el alta y la asignación llegan casi juntas), o
+// alguien que lo enlaza a mano entre medias. El índice único de
+// basecamp_links tumba la segunda transacción entera, tarea incluida, y se
+// contesta con la tarea que ganó.
 func (r *BasecampRepository) CreateLinkedTask(t *domain.Item, l *domain.BasecampLink) (*domain.Item, bool, error) {
-	var existing string
 	err := r.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Exec(`SELECT pg_advisory_xact_lock(hashtext(?))`,
-			"basecamp-task:"+l.OrgID+":"+strconv.FormatInt(l.RecordingID, 10)).Error; err != nil {
-			return err
-		}
-		var old domain.BasecampLink
-		err := tx.First(&old, "org_id = ? AND recording_id = ?", l.OrgID, l.RecordingID).Error
-		if err == nil {
-			existing = old.ItemID
-			return nil
-		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
 		if t.ID == "" {
 			t.ID = uuid.NewString()
 		}
@@ -456,16 +443,11 @@ func (r *BasecampRepository) CreateLinkedTask(t *domain.Item, l *domain.Basecamp
 		return tx.Create(l).Error
 	})
 	if err != nil {
-		// Otro lo enlazó entre medias: vale la suya.
 		if old, e := r.LinkFor(l.OrgID, l.RecordingID); e == nil {
 			it, e := r.Item(old.ItemID)
 			return it, false, e
 		}
 		return nil, false, err
-	}
-	if existing != "" {
-		it, err := r.Item(existing)
-		return it, false, err
 	}
 	// Lo que hace CreateTask después de crear: la búsqueda y las claves de
 	// fuera. Fuera de la transacción, como allí.

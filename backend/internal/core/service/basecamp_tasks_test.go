@@ -111,7 +111,8 @@ func noticesOfKind(notices []domain.Aviso, kind string) []domain.Aviso {
 //
 // Roturas que atrapa: no crear la tarea; crearla sin enlace (el comentario
 // cae suelto); crearla visible para el cliente; no copiar las notas o la URL;
-// no poner al asignado o no avisarle; avisar a quien creó el to-do.
+// no poner al asignado o no avisarle; avisar a quien creó el to-do, o a quien
+// se asignó a sí misma.
 func TestANewAssignedTodoBecomesALinkedTask(t *testing.T) {
 	f := newBasecampFixture(t)
 	f.setTodo(bcNewTodo, "Revisar el checkout", "<div>Falla con <strong>tarjetas</strong> de débito</div>", bcBob)
@@ -140,6 +141,15 @@ func TestANewAssignedTodoBecomesALinkedTask(t *testing.T) {
 	}
 	if ana := f.inbox.of("u-ana"); len(ana) != 0 {
 		t.Fatalf("Ana created the to-do herself and was told %v", kinds(ana))
+	}
+	// Quien se asigna a sí misma no recibe aviso de ello.
+	f.setTodo(6005, "Lo hago yo", "", bcAna)
+	f.deliver(t, todoEvent(205, domain.BasecampTodoCreated, 6005, bcAna))
+	if got := f.assignees(t, f.taskOf(t, 6005).ID); strings.Join(got, ",") != "u-ana" {
+		t.Fatalf("assignees %v", got)
+	}
+	if ana := f.inbox.of("u-ana"); len(ana) != 0 {
+		t.Fatalf("Ana assigned herself and was told %v", kinds(ana))
 	}
 
 	// Un comentario después cae en la tarea y avisa a su responsable.
@@ -214,6 +224,51 @@ func TestTheSameTodoNeverMakesTwoTasks(t *testing.T) {
 	}
 	if got := f.assignees(t, "t-1"); strings.Join(got, ",") != "u-ana,u-bob,u-carla" {
 		t.Fatalf("t-1 assignees %v", got)
+	}
+}
+
+// Las dos guardas de «una sola tarea», cada una por su lado: la del servicio
+// encuentra el enlace hecho a mano aunque el espacio del proyecto no tenga
+// ninguna lista donde crear; y la del repositorio, si otro enlazó el to-do
+// entre que se miró y se creó, devuelve la tarea de ese otro y no deja una
+// segunda.
+//
+// Roturas que atrapa: no mirar el enlace antes de buscar lista (el to-do
+// enlazado a mano se pierde); no volver al enlace ganador tras chocar con el
+// índice único (el evento falla y la tarea nueva se pierde o se duplica).
+func TestBothGuardsOfOneTaskPerTodo(t *testing.T) {
+	f := newBasecampFixture(t)
+	// El enlace a mano ya ganó: el repositorio no crea otra.
+	const raced = int64(6040)
+	item, _ := f.svc.Task("t-1")
+	if _, err := f.svc.LinkTask(item, todoURL(raced)); err != nil {
+		t.Fatal(err)
+	}
+	before := f.countItems(t)
+	got, created, err := repository.NewBasecampRepository(f.db).CreateLinkedTask(
+		&domain.Item{OrgID: "org-1", SpaceID: "sp-1", ListID: "l-1", Title: "Tarde", Status: domain.ReportPending,
+			Visibility: domain.VisibilityInternal},
+		&domain.BasecampLink{OrgID: "org-1", RecordingID: raced, ProjectID: bcProject})
+	if err != nil || created || got == nil || got.ID != "t-1" {
+		t.Fatalf("a lost race gave %+v created=%v err=%v", got, created, err)
+	}
+	if f.countItems(t) != before {
+		t.Fatal("a lost race left a second task")
+	}
+
+	// El proyecto pasa a un espacio sin listas: el to-do enlazado a mano a
+	// t-1 sigue llegando a t-1.
+	sp := &domain.TaskSpace{OrgID: "org-1", Name: "Vacío", Key: "va", Rank: "0.6"}
+	sp.ID = "sp-empty"
+	mustCreate(t, f.db, sp)
+	if _, err := f.svc.LinkProject("org-1", "u-ana", bcProject, "sp-empty"); err != nil {
+		t.Fatal(err)
+	}
+	f.secret = strings.TrimPrefix(f.fake.hookPayloadURL, "https://cac.example/webhooks/basecamp/")
+	f.setTodo(raced, "A mano", "", bcCarla)
+	f.deliver(t, todoEvent(300, domain.BasecampTodoAssignment, raced, bcClient))
+	if got := f.assignees(t, "t-1"); strings.Join(got, ",") != "u-ana,u-bob,u-carla" {
+		t.Fatalf("the to-do linked by hand did not reach t-1: %v", got)
 	}
 }
 
@@ -375,7 +430,7 @@ func TestATaskLinksItselfByTheURLInItsDescription(t *testing.T) {
 //
 // Roturas que atrapa: enlazar por la descripción sin mirar la conexión de la
 // org de la tarea; crear la tarea con un to-do que Basecamp dice de otro
-// proyecto.
+// proyecto; poner responsables en una tarea enlazada a otro proyecto.
 func TestABasecampTodoNeverCrossesOrganizations(t *testing.T) {
 	f := newBasecampFixture(t)
 	f.addSecondOrg(t)
@@ -397,6 +452,18 @@ func TestABasecampTodoNeverCrossesOrganizations(t *testing.T) {
 	f.deliver(t, todoEvent(270, domain.BasecampTodoCreated, 6031, bcClient))
 	if f.countItems(t) != before {
 		t.Fatal("a to-do Basecamp says is of another project made a task here")
+	}
+
+	// t-1 enlazada a mano a un recording de otro proyecto: el secreto de éste
+	// no le pone responsables.
+	item, _ := f.svc.Task("t-1")
+	if _, err := f.svc.LinkTask(item, fmt.Sprintf("https://3.basecamp.com/%d/buckets/43/todos/6032", bcAccount)); err != nil {
+		t.Fatal(err)
+	}
+	f.setTodo(6032, "Cruzado", "", bcCarla)
+	f.deliver(t, todoEvent(271, domain.BasecampTodoAssignment, 6032, bcClient))
+	if got := f.assignees(t, "t-1"); strings.Join(got, ",") != "u-ana,u-bob" {
+		t.Fatalf("this project's secret assigned a task linked to another project: %v", got)
 	}
 }
 
