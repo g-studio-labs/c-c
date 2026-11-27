@@ -651,7 +651,9 @@
     "chatWrite": "Write in channels and direct messages",
     "chatWriteDetail": "Lets an agent write in a channel or message a person for you, in your name and marked <1>via agent</1>. Adding only: it cannot edit or withdraw messages.",
     "chatManage": "Edit and withdraw your messages",
-    "chatManageDetail": "Lets an agent correct your own messages in channels and direct messages (the other person is told you edited it, marked <1>via agent</1>), and withdraw the ones an agent wrote. It never withdraws what you typed yourself, and never touches anyone else's messages."
+    "chatManageDetail": "Lets an agent correct your own messages in channels and direct messages (the other person is told you edited it, marked <1>via agent</1>), and withdraw the ones an agent wrote. It never withdraws what you typed yourself, and never touches anyone else's messages.",
+    "eventsRead": "Listen to your notifications and events",
+    "eventsReadDetail": "Lets an agent listen live to what cac would tell your bell and to the Basecamp activity of your organizations, and catch up on anything it missed. It only reads what is yours: it writes nothing and opens no other permission."
   },
   "last": {
     "webviewRecovered": "The page closed unexpectedly and was reloaded. It has been reported.",

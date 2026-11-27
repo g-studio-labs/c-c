@@ -43,6 +43,7 @@ pub const TOKEN_SCOPES: &[TokenScope] = &[
     scope("posts:write", "common:scopes.postsWrite", "common:scopes.postsWriteDetail"),
     scope("chat:write", "common:scopes.chatWrite", "common:scopes.chatWriteDetail"),
     scope("chat:manage", "common:scopes.chatManage", "common:scopes.chatManageDetail"),
+    scope("events:read", "common:scopes.eventsRead", "common:scopes.eventsReadDetail"),
 ];
 
 /// Si están marcados todos los permisos que se pueden dar.
