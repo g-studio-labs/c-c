@@ -240,9 +240,10 @@ impl Updater {
     /// Lo mismo que `is_published`, con el motivo de que no.
     fn publication(&self, offer: &Offer) -> Result<(), String> {
         let version = &offer.version;
-        let url = self.source.asset_url_tagged(&tag(version), update::CHECKSUMS);
-        let sums = update::fetch_text(&url, Duration::from_secs(8)).map_err(|_| format!("v{version} is announced, but its release isn't published yet"))?;
-        update::checksum_for(&sums, &offer.asset).map(|_| ()).ok_or_else(|| format!("v{version} is announced, but its release has no file for {}-{}", self.os, self.arch))
+        update::release_has(&self.source, &tag(version), &offer.asset).map_err(|why| match why {
+            update::Unpublished::NoRelease => format!("v{version} is announced, but its release isn't published yet"),
+            update::Unpublished::NoFile => format!("v{version} is announced, but its release has no file for {}-{}", self.os, self.arch),
+        })
     }
 
     /// Borra lo que dejaron las descargas de otras ejecuciones (el instalador

@@ -156,7 +156,9 @@
     "tokenSaveFailed": "Could not save the permissions.",
     "tokenRevoke": "Revoke",
     "tokenRevokeAsk": "Revoke “{{name}}”? It stops working right away, and whatever uses it loses access.",
-    "tokenRevokeFailed": "Could not revoke the token."
+    "tokenRevokeFailed": "Could not revoke the token.",
+    "unpublished": "v{{version}} is announced, but its release isn't published yet.",
+    "unpublishedFile": "v{{version}} is announced, but its release has no file for this machine."
   },
   "updater": {
     "available": "A new version of cac is out: v{{version}}",

@@ -3654,6 +3654,87 @@ mod tests {
         let _ = std::fs::remove_dir_all(scratch);
     }
 
+    /// Una versión de `cac-mcp` anunciada (`mcp/VERSION`) cuya release aún no
+    /// está publicada, o que no trae el fichero de esta máquina, no se ofrece:
+    /// ni el botón «Actualizar», ni el punto del menú; la ventana dice que está
+    /// anunciada y por qué no se ofrece. Publicada, sí (command-and-control-565).
+    ///
+    /// Roturas que atrapa: el botón que acaba en el 404 de `SHA256SUMS`; el
+    /// punto del menú encendido por una versión que no se puede bajar; callar
+    /// por qué no hay botón; no volver a ofrecerla cuando se publica.
+    #[gpui_kit::test]
+    #[cfg(target_os = "linux")]
+    fn an_announced_cac_mcp_is_not_offered_until_its_release_is_published(cx: &mut TestAppContext) {
+        use crate::connect::McpSetup;
+        use cac_mcp::update::{fake::FakeReleases, Machine};
+        use std::os::unix::fs::PermissionsExt;
+
+        let releases = FakeReleases::start();
+        releases.announce("1.34.0");
+        let scratch = std::env::temp_dir().join(format!("cac-desktop-unpublished-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let binary = scratch.join("bin").join("cac-mcp");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, "#!/bin/sh\necho 'cac-mcp 1.33.0'\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let machine = Machine { source: releases.source(), state_dir: Some(scratch.join("state")), look_in: vec![binary.clone()], install_to: Some(binary.clone()) };
+
+        let server = server();
+        server.install(cx);
+        cx.update(|cx| cx.set_global(McpSetup { machine, server_url: "https://cac.example".into(), claude: std::sync::Arc::new(cac_mcp::claude_code::fake::FakeClaude::new(None)) }));
+        let (window, _workspace) = open_with_view(1100., cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        let open_connect = |cx: &mut TestAppContext| {
+            click(window, "account-menu", cx);
+            wait_until(cx, "el menú se abre", |cx| on_screen(window, "account-connect", cx));
+            click(window, "account-connect", cx);
+            wait_until(cx, "la ventana se abre", |cx| on_screen(window, "connect-dialog", cx));
+        };
+        let close = |cx: &mut TestAppContext| {
+            press(window, "escape", cx);
+            wait_until(cx, "Escape la cierra", |cx| !on_screen(window, "connect-dialog", cx));
+        };
+
+        // Anunciada, sin release.
+        open_connect(cx);
+        wait_until(cx, "dice que está anunciada", |cx| on_screen(window, "connect-unpublished", cx));
+        assert!(!on_screen(window, "connect-newer", cx) && !on_screen(window, "connect-run", cx), "ofrece una versión sin release");
+        close(cx);
+        click(window, "account-menu", cx);
+        wait_until(cx, "el menú se abre", |cx| on_screen(window, "account-connect", cx));
+        assert!(!on_screen(window, "account-connect-update", cx), "el punto avisa de una versión que no se puede bajar");
+        click(window, "account-connect", cx);
+        wait_until(cx, "la ventana se abre", |cx| on_screen(window, "connect-dialog", cx));
+        close(cx);
+
+        // Con release, pero sin el fichero de esta máquina.
+        let asset = cac_mcp::update::this_platform_asset().unwrap();
+        let sums: String = cac_mcp::update::ASSETS
+            .iter()
+            .filter(|name| **name != asset)
+            .map(|name| format!("{}  {name}\n", cac_mcp::update::sha256_hex(b"x")))
+            .collect();
+        releases.put("/download/mcp-v1.34.0/SHA256SUMS", sums);
+        open_connect(cx);
+        wait_until(cx, "dice que no trae fichero", |cx| on_screen(window, "connect-unpublished-file", cx));
+        assert!(!on_screen(window, "connect-unpublished", cx), "dice que falta la release cuando la release está");
+        assert!(!on_screen(window, "connect-run", cx), "ofrece una versión sin fichero para esta máquina");
+        close(cx);
+
+        // Publicada: se ofrece.
+        releases.publish("1.34.0", b"#!/bin/sh\necho 'cac-mcp 1.34.0'\n");
+        open_connect(cx);
+        wait_until(cx, "se ofrece", |cx| on_screen(window, "connect-run", cx));
+        assert!(on_screen(window, "connect-newer", cx) && !on_screen(window, "connect-unpublished", cx));
+        close(cx);
+        click(window, "account-menu", cx);
+        wait_until(cx, "el menú se abre", |cx| on_screen(window, "account-connect", cx));
+        assert!(on_screen(window, "account-connect-update", cx), "publicada, y el punto no avisa");
+
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
     /// «Conectar Claude Code» crea el token personal y registra `cac-mcp` en
     /// Claude Code sin enseñar el token; «Seleccionar todos» marca y desmarca
     /// los permisos; con otro registro `cac` puesto, pregunta antes de

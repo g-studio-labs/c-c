@@ -26,7 +26,7 @@ fn main() {
             0
         }
         ["--version" | "-V"] => {
-            print!("{}", version_text(update::state_dir().and_then(|dir| update::read_checked(&dir)).and_then(|checked| checked.latest).as_deref()));
+            print!("{}", version_text(update::state_dir().and_then(|dir| update::read_checked(&dir)).and_then(|checked| checked.published).as_deref()));
             0
         }
         ["update"] => run_update(false),
@@ -69,6 +69,15 @@ fn run_update(only_check: bool) -> i32 {
     };
     if !update::is_newer(&latest, INSTALLED) {
         println!("cac-mcp {INSTALLED} is the latest version.");
+        return 0;
+    }
+    // `VERSION` va por delante de la release: una versión anunciada que aún no
+    // se puede bajar no es «disponible», y no es un fallo de quien lo pide.
+    if let Err(why) = update::confirm_offerable(&source, update::state_dir().as_deref(), &latest) {
+        match why {
+            update::Unpublished::NoRelease => println!("cac-mcp {latest} is announced, but its release isn't published yet. Nothing to update; try again later."),
+            update::Unpublished::NoFile => println!("cac-mcp {latest} is announced, but its release has no file for this machine. Nothing to update."),
+        }
         return 0;
     }
     if only_check {

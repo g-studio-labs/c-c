@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use cac_core::{all_scopes_selected, date_with_year, toggle_all_scopes, toggle_scope, PersonalToken, TokenValue, TOKEN_SCOPES};
 use cac_mcp::claude_code::{CardState, Cli, RegisterError, Registration};
-use cac_mcp::update::{Installed, Machine, Progress, Status, Step, TOKEN_PLACEHOLDER};
+use cac_mcp::update::{Installed, Machine, Progress, Status, Step, Unpublished, TOKEN_PLACEHOLDER};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
@@ -597,7 +597,7 @@ impl ConnectView {
                             // Lo instalado es lo que dijo el binario nuevo; la
                             // última conocida sigue siendo la que era.
                             let latest = this.status.take().and_then(|status| status.latest);
-                            this.status = Some(Status { installed: Some(installed.clone()), latest });
+                            this.status = Some(Status { installed: Some(installed.clone()), latest, unpublished: None });
                             this.work = Work::Done(installed);
                         }
                         Report::End(Err(reason)) => this.work = Work::Failed(reason),
@@ -644,6 +644,15 @@ impl ConnectView {
                 .into_any_element(),
         };
         let published = match (status.step(), &status.latest) {
+            // Anunciada y sin poder bajarse: se dice, sin botón que falle.
+            (_, Some(latest)) if status.unpublished.is_some() => {
+                let (id, key) = if status.unpublished == Some(Unpublished::NoFile) {
+                    ("connect-unpublished-file", "nav:mcp.unpublishedFile")
+                } else {
+                    ("connect-unpublished", "nav:mcp.unpublished")
+                };
+                Some(div().id(id).test_support().text_color(muted).child(cac_core::text_with(here, key, &[("version", latest)])).into_any_element())
+            }
             (Step::Update, Some(latest)) => Some(
                 div()
                     .id("connect-newer")

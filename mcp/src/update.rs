@@ -117,6 +117,33 @@ pub fn asset_name(os: &str, arch: &str) -> Option<&'static str> {
     }
 }
 
+/// Por qué una versión anunciada no se puede ofrecer todavía.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unpublished {
+    /// La release no existe, o no tiene su `SHA256SUMS`: `VERSION` se sube a
+    /// `main` antes de que el workflow publique, y durante la compilación (o
+    /// para siempre, si un sistema falla) ofrecerla acabaría en un 404. Sin
+    /// respuesta tampoco se ofrece: sin red no se puede bajar nada.
+    NoRelease,
+    /// La release está, y no trae fichero para esta máquina.
+    NoFile,
+}
+
+/// Si la release `tag` ya tiene su `SHA256SUMS` y en él el fichero `asset`.
+/// Es la comprobación que comparten `cac-mcp` y la app nativa (`desktop_update`)
+/// antes de ofrecer una versión. Bloquea: sale a la red.
+pub fn release_has(source: &Source, tag: &str, asset: &str) -> Result<(), Unpublished> {
+    let sums = fetch_text(&source.asset_url_tagged(tag, CHECKSUMS), Duration::from_secs(8)).map_err(|_| Unpublished::NoRelease)?;
+    checksum_for(&sums, asset).map(|_| ()).ok_or(Unpublished::NoFile)
+}
+
+/// Lo mismo para `cac-mcp`: la release de esa versión y el fichero de esta
+/// máquina.
+pub fn offerable(source: &Source, version: &str) -> Result<(), Unpublished> {
+    let asset = this_platform_asset().map_err(|_| Unpublished::NoFile)?;
+    release_has(source, &tag(version), asset)
+}
+
 /// Todo lo que lleva una release, además de `SHA256SUMS`.
 pub const ASSETS: [&str; 4] = ["cac-mcp-linux-x86_64", "cac-mcp-macos-arm64", "cac-mcp-macos-x86_64", "cac-mcp-windows-x86_64.exe"];
 
@@ -437,6 +464,10 @@ pub struct Checked {
     pub at: u64,
     /// Si esa vez contestaron.
     pub answered: bool,
+    /// La última versión de las vistas cuya release se comprobó publicada, con
+    /// su fichero para esta máquina. `latest` puede ir por delante (anunciada,
+    /// sin publicar): el aviso del binario sólo cuenta ésta.
+    pub published: Option<String>,
 }
 
 fn cache_file(dir: &Path) -> PathBuf {
@@ -449,6 +480,7 @@ pub fn read_checked(dir: &Path) -> Option<Checked> {
         latest: value["latest"].as_str().filter(|v| parse_version(v).is_some()).map(str::to_string),
         at: value["checkedAt"].as_u64()?,
         answered: value["answered"].as_bool().unwrap_or(false),
+        published: value["published"].as_str().filter(|v| parse_version(v).is_some()).map(str::to_string),
     })
 }
 
@@ -457,7 +489,7 @@ fn write_checked(dir: &Path, checked: &Checked) {
     // la próxima, y ya.
     let _ = std::fs::create_dir_all(dir);
     let staged = dir.join(format!(".update.json.{}", std::process::id()));
-    let text = serde_json::json!({ "latest": checked.latest, "checkedAt": checked.at, "answered": checked.answered }).to_string();
+    let text = serde_json::json!({ "latest": checked.latest, "checkedAt": checked.at, "answered": checked.answered, "published": checked.published }).to_string();
     if std::fs::write(&staged, text).is_ok() && std::fs::rename(&staged, cache_file(dir)).is_err() {
         let _ = std::fs::remove_file(&staged);
     }
@@ -488,8 +520,10 @@ pub fn now() -> u64 {
 pub fn check_now(source: &Source, dir: Option<&Path>, timeout: Duration) -> Result<String, String> {
     let answer = fetch_latest(source, timeout);
     if let Some(dir) = dir {
-        let before = read_checked(dir).and_then(|checked| checked.latest);
-        write_checked(dir, &Checked { latest: answer.clone().ok().or(before), at: now(), answered: answer.is_ok() });
+        let before = read_checked(dir);
+        let published = before.as_ref().and_then(|checked| checked.published.clone());
+        let before = before.and_then(|checked| checked.latest);
+        write_checked(dir, &Checked { latest: answer.clone().ok().or(before), at: now(), answered: answer.is_ok(), published });
     }
     answer
 }
@@ -511,6 +545,32 @@ pub fn latest_known_within(source: &Source, dir: &Path, now: u64, max_age: u64) 
     }
     let before = checked.and_then(|checked| checked.latest);
     check_now(source, Some(dir), check_timeout()).ok().or(before)
+}
+
+/// Lo mismo que `offerable`, y lo comprobado queda apuntado junto a lo que se
+/// supo de la última versión (`Checked::published`): el aviso del binario sólo
+/// cuenta lo apuntado, y mientras la versión no cambie no se vuelve a preguntar
+/// por su release. Bloquea.
+pub fn confirm_offerable(source: &Source, dir: Option<&Path>, version: &str) -> Result<(), Unpublished> {
+    let checked = dir.and_then(read_checked);
+    if checked.as_ref().and_then(|checked| checked.published.as_deref()) == Some(version) {
+        return Ok(());
+    }
+    offerable(source, version)?;
+    if let (Some(dir), Some(mut checked)) = (dir, checked) {
+        checked.published = Some(version.to_string());
+        write_checked(dir, &checked);
+    }
+    Ok(())
+}
+
+/// La última versión que se sabe **y que ya se puede bajar** (su release tiene
+/// el fichero de esta máquina), si es más nueva que `serving`. Lo que el aviso
+/// del binario suelto dice al agente: una versión anunciada sin publicar no
+/// se anuncia. Bloquea.
+pub fn latest_offerable(source: &Source, dir: &Path, now: u64, serving: &str) -> Option<String> {
+    let latest = latest_known(source, dir, now)?;
+    (is_newer(&latest, serving) && confirm_offerable(source, Some(dir), &latest).is_ok()).then_some(latest)
 }
 
 /// El plazo de preguntar por la última versión: ocho segundos, salvo lo que
@@ -542,15 +602,18 @@ pub enum Step {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Status {
     pub installed: Option<Installed>,
-    /// La última publicada, si se pudo saber.
+    /// La última anunciada (`mcp/VERSION`), si se pudo saber.
     pub latest: Option<String>,
+    /// Por qué `latest`, siendo más nueva que lo instalado, aún no se ofrece:
+    /// su release no está publicada o no trae fichero para esta máquina.
+    pub unpublished: Option<Unpublished>,
 }
 
 impl Status {
     pub fn step(&self) -> Step {
         match (&self.installed, &self.latest) {
             (None, _) => Step::Install,
-            (Some(installed), Some(latest)) if is_newer(latest, &installed.version) => Step::Update,
+            (Some(installed), Some(latest)) if is_newer(latest, &installed.version) && self.unpublished.is_none() => Step::Update,
             _ => Step::Current,
         }
     }
@@ -580,10 +643,15 @@ impl Machine {
     /// `max_age` segundos, pregunta por la última versión. Bloquea: lanza el
     /// binario y puede salir a la red.
     pub fn look(&self, max_age: u64) -> Status {
-        Status {
-            installed: find_among(self.look_in.iter().cloned()),
-            latest: self.state_dir.as_deref().and_then(|dir| latest_known_within(&self.source, dir, now(), max_age)),
-        }
+        let installed = find_among(self.look_in.iter().cloned());
+        let latest = self.state_dir.as_deref().and_then(|dir| latest_known_within(&self.source, dir, now(), max_age));
+        // Sólo se ofrece lo que se puede bajar: se mira la release de la
+        // anunciada cuando es más nueva que lo instalado.
+        let unpublished = match (&installed, &latest) {
+            (Some(installed), Some(latest)) if is_newer(latest, &installed.version) => offerable(&self.source, latest).err(),
+            _ => None,
+        };
+        Status { installed, latest, unpublished }
     }
 
     /// Dónde va el binario al instalar o actualizar: donde ya está, o donde lo
@@ -968,13 +1036,95 @@ mod tests {
     #[test]
     fn what_is_offered_depends_on_what_is_installed_and_what_is_published() {
         let at = |version: &str| Some(Installed { path: "/opt/cac/cac-mcp".into(), version: version.into() });
-        let status = |installed, latest: Option<&str>| Status { installed, latest: latest.map(str::to_string) };
+        let status = |installed, latest: Option<&str>| Status { installed, latest: latest.map(str::to_string), unpublished: None };
         assert_eq!(status(None, Some("1.34.0")).step(), Step::Install);
         assert_eq!(status(None, None).step(), Step::Install);
         assert_eq!(status(at("1.33.0"), Some("1.34.0")).step(), Step::Update);
         assert_eq!(status(at("1.34.0"), Some("1.34.0")).step(), Step::Current);
         assert_eq!(status(at("1.35.0"), Some("1.34.0")).step(), Step::Current);
         assert_eq!(status(at("1.33.0"), None).step(), Step::Current);
+        // Anunciada pero sin poder bajarse: nada que ofrecer.
+        let held = |why| Status { installed: at("1.33.0"), latest: Some("1.34.0".into()), unpublished: Some(why) };
+        assert_eq!(held(Unpublished::NoRelease).step(), Step::Current);
+        assert_eq!(held(Unpublished::NoFile).step(), Step::Current);
+    }
+
+    /// Lo que la máquina ofrece depende de que la release de la versión
+    /// anunciada esté publicada **con el fichero de esta plataforma**: ni la
+    /// release sin publicar (`VERSION` va por delante, command-and-control-565)
+    /// ni una publicada sin su fichero dan botón, y publicada sí.
+    ///
+    /// Roturas que atrapa: ofrecer la versión anunciada sin mirar su release
+    /// (el 404 de `SHA256SUMS` de la captura); mirar sólo que la release
+    /// exista y no que traiga el fichero de esta máquina; no volver a
+    /// ofrecerla cuando por fin se publica; ofrecer actualizar al que no tiene
+    /// nada instalado por una versión sin publicar como «actualización».
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_announced_version_is_offered_only_once_its_release_has_this_machines_file() {
+        let releases = FakeReleases::start();
+        releases.announce("1.34.0");
+        let dir = scratch("unpublished");
+        let installed = dir.join("bin/cac-mcp");
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, "#!/bin/sh\necho 'cac-mcp 1.33.0'\n").unwrap();
+        std::fs::set_permissions(&installed, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let machine = Machine { source: releases.source(), state_dir: Some(dir.join("state")), look_in: vec![installed.clone()], install_to: Some(installed) };
+
+        // Anunciada, sin release: sin oferta, y dice por qué.
+        let status = machine.look(0);
+        assert_eq!(status.latest.as_deref(), Some("1.34.0"));
+        assert_eq!(status.unpublished, Some(Unpublished::NoRelease));
+        assert_eq!(status.step(), Step::Current, "ofrece una versión cuya release no existe");
+
+        // Release publicada, pero sin el fichero de esta plataforma.
+        let asset = this_platform_asset().unwrap();
+        let sums = |names: &[&str]| names.iter().map(|name| format!("{}  {name}\n", sha256_hex(b"x"))).collect::<String>();
+        let others: Vec<&str> = ASSETS.iter().copied().filter(|name| *name != asset).collect();
+        releases.put("/download/mcp-v1.34.0/SHA256SUMS", sums(&others));
+        let status = machine.look(0);
+        assert_eq!(status.unpublished, Some(Unpublished::NoFile));
+        assert_eq!(status.step(), Step::Current, "ofrece una versión sin fichero para esta máquina");
+
+        // Publicada del todo: se ofrece.
+        releases.publish("1.34.0", b"#!/bin/sh\necho 'cac-mcp 1.34.0'\n");
+        let status = machine.look(0);
+        assert_eq!(status.unpublished, None);
+        assert_eq!(status.step(), Step::Update);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Lo que el aviso del binario cuenta es lo comprobado: apunta la versión
+    /// ya publicada, no vuelve a preguntar por su release mientras no cambie,
+    /// y no cuenta la que sólo está anunciada.
+    ///
+    /// Roturas que atrapa: avisar de una versión sin publicar; apuntar como
+    /// publicada la que no lo está; preguntar por la release en cada arranque
+    /// aun después de saberla publicada.
+    #[test]
+    fn the_agents_notice_only_counts_a_version_that_can_be_downloaded() {
+        let releases = FakeReleases::start();
+        releases.announce("1.34.0");
+        let dir = scratch("notice");
+        let source = releases.source();
+        let sums_asks = || releases.asked().iter().filter(|path| path.ends_with("/SHA256SUMS")).count();
+
+        assert_eq!(latest_offerable(&source, &dir, 1_000_000, "1.33.0"), None, "avisó de una versión sin publicar");
+        assert_eq!(read_checked(&dir).unwrap().published, None);
+        assert_eq!(read_checked(&dir).unwrap().latest.as_deref(), Some("1.34.0"));
+
+        releases.publish("1.34.0", b"binario");
+        assert_eq!(latest_offerable(&source, &dir, 1_000_001, "1.33.0").as_deref(), Some("1.34.0"));
+        assert_eq!(read_checked(&dir).unwrap().published.as_deref(), Some("1.34.0"));
+        let asked = sums_asks();
+        assert_eq!(latest_offerable(&source, &dir, 1_000_002, "1.33.0").as_deref(), Some("1.34.0"));
+        assert_eq!(sums_asks(), asked, "volvió a preguntar por una release que ya sabía publicada");
+        // Y lo apuntado sobrevive a la pregunta diaria de la última versión.
+        assert_eq!(check_now(&source, Some(&dir), Duration::from_secs(5)).unwrap(), "1.34.0");
+        assert_eq!(read_checked(&dir).unwrap().published.as_deref(), Some("1.34.0"), "la pregunta diaria borró lo comprobado");
+        // Ni avisa de lo que no es más nuevo que lo que sirve.
+        assert_eq!(latest_offerable(&source, &dir, 1_000_003, "1.34.0"), None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// La app instala lo mismo que el script, donde el script, y actualiza el
@@ -1001,7 +1151,7 @@ mod tests {
         let asks = || releases.asked().iter().filter(|path| *path == "/VERSION").count();
 
         let before = machine.look(3600);
-        assert_eq!(before, Status { installed: None, latest: Some("1.34.0".into()) });
+        assert_eq!(before, Status { installed: None, latest: Some("1.34.0".into()), unpublished: None });
         assert_eq!(machine.target(&before), Some(default.clone()));
         let installed = machine.install(&before, &mut |_| {}).unwrap();
         assert_eq!(installed, Installed { path: default.clone(), version: "1.34.0".into() });
@@ -1010,7 +1160,7 @@ mod tests {
 
         // Sin saber la última (se miró sin red): al instalar se pregunta.
         std::fs::remove_file(&default).unwrap();
-        let unknown = Status { installed: None, latest: None };
+        let unknown = Status { installed: None, latest: None, unpublished: None };
         assert_eq!(machine.install(&unknown, &mut |_| {}).unwrap().version, "1.34.0");
         assert_eq!(asks(), 2);
 

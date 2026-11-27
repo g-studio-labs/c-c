@@ -6880,8 +6880,9 @@ fn watch_for_updates(host: Host, disabled: bool, source: crate::update::Source, 
     if UPDATE_WATCH.set(UpdateWatch { state_dir: state_dir.clone(), latest: latest.clone(), told: false.into() }).is_err() {
         return false;
     }
+    let serving = host.version;
     std::thread::spawn(move || {
-        let _ = latest.set(crate::update::latest_known(&source, &state_dir, crate::update::now()));
+        let _ = latest.set(crate::update::latest_offerable(&source, &state_dir, crate::update::now(), serving));
     });
     true
 }
@@ -6894,7 +6895,7 @@ fn update_note_for(latest: Option<&str>) -> Option<String> {
 /// fichero pequeño; la red es cosa del hilo de fondo.
 fn update_note_at_start() -> Option<String> {
     let watch = UPDATE_WATCH.get()?;
-    let known = crate::update::read_checked(&watch.state_dir)?.latest;
+    let known = crate::update::read_checked(&watch.state_dir)?.published;
     let note = update_note_for(known.as_deref())?;
     watch.told.store(true, std::sync::atomic::Ordering::Relaxed);
     Some(note)

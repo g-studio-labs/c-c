@@ -109,6 +109,7 @@ fn version_asks(releases: &FakeReleases) -> usize {
 fn a_newer_version_is_told_once_and_asked_for_once_a_day() {
     let releases = FakeReleases::start();
     releases.announce(NEWER);
+    releases.publish(NEWER, b"binary");
     let dir = scratch("told");
 
     // La red no contesta hasta haber conectado: si contestaba antes (una
@@ -143,6 +144,59 @@ fn a_newer_version_is_told_once_and_asked_for_once_a_day() {
     assert!(!second.call().contains(NEWER), "ya se dijo al conectar");
     second.close();
     assert_eq!(version_asks(&releases), 1, "preguntó a la red más de una vez en el mismo día");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Una versión anunciada cuya release aún no está publicada (`mcp/VERSION`
+/// sube a `main` antes de que salga el workflow) no se avisa ni se ofrece:
+/// ni el aviso al agente, ni `update --check`, ni `update`, que no toca el
+/// binario ni falla. Al publicarse, se avisa.
+///
+/// Roturas que atrapa: avisar al agente de una versión que da 404; que
+/// `update --check` diga «available» sin poder bajarla; que `update` falle o
+/// reemplace con una descarga rota en vez de decir que no hay nada que
+/// actualizar; que `--version` anuncie la no publicada.
+#[test]
+#[cfg(unix)]
+fn a_version_announced_before_its_release_is_neither_told_nor_offered() {
+    let releases = FakeReleases::start();
+    releases.announce(NEWER);
+    let dir = scratch("unpublished");
+    let copy = dir.join("bin").join("cac-mcp");
+    std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_cac-mcp"), &copy).unwrap();
+    let original = std::fs::read(&copy).unwrap();
+    let source = releases.source();
+    let run = |args: &[&str]| {
+        let out = binary_at(&copy, &dir, &source.version_url, &source.download_base).args(args).stdin(Stdio::null()).output().unwrap();
+        (out.status.code(), String::from_utf8_lossy(&out.stdout).to_string())
+    };
+
+    // El aviso al agente: se espera a que el hilo de fondo haya preguntado.
+    let mut session = Session::open(binary(&dir, &releases));
+    session.instructions();
+    wait_for("el hilo de fondo mira la release", || releases.asked().iter().any(|path| path.ends_with("/SHA256SUMS")));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!session.call().contains(NEWER), "avisó de una versión sin publicar");
+    session.close();
+    // La siguiente sesión lo sabe de lo apuntado (la última anunciada), y
+    // tampoco lo dice al conectar.
+    let mut next = Session::open(binary(&dir, &releases));
+    assert!(!next.instructions().contains(NEWER), "al conectar avisó de lo apuntado, que no está publicada");
+    next.close();
+
+    let (code, out) = run(&["update", "--check"]);
+    assert_eq!(code, Some(0));
+    assert!(out.contains("announced, but its release isn't published yet") && !out.contains("is available"), "{out}");
+    let (code, out) = run(&["update"]);
+    assert_eq!(code, Some(0));
+    assert!(out.contains("Nothing to update"), "{out}");
+    assert_eq!(std::fs::read(&copy).unwrap(), original, "`update` tocó el binario sin release");
+    assert!(!run(&["--version"]).1.contains("available"), "`--version` anuncia lo que no se puede bajar");
+
+    releases.publish(NEWER, NEW_BINARY);
+    let (_, out) = run(&["update", "--check"]);
+    assert!(out.contains("is available"), "{out}");
     let _ = std::fs::remove_dir_all(dir);
 }
 

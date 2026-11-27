@@ -324,8 +324,15 @@ actualiza quien lo pide.
 - **Sólo el binario suelto pregunta por sus versiones** (`Host::updates_itself`):
   una vez al día, en un hilo aparte, recordado en su carpeta de estado, y se
   calla con `CAC_MCP_NO_UPDATE_CHECK=1`. A `cac --mcp` lo actualiza la app.
+  **Y sólo se ofrece (o se avisa de) una versión cuya release ya está
+  publicada con el fichero de esta máquina**: `mcp/VERSION` sube a `main`
+  antes de que salga el workflow, y ofrecerla daba un 404 en `SHA256SUMS`
+  (`update::offerable`, que comparte con la app nativa `release_has`;
+  command-and-control-565).
   → Guardianes: `mcp/tests/updates.rs` (con el binario de verdad contra una
-  release de mentira) y `server::tests::only_the_standalone_binary_watches_for_its_own_updates`.
+  release de mentira; `a_version_announced_before_its_release_is_neither_told_nor_offered`),
+  `update::tests::an_announced_version_is_offered_only_once_its_release_has_this_machines_file`
+  y `server::tests::only_the_standalone_binary_watches_for_its_own_updates`.
 - **Ninguna prueba sale a internet**: `update::fake::FakeReleases` sirve
   `VERSION`, los binarios y las sumas en esta máquina, y las direcciones se
   cambian por el entorno (`CAC_MCP_VERSION_URL`, `CAC_MCP_DOWNLOAD_BASE`). El
