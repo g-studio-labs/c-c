@@ -1248,15 +1248,20 @@ impl DocsView {
     /// (`cac_core::doc_link`): lo de fuera se le da al sistema; lo de dentro
     /// —una tarea, una página, la pestaña de otro nodo, una sección— lo abre
     /// el core, que pregunta antes si hay texto sin guardar y deja dicho lo
-    /// que no se pudo abrir.
+    /// que no se pudo abrir. Un enlace de cac con su dirección de la web (o
+    /// `cac://`) es de dentro igual; y uno a otra pantalla (un canal, un
+    /// pedido) va a ella (`links::open`).
     fn follow_link(url: &str, cx: &mut App) {
-        match cac_core::doc_link(url) {
-            cac_core::DocLink::Web { url } => cx.open_url(&url),
-            _ => {
-                let href = url.to_string();
-                Backend::run(cx, move |core| async move { core.docs().follow_link(&href).await });
-            }
-        }
+        let core = Backend::core(cx);
+        let href = match core.app_link(url) {
+            cac_core::AppLink::Task { .. } | cac_core::AppLink::Doc { .. } => core.app_route(url).unwrap_or_else(|| url.to_string()),
+            cac_core::AppLink::Browser { url } => return cx.open_url(&url),
+            // Un ancla, una mención, o lo que no se entiende: el core sabe
+            // qué hacer con cada uno dentro de un documento.
+            cac_core::AppLink::Unopenable => url.to_string(),
+            _ => return crate::links::open(url, cx),
+        };
+        Backend::run(cx, move |core| async move { core.docs().follow_link(&href).await });
     }
 
     /// Un texto del documento, pintado, con sus enlaces seguidos por

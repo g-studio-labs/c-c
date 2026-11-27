@@ -43,6 +43,19 @@ pub(crate) fn show_ring(ring: &cac_core::IncomingRing, cx: &mut App) {
 
 impl Global for Notifier {}
 
+/// Cuántas veces se trajo la ventana al frente: la plataforma de pruebas no
+/// lo apunta, y es la mitad de lo que hace pulsar un aviso.
+#[cfg(test)]
+pub(crate) struct Fronted(pub usize);
+
+#[cfg(test)]
+impl Global for Fronted {}
+
+#[cfg(test)]
+pub(crate) fn times_fronted(cx: &App) -> usize {
+    cx.try_global::<Fronted>().map_or(0, |fronted| fronted.0)
+}
+
 /// Lo prepara al arrancar: sin esto, pulsar un aviso no llega a nadie.
 pub fn install(cx: &mut App) {
     cx.set_global(Notifier::default());
@@ -70,6 +83,11 @@ pub(crate) fn show(announcement: Announcement, cx: &mut App) {
 /// pidió que se mire un pedido ya (`request:open`). Un gestor de ventanas que
 /// no deja robar el foco no es un fallo: lo pedido ya está en pantalla.
 pub(crate) fn bring_to_front(cx: &mut App) {
+    #[cfg(test)]
+    {
+        let fronted = cx.try_global::<Fronted>().map_or(0, |fronted| fronted.0);
+        cx.set_global(Fronted(fronted + 1));
+    }
     cx.activate(true);
     if let Some(window) = cx.active_window().or_else(|| cx.windows().first().copied()) {
         let _ = window.update(cx, |_, window, _| window.activate_window());

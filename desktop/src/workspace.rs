@@ -275,6 +275,11 @@ impl Workspace {
         let organization = cx.new(|cx| crate::organization::OrgView::new(window, cx));
         // «Gestionar» en la ficha de un espacio lleva a sus tareas.
         let on_organization = cx.subscribe(&organization, |this, _, event: &crate::organization::ManageSpace, cx| this.manage_space(event.0.clone(), cx));
+        // Un enlace de cac a la organización (un aviso de Basecamp, `cac://organization`).
+        let this = cx.entity().downgrade();
+        crate::links::on_open_organization(cx, move |cx| {
+            let _ = this.update(cx, |this, cx| this.open_aside(Aside::Organization, cx));
+        });
         let on_connect = [
             // Lo que sabe cambia desde otro hilo (mirar la máquina, instalar):
             // el punto del menú se repinta con ello.

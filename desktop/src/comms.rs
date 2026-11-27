@@ -1118,7 +1118,7 @@ mod tests {
     /// el autor; pulsar sin efecto (la etiqueta que no se apunta); que un
     /// aviso ajeno lleve a algún sitio; no cambiar de organización; no
     /// buscar el canal en las demás organizaciones; no entrar en
-    /// comunicación.
+    /// comunicación; no traer la ventana al frente.
     #[gpui_kit::test]
     fn a_notice_shows_and_clicking_it_opens_its_conversation(cx: &mut TestAppContext) {
         let server = server();
@@ -1154,11 +1154,13 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         cx.run_until_parked();
         assert_eq!(cx.update(|cx| Backend::snapshot(cx).read(cx).orgs.current_org_id.clone()).as_deref(), Some("o1"), "un aviso ajeno no mueve nada");
+        assert_eq!(cx.update(|cx| crate::notifier::times_fronted(cx)), 0, "ni trae la ventana");
 
         cx.simulate_system_notification_response(SystemNotificationResponse { tag: "chat:z".into(), action_id: None });
         wait_until(cx, "el canal del aviso está delante", |cx| label(window, "conversation-title", cx) == "#Soporte");
         assert_eq!(selected(cx), Some(Conversation::Channel { space_id: "z".into() }));
         assert_eq!(cx.update(|cx| Backend::snapshot(cx).read(cx).orgs.current_org_id.clone()).as_deref(), Some("o2"));
+        assert_eq!(cx.update(|cx| crate::notifier::times_fronted(cx)), 1, "la ventana, al frente");
         stop(cx);
     }
 

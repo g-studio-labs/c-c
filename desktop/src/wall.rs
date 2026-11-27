@@ -389,7 +389,11 @@ impl WallView {
             let Ok(link) = answer.await else { return };
             cx.update(|cx| match link {
                 cac_core::ThreadLink::Web { url } => cx.open_url(&url),
-                cac_core::ThreadLink::Task { .. } | cac_core::ThreadLink::Doc => Backend::core(cx).wall().close_post(),
+                cac_core::ThreadLink::Task { .. } | cac_core::ThreadLink::Doc | cac_core::ThreadLink::Place => Backend::core(cx).wall().close_post(),
+                cac_core::ThreadLink::Organization => {
+                    Backend::core(cx).wall().close_post();
+                    crate::links::open_organization(cx);
+                }
                 cac_core::ThreadLink::NotHere => {
                     let text = tr(cx, "common:misc.notInThisApp");
                     view.update(cx, |this, cx| {

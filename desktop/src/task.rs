@@ -521,8 +521,8 @@ impl TaskView {
     pub(crate) fn follow_link(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(file) = Backend::core(cx).tasks().linked_attachment(url) {
             self.open_file(file.id, file.file_name, window, cx);
-        } else if crate::theme::leads_somewhere(url) {
-            cx.open_url(url);
+        } else {
+            crate::links::open(url, cx);
         }
     }
 

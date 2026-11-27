@@ -33,6 +33,7 @@ mod files;
 mod identity;
 mod inbox;
 mod lang;
+mod links;
 mod log_view;
 mod mentions;
 mod message_actions;
@@ -48,6 +49,8 @@ mod platform;
 mod system;
 mod prompt;
 mod shell;
+#[cfg(unix)]
+mod single_instance;
 mod sound;
 mod spike;
 mod task;
@@ -124,6 +127,26 @@ fn main() {
         eprintln!("cac: esta máquina no dice dónde guardar los datos de su usuario");
         std::process::exit(1);
     };
+    // El enlace con el que se lanzó (`cac-desktop <enlace>`), si lo hay.
+    let link = std::env::args().nth(1).map(|arg| arg.trim().to_string()).filter(|arg| !arg.is_empty());
+    // Una sola app por persona: si ya hay una abierta, se le pasa el enlace
+    // (o sólo «al frente») y ésta se cierra. Si el socket no se puede usar,
+    // se arranca igual: mejor dos ventanas que ninguna.
+    #[cfg(unix)]
+    let instance = if spike {
+        None
+    } else {
+        let dir = single_instance::socket_dir(var, &data_dir);
+        let me = single_instance::my_uid();
+        match single_instance::claim(&dir, me, &single_instance::Message::from_args(link.clone().into_iter())) {
+            Ok(single_instance::Claim::Delivered) => std::process::exit(0),
+            Ok(single_instance::Claim::First(listener)) => Some((listener, me)),
+            Err(error) => {
+                eprintln!("cac: sin instancia única ({error})");
+                None
+            }
+        }
+    };
     let server_url = system::server_url(var);
     let mut config = Config::new(server_url.clone());
     config.client = Some("desktop".to_string());
@@ -154,6 +177,23 @@ fn main() {
             voice_settings::restore_choices(cx);
         }
         theme::apply_preference(cx);
+        // Lo que llega de otra instancia: la ventana al frente, y su enlace.
+        #[cfg(unix)]
+        if let Some((listener, me)) = instance {
+            let (sender, mut arrived) = tokio::sync::mpsc::unbounded_channel();
+            single_instance::serve(listener, me, move |message| {
+                let _ = sender.send(message);
+            });
+            cx.spawn(async move |cx| {
+                while let Some(message) = arrived.recv().await {
+                    cx.update(|cx| match message {
+                        single_instance::Message::Open(link) => links::open_from_outside(link, cx),
+                        single_instance::Message::Focus => notifier::bring_to_front(cx),
+                    });
+                }
+            })
+            .detach();
+        }
         // Nada sigue tocando un servidor sin nadie mirando.
         cx.on_app_quit(|_| {
             platform::provision_engine::stop_all();
@@ -181,6 +221,9 @@ fn main() {
         } else {
             gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| shell::Shell::new(window, cx)))
                 .expect("no se pudo abrir la ventana");
+            if let Some(link) = link {
+                links::open_from_outside(link, cx);
+            }
         }
     });
 }

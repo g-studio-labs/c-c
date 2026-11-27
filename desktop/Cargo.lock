@@ -963,6 +963,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "image",
+ "libc",
  "log",
  "reqwest",
  "serde_json",

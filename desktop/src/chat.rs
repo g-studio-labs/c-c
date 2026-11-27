@@ -355,7 +355,8 @@ impl ChatView {
                 ThreadLink::Recording { id } => cx.emit(OpenRecording { id }),
                 ThreadLink::NotHere => this.say(tr(cx, "common:misc.notInThisApp"), cx),
                 ThreadLink::Unknown => this.say(tr(cx, "common:last.openLinkFailed"), cx),
-                ThreadLink::Task { .. } | ThreadLink::Doc | ThreadLink::Inert => {}
+                ThreadLink::Organization => crate::links::open_organization(cx),
+                ThreadLink::Task { .. } | ThreadLink::Doc | ThreadLink::Place | ThreadLink::Inert => {}
             })
             .ok();
         })

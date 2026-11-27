@@ -118,13 +118,13 @@ fn modal(id: &'static str, card: impl IntoElement, window: &Window) -> impl Into
     .with_priority(2)
 }
 
-/// Un clic en un enlace del texto: otra nota se abre aquí; una dirección web,
-/// en el navegador.
+/// Un clic en un enlace del texto: otra nota se abre aquí; lo demás de cac,
+/// en su sitio, y una dirección web, en el navegador (`links::open`).
 fn follow_link(url: &str, cx: &mut App) {
     if let Some(id) = note_link_target(url) {
         Backend::run(cx, move |core| async move { core.notes().open(&id).await });
-    } else if url.starts_with("http://") || url.starts_with("https://") {
-        cx.open_url(url);
+    } else {
+        crate::links::open(url, cx);
     }
 }
 

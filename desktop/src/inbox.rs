@@ -149,8 +149,10 @@ impl Workspace {
     }
 
     /// Pulsar un aviso o una conversación: leída, y a su sitio. Una
-    /// conversación se abre en la vista rápida, sin irse de la página. Si es
-    /// un sitio que esta app todavía no tiene, se queda en el panel y lo dice.
+    /// conversación se abre en la vista rápida, sin irse de la página. Lo que
+    /// esta bandeja no sabe abrir (la organización, un aviso de Basecamp, un
+    /// sitio que esta app no tiene) va por `links::open`: a su pantalla, o a
+    /// la web en el navegador; el panel se queda.
     fn open_from_inbox(&mut self, read: InboxRead, link: String, org_id: String, title: String, window: &mut Window, cx: &mut Context<Self>) {
         let target = cac_core::link_target(&link);
         let here = target != InboxTarget::NotHere;
@@ -170,8 +172,7 @@ impl Workspace {
         } else if here {
             self.close_inbox(window, cx);
         } else {
-            self.inbox.said = Some(tr(cx, "common:misc.notInThisApp"));
-            cx.notify();
+            crate::links::open(&link, cx);
         }
     }
 
@@ -1042,12 +1043,13 @@ mod tests {
     /// Pulsar una conversación la marca leída entera y abre su vista rápida
     /// sin irse de la página; «Abrir la conversación» lleva a ella. Pulsar
     /// algo que esta app no tiene lo marca leído, se queda en el panel y lo
-    /// dice.
+    /// abre en la web.
     ///
     /// Roturas que atrapa: marcar una conversación por los ids que hay a mano;
     /// irse de la página al pulsarla; un «Abrir la conversación» que no lleva
     /// a ella; cerrar el panel y no ir a ningún sitio (un clic perdido); no
-    /// marcar leído lo que no se puede abrir.
+    /// marcar leído lo que no se puede abrir; un sitio que esta app no tiene
+    /// que no lleva a ninguna parte (ni a la web).
     #[gpui_kit::test]
     fn clicking_goes_where_it_says_or_says_why_not(cx: &mut TestAppContext) {
         let server = server(full_inbox());
@@ -1056,7 +1058,8 @@ mod tests {
         open_panel(window, cx);
 
         click(window, "inbox-row-n3", cx);
-        wait_until(cx, "dice que no está en esta app", |cx| label(window, "inbox-said", cx) == "Todavía no está en esta app");
+        let web = cx.update(|cx| format!("{}/app/servers/x/backups?target=b", Backend::core(cx).base_url()));
+        wait_until(cx, "lo abre en la web", |cx| cx.opened_url().as_ref() == Some(&web));
         assert!(on_screen(window, "inbox", cx), "y el panel sigue abierto");
         wait_until(cx, "se marca leído", |_| posted(&server, "/api/v1/notifications/read").iter().any(|(_, body)| *body == json!({ "ids": ["n3"] })));
 

@@ -186,16 +186,12 @@ impl RequestsView {
         .detach();
     }
 
-    /// Un enlace del pedido: una dirección de fuera, al navegador; una ruta
-    /// de la app, a su sitio aquí si lo tiene.
+    /// Un enlace del pedido: una ruta de la app, a su sitio aquí en la
+    /// organización del pedido; lo demás (una dirección de cac o de fuera,
+    /// una ruta que esta app no tiene) lo decide `links::open`.
     fn open_link(&mut self, url: String, org_id: String, cx: &mut Context<Self>) {
-        if !url.starts_with('/') || url.starts_with("//") {
-            cx.open_url(&url);
-            return;
-        }
-        if cac_core::link_target(&url) == InboxTarget::NotHere {
-            self.said = Some(tr(cx, "common:misc.notInThisApp"));
-            cx.notify();
+        if !url.starts_with('/') || url.starts_with("//") || cac_core::link_target(&url) == InboxTarget::NotHere {
+            crate::links::open(&url, cx);
             return;
         }
         Backend::run(cx, move |core| async move {
@@ -234,7 +230,7 @@ impl RequestsView {
     /// dice.
     fn follow(&mut self, target: LinkSegment, org_id: String, cx: &mut Context<Self>) {
         match target {
-            LinkSegment::Url(url) => cx.open_url(&url),
+            LinkSegment::Url(url) => crate::links::open(&url, cx),
             LinkSegment::AppRoute { route, .. } => self.open_link(route, org_id, cx),
             LinkSegment::Path { path, .. } => {
                 // Mirar si existe puede tardar (una ruta de red): fuera del hilo de la ventana.
