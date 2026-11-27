@@ -271,36 +271,34 @@ func (s *RequestService) answerVia(q *domain.Request, callerID, answeredVia stri
 		return nil, err
 	}
 	s.announce(domain.RequestAnsweredEvent, fresh)
-	s.notifyAnswered(fresh, answeredVia, clean)
+	s.notifyAnswered(fresh, callerID, answeredVia, clean)
 	v := s.View(fresh, callerID, false)
 	return &v, nil
 }
 
 // notifyAnswered: a quien lo pidió, que su sesión se entere de la respuesta
-// sin preguntar (command-and-control-558). No si la apuntó su propia sesión:
-// ya la sabe, es quien la escribió. El `finalText` de un mensaje aprobado y la
-// nota van enteros en `detail`, que el cuerpo de la campana no lleva.
-func (s *RequestService) notifyAnswered(q *domain.Request, answeredVia string, a domain.RequestAnswer) {
-	if s.inbox == nil || q.RequestedByID == "" || answeredVia == domain.AnsweredViaSession {
+// sin preguntar (command-and-control-558). **Sólo al diario**: ni fila en la
+// campana ni push, porque ninguna campana conoce esta clase y la pintaría como
+// desconocida. Y nunca a quien contestó: ni a la sesión que lo apuntó, ni a
+// quien lo pidió y lo contesta él mismo (el pedido que el agente de José le
+// abre a José). El `finalText` y la nota van enteros —recortados si pasan del
+// tope del diario, ver putText— en `detail`.
+func (s *RequestService) notifyAnswered(q *domain.Request, callerID, answeredVia string, a domain.RequestAnswer) {
+	if journalOut == nil || q.RequestedByID == "" || answeredVia == domain.AnsweredViaSession ||
+		callerID == q.RequestedByID {
 		return
 	}
-	title := ""
-	if t, err := s.tasks.FindTask(q.TaskID); err == nil {
-		title = t.Title
-	}
-	detail := map[string]any{"code": q.Code, "kind": q.Kind, "finalText": a.FinalText, "note": a.Note, "reason": a.Reason}
+	detail := map[string]any{"code": q.Code, "kind": q.Kind}
+	putText(detail, "finalText", a.FinalText)
+	putText(detail, "note", a.Note)
+	putText(detail, "reason", a.Reason)
 	if a.Approved != nil {
 		detail["approved"] = *a.Approved
 	}
-	s.inbox.Notify(domain.Aviso{
-		UserID: q.RequestedByID, OrgID: q.OrgID, Kind: domain.RequestAnsweredNotifyKind,
-		TitleKey:  "notify.request.answered",
-		TitleArgs: map[string]string{"task": title},
-		Body:      q.Summary,
-		Link:      domain.RequestLink(q.Code),
-		Group:     domain.ItemGroup(q.TaskID),
-		Label:     title,
-		Detail:    detail,
+	// La clave evita que el mismo pedido se apunte dos veces.
+	_, _, _ = journalOut.Append(domain.UserEventInput{
+		UserID: q.RequestedByID, OrgID: q.OrgID, Type: domain.RequestAnsweredEvent,
+		Key: "request:answered:" + q.ID, Mine: true, Data: detail,
 	})
 }
 

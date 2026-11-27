@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"time"
+	"unicode/utf8"
 
 	"github.com/guz-studio/cac/backend/internal/core/domain"
 	"github.com/guz-studio/cac/backend/internal/core/events"
@@ -53,6 +54,45 @@ func (j *EventJournal) Append(in domain.UserEventInput) (domain.EventEnvelope, b
 		j.hub.Publish(events.Event{Type: env.Type, OrgID: env.OrgID, UserID: in.UserID, Seq: env.Seq, Data: env})
 	}
 	return env, true, nil
+}
+
+// detailTextMax: lo que, ya escapado en JSON, ocupa como mucho cada texto
+// largo de un `detail`. El diario sustituye **todo** el `data` por
+// {truncated, bytes} si pasa de UserEventMaxData, y con ello los ids que dicen
+// de qué mensaje es el evento; recortando el texto antes, los ids se quedan.
+const detailTextMax = 8 * 1024
+
+// clipText recorta `s` para que escapado en JSON no pase de `max` bytes, sin
+// partir un carácter. Devuelve si recortó.
+func clipText(s string, max int) (string, bool) {
+	enc := func(v string) int { b, _ := json.Marshal(v); return len(b) }
+	if enc(s) <= max {
+		return s, false
+	}
+	cut := len(s)
+	if cut > max {
+		cut = max
+	}
+	for cut > 0 {
+		for cut > 0 && cut < len(s) && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		if enc(s[:cut]) <= max {
+			return s[:cut], true
+		}
+		cut = cut * 3 / 4
+	}
+	return "", true
+}
+
+// putText pone `text` en `m[key]`, recortado si hace falta, y marca
+// `textTruncated` cuando recorta.
+func putText(m map[string]any, key, text string) {
+	clipped, cut := clipText(text, detailTextMax)
+	m[key] = clipped
+	if cut {
+		m["textTruncated"] = true
+	}
 }
 
 // Head: el último número de esa persona.

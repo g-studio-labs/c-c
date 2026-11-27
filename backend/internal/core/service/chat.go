@@ -70,10 +70,12 @@ type broadcast struct {
 // detail: lo que el evento del diario lleva de esta línea y la campana no
 // cabe: el texto **entero**, no el adelanto de 400 caracteres del aviso.
 func (b broadcast) detail(author string) map[string]any {
-	return map[string]any{
+	d := map[string]any{
 		"spaceId": b.spaceID, "messageId": b.messageID, "author": author,
-		"text": b.body, "viaAgent": b.via == domain.ViaMCP,
+		"viaAgent": b.via == domain.ViaMCP,
 	}
+	putText(d, "text", b.body)
+	return d
 }
 
 type ChatService struct {
@@ -516,10 +518,10 @@ func (s *ChatService) announceEdit(original *domain.ChatMessage, by domain.Messa
 			Body:      Adelanto(body),
 			Link:      "/chat?space=" + original.SpaceID, Via: by.WrittenVia(),
 			Group: domain.ChannelGroup(original.SpaceID), Label: where,
-			Detail: map[string]any{
+			Detail: editedDetail(map[string]any{
 				"spaceId": original.SpaceID, "messageId": original.ID, "author": author,
-				"text": body, "viaAgent": by.AsAgent(), "edited": true,
-			},
+				"viaAgent": by.AsAgent(), "edited": true,
+			}, body),
 		})
 	}
 }
@@ -714,4 +716,11 @@ func Adelanto(cuerpo string) string {
 		return limpio
 	}
 	return strings.TrimRight(string(runas[:tope]), " ") + "…"
+}
+
+// editedDetail: el detalle de un aviso de corrección, con el texto recortado
+// como en un mensaje nuevo (ver putText).
+func editedDetail(d map[string]any, text string) map[string]any {
+	putText(d, "text", text)
+	return d
 }

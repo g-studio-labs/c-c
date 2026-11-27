@@ -103,10 +103,10 @@ func (s *DMService) publish(toUserID, orgID, conversationID, messageID, actorID 
 			// El texto entero sólo viaja en el evento del diario de quien
 			// recibe (Notify lo apunta a `UserID`), no en la fila de la
 			// campana: el otro participante no lo ve ahí y nadie más lo recibe.
-			Detail: map[string]any{
+			Detail: editedDetail(map[string]any{
 				"threadId": conversationID, "messageId": messageID, "author": de,
-				"text": text, "viaAgent": via == domain.ViaMCP,
-			},
+				"viaAgent": via == domain.ViaMCP,
+			}, text),
 		})
 	}
 }
@@ -293,10 +293,10 @@ func (s *DMService) announceEdit(c *domain.DMConversation, m *domain.DMMessage, 
 		TitleKey: key, TitleArgs: map[string]string{"who": who},
 		Body: "", Link: "/dm?c=" + c.ID, Via: by.WrittenVia(),
 		Group: domain.DMGroup(c.ID), Label: who,
-		Detail: map[string]any{
+		Detail: editedDetail(map[string]any{
 			"threadId": c.ID, "messageId": m.ID, "author": who,
-			"text": body, "viaAgent": by.AsAgent(), "edited": true,
-		},
+			"viaAgent": by.AsAgent(), "edited": true,
+		}, body),
 	})
 }
 
