@@ -4,7 +4,7 @@ name = "cac-mcp"
 # de la última release de la app (v1.33.0) porque hasta ahora el MCP anunciaba
 # la versión de la app, y un cliente que la lea no debe verla retroceder.
 # `cac --mcp` sigue anunciando la de la app (`Host::desktop_app`).
-version = "1.33.0"
+version = "1.34.0"
 license = "AGPL-3.0-or-later"
 description = "El servidor MCP de cac: lo que un agente lee y escribe en cac, por stdio"
 edition = "2021"

@@ -13,6 +13,12 @@ tablero: **App** `ca0bfd49-0909-43eb-8135-bc8ecd0f282c` y **Backend**
 
 ## 🟢 Al día
 
+**27-nov, escuchar a cac** (command-and-control-558): el diario por persona
+en el backend, `cac-mcp listen run/follow/ack/install` y la skill `cac-listen`
+con las herramientas `install_listener` y `basecamp_awaiting` (MCP 1.34.0, sin
+soltar: la release `mcp-v1.34.0` se pregunta a jose). Cómo se escucha, en
+`CLAUDE.md` («El MCP es su propio crate»).
+
 **24-nov, «Por atender»: los pedidos de los agentes a una persona**
 (command-and-control-500 y 504), en la rama `wt-requests` (worktree
 `cac-wt-requests`), sin fusionar. Backend (`domain/request.go`, rutas

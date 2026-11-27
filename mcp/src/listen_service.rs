@@ -273,6 +273,24 @@ pub fn run_cli(os: &str, args: &[&str], setup: &dyn Fn() -> Result<Setup, String
     }
 }
 
+/// `install` para quien no puede imprimir (el servidor MCP habla JSON-RPC por
+/// la salida): el mismo camino que `cac-mcp listen install`, con su informe.
+pub fn install_here() -> Report {
+    run_cli(std::env::consts::OS, &["install"], &setup_here, &systemctl)
+}
+
+/// Lo que `install` escribiría, sin escribir ni arrancar nada.
+pub fn preview_here() -> Result<Value, String> {
+    if std::env::consts::OS != "linux" {
+        return Err(by_hand(std::env::consts::OS));
+    }
+    let setup = setup_here()?;
+    if lives_in_an_appimage(&setup.exe, setup.appdir.as_deref(), setup.appimage.as_deref()) {
+        return Err(format!("{} is inside an AppImage; install the standalone `cac-mcp`.", setup.exe.display()));
+    }
+    Ok(serde_json::json!({ "unit": setup.unit_path().display().to_string(), "text": unit_text(&setup.exe) }))
+}
+
 /// `cac-mcp listen install|uninstall|status`.
 pub fn main(args: &[&str]) -> i32 {
     let report = run_cli(std::env::consts::OS, args, &setup_here, &systemctl);

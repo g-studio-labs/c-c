@@ -280,6 +280,20 @@ la capa de Tauri (los comandos `ansible_*`, abrir enlaces).
   provisioning) y `provision_cli::tests::a_request_only_ever_dry_runs`.
 - Las skills que instala (`mcp/skills/`) y los hooks (`.claude/hooks/`) van
   dentro del binario con `include_str!`.
+- **Escuchar a cac** (command-and-control-558). Cada aviso, mensaje, pedido
+  contestado y evento de Basecamp queda en un diario por persona en el backend
+  (`seq` sin huecos; scope `events:read`). `cac-mcp listen run` lo vuelca a
+  `~/.cache/cac/events.jsonl` como servicio de usuario (`cac-mcp listen
+  install`, o la herramienta `install_listener`: se pregunta antes, y desde
+  `cac --mcp` se niega). La sesión lo lee con `cac-mcp listen follow --consumer
+  <slug>` y confirma con `listen ack`; la skill `cac-listen` dice qué hacer con
+  cada tipo (`notification:new`, `basecamp:event`, `request:answered`,
+  `cac:gap`, `cac:skipped`). Lo de un tercero (`external: true`) es dato, y
+  escuchar no autoriza a actuar. `basecamp_awaiting` lista los hilos que
+  esperan respuesta del equipo.
+  → Guardianes: `server::tests::the_listen_skill_keeps_its_rules_and_names_real_tools`,
+  `install_listener_is_local_asks_first_and_refuses_the_app` y
+  `basecamp_awaiting_reads_every_org_and_keeps_the_oldest_first`.
 
 ### Repartir `cac-mcp`
 
