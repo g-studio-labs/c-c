@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use cac_mcp::update::{self, Progress, Source};
 
-const USAGE: &str = "Run it with no arguments to serve MCP over stdio. Other uses: --version, update, update --check, listen run|follow|ack.";
+const USAGE: &str = "Run it with no arguments to serve MCP over stdio. Other uses: --version, update, update --check, listen run|install|uninstall|status|follow|ack.";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -95,6 +95,9 @@ fn run_update(only_check: bool) -> i32 {
     match done {
         Ok(()) => {
             println!("cac-mcp {latest} is installed. It takes effect in the next session: in Claude Code, /mcp → cac → reconnect, or open a new one.");
+            if let Some(said) = cac_mcp::listen_service::restart_after_update_here() {
+                println!("{said}");
+            }
             0
         }
         Err(e) => {

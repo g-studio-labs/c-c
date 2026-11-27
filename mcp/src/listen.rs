@@ -46,7 +46,7 @@ const TOKEN_REVOKED: &str = "token:revoked";
 /// empezar: el `seq` baja, y lo confirmado de cada consumidor también.
 pub const RESET: &str = "reset";
 
-const USAGE: &str = "Usage: cac-mcp listen run | follow --consumer <name> [--project <id|name>] [--type <type>] [--mine] [--once] | ack --consumer <name> <seq>";
+const USAGE: &str = "Usage: cac-mcp listen run | install | uninstall | status | follow --consumer <name> [--project <id|name>] [--type <type>] [--mine] [--once] | ack --consumer <name> <seq>";
 
 // ── Dónde vive cada cosa ────────────────────────────────────────────────────
 
@@ -427,6 +427,11 @@ pub fn retry_delay(failure: &Failure, attempt: u32) -> Duration {
     }
 }
 
+/// Dónde deja `listen run` cómo está (lo que lee `listen status`).
+pub fn status_file(state_dir: &Path) -> PathBuf {
+    state_dir.join("listen.status.json")
+}
+
 /// Lo que `listen status` (C2) lee: cómo está quien escucha, sin el token.
 struct Status {
     path: PathBuf,
@@ -477,7 +482,7 @@ impl Listener {
             journal.save_cursor(cursor)?;
         }
         journal.compact(now())?;
-        let status = Status { path: journal.state_dir.join("listen.status.json"), last_connected: None, last_event: None };
+        let status = Status { path: status_file(&journal.state_dir), last_connected: None, last_event: None };
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .user_agent(concat!("cac-mcp/", env!("CARGO_PKG_VERSION"), " listen"))
@@ -962,6 +967,7 @@ pub fn main(args: &[&str]) -> i32 {
         ["run"] => run_command(),
         ["follow", rest @ ..] => follow_command(rest),
         ["ack", rest @ ..] => ack_command(rest),
+        ["install" | "uninstall" | "status"] => crate::listen_service::main(args),
         _ => {
             eprintln!("cac-mcp listen: unknown arguments `{}`. {USAGE}", args.join(" "));
             2
