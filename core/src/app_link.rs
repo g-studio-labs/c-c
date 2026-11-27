@@ -91,9 +91,10 @@ fn origin(url: &str) -> Option<(String, &str)> {
     }
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let host = &rest[..end];
-    // Con usuario dentro (`https://cac.guz-studio.dev@otro.com/`) el host es
-    // el de detrás de la arroba: no es de aquí.
-    if host.is_empty() || host.contains('@') {
+    // Con usuario dentro (`https://cac.guz-studio.dev@otro.com/`) lo de
+    // delante de `/` no es el host del servidor, y no casa con él: no hace
+    // falta mirar la arroba aparte.
+    if host.is_empty() {
         return None;
     }
     Some((format!("{scheme}://{}", host.to_ascii_lowercase()), &rest[end..]))
