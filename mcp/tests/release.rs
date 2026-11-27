@@ -154,3 +154,50 @@ fn the_workflow_the_scripts_and_the_binary_name_the_same_files() {
     assert!(update::INSTALL_SH.contains("/main/scripts/install-mcp.sh") && update::INSTALL_PS.contains("/main/scripts/install-mcp.ps1"));
     assert_eq!(update::tag("1.33.0"), "mcp-v1.33.0");
 }
+
+/// Todo `Cargo.lock` del repo que nombra el paquete `cac-mcp` (hoy los de
+/// `mcp/`, `desktop/`, `ops/` y `app/src-tauri/`) lleva la versión de
+/// `mcp/VERSION`.
+///
+/// Rotura que atrapa: subir la versión del MCP y dejar atrás el `Cargo.lock`
+/// de otro crate que lo usa por ruta. `cargo build --locked` se niega a
+/// tocarlo, y así se rompió la release 0.1.3 de la app nativa.
+#[test]
+fn every_lockfile_that_names_cac_mcp_carries_its_version() {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                // `target/` y `node_modules/` traen locks de otros; lo que
+                // empieza por punto (`.git`, `.claude` con sus worktrees) no
+                // es este árbol.
+                if !name.starts_with('.') && name != "target" && name != "node_modules" {
+                    walk(&path, out);
+                }
+            } else if name == "Cargo.lock" {
+                out.push(path);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut locks = Vec::new();
+    walk(&root, &mut locks);
+    let version = read("VERSION").trim().to_string();
+    let mut naming = Vec::new();
+    for lock in &locks {
+        let text = std::fs::read_to_string(lock).unwrap();
+        let mut lines = text.lines();
+        while let Some(line) = lines.next() {
+            if line.trim() == "name = \"cac-mcp\"" {
+                let found = lines.next().unwrap_or("").trim().to_string();
+                let rel = lock.strip_prefix(&root).unwrap_or(lock).display().to_string();
+                assert_eq!(found, format!("version = \"{version}\""), "{rel} lleva otra versión de cac-mcp que mcp/VERSION ({version})");
+                naming.push(rel);
+            }
+        }
+    }
+    naming.sort();
+    assert!(naming.contains(&"mcp/Cargo.lock".to_string()) && naming.len() >= 2, "no encontró los Cargo.lock que usan cac-mcp: {naming:?}");
+}
