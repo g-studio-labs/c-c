@@ -43,6 +43,11 @@ func InitRoutes(db *gorm.DB) *chi.Mux {
 		lg.Warn("events: VALKEY_ADDR not set — live notifications only reach clients " +
 			"connected to this pod, which is wrong with more than one replica")
 	}
+	// El diario de eventos de cada persona (command-and-control-558): lo
+	// apunta cada aviso, y un token con events:read lo escucha.
+	journal := service.NewEventJournal(repository.NewUserEventRepository(db), hub)
+	service.SetEventJournal(journal)
+	journal.StartPruning()
 	// Después del hub: cambiar la contraseña cierra los streams abiertos.
 	InitAuthRoutes(db, r, hub)
 	InitCollectionRoutes(db, r)

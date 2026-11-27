@@ -20,7 +20,7 @@ import (
 // Mutantes: no colgar; colgar con el aviso de cualquiera.
 func TestClosingTheSessionsHangsUpTheirStreams(t *testing.T) {
 	hub := events.NewHub()
-	h := NewEventsHandler(hub, nil)
+	h := NewEventsHandler(hub, nil, nil)
 	pase, _, err := repository.SignURLTicket(&domain.ClaimsJWT{UserID: "u-ana", Username: "ana",
 		Orgs: []domain.OrgMembershipClaim{{OrgID: "org-1", Role: domain.OrgRoleMember}}},
 		repository.URLScopeEvents, time.Now())

@@ -2,10 +2,12 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/guz-studio/cac/backend/internal/core/domain"
 	"github.com/guz-studio/cac/backend/internal/core/events"
 	lg "github.com/guz-studio/cac/backend/internal/core/logger"
 	"github.com/guz-studio/cac/backend/internal/core/repository"
@@ -14,10 +16,19 @@ import (
 
 type EventsHandler interface {
 	Stream(w http.ResponseWriter, r *http.Request)
+	Backlog(w http.ResponseWriter, r *http.Request)
+}
+
+// EventJournal es lo que el stream y el backlog leen del diario de eventos de
+// una persona (service.EventJournal).
+type EventJournal interface {
+	Read(userID string, after int64, limit int, orgs map[string]bool) (domain.EventPage, error)
+	Head(userID string) (int64, error)
 }
 
 type eventsHandler struct {
-	hub *events.Hub
+	hub     *events.Hub
+	journal EventJournal
 	// seen marca que esta persona sigue por aquí, en cada latido.
 	//
 	// Hace falta porque **esta ruta no pasa por el AuthMiddleware**: autentica
@@ -34,8 +45,8 @@ type eventsHandler struct {
 	seen func(userID string)
 }
 
-func NewEventsHandler(hub *events.Hub, seen func(userID string)) EventsHandler {
-	return &eventsHandler{hub: hub, seen: seen}
+func NewEventsHandler(hub *events.Hub, seen func(userID string), journal EventJournal) EventsHandler {
+	return &eventsHandler{hub: hub, seen: seen, journal: journal}
 }
 
 // latido es cada cuánto se manda el ping y, con él, se registra la presencia.
@@ -51,8 +62,20 @@ var latido = 25 * time.Second
 // in a URL). Events are delivered only for the orgs the caller belongs to.
 func (h *eventsHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	claims, err := claimsFromHeaderOrTicket(r, repository.URLScopeEvents)
+	if errors.Is(err, errPATMissingEvents) {
+		SendErrorResponse(w, http.StatusForbidden, "Token is missing the "+domain.ScopeEventsRead+" scope", err.Error())
+		return
+	}
 	if err != nil {
 		SendErrorResponse(w, http.StatusUnauthorized, "Unauthorized", "invalid-token")
+		return
+	}
+	// Un token personal sólo llega aquí por la cabecera y con events:read
+	// (claimsFromPAT); un `cac_pat_…` en `?token=` no es un pase y ya cayó
+	// arriba con 401. Su stream es otro: ver streamToken.
+	if claims.ViaToken {
+		tok, _ := bearerPAT(r)
+		h.streamToken(w, r, claims, tok)
 		return
 	}
 

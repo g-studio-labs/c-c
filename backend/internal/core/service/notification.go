@@ -69,6 +69,12 @@ func (s *NotificationService) Notify(a domain.Aviso) {
 	if err := s.repo.Add(n); err != nil {
 		return
 	}
+	// Y al diario de la persona (command-and-control-558), con lo mismo que la
+	// fila: lo que calló en la campana tampoco llega como evento, porque las
+	// preferencias ya se miraron arriba.
+	if journalOut != nil {
+		_, _, _ = journalOut.Append(notificationEvent(a, n))
+	}
 	// Y al teléfono, si lo pidió (W2). Después de la fila y con lo mismo que la
 	// fila —el título ya en su idioma, el enlace, el grupo como etiqueta—, así
 	// que el teléfono no puede decir algo distinto de la campana. Sin poder leer
@@ -78,6 +84,18 @@ func (s *NotificationService) Notify(a domain.Aviso) {
 		PushToPhone(a.UserID, domain.PushMessage{
 			ID: n.ID, Kind: n.Kind, Title: n.Title, Body: n.Body, Link: n.Link, Tag: n.GroupKey, OrgID: n.OrgID,
 		}, PushOptions{})
+	}
+}
+
+// notificationEvent: el evento del diario de un aviso ya guardado.
+func notificationEvent(a domain.Aviso, n *domain.Notification) domain.UserEventInput {
+	return domain.UserEventInput{
+		UserID: n.UserID, OrgID: n.OrgID, Type: domain.UserEventNotification, Mine: true,
+		Data: map[string]any{
+			"notificationId": n.ID, "kind": n.Kind, "title": n.Title, "body": n.Body,
+			"link": n.Link, "group": n.GroupKey, "label": n.GroupLabel, "via": n.Via,
+			"sourceKey": a.SourceKey, "detail": a.Detail,
+		},
 	}
 }
 

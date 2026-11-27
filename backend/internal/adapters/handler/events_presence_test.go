@@ -36,7 +36,7 @@ func TestElLatidoDelStreamRegistraPresencia(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		vistos = append(vistos, userID)
-	})
+	}, nil)
 
 	pase, _, err := repository.SignURLTicket(&domain.ClaimsJWT{UserID: "u-ana", Username: "ana",
 		Orgs: []domain.OrgMembershipClaim{{OrgID: "org-1", Role: domain.OrgRoleMember}}},

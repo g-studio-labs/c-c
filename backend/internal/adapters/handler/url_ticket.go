@@ -59,21 +59,41 @@ var patAuth func(token string) (*domain.ClaimsJWT, error)
 // UsePATAuthenticator: ver patAuth.
 func UsePATAuthenticator(fn func(token string) (*domain.ClaimsJWT, error)) { patAuth = fn }
 
-var errPATNotHere = errors.New("personal tokens cannot use this route")
+var (
+	errPATNotHere       = errors.New("personal tokens cannot use this route")
+	errPATMissingEvents = errors.New("missing-scope:" + domain.ScopeEventsRead)
+)
 
 // claimsFromPAT: un token personal, en la cabecera, abre un adjunto. Las rutas
 // `raw` viven fuera de AuthMiddleware (un <img> no manda cabeceras), así que
 // sin esto un agente con su token recibía 404 por cada adjunto que `get_task`
-// le enseñaba (command-and-control-246). Sólo adjuntos: el stream de eventos
-// registra presencia, y un token es una máquina, no alguien que está.
+// le enseñaba (command-and-control-246).
+//
+// Y el stream de eventos, sólo con `events:read` (command-and-control-558):
+// entonces el handler lo lleva por su rama de token, que sólo entrega el
+// diario de su dueño y no registra presencia —un token es una máquina, no
+// alguien que está—.
 func claimsFromPAT(tok, scope string) (*domain.ClaimsJWT, error) {
-	if scope != repository.URLScopeMedia || patAuth == nil {
+	if (scope != repository.URLScopeMedia && scope != repository.URLScopeEvents) || patAuth == nil {
 		return nil, errPATNotHere
 	}
 	c, err := patAuth(tok)
 	if err != nil {
 		return nil, err
 	}
+	if scope == repository.URLScopeEvents && !c.HasScope(domain.ScopeEventsRead) {
+		return nil, errPATMissingEvents
+	}
 	c.ViaToken = true
 	return c, nil
+}
+
+// bearerPAT: el token personal de la cabecera, si lo hay.
+func bearerPAT(r *http.Request) (string, bool) {
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, "Bearer ") {
+		return "", false
+	}
+	tok := strings.TrimPrefix(h, "Bearer ")
+	return tok, strings.HasPrefix(tok, repository.PATPrefix)
 }

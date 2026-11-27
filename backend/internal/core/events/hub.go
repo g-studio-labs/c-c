@@ -34,14 +34,20 @@ type Event struct {
 	// del muro «para todos»— no tiene una OrgID que filtrar, y con OrgID vacía
 	// sólo le llegaría a los superadmins. UserID sigue mandando sobre esto.
 	Broadcast bool `json:"-"`
-	Data      any  `json:"data"`
+	// Seq: el número del evento en el diario de UserID (command-and-control-558).
+	// Mayor que cero sólo en lo que sale del diario; es lo único que se le
+	// entrega a quien escucha con un token (SubscribePersonal).
+	Seq  int64 `json:"-"`
+	Data any   `json:"data"`
 }
 
 type subscriber struct {
 	orgs   map[string]bool
 	all    bool   // superadmin: receive events from every org
 	userID string // who is listening, for events addressed to one person
-	ch     chan Event
+	// personal: sólo su diario. Ver SubscribePersonal.
+	personal bool
+	ch       chan Event
 }
 
 type Hub struct {
@@ -68,12 +74,23 @@ func (h *Hub) SubscribeAll(userID string) (<-chan Event, func()) {
 	return h.subscribe(userID, nil, true)
 }
 
+// SubscribePersonal: quien escucha con un token personal. Sólo recibe los
+// eventos del diario de esa persona —dirigidos a ella y con número—: ni lo de
+// sus organizaciones, ni los comunicados, ni lo de todas aunque sea superadmin.
+// Un token es una máquina que lee lo que le toca a su dueño, no una consola.
+func (h *Hub) SubscribePersonal(userID string) (<-chan Event, func()) {
+	return h.add(&subscriber{orgs: map[string]bool{}, userID: userID, personal: true, ch: make(chan Event, 64)})
+}
+
 func (h *Hub) subscribe(userID string, orgIDs []string, all bool) (<-chan Event, func()) {
 	orgs := make(map[string]bool, len(orgIDs))
 	for _, id := range orgIDs {
 		orgs[id] = true
 	}
-	sub := &subscriber{orgs: orgs, all: all, userID: userID, ch: make(chan Event, 32)}
+	return h.add(&subscriber{orgs: orgs, all: all, userID: userID, ch: make(chan Event, 32)})
+}
+
+func (h *Hub) add(sub *subscriber) (<-chan Event, func()) {
 
 	h.mu.Lock()
 	id := h.next
@@ -110,6 +127,16 @@ func (h *Hub) deliver(e Event) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for _, s := range h.subs {
+		if s.personal {
+			if e.UserID != s.userID || e.Seq <= 0 {
+				continue
+			}
+			select {
+			case s.ch <- e:
+			default:
+			}
+			continue
+		}
 		// Addressed to one person: nobody else, whatever they are subscribed
 		// to. Checked before the org rule on purpose — `all` means "every
 		// organization", not "every conversation", and reading it as the latter

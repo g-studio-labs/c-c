@@ -200,6 +200,13 @@ type Aviso struct {
 	// ni se deben traducir.
 	TitleKey  string
 	TitleArgs map[string]string
+	// SourceKey: la clave del evento del diario que causó este aviso (un
+	// `basecamp:event`), para que quien escucha los empareje. Opcional.
+	SourceKey string
+	// Detail: lo que el aviso no cabe en sus 400 caracteres —el texto entero de
+	// un mensaje, el `finalText` de un pedido—. Sólo viaja en el evento del
+	// diario, no en la fila de la campana. Opcional.
+	Detail any
 }
 
 // Frase es un título **sin escribir todavía**: la clave del catálogo y sus

@@ -112,7 +112,8 @@ func InitReportRoutes(db *gorm.DB, r *chi.Mux, hub *events.Hub) {
 	imageProxy := handler.NewImageProxyHandler(reportRepo, store)
 	// Con el registrador de presencia: ver el comentario en el handler — esta
 	// ruta no pasa por el middleware que lo hace en todas las demás.
-	eventsH := handler.NewEventsHandler(hub, repository.NewAuthRepository(db).TouchLastSeen)
+	eventsH := handler.NewEventsHandler(hub, repository.NewAuthRepository(db).TouchLastSeen,
+		service.NewEventJournal(repository.NewUserEventRepository(db), hub))
 
 	// Admin API — JWT, org-scoped.
 	r.Route("/api/v1/report-projects", func(r chi.Router) {
@@ -148,6 +149,9 @@ func InitReportRoutes(db *gorm.DB, r *chi.Mux, hub *events.Hub) {
 	// SSE notifications — org-scoped. Auth by ?token= (EventSource can't set
 	// headers), so it lives outside the JWT-only group.
 	r.Get("/api/v1/events", eventsH.Stream)
+	// Lo que el diario guarda de quien pregunta, desde un cursor
+	// (command-and-control-558). Éste sí por la cabecera, como toda la API.
+	r.With(middleware.AuthMiddleware).Get("/api/v1/events/backlog", eventsH.Backlog)
 
 	// Diagnostics (passive telemetry) — JWT, org-scoped. Separate lane from the
 	// reports inbox; NOT streamed over SSE (volume).

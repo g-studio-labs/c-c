@@ -162,6 +162,13 @@ const (
 	// lo del dueño del token —ni el de un superadmin toca lo ajeno— y retirar,
 	// sólo lo que escribió un agente (domain.MessageChanger).
 	ScopeChatManage = "chat:manage"
+	// ScopeEventsRead: escuchar el diario de eventos del dueño del token —el
+	// stream y su backlog— desde una máquina (`cac-mcp listen`,
+	// command-and-control-558). Es lectura: no abre ninguna ruta que escriba
+	// (no está en la tabla de rutas de un token) y no hace de nadie una
+	// persona presente. Aparte de leer porque un token de solo lectura de antes
+	// no tiene por qué quedarse escuchando todo lo que le pasa a su dueño.
+	ScopeEventsRead = "events:read"
 )
 
 // AllScopes: todos los que se pueden conceder. Una lista y no sólo el switch
@@ -174,6 +181,7 @@ var AllScopes = []string{
 	ScopeDocsWrite, ScopeDocsManage, ScopeDocsShare,
 	ScopeCollectionsWrite, ScopeDeploysManage, ScopeServersManage, ScopeNotifyMe, ScopePostsWrite,
 	ScopeChatWrite, ScopeChatManage,
+	ScopeEventsRead,
 }
 
 func ValidScope(s string) bool {
