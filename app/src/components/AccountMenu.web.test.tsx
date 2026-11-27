@@ -62,6 +62,20 @@ describe("la elección de «Abrir en la app» en el menú de cuenta", () => {
     expect(localStorage.getItem("cac.openInApp")).toBeNull();
   });
 
+  it("al abrirse relee lo que la barra recordó después de montarse", async () => {
+    const { default: OpenInAppBar } = await import("@/components/OpenInAppBar");
+    render(
+      <MemoryRouter>
+        <OpenInAppBar />
+        <AccountMenu onChangePassword={() => {}} onNotificationPrefs={() => {}} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: /Open in the app|Abrir en la app/ }));
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    expect(screen.getByRole("button", { name: "App" }).getAttribute("data-active")).toBe("true");
+  });
+
   it("no se ofrece en móvil", () => {
     Object.defineProperty(navigator, "userAgent", { value: "Mozilla/5.0 (Linux; Android 14) Mobile", configurable: true });
     open();

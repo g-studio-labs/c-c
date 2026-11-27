@@ -45,6 +45,7 @@ beforeEach(() => {
   resetTried();
   platform.isTauri = false;
   clicks.length = 0;
+  document.querySelectorAll("iframe").forEach((f) => f.remove());
   setUA(DESKTOP);
   const append = document.body.appendChild.bind(document.body);
   vi.spyOn(document.body, "appendChild").mockImplementation(((node: Node) => {
@@ -114,6 +115,19 @@ describe("la barra «Abrir en la app»", () => {
     fireEvent.click(screen.getByRole("checkbox"));
     fireEvent.click(screen.getByRole("button", { name: /Open in the app|Abrir en la app/ }));
     expect(clicks).toEqual(["cac://tasks?task=X"]);
+  });
+
+  it("el marco del intento se quita al segundo", () => {
+    vi.useFakeTimers();
+    try {
+      mount();
+      fireEvent.click(screen.getByRole("button", { name: /Open in the app|Abrir en la app/ }));
+      expect(document.querySelectorAll("iframe")).toHaveLength(1);
+      vi.advanceTimersByTime(1000);
+      expect(document.querySelectorAll("iframe")).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("el intento no navega la página: ni location ni historial", () => {

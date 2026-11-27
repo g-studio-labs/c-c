@@ -1565,7 +1565,7 @@
     "open": "Open in the app",
     "stay": "No, stay on the web",
     "remember": "Remember my choice",
-    "setting": "Open links, always in",
+    "setting": "Open links in",
     "choice": { "ask": "Ask", "app": "App", "web": "Web" }
   }
 }
