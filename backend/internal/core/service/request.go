@@ -271,8 +271,37 @@ func (s *RequestService) answerVia(q *domain.Request, callerID, answeredVia stri
 		return nil, err
 	}
 	s.announce(domain.RequestAnsweredEvent, fresh)
+	s.notifyAnswered(fresh, answeredVia, clean)
 	v := s.View(fresh, callerID, false)
 	return &v, nil
+}
+
+// notifyAnswered: a quien lo pidió, que su sesión se entere de la respuesta
+// sin preguntar (command-and-control-558). No si la apuntó su propia sesión:
+// ya la sabe, es quien la escribió. El `finalText` de un mensaje aprobado y la
+// nota van enteros en `detail`, que el cuerpo de la campana no lleva.
+func (s *RequestService) notifyAnswered(q *domain.Request, answeredVia string, a domain.RequestAnswer) {
+	if s.inbox == nil || q.RequestedByID == "" || answeredVia == domain.AnsweredViaSession {
+		return
+	}
+	title := ""
+	if t, err := s.tasks.FindTask(q.TaskID); err == nil {
+		title = t.Title
+	}
+	detail := map[string]any{"code": q.Code, "kind": q.Kind, "finalText": a.FinalText, "note": a.Note, "reason": a.Reason}
+	if a.Approved != nil {
+		detail["approved"] = *a.Approved
+	}
+	s.inbox.Notify(domain.Aviso{
+		UserID: q.RequestedByID, OrgID: q.OrgID, Kind: domain.RequestAnsweredNotifyKind,
+		TitleKey:  "notify.request.answered",
+		TitleArgs: map[string]string{"task": title},
+		Body:      q.Summary,
+		Link:      domain.RequestLink(q.Code),
+		Group:     domain.ItemGroup(q.TaskID),
+		Label:     title,
+		Detail:    detail,
+	})
 }
 
 // AnswerFromBasecamp: lo que `userID` escribió en el hilo de Basecamp enlazado

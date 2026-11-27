@@ -62,6 +62,18 @@ type broadcast struct {
 	// repliedTo: quien escribió lo que esta línea contesta. Se le avisa como a
 	// alguien nombrado — le están hablando a él —, salvo que sea quien escribe.
 	repliedTo string
+	// via: por dónde entró la línea, para decir en el evento si la escribió un
+	// agente.
+	via string
+}
+
+// detail: lo que el evento del diario lleva de esta línea y la campana no
+// cabe: el texto **entero**, no el adelanto de 400 caracteres del aviso.
+func (b broadcast) detail(author string) map[string]any {
+	return map[string]any{
+		"spaceId": b.spaceID, "messageId": b.messageID, "author": author,
+		"text": b.body, "viaAgent": b.via == domain.ViaMCP,
+	}
 }
 
 type ChatService struct {
@@ -212,6 +224,7 @@ func (s *ChatService) anotarAvisos(b broadcast) {
 			// canal**, no en un sitio aparte. El rótulo va sin el envoltorio,
 			// que es del título de la fila y no del nombre del canal.
 			Group: domain.ChannelGroup(b.spaceID), Label: where,
+			Detail: b.detail(author),
 		})
 	}
 
@@ -225,6 +238,7 @@ func (s *ChatService) anotarAvisos(b broadcast) {
 			Body:      line,
 			Link:      "/chat?space=" + b.spaceID, Via: domain.ViaApp,
 			Group: domain.ChannelGroup(b.spaceID), Label: where,
+			Detail: b.detail(author),
 		})
 	}
 
@@ -258,6 +272,7 @@ func (s *ChatService) anotarAvisos(b broadcast) {
 			Title: where, Body: line,
 			Link: "/chat?space=" + b.spaceID, Via: domain.ViaApp,
 			Group: domain.ChannelGroup(b.spaceID), Label: where,
+			Detail: b.detail(author),
 		})
 	}
 }
@@ -412,7 +427,7 @@ func (s *ChatService) write(
 		// Las menciones se leen del cuerpo también aquí: si algún día una línea
 		// del sistema nombra a alguien, que le llegue. Hoy ninguna lo hace.
 		mentions:  s.mentioned(orgID, body),
-		repliedTo: repliedTo,
+		repliedTo: repliedTo, via: domain.NormalizeVia(via),
 	})
 	return m, nil
 }
@@ -501,6 +516,10 @@ func (s *ChatService) announceEdit(original *domain.ChatMessage, by domain.Messa
 			Body:      Adelanto(body),
 			Link:      "/chat?space=" + original.SpaceID, Via: by.WrittenVia(),
 			Group: domain.ChannelGroup(original.SpaceID), Label: where,
+			Detail: map[string]any{
+				"spaceId": original.SpaceID, "messageId": original.ID, "author": author,
+				"text": body, "viaAgent": by.AsAgent(), "edited": true,
+			},
 		})
 	}
 }

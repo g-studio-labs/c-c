@@ -48,7 +48,7 @@ func (s *DMService) WithNotifier(n Notifier) *DMService {
 // `edited` es una corrección o un retiro: el evento sale igual —la
 // conversación cambia en pantalla— y marcado, pero sin fila en la campana:
 // no es que te hayan escrito otra vez (command-and-control-418).
-func (s *DMService) publish(toUserID, orgID, conversationID, messageID, actorID string, edited bool) {
+func (s *DMService) publish(toUserID, orgID, conversationID, messageID, actorID string, edited bool, text, via string) {
 	if s.hub == nil || toUserID == "" || toUserID == actorID {
 		return
 	}
@@ -100,6 +100,13 @@ func (s *DMService) publish(toUserID, orgID, conversationID, messageID, actorID 
 			// El rótulo es el nombre a secas, sin el «te escribió» del título:
 			// plegados, tres directos de Ana son «Ana», no «Ana te escribió».
 			Group: domain.DMGroup(conversationID), Label: de,
+			// El texto entero sólo viaja en el evento del diario de quien
+			// recibe (Notify lo apunta a `UserID`), no en la fila de la
+			// campana: el otro participante no lo ve ahí y nadie más lo recibe.
+			Detail: map[string]any{
+				"threadId": conversationID, "messageId": messageID, "author": de,
+				"text": text, "viaAgent": via == domain.ViaMCP,
+			},
 		})
 	}
 }
@@ -223,7 +230,7 @@ func (s *DMService) ReplyVia(via, conversationID, userID, body, replyToID string
 	if err := s.repo.Create(m); err != nil {
 		return nil, err
 	}
-	s.publish(c.Other(userID), c.OrgID, c.ID, m.ID, userID, false)
+	s.publish(c.Other(userID), c.OrgID, c.ID, m.ID, userID, false, body, m.Via)
 	return m, nil
 }
 
@@ -261,8 +268,8 @@ func (s *DMService) EditAs(by domain.MessageChanger, conversationID, messageID, 
 	if err := s.repo.Rewrite(messageID, body, by.WrittenVia()); err != nil {
 		return err
 	}
-	s.publish(c.Other(by.UserID), c.OrgID, c.ID, m.ID, by.UserID, true)
-	s.announceEdit(c, m, by)
+	s.publish(c.Other(by.UserID), c.OrgID, c.ID, m.ID, by.UserID, true, "", "")
+	s.announceEdit(c, m, by, body)
 	return nil
 }
 
@@ -271,7 +278,7 @@ func (s *DMService) EditAs(by domain.MessageChanger, conversationID, messageID, 
 // un directo nuevo (ver publish): una fila de la campana la puede leer quien
 // mire la pantalla. Sólo si corrige el autor: lo que limpia un superadmin no
 // es «su mensaje».
-func (s *DMService) announceEdit(c *domain.DMConversation, m *domain.DMMessage, by domain.MessageChanger) {
+func (s *DMService) announceEdit(c *domain.DMConversation, m *domain.DMMessage, by domain.MessageChanger, body string) {
 	to := c.Other(by.UserID)
 	if s.notifier == nil || m.AuthorUserID != by.UserID || to == "" || to == by.UserID {
 		return
@@ -286,6 +293,10 @@ func (s *DMService) announceEdit(c *domain.DMConversation, m *domain.DMMessage, 
 		TitleKey: key, TitleArgs: map[string]string{"who": who},
 		Body: "", Link: "/dm?c=" + c.ID, Via: by.WrittenVia(),
 		Group: domain.DMGroup(c.ID), Label: who,
+		Detail: map[string]any{
+			"threadId": c.ID, "messageId": m.ID, "author": who,
+			"text": body, "viaAgent": by.AsAgent(), "edited": true,
+		},
 	})
 }
 
@@ -306,7 +317,7 @@ func (s *DMService) WithdrawAs(by domain.MessageChanger, conversationID, message
 	if err := s.repo.Withdraw(messageID); err != nil {
 		return err
 	}
-	s.publish(c.Other(by.UserID), c.OrgID, c.ID, m.ID, by.UserID, true)
+	s.publish(c.Other(by.UserID), c.OrgID, c.ID, m.ID, by.UserID, true, "", "")
 	return nil
 }
 

@@ -173,7 +173,7 @@ func (p NotificationPrefs) Allows(kind string) bool {
 	case SelfNoticeKind:
 		return !p.WorkQuiet
 	// Un pedido de un agente es trabajo que te llega, como una asignación.
-	case RequestNotifyKind:
+	case RequestNotifyKind, RequestAnsweredNotifyKind:
 		return !p.WorkQuiet
 	// Un run del CI que terminó y un deploy que acabó son la misma familia:
 	// lo que hizo la máquina con el código. Un solo interruptor para los dos.
