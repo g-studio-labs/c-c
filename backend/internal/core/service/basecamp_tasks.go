@@ -50,12 +50,14 @@ func (s *BasecampService) processAssignable(full basecampFull, who, actorID stri
 		switch {
 		case errors.Is(err, gorm.ErrRecordNotFound):
 			// Ya no existe (a la papelera antes de que llegara el evento).
+			s.publishUnreadable(full)
 			return nil
 		case basecampRefused(err):
 			// Un «no» de Basecamp (403: quien conectó ya no ve ese proyecto)
 			// no cambia al reintentar, y desactivarían el webhook: se atiende,
 			// pero quien enlazó el proyecto tiene que enterarse.
 			lg.Warn(fmt.Sprintf("basecamp: reading recording %d of project %d: %v", recording, proj.ProjectID, err))
+			s.publishUnreadable(full)
 			s.notifyProjectRefused(proj)
 			return nil
 		case errors.Is(err, domain.ErrBasecampNotConnected), errors.Is(err, domain.ErrBasecampReconnect),
@@ -64,6 +66,7 @@ func (s *BasecampService) processAssignable(full basecampFull, who, actorID stri
 			// diez fallos: se perdería también lo de la fase 1. Los admins ya
 			// tienen el aviso de volver a conectar.
 			lg.Warn(fmt.Sprintf("basecamp: reading recording %d of project %d: %v", recording, proj.ProjectID, err))
+			s.publishUnreadable(full)
 			return nil
 		}
 		// Basecamp no contestó: el evento se suelta y su reintento vuelve.
@@ -99,6 +102,20 @@ func (s *BasecampService) processAssignable(full basecampFull, who, actorID stri
 			Data: map[string]string{"listId": item.ListID, "taskId": item.ID}})
 	}
 	return s.syncAssignees(proj, item, rec.Assignees, who, actorID, full.key)
+}
+
+// publishUnreadable: el evento de un to-do o una tarjeta que Basecamp no deja
+// leer sale igual, con `enriched: false`, para que cada miembro sepa que
+// pasó algo. Sólo en los casos que no se reintentan: en un reintento, la
+// clave ya estaría usada y el evento completo no saldría nunca.
+func (s *BasecampService) publishUnreadable(full basecampFull) {
+	if link, err := s.repo.LinkFor(full.proj.OrgID, full.ev.Recording.ID); err == nil && link.ProjectID == full.proj.ProjectID {
+		if it, err := s.repo.Item(link.ItemID); err == nil {
+			full.item = it
+		}
+	}
+	full.unreadable = true
+	s.publishEvent(full)
 }
 
 // taskFor: la tarea enlazada al recording, creándola si no la hay. nil si el

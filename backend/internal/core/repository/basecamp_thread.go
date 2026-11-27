@@ -73,8 +73,7 @@ func (r *BasecampRepository) Awaiting(orgID string) ([]domain.BasecampAwaiting, 
 		a := domain.BasecampAwaiting{ProjectID: x.ProjectID, ProjectName: x.ProjectName, SpaceID: x.SpaceID,
 			RecordingID: x.RecordingID, Type: x.Type, Title: x.Title, AppURL: domain.SafeBasecampURL(x.AppURL),
 			AwaitingSince: x.AwaitingSince, TaskID: x.ItemID,
-			LastExternal: domain.BasecampAwaitingExternal{Name: x.LastExternalName, Client: x.LastExternalClient,
-				At: x.LastExternalAt, Excerpt: x.LastExternalExcerpt}}
+			LastExternal: x.LastExternalOut(), LastClient: x.LastClientOut()}
 		if x.ItemID != "" {
 			a.TaskRef = r.taskRef(x.ItemProject, x.SpaceKey, x.ItemSeq)
 		}

@@ -38,6 +38,13 @@ const (
 	// basecampRecentPages: las páginas de comentarios que se leen para llegar
 	// a los últimos.
 	basecampRecentPages = 4
+	// basecampMaxAttachments y basecampMaxMentions: los que viajan en el
+	// evento. Sin tope, un comentario con ~120 imágenes pasa de
+	// UserEventMaxData y el diario cambia todo `data` por {truncated, bytes},
+	// ids incluidos. Lo que sobra se marca con `attachmentsTruncated` /
+	// `mentionsTruncated`.
+	basecampMaxAttachments = 40
+	basecampMaxMentions    = 40
 )
 
 // WithJournal: otro diario que el del proceso, para las pruebas.
@@ -74,8 +81,11 @@ func basecampEventKey(ev domain.BasecampWebhookEvent) string {
 type basecampAuthor struct {
 	wire   domain.BasecampPersonWire
 	person *domain.BasecampPerson
+	// matched: casado con alguien que hoy es miembro de la org.
+	matched bool
 	// team: casado con un miembro de la org y no marcado cliente. Todo lo
-	// demás es de fuera, también una persona sin casar.
+	// demás es de fuera, también una persona sin casar o casada con alguien
+	// que ya dejó la org.
 	team bool
 }
 
@@ -88,7 +98,8 @@ func (a basecampAuthor) userID() string {
 
 func (s *BasecampService) authorOf(orgID string, wire domain.BasecampPersonWire, person *domain.BasecampPerson) basecampAuthor {
 	a := basecampAuthor{wire: wire, person: person}
-	a.team = person != nil && person.UserID != "" && !person.Client && !wire.Client && s.repo.IsMember(orgID, person.UserID)
+	a.matched = person != nil && person.UserID != "" && s.repo.IsMember(orgID, person.UserID)
+	a.team = a.matched && !person.Client && !wire.Client
 	return a
 }
 
@@ -112,8 +123,8 @@ func (s *BasecampService) trackThread(proj *domain.BasecampProject, ev domain.Ba
 		Title: clipRunes(strings.TrimSpace(title), 300), AppURL: domain.SafeBasecampURL(appURL), Type: typ,
 		Said: said, At: at.UTC(), External: !author.team, AuthorName: strings.TrimSpace(author.wire.Name),
 		AuthorClient: author.wire.Client || (author.person != nil && author.person.Client),
-		AuthorUserID: author.userID(),
-		Excerpt:      domain.BasecampPlainText(ev.Recording.Content, basecampExcerpt)}
+		AuthorUserID: author.userID(), AuthorPersonID: author.wire.ID, AuthorMatched: author.matched,
+		Excerpt: domain.BasecampPlainText(ev.Recording.Content, basecampExcerpt)}
 	thread, err := s.repo.ApplyToThread(w)
 	if err != nil {
 		lg.Warn(fmt.Sprintf("basecamp: updating thread %d of org %s: %v", targetID, proj.OrgID, err))
@@ -142,13 +153,21 @@ type basecampFull struct {
 	todo *domain.BasecampAssignable
 	// textHTML: el texto del evento; vacío, el del recording.
 	textHTML string
+	// unreadable: Basecamp no deja leer el to-do o la tarjeta (borrado, un
+	// «no», sin conexión). El evento sale igual, sin completar y sin volver a
+	// preguntar.
+	unreadable bool
 }
 
+// bcPersonOut: una persona de Basecamp en el evento. `matched: false` con
+// `client: false` es alguien sin casar (o casado con quien ya no es de la
+// org): la nativa y la skill dicen «cásalo en Organización → Basecamp».
 type bcPersonOut struct {
 	PersonID int64  `json:"personId"`
 	Name     string `json:"name"`
 	Client   bool   `json:"client"`
 	UserID   string `json:"userId"`
+	Matched  bool   `json:"matched"`
 }
 
 // publishEvent deja el `basecamp:event` en el diario de cada miembro de la
@@ -173,28 +192,28 @@ func (s *BasecampService) publishEvent(f basecampFull) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	enriched := true
+	enriched := !f.unreadable
 	todo := f.todo
-	if todo == nil {
-		if path := todoPath(f.ev, f.proj.ProjectID, targetID); path != "" {
-			var rec domain.BasecampAssignable
-			if err := s.apiCtx(ctx, f.proj.OrgID, path, &rec); err == nil && rec.ID == targetID {
-				todo = &rec
-			} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-				enriched = false
+	var recent []map[string]any
+	if f.unreadable {
+		recent = []map[string]any{}
+	} else {
+		if todo == nil {
+			if path := todoPath(f.ev, f.proj.ProjectID, targetID); path != "" {
+				var rec domain.BasecampAssignable
+				if err := s.apiCtx(ctx, f.proj.OrgID, path, &rec); err == nil && rec.ID == targetID {
+					todo = &rec
+				} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+					enriched = false
+				}
 			}
 		}
+		var ok bool
+		recent, ok = s.recentComments(ctx, f.proj, targetID)
+		enriched = enriched && ok
 	}
-	recent, ok := s.recentComments(ctx, f.proj, targetID)
-	enriched = enriched && ok
 
-	data := s.eventData(f, todo, recent, enriched)
-	mentioned := map[string]bool{}
-	for _, m := range data["mentions"].([]bcPersonOut) {
-		if m.UserID != "" {
-			mentioned[m.UserID] = true
-		}
-	}
+	data, mentioned := s.eventData(f, todo, recent, enriched)
 	assigned := map[string]bool{}
 	if t, ok := data["todo"].(map[string]any); ok {
 		for _, a := range t["assignees"].([]bcPersonOut) {
@@ -202,6 +221,12 @@ func (s *BasecampService) publishEvent(f basecampFull) {
 				assigned[a.UserID] = true
 			}
 		}
+	}
+	// Lo que escribió la propia persona no es «suyo» para `--mine`, aunque
+	// esté asignada al to-do o se mencione.
+	authorUID := ""
+	if f.author.person != nil {
+		authorUID = f.author.person.UserID
 	}
 	for _, uid := range members {
 		you := map[string]any{"mentioned": mentioned[uid], "assigned": assigned[uid],
@@ -212,7 +237,7 @@ func (s *BasecampService) publishEvent(f basecampFull) {
 		}
 		per["you"] = you
 		if _, _, err := j.Append(domain.UserEventInput{UserID: uid, OrgID: f.proj.OrgID, Type: domain.UserEventBasecamp,
-			Key: f.key, Mine: mentioned[uid] || assigned[uid], External: !f.author.team, Data: per}); err != nil {
+			Key: f.key, Mine: (mentioned[uid] || assigned[uid]) && uid != authorUID, External: !f.author.team, Data: per}); err != nil {
 			lg.Warn("basecamp: appending an event to a journal: " + err.Error())
 		}
 	}
@@ -304,13 +329,14 @@ func (s *BasecampService) personOut(orgID string, w domain.BasecampPersonWire) b
 	}
 	out.Client = out.Client || p.Client
 	if p.UserID != "" && s.repo.IsMember(orgID, p.UserID) {
-		out.UserID = p.UserID
+		out.UserID, out.Matched = p.UserID, true
 	}
 	return out
 }
 
-// eventData: el `data` del evento, igual para todos los miembros salvo `you`.
-func (s *BasecampService) eventData(f basecampFull, todo *domain.BasecampAssignable, recent []map[string]any, enriched bool) map[string]any {
+// eventData: el `data` del evento, igual para todos los miembros salvo `you`,
+// y los usuarios que nombra (todos, también los que no caben en `mentions`).
+func (s *BasecampService) eventData(f basecampFull, todo *domain.BasecampAssignable, recent []map[string]any, enriched bool) (map[string]any, map[string]bool) {
 	ev, proj := f.ev, f.proj
 	targetID, targetTitle, targetURL := ev.Target()
 
@@ -329,7 +355,8 @@ func (s *BasecampService) eventData(f basecampFull, todo *domain.BasecampAssigna
 	}
 
 	author := bcPersonOut{PersonID: f.author.wire.ID, Name: strings.TrimSpace(f.author.wire.Name),
-		Client: f.author.wire.Client || (f.author.person != nil && f.author.person.Client), UserID: f.author.userID()}
+		Client: f.author.wire.Client || (f.author.person != nil && f.author.person.Client), UserID: f.author.userID(),
+		Matched: f.author.matched}
 	data["author"] = author
 	data["team"] = f.author.team
 
@@ -339,6 +366,7 @@ func (s *BasecampService) eventData(f basecampFull, todo *domain.BasecampAssigna
 	}
 	putText(data, "text", domain.BasecampMarkdown(content))
 	mentions := []bcPersonOut{}
+	mentioned := map[string]bool{}
 	seen := map[string]bool{}
 	for _, m := range domain.ExtractBasecampMentions(content) {
 		key := m.SGID
@@ -353,12 +381,22 @@ func (s *BasecampService) eventData(f basecampFull, todo *domain.BasecampAssigna
 		}
 		out := bcPersonOut{PersonID: p.PersonID, Name: p.Name, Client: p.Client}
 		if p.UserID != "" && s.repo.IsMember(proj.OrgID, p.UserID) {
-			out.UserID = p.UserID
+			out.UserID, out.Matched = p.UserID, true
+			mentioned[p.UserID] = true
 		}
 		mentions = append(mentions, out)
 	}
+	if len(mentions) > basecampMaxMentions {
+		mentions = mentions[:basecampMaxMentions]
+		data["mentionsTruncated"] = true
+	}
 	data["mentions"] = mentions
-	data["attachments"] = domain.BasecampAttachments(content)
+	attachments := domain.BasecampAttachments(content)
+	if len(attachments) > basecampMaxAttachments {
+		attachments = attachments[:basecampMaxAttachments]
+		data["attachmentsTruncated"] = true
+	}
+	data["attachments"] = attachments
 
 	thread := map[string]any{"recordingId": targetID, "title": targetTitle,
 		"appUrl": domain.SafeBasecampURL(targetURL), "recent": recent}
@@ -367,8 +405,10 @@ func (s *BasecampService) eventData(f basecampFull, todo *domain.BasecampAssigna
 		thread["awaitingReply"] = t.AwaitingReply
 		thread["awaitingSince"] = t.AwaitingSince
 		if t.LastExternalAt != nil {
-			thread["lastExternal"] = map[string]any{"name": t.LastExternalName, "client": t.LastExternalClient,
-				"at": t.LastExternalAt}
+			thread["lastExternal"] = t.LastExternalOut()
+		}
+		if c := t.LastClientOut(); c != nil {
+			thread["lastClient"] = c
 		}
 		if t.LastTeamReplyAt != nil {
 			thread["lastTeamReply"] = map[string]any{"userId": t.LastTeamReplyByID, "at": t.LastTeamReplyAt}
@@ -394,7 +434,7 @@ func (s *BasecampService) eventData(f basecampFull, todo *domain.BasecampAssigna
 		cac["requestCodes"] = s.repo.OpenRequestCodes(f.item.ID)
 	}
 	data["cac"] = cac
-	return data
+	return data, mentioned
 }
 
 // Awaiting: los hilos por contestar de la org.

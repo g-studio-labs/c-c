@@ -325,8 +325,9 @@ func TestBasecampBeingDownStillDeliversTheEvent(t *testing.T) {
 	if todo["dueOn"] != "2026-12-01" || d["list"].(map[string]any)["title"] != "Sprint 3" {
 		t.Fatalf("todo %v list %v", todo, d["list"])
 	}
-	if !evs[1].Mine || d["you"].(map[string]any)["assigned"] != true {
-		t.Fatalf("Ana is assigned to the to-do and her event says mine=%v you=%v", evs[1].Mine, d["you"])
+	// Ana está asignada, pero lo escribió ella: no es «suyo» (TestWhatYouWroteIsNotMine).
+	if evs[1].Mine || d["you"].(map[string]any)["assigned"] != true {
+		t.Fatalf("Ana is assigned to the to-do and wrote it; her event says mine=%v you=%v", evs[1].Mine, d["you"])
 	}
 }
 
@@ -435,3 +436,201 @@ func TestTheEventComesBeforeItsNoticesAndTheyShareTheKey(t *testing.T) {
 type notifierFunc func(domain.Aviso)
 
 func (n notifierFunc) Notify(a domain.Aviso) { n(a) }
+
+// Un cliente dice algo y después habla alguien sin casar (p. ej. el equipo
+// publicando como «Dwit»): la lista conserva lo del cliente y dice que lo
+// último es de alguien sin casar, con su persona, para poder casarlo. Lo
+// mismo en el evento.
+//
+// Roturas que atrapa: que lo del sin casar pise lo del cliente; perder el
+// `matched: false` o el `personId`, en la lista o en el evento.
+func TestAnUnmatchedReplyKeepsTheClientsMessage(t *testing.T) {
+	f := newBasecampFixture(t)
+	j := f.withJournal(t)
+	f.linkTodo(t)
+	f.deliver(t, commentAt(9001, 8001, bcClient, "<div>¿Ya quedó el login?</div>", "2026-11-26T12:00:00Z"))
+	f.deliver(t, commentAt(9002, 8002, bcNewcomer, "<div>Ya casi</div>", "2026-11-26T12:05:00Z"))
+
+	list := f.awaiting(t)
+	if len(list) != 1 {
+		t.Fatalf("awaiting: %+v", list)
+	}
+	ext, cl := list[0].LastExternal, list[0].LastClient
+	if ext.Name != "Nuevo" || ext.PersonID != bcNewcomer.ID || ext.Matched || ext.Client || ext.Excerpt != "Ya casi" {
+		t.Fatalf("lastExternal: %+v", ext)
+	}
+	if cl == nil || cl.Name != "Cliente" || cl.PersonID != bcClient.ID || !cl.Client || cl.Excerpt != "¿Ya quedó el login?" {
+		t.Fatalf("lastClient: %+v", cl)
+	}
+
+	evs := bcEvents(t, j, "u-bob")
+	d := eventData(t, evs[1])
+	if a := d["author"].(map[string]any); a["matched"] != false || a["personId"] != float64(bcNewcomer.ID) {
+		t.Fatalf("the unmatched author: %v", a)
+	}
+	th := d["thread"].(map[string]any)
+	le, lc := th["lastExternal"].(map[string]any), th["lastClient"].(map[string]any)
+	if le["matched"] != false || le["personId"] != float64(bcNewcomer.ID) || lc["name"] != "Cliente" {
+		t.Fatalf("the thread in the event: lastExternal %v lastClient %v", le, lc)
+	}
+
+	// Y alguien del equipo, casado, sale `matched: true`.
+	f.deliver(t, commentAt(9003, 8003, bcAna, "<div>Listo</div>", "2026-11-26T12:10:00Z"))
+	evs = bcEvents(t, j, "u-bob")
+	if a := eventData(t, evs[2])["author"].(map[string]any); a["matched"] != true || a["userId"] != "u-ana" {
+		t.Fatalf("a matched team author: %v", a)
+	}
+}
+
+// Alguien casado que ya dejó la org es de fuera: su respuesta no limpia el
+// hilo ni sale como del equipo.
+//
+// Rotura que atrapa: dar por del equipo a quien está casado sin mirar si
+// sigue siendo miembro.
+func TestAnAuthorWhoLeftTheOrgCountsAsExternal(t *testing.T) {
+	f := newBasecampFixture(t)
+	j := f.withJournal(t)
+	// Ana queda casada con u-ana, y después deja la org.
+	f.deliver(t, commentAt(9001, 8001, bcAna, "<div>Hola</div>", "2026-11-26T11:00:00Z"))
+	f.deliver(t, commentAt(9002, 8002, bcClient, "<div>¿Y?</div>", "2026-11-26T12:00:00Z"))
+	if err := f.db.Exec(`DELETE FROM org_memberships WHERE org_id = 'org-1' AND user_id = 'u-ana'`).Error; err != nil {
+		t.Fatal(err)
+	}
+	var p domain.BasecampPerson
+	if err := f.db.First(&p, "org_id = ? AND person_id = ?", "org-1", bcAna.ID).Error; err != nil || p.UserID != "u-ana" {
+		t.Fatalf("Ana should still be matched to u-ana: %+v %v", p, err)
+	}
+	f.deliver(t, commentAt(9003, 8003, bcAna, "<div>Ya está</div>", "2026-11-26T12:05:00Z"))
+
+	if th := f.thread(t, bcTodo); !th.AwaitingReply || th.LastExternalName != "Ana Bc" || th.LastExternalMatched {
+		t.Fatalf("someone who left the org cleared the thread: %+v", th)
+	}
+	evs := bcEvents(t, j, "u-bob")
+	last := evs[len(evs)-1]
+	d := eventData(t, last)
+	if !last.External || d["team"] != false || d["author"].(map[string]any)["matched"] != false {
+		t.Fatalf("the reply of someone who left the org: external %v data %v", last.External, d)
+	}
+}
+
+// awaitingWrite: un comentario de fuera en el hilo `recording` a la hora `at`.
+func awaitingWrite(recording int64, at string) domain.BasecampThreadWrite {
+	when, _ := time.Parse(time.RFC3339, at)
+	return domain.BasecampThreadWrite{OrgID: "org-1", RecordingID: recording, ProjectID: bcProject,
+		Title: fmt.Sprintf("Hilo %d", recording), Type: "Todo", Said: true, At: when, External: true,
+		AuthorName: "Cliente", AuthorClient: true, AuthorPersonID: bcClient.ID}
+}
+
+// La lista va del que más lleva esperando al que menos, aunque el más viejo
+// llegara después.
+//
+// Rotura que atrapa: ordenar al revés.
+func TestAwaitingListsTheOldestFirst(t *testing.T) {
+	f := newBasecampFixture(t)
+	repo := repository.NewBasecampRepository(f.db)
+	for _, w := range []domain.BasecampThreadWrite{awaitingWrite(7001, "2026-11-26T12:10:00Z"), awaitingWrite(7002, "2026-11-26T09:00:00Z")} {
+		if _, err := repo.ApplyToThread(w); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list := f.awaiting(t)
+	if len(list) != 2 || list[0].RecordingID != 7002 || list[1].RecordingID != 7001 {
+		t.Fatalf("awaiting order: %+v", list)
+	}
+}
+
+// El mismo proyecto de Basecamp enlazado en dos orgs: cada hilo sale una vez
+// en la lista y en la cuenta.
+//
+// Rotura que atrapa: cruzar el hilo con el proyecto sin mirar la org (sale
+// una fila por cada org que lo enlazó).
+func TestAProjectLinkedInTwoOrgsIsListedOnce(t *testing.T) {
+	f := newBasecampFixture(t)
+	f.addSecondOrg(t)
+	mustCreate(t, f.db, &domain.BasecampProject{OrgID: "org-2", SpaceID: "sp-other", ProjectID: bcProject,
+		Name: "Proteus (org-2)", SecretHash: "hash-of-org-2"})
+	if _, err := repository.NewBasecampRepository(f.db).ApplyToThread(awaitingWrite(7001, "2026-11-26T12:00:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	if list := f.awaiting(t); len(list) != 1 || list[0].ProjectName != "Proteus" {
+		t.Fatalf("awaiting: %+v", list)
+	}
+	if st, err := f.svc.Status("org-1"); err != nil || st.Awaiting != 1 {
+		t.Fatalf("status awaiting: %+v %v", st, err)
+	}
+}
+
+// Un to-do que Basecamp no deja leer (un «no», borrado) no hace tarea, pero
+// su evento sale igual, sin completar.
+//
+// Rotura que atrapa: salir antes de publicar el evento.
+func TestAnUnreadableTodoStillPublishesItsEvent(t *testing.T) {
+	f := newBasecampFixture(t)
+	j := f.withJournal(t)
+	for i, status := range []int{403, 404} {
+		f.fake.mu.Lock()
+		f.fake.recordingsStatus = status
+		f.fake.mu.Unlock()
+		f.deliver(t, todoEvent(500+int64(i), domain.BasecampTodoCreated, bcNewTodo+int64(i), bcAna))
+		evs := bcEvents(t, j, "u-bob")
+		if len(evs) != i+1 {
+			t.Fatalf("a to-do answered %d left %d events", status, len(evs))
+		}
+		if d := eventData(t, evs[i]); d["enriched"] != false || d["eventId"] != float64(500+i) {
+			t.Fatalf("the event of a to-do answered %d: %v", status, d)
+		}
+	}
+}
+
+// Un comentario con muchísimos adjuntos y menciones no se queda sin sus ids:
+// lo que sobra se corta y se marca, y el evento cabe en el diario.
+//
+// Rotura que atrapa: no poner tope (el diario cambia todo `data` por
+// {truncated, bytes}).
+func TestManyAttachmentsAndMentionsKeepTheEventsIds(t *testing.T) {
+	f := newBasecampFixture(t)
+	j := f.withJournal(t)
+	var b strings.Builder
+	b.WriteString("<div>Capturas")
+	for i := 0; i < 120; i++ {
+		fmt.Fprintf(&b, `<bc-attachment sgid="att-%d" content-type="image/png" filename="captura-de-pantalla-%03d.png" `+
+			`href="https://storage.3.basecamp.com/999/blobs/%d/download/captura-de-pantalla-%03d.png"></bc-attachment>`, i, i, 100000+i, i)
+		b.WriteString(mentionHTML(fmt.Sprintf("sgid-unknown-%d", i), fmt.Sprintf("Persona %d", i)))
+	}
+	b.WriteString("</div>")
+	f.deliver(t, commentAt(9001, 8001, bcClient, b.String(), "2026-11-26T12:00:00Z"))
+	d := eventData(t, bcEvents(t, j, "u-ana")[0])
+	if d["truncated"] == true || d["eventId"] != float64(9001) {
+		t.Fatalf("the event lost its ids: %v", d)
+	}
+	if n := len(d["attachments"].([]any)); n == 0 || n >= 120 || d["attachmentsTruncated"] != true {
+		t.Fatalf("attachments: %d, truncated %v", n, d["attachmentsTruncated"])
+	}
+	if n := len(d["mentions"].([]any)); n == 0 || n >= 120 || d["mentionsTruncated"] != true {
+		t.Fatalf("mentions: %d, truncated %v", n, d["mentionsTruncated"])
+	}
+}
+
+// Lo que escribe alguien no es «suyo» (`mine`) aunque esté asignado al to-do;
+// para otro asignado, sí.
+//
+// Rotura que atrapa: marcar `mine` a quien escribió.
+func TestWhatYouWroteIsNotMine(t *testing.T) {
+	f := newBasecampFixture(t)
+	j := f.withJournal(t)
+	f.linkTodo(t)
+	f.fake.mu.Lock()
+	f.fake.recordings[fmt.Sprintf("todos/%d", bcTodo)] = fmt.Sprintf(`{"id":%d,"title":"Arreglar el login",
+		"assignees":[{"id":101,"name":"Ana Bc","email_address":"ana@dwit.mx"},{"id":102,"name":"Bob Bc","email_address":"bob@dwit.mx"}],
+		"bucket":{"id":%d}}`, bcTodo, bcProject)
+	f.fake.recordings[fmt.Sprintf("recordings/%d/comments", bcTodo)] = `[]`
+	f.fake.mu.Unlock()
+	f.deliver(t, commentAt(9001, 8001, bcAna, "<div>Listo</div>", "2026-11-26T12:00:00Z"))
+	ana, bob := bcEvents(t, j, "u-ana")[0], bcEvents(t, j, "u-bob")[0]
+	if eventData(t, ana)["you"].(map[string]any)["assigned"] != true || eventData(t, bob)["you"].(map[string]any)["assigned"] != true {
+		t.Fatalf("both are assigned: ana %v bob %v", eventData(t, ana)["you"], eventData(t, bob)["you"])
+	}
+	if ana.Mine || !bob.Mine {
+		t.Fatalf("mine: Ana (who wrote it) %v, Bob %v", ana.Mine, bob.Mine)
+	}
+}

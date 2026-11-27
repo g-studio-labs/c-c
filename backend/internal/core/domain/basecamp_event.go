@@ -33,10 +33,23 @@ type BasecampThread struct {
 	LastExternalName    string `gorm:"type:varchar(200)"`
 	LastExternalClient  bool   `gorm:"not null;default:false"`
 	LastExternalExcerpt string `gorm:"type:text"`
-	LastTeamReplyAt     *time.Time
-	LastTeamReplyByID   string `gorm:"type:varchar(36)"`
-	AwaitingReply       bool   `gorm:"not null;default:false;index"`
-	AwaitingSince       *time.Time
+	// LastExternalPersonID y LastExternalMatched: quién era en Basecamp y si
+	// estaba casado con un miembro. Un «de fuera» sin casar puede ser alguien
+	// del equipo que publica con otra cuenta (p. ej. «Dwit»): quien lee la
+	// lista tiene que poder decir «cásalo», no tomarlo por un cliente.
+	LastExternalPersonID int64 `gorm:"not null;default:0"`
+	LastExternalMatched  bool  `gorm:"not null;default:false"`
+	// LastClient*: lo último que dijo un **cliente**. Lo de un sin casar que
+	// llega después no lo pisa: si no, el mensaje del cliente desaparecería de
+	// la lista tras la respuesta de alguien del equipo que no está casado.
+	LastClientAt       *time.Time
+	LastClientName     string `gorm:"type:varchar(200)"`
+	LastClientPersonID int64  `gorm:"not null;default:0"`
+	LastClientExcerpt  string `gorm:"type:text"`
+	LastTeamReplyAt    *time.Time
+	LastTeamReplyByID  string `gorm:"type:varchar(36)"`
+	AwaitingReply      bool   `gorm:"not null;default:false;index"`
+	AwaitingSince      *time.Time
 }
 
 func (BasecampThread) TableName() string { return "basecamp_threads" }
@@ -55,10 +68,13 @@ type BasecampThreadWrite struct {
 	At       time.Time
 	External bool
 	// Del autor: su nombre y si es cliente (de fuera), o su usuario (equipo).
-	AuthorName   string
-	AuthorClient bool
-	AuthorUserID string
-	Excerpt      string
+	AuthorName     string
+	AuthorClient   bool
+	AuthorUserID   string
+	AuthorPersonID int64
+	// AuthorMatched: casado con un miembro de la org (aunque sea cliente).
+	AuthorMatched bool
+	Excerpt       string
 }
 
 // Apply: el hilo después de este evento. Lo de Basecamp llega fuera de orden,
@@ -86,6 +102,11 @@ func (t *BasecampThread) Apply(w BasecampThreadWrite) {
 	if w.External {
 		t.LastExternalAt = &at
 		t.LastExternalName, t.LastExternalClient, t.LastExternalExcerpt = w.AuthorName, w.AuthorClient, w.Excerpt
+		t.LastExternalPersonID, t.LastExternalMatched = w.AuthorPersonID, w.AuthorMatched
+		if w.AuthorClient {
+			t.LastClientAt = &at
+			t.LastClientName, t.LastClientPersonID, t.LastClientExcerpt = w.AuthorName, w.AuthorPersonID, w.Excerpt
+		}
 		if !t.AwaitingReply {
 			t.AwaitingReply, t.AwaitingSince = true, &at
 		}
@@ -105,11 +126,31 @@ func (t *BasecampThread) AnsweredBy(userID string) bool {
 }
 
 // BasecampAwaitingExternal: lo último que dijo alguien de fuera en un hilo.
+// `matched: false` con `client: false` es una persona sin casar: puede ser
+// del equipo con otra cuenta, y se arregla casándola en Organización →
+// Basecamp.
 type BasecampAwaitingExternal struct {
-	Name    string     `json:"name"`
-	Client  bool       `json:"client"`
-	At      *time.Time `json:"at"`
-	Excerpt string     `json:"excerpt"`
+	PersonID int64      `json:"personId"`
+	Name     string     `json:"name"`
+	Client   bool       `json:"client"`
+	Matched  bool       `json:"matched"`
+	At       *time.Time `json:"at"`
+	Excerpt  string     `json:"excerpt"`
+}
+
+// LastExternalOut y LastClientOut: lo de fuera de un hilo, para la lista y
+// el evento. LastClientOut es nil si ningún cliente ha dicho nada.
+func (t *BasecampThread) LastExternalOut() BasecampAwaitingExternal {
+	return BasecampAwaitingExternal{PersonID: t.LastExternalPersonID, Name: t.LastExternalName,
+		Client: t.LastExternalClient, Matched: t.LastExternalMatched, At: t.LastExternalAt, Excerpt: t.LastExternalExcerpt}
+}
+
+func (t *BasecampThread) LastClientOut() *BasecampAwaitingExternal {
+	if t.LastClientAt == nil {
+		return nil
+	}
+	return &BasecampAwaitingExternal{PersonID: t.LastClientPersonID, Name: t.LastClientName, Client: true,
+		At: t.LastClientAt, Excerpt: t.LastClientExcerpt}
 }
 
 // BasecampAwaiting: un hilo por contestar,
@@ -124,8 +165,11 @@ type BasecampAwaiting struct {
 	AppURL        string                   `json:"appUrl"`
 	AwaitingSince *time.Time               `json:"awaitingSince"`
 	LastExternal  BasecampAwaitingExternal `json:"lastExternal"`
-	TaskID        string                   `json:"taskId,omitempty"`
-	TaskRef       string                   `json:"taskRef,omitempty"`
+	// LastClient: lo último que dijo un cliente, aunque después hablara
+	// alguien sin casar.
+	LastClient *BasecampAwaitingExternal `json:"lastClient,omitempty"`
+	TaskID     string                    `json:"taskId,omitempty"`
+	TaskRef    string                    `json:"taskRef,omitempty"`
 }
 
 // ─── El texto de un evento ───────────────────────────────────────────────────
