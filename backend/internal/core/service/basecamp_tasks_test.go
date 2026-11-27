@@ -668,16 +668,23 @@ func TestABasecampRefusalIsHandledButAnOutageIsRetried(t *testing.T) {
 		f.fake.recordingsStatus = status
 		f.fake.mu.Unlock()
 	}
-	set(403)
-	if err := f.svc.HandleWebhook(f.secret, todoEvent(410, domain.BasecampTodoCreated, bcNewTodo, bcAna)); err != nil {
-		t.Fatalf("a 403 from Basecamp was released for a retry that cannot change it: %v", err)
-	}
-	if f.taskOf(t, bcNewTodo) != nil {
-		t.Fatal("a to-do Basecamp refused to show made a task")
+	for i, status := range []int{403, 400, 410} {
+		f.inbox.reset()
+		set(status)
+		if err := f.svc.HandleWebhook(f.secret, todoEvent(410+int64(i)*10, domain.BasecampTodoCreated, bcNewTodo, bcAna)); err != nil {
+			t.Fatalf("a %d from Basecamp was released for a retry that cannot change it: %v", status, err)
+		}
+		if f.taskOf(t, bcNewTodo) != nil {
+			t.Fatal("a to-do Basecamp refused to show made a task")
+		}
+		got := noticesOfKind(f.inbox.of("u-ana"), domain.BasecampActivityKind)
+		if len(got) != 1 || got[0].TitleKey != "notify.basecamp.project_refused" || got[0].Group == "" || got[0].Label == "" {
+			t.Fatalf("a %d was handled in silence: whoever linked the project got %+v", status, got)
+		}
 	}
 	for i, status := range []int{429, 502} {
 		set(status)
-		if err := f.svc.HandleWebhook(f.secret, todoEvent(411+int64(i), domain.BasecampTodoCreated, bcNewTodo, bcAna)); err == nil {
+		if err := f.svc.HandleWebhook(f.secret, todoEvent(450+int64(i), domain.BasecampTodoCreated, bcNewTodo, bcAna)); err == nil {
 			t.Fatalf("a %d was taken as handled: the to-do would be lost", status)
 		}
 	}

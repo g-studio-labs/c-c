@@ -50,12 +50,18 @@ func (s *BasecampService) processAssignable(proj *domain.BasecampProject, ev dom
 		case errors.Is(err, gorm.ErrRecordNotFound):
 			// Ya no existe (a la papelera antes de que llegara el evento).
 			return nil
+		case basecampRefused(err):
+			// Un «no» de Basecamp (403: quien conectó ya no ve ese proyecto)
+			// no cambia al reintentar, y desactivarían el webhook: se atiende,
+			// pero quien enlazó el proyecto tiene que enterarse.
+			lg.Warn(fmt.Sprintf("basecamp: reading recording %d of project %d: %v", recording, proj.ProjectID, err))
+			s.notifyProjectRefused(proj)
+			return nil
 		case errors.Is(err, domain.ErrBasecampNotConnected), errors.Is(err, domain.ErrBasecampReconnect),
-			errors.Is(err, domain.ErrBasecampOff), basecampRefused(err):
+			errors.Is(err, domain.ErrBasecampOff):
 			// Reintentar no lo arregla, y Basecamp desactiva el webhook tras
 			// diez fallos: se perdería también lo de la fase 1. Los admins ya
-			// tienen el aviso de volver a conectar. Un «no» de Basecamp (403:
-			// quien conectó ya no ve ese proyecto) tampoco cambia al reintentar.
+			// tienen el aviso de volver a conectar.
 			lg.Warn(fmt.Sprintf("basecamp: reading recording %d of project %d: %v", recording, proj.ProjectID, err))
 			return nil
 		}
@@ -307,4 +313,13 @@ func (s *BasecampService) reconcileWebhook(p *domain.BasecampProject, want strin
 		return err
 	}
 	return s.repo.SetWebhookTypes(p.ID, want)
+}
+
+func (s *BasecampService) notifyProjectRefused(proj *domain.BasecampProject) {
+	if s.inbox == nil || proj.LinkedByID == "" {
+		return
+	}
+	s.inbox.Notify(domain.Aviso{UserID: proj.LinkedByID, OrgID: proj.OrgID, Kind: domain.BasecampActivityKind,
+		TitleKey: "notify.basecamp.project_refused", TitleArgs: map[string]string{"project": proj.Name},
+		Link: "/organization", Group: domain.BasecampProjectGroup(proj.ProjectID), Label: proj.Name})
 }

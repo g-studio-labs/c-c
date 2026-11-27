@@ -128,6 +128,10 @@ var catalogo = map[string]map[Locale]string{
 		EN: "Basecamp stopped renewing: connect it again",
 		ES: "Basecamp dejó de renovarse: vuelve a conectarlo",
 	},
+	"notify.basecamp.project_refused": {
+		EN: "Basecamp no longer lets cac read the project {{project}}: check that whoever connected the account is still in it",
+		ES: "Basecamp ya no deja leer el proyecto {{project}}: revisa que quien conectó la cuenta siga en él",
+	},
 	"notify.item.assigned": {
 		EN: "Assigned to you",
 		ES: "Te la asignaron",
