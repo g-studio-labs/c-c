@@ -48,13 +48,10 @@ pub(crate) enum Message {
 }
 
 impl Message {
-    /// Lo que se le pide a la abierta: el primer argumento, si lo hay, es un
-    /// enlace (`cac-desktop <enlace>`); lo demás no se mira.
-    pub(crate) fn from_args(mut args: impl Iterator<Item = String>) -> Message {
-        match args.next().map(|arg| arg.trim().to_string()).filter(|arg| !arg.is_empty()) {
-            Some(link) => Message::Open(link),
-            None => Message::Focus,
-        }
+    /// Lo que se le pide a la abierta: abrir el enlace con el que se lanzó
+    /// ésta (`links::launch_link`), o sólo «al frente».
+    pub(crate) fn for_launch(link: Option<String>) -> Message {
+        link.map_or(Message::Focus, Message::Open)
     }
 
     /// Una línea. Un enlace con un salto de línea dentro no es un enlace:
@@ -331,13 +328,12 @@ mod tests {
     /// Lo que viaja: una línea, y sólo lo que se sabe pedir.
     ///
     /// Roturas que atrapa: que un salto de línea dentro de un enlace cuele
-    /// una segunda orden; aceptar cualquier cosa como enlace; no tomar el
-    /// enlace del primer argumento.
+    /// una segunda orden; aceptar cualquier cosa como enlace; perder el
+    /// enlace con el que se lanzó.
     #[test]
     fn only_a_focus_or_a_link_travels() {
-        assert_eq!(Message::from_args(["cac://dm?c=c1".to_string()].into_iter()), Message::Open("cac://dm?c=c1".into()));
-        assert_eq!(Message::from_args(std::iter::empty()), Message::Focus);
-        assert_eq!(Message::from_args(["  ".to_string()].into_iter()), Message::Focus);
+        assert_eq!(Message::for_launch(Some("cac://dm?c=c1".into())), Message::Open("cac://dm?c=c1".into()));
+        assert_eq!(Message::for_launch(None), Message::Focus);
         let sneaky = Message::Open("cac://x\nopen https://ejemplo.com".into());
         assert_eq!(sneaky.encode(), "focus\n");
         let link = Message::Open("cac://tasks?task=1".into());

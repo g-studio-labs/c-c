@@ -78,6 +78,16 @@ pub(crate) fn open(href: &str, cx: &mut App) {
     }
 }
 
+/// El enlace que trae un argumento de la línea de órdenes o el sistema
+/// (`cac-desktop <enlace>`, el «abrir URL» de macOS). Sólo un `cac://`: eso lo
+/// escribe cualquiera (en Windows `"%1"` llega entero en un argumento, traiga
+/// lo que traiga), y otra cosa no se toma por un enlace que abrir.
+pub(crate) fn launch_link(arg: &str) -> Option<String> {
+    let arg = arg.trim();
+    let scheme = arg.get(..6).is_some_and(|head| head.eq_ignore_ascii_case("cac://"));
+    (scheme && arg.len() > 6).then(|| arg.to_string())
+}
+
 /// Un enlace que llega de fuera de la ventana. Con la sesión y la
 /// organización ya cargadas se abre en el acto; si no, en cuanto lo estén
 /// (al arrancar con un enlace, o con la pantalla de entrar delante).
@@ -162,6 +172,20 @@ mod tests {
 
     fn stop(cx: &mut TestAppContext) {
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Sólo un `cac://` llega de fuera como enlace.
+    ///
+    /// Roturas que atrapa: tomar por enlace cualquier argumento (una ruta,
+    /// una dirección web, una opción) que el sistema o alguien pase; no
+    /// aceptar el esquema en mayúsculas; un `cac://` vacío.
+    #[test]
+    fn only_a_cac_link_comes_in_from_outside() {
+        assert_eq!(launch_link(" cac://tasks?task=1 ").as_deref(), Some("cac://tasks?task=1"));
+        assert_eq!(launch_link("CAC://dm?c=c1").as_deref(), Some("CAC://dm?c=c1"));
+        for other in ["https://cac.guz-studio.dev/app/tasks?task=1", "/tasks?task=1", "--help", "cac:user/u1", "cac://", "", "ca"] {
+            assert_eq!(launch_link(other), None, "{other:?}");
+        }
     }
 
     /// Un enlace de cac pulsado dentro de la app —con su dirección de la

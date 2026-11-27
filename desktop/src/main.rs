@@ -127,8 +127,9 @@ fn main() {
         eprintln!("cac: esta máquina no dice dónde guardar los datos de su usuario");
         std::process::exit(1);
     };
-    // El enlace con el que se lanzó (`cac-desktop <enlace>`), si lo hay.
-    let link = std::env::args().nth(1).map(|arg| arg.trim().to_string()).filter(|arg| !arg.is_empty());
+    // El enlace con el que se lanzó (`cac-desktop cac://…`), si lo hay. Otro
+    // argumento no es un enlace.
+    let link = std::env::args().nth(1).and_then(|arg| links::launch_link(&arg));
     // Una sola app por persona: si ya hay una abierta, se le pasa el enlace
     // (o sólo «al frente») y ésta se cierra. Si el socket no se puede usar,
     // se arranca igual: mejor dos ventanas que ninguna.
@@ -138,7 +139,7 @@ fn main() {
     } else {
         let dir = single_instance::socket_dir(var, &data_dir);
         let me = single_instance::my_uid();
-        match single_instance::claim(&dir, me, &single_instance::Message::from_args(link.clone().into_iter())) {
+        match single_instance::claim(&dir, me, &single_instance::Message::for_launch(link.clone())) {
             Ok(single_instance::Claim::Delivered) => std::process::exit(0),
             Ok(single_instance::Claim::First(listener)) => Some((listener, me)),
             Err(error) => {
@@ -152,7 +153,17 @@ fn main() {
     config.client = Some("desktop".to_string());
     let system_language = system::system_language(system::Os::current(), var, system::preferred_languages);
 
-    gpui_kit::application().with_assets(assets::Assets).run(move |cx| {
+    // El «abrir URL» del sistema (macOS lo manda así, no en los argumentos,
+    // también a la app ya abierta). Llega sin contexto: va por un canal al
+    // mismo camino que lo que entrega otra instancia.
+    let (opened_urls, mut urls_to_open) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let application = gpui_kit::application().with_assets(assets::Assets);
+    application.on_open_urls(move |urls| {
+        for link in urls.iter().filter_map(|url| links::launch_link(url)) {
+            let _ = opened_urls.send(link);
+        }
+    });
+    application.run(move |cx| {
         gpui_kit::init(cx);
         // Las confirmaciones, donde el sistema no tiene diálogo propio (Linux).
         prompt::install(cx);
@@ -177,6 +188,12 @@ fn main() {
             voice_settings::restore_choices(cx);
         }
         theme::apply_preference(cx);
+        cx.spawn(async move |cx| {
+            while let Some(link) = urls_to_open.recv().await {
+                cx.update(|cx| links::open_from_outside(link, cx));
+            }
+        })
+        .detach();
         // Lo que llega de otra instancia: la ventana al frente, y su enlace.
         #[cfg(unix)]
         if let Some((listener, me)) = instance {
