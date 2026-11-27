@@ -115,6 +115,16 @@ pub(crate) fn open_from_outside(href: String, cx: &mut App) {
     .detach();
 }
 
+/// Lo que manda la app que se lanzó con ésta ya abierta: su enlace, o
+/// sólo traer la ventana al frente (relanzarla sin nada).
+#[cfg(unix)]
+pub(crate) fn from_another_launch(message: crate::single_instance::Message, cx: &mut App) {
+    match message {
+        crate::single_instance::Message::Open(link) => open_from_outside(link, cx),
+        crate::single_instance::Message::Focus => crate::notifier::bring_to_front(cx),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use gpui_kit::{px, size, AnyWindowHandle, AppContext, Bounds, Point, TestAppContext, WindowBounds, WindowOptions};
@@ -220,6 +230,33 @@ mod tests {
 
         cx.update(|cx| open("https://example.com/a", cx));
         wait_until(cx, "lo de fuera, al navegador", |cx| cx.opened_url().as_deref() == Some("https://example.com/a"));
+        stop(cx);
+    }
+
+    /// Relanzar la app sin enlace la trae al frente, y nada más; con
+    /// enlace, además lo abre.
+    ///
+    /// Rotura que atrapa: que el «al frente» de otra instancia no haga nada
+    /// (la segunda se cierra y la abierta sigue escondida).
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn launching_again_brings_the_open_app_to_the_front(cx: &mut TestAppContext) {
+        use crate::single_instance::Message;
+        let server = server();
+        server.install(cx);
+        sign_in(cx);
+        let _window = open_window(cx);
+        wait_until(cx, "la organización se carga", |cx| current_org(cx).as_deref() == Some("o1"));
+        let before = cx.update(|cx| crate::notifier::times_fronted(cx));
+
+        cx.update(|cx| from_another_launch(Message::Focus, cx));
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| crate::notifier::times_fronted(cx)), before + 1, "al frente");
+        assert_eq!(task_open(cx), None, "sin abrir nada");
+
+        cx.update(|cx| from_another_launch(Message::Open("cac://tasks?task=cac-12".into()), cx));
+        wait_until(cx, "con enlace, lo abre", |cx| task_open(cx).as_deref() == Some("t1"));
+        assert_eq!(cx.update(|cx| crate::notifier::times_fronted(cx)), before + 2);
         stop(cx);
     }
 

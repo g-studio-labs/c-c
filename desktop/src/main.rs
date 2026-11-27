@@ -203,10 +203,7 @@ fn main() {
             });
             cx.spawn(async move |cx| {
                 while let Some(message) = arrived.recv().await {
-                    cx.update(|cx| match message {
-                        single_instance::Message::Open(link) => links::open_from_outside(link, cx),
-                        single_instance::Message::Focus => notifier::bring_to_front(cx),
-                    });
+                    cx.update(|cx| links::from_another_launch(message, cx));
                 }
             })
             .detach();
