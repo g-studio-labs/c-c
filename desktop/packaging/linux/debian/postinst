@@ -1,0 +1,11 @@
+#!/bin/sh
+# Que el sistema sepa que cac:// es de esta app: refresca la caché de
+# lanzadores (donde vive el MimeType) y deja la app como la que abre el esquema.
+# `xdg-mime` escribe en el HOME de quien lo corre, que aquí es root, así que no
+# se usa: la caché del sistema basta y cada persona puede cambiarla.
+set -e
+
+if [ "$1" = "configure" ] && command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database -q /usr/share/applications || true
+fi
+exit 0

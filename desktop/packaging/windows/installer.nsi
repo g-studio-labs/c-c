@@ -22,6 +22,10 @@ Unicode true
   !error "Faltan definiciones: este script se lanza desde package.ps1"
 !endif
 
+; El esquema cac:// por usuario (HKCU\Software\Classes): sin administrador, y
+; sin tocar el de nadie más. Windows lanza el comando con el enlace en %1.
+!define SCHEME_KEY "Software\Classes\cac"
+
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
 
 Name "${APP_NAME}"
@@ -56,6 +60,11 @@ Section "Install"
 
   CreateShortcut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\${APP_BINARY}.exe"
 
+  WriteRegStr HKCU "${SCHEME_KEY}" "" "URL:cac"
+  WriteRegStr HKCU "${SCHEME_KEY}" "URL Protocol" ""
+  WriteRegStr HKCU "${SCHEME_KEY}\DefaultIcon" "" "$INSTDIR\${APP_BINARY}.exe,0"
+  WriteRegStr HKCU "${SCHEME_KEY}\shell\open\command" "" '"$INSTDIR\${APP_BINARY}.exe" "%1"'
+
   WriteRegStr HKCU "Software\${APP_ID}" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "${APP_NAME}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${APP_VERSION}"
@@ -75,6 +84,7 @@ Section "Uninstall"
   RMDir /r "$INSTDIR\licenses"
   RMDir "$INSTDIR"
   Delete "$SMPROGRAMS\${APP_NAME}.lnk"
+  DeleteRegKey HKCU "${SCHEME_KEY}"
   DeleteRegKey HKCU "${UNINSTALL_KEY}"
   DeleteRegKey HKCU "Software\${APP_ID}"
 SectionEnd

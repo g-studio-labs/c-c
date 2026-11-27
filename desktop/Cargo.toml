@@ -83,6 +83,7 @@ extended-description = "Cliente de escritorio nativo de cac (CAC Nativa). Conviv
 # de reserva por OpenGL, y `xdg-open`/el portal para abrir enlaces.
 depends = "$auto, libvulkan1, libwayland-client0, libxkbcommon0, libxkbcommon-x11-0, libxcb1"
 recommends = "mesa-vulkan-drivers, libwayland-egl1, libegl1, xdg-utils, xdg-desktop-portal"
+maintainer-scripts = "packaging/linux/debian"
 assets = [
     ["target/release/cac-desktop", "usr/bin/", "755"],
     ["packaging/linux/dev.guz-studio.cac.native.desktop", "usr/share/applications/", "644"],

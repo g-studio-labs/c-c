@@ -227,3 +227,42 @@ fn the_macos_app_is_signed_with_the_fixed_identity_and_declares_mic_and_camera()
     let import = position(&workflow, "security import");
     assert!(import < position(&workflow, "bash packaging/macos/package.sh"), "firma antes de importar el certificado");
 }
+
+/// Cada paquete de la app nativa registra el esquema `cac://` y le pasa el
+/// enlace al binario.
+///
+/// Roturas que atrapa: quitar el `MimeType` del lanzador de Linux o el `%u` del
+/// `Exec` (el sistema abriría la app sin el enlace); que el `.deb` no lleve su
+/// `postinst` (la caché de lanzadores no se refresca) o `cargo-deb` no lo
+/// apunte; que el `.tar.gz` no lleve el script de registro; quitar `cac` de
+/// `CFBundleURLTypes` en macOS; en Windows, perder `URL Protocol`, el `"%1"`
+/// del comando, o que el desinstalador no borre la clave (cac:// quedaría
+/// apuntando a un programa que ya no está).
+#[test]
+fn every_package_registers_the_cac_scheme_and_passes_the_link() {
+    let desktop = read("../desktop/packaging/linux/dev.guz-studio.cac.native.desktop");
+    let line = |key: &str| desktop.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix('=')).unwrap_or_else(|| panic!("falta {key}"));
+    assert!(line("MimeType").split(';').any(|m| m == "x-scheme-handler/cac"), "{}", line("MimeType"));
+    assert!(line("Exec").split_whitespace().any(|a| a == "%u"), "el Exec no pasa el enlace: {}", line("Exec"));
+
+    let manifest = read("../desktop/Cargo.toml");
+    assert!(manifest.contains("maintainer-scripts = \"packaging/linux/debian\""), "cargo-deb no lleva los scripts");
+    let postinst = read("../desktop/packaging/linux/debian/postinst");
+    assert!(postinst.contains("update-desktop-database"), "el postinst no refresca los lanzadores");
+    let tarball = commands(&read("../desktop/packaging/linux/package.sh"));
+    assert!(tarball.iter().any(|l| l.contains("register-url-scheme.sh")), "el .tar.gz no lleva el script de registro");
+    let register = read("../desktop/packaging/linux/register-url-scheme.sh");
+    assert!(register.contains("xdg-mime default") && register.contains("x-scheme-handler/cac"));
+
+    let plist = read("../desktop/packaging/macos/Info.plist");
+    let types = plist.split_once("<key>CFBundleURLTypes</key>").expect("el Info.plist no declara CFBundleURLTypes").1;
+    assert!(types.contains("<key>CFBundleURLSchemes</key>") && types.contains("<string>cac</string>"), "macOS no conoce cac://");
+
+    let installer = commands(&read("../desktop/packaging/windows/installer.nsi"));
+    assert!(installer.iter().any(|l| l == "!define SCHEME_KEY \"Software\\Classes\\cac\""));
+    assert!(installer.iter().any(|l| l.starts_with("WriteRegStr HKCU \"${SCHEME_KEY}\" \"URL Protocol\"")), "falta URL Protocol");
+    let open = installer.iter().find(|l| l.contains("${SCHEME_KEY}\\shell\\open\\command")).expect("falta shell\\open\\command");
+    assert!(open.ends_with("'\"$INSTDIR\\${APP_BINARY}.exe\" \"%1\"'"), "el comando no pasa %1: {open}");
+    let uninstall_at = position(&installer, "Section \"Uninstall\"");
+    assert!(installer[uninstall_at..].iter().any(|l| l == "DeleteRegKey HKCU \"${SCHEME_KEY}\""), "el desinstalador no quita cac://");
+}

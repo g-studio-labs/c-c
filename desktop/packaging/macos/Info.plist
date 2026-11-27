@@ -27,6 +27,20 @@
     <string>__APP_VERSION__</string>
     <key>CFBundleVersion</key>
     <string>__APP_VERSION__</string>
+    <!-- El esquema cac://. A diferencia de Linux y Windows, macOS no pasa el
+         enlace como argumento: llega a la app abierta como un evento «abrir
+         URL» (kAEGetURL), que el código de la app tiene que recoger. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>__APP_ID__</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>cac</string>
+            </array>
+        </dict>
+    </array>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.productivity</string>
     <!-- La mínima con la que compila GPUI (su `build.rs` pide

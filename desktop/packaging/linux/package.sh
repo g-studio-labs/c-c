@@ -37,6 +37,9 @@ for size in 32 64 128 256 512; do
   install -Dm644 "$PACKAGING_DIR/icons/${size}x${size}.png" \
     "$ROOT/share/icons/hicolor/${size}x${size}/apps/$APP_ID.png"
 done
+# Quien no usa el .deb registra cac:// con esto (el postinst del .deb ya lo hace).
+install -Dm755 "$PACKAGING_DIR/linux/register-url-scheme.sh" \
+  "$ROOT/share/doc/$APP_BINARY/register-url-scheme.sh"
 # La licencia de las tipografías que lleva el binario (OFL).
 for license in "$CRATE_DIR"/assets/fonts/LICENSE-*.txt; do
   install -Dm644 "$license" "$ROOT/share/doc/$APP_BINARY/licenses/$(basename "$license")"

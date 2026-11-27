@@ -1,0 +1,11 @@
+#!/bin/sh
+# Al quitar el paquete, que el esquema cac:// no quede apuntando a un lanzador
+# que ya no existe.
+set -e
+
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications || true
+  fi
+fi
+exit 0

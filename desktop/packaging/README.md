@@ -28,6 +28,10 @@ bash packaging/linux/package.sh
 - El `.tar.gz` lleva el mismo árbol (`bin/`, `share/`) para lo que no es Debian:
   `tar -xzf cac-desktop-*.tar.gz --strip-components=1 -C ~/.local` (con
   `~/.local/bin` en el `PATH`, que es por donde el lanzador encuentra el binario).
+- Los enlaces `cac://`: el `.desktop` declara `MimeType=x-scheme-handler/cac` y
+  `Exec=cac-desktop %u` (el sistema lanza el binario con el enlace como primer
+  argumento). El `.deb` lo registra en su `postinst`; con el `.tar.gz`, se corre
+  una vez `sh ~/.local/share/doc/cac-desktop/register-url-scheme.sh`.
 - Necesita en la máquina: Vulkan con su controlador (`libvulkan1` y el de la
   gráfica), `libxkbcommon`, `libxcb` y, en Wayland, `libwayland-client`.
 - El binario pide la glibc de donde se compiló: el del CI (Ubuntu 24.04) no
@@ -35,6 +39,10 @@ bash packaging/linux/package.sh
 - No hay AppImage, a propósito: el porqué está en `linux/package.sh`.
 
 ## macOS — `.dmg`
+
+El `Info.plist` declara `cac` en `CFBundleURLTypes`, pero el enlace **no llega
+como argumento** (a diferencia de Linux y Windows): es un evento «abrir URL» que la app
+tiene que recoger — pendiente en command-and-control-561.
 
 ```sh
 bash packaging/macos/package.sh
@@ -53,4 +61,6 @@ firma y la notarización está comentado en el script.
 
 Necesita NSIS 3 (`choco install nsis`). El instalador es por usuario, sin
 permisos de administrador; el `.zip` lleva el `.exe` suelto, que no necesita
-nada a su lado. **Sin firmar**: SmartScreen avisa al ejecutarlo.
+nada a su lado. **Sin firmar**: SmartScreen avisa al ejecutarlo. El instalador registra
+`cac://` en `HKCU\Software\Classes\cac` (comando con `"%1"`) y el
+desinstalador lo quita.

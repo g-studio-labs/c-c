@@ -116,7 +116,7 @@ mod tests {
     fn the_linux_launcher_is_this_apps() {
         assert_eq!(DESKTOP_ENTRY_PATH, format!("packaging/linux/{APP_ID}.desktop"));
         assert_eq!(entry("Name"), APP_NAME);
-        assert_eq!(entry("Exec"), APP_BINARY);
+        assert_eq!(entry("Exec"), format!("{APP_BINARY} %u"));
         assert_eq!(entry("Icon"), APP_ID);
         assert_eq!(entry("StartupWMClass"), APP_ID);
     }
