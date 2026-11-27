@@ -463,7 +463,3 @@ const (
 // RequestNotifyKind: la clase del aviso en la campana. Se calla con lo mismo
 // que el resto del trabajo que te llega.
 const RequestNotifyKind = "request:new"
-
-// RequestAnsweredNotifyKind: la respuesta a un pedido, para quien lo pidió. Se
-// calla con lo mismo que RequestNotifyKind.
-const RequestAnsweredNotifyKind = "request:answered"
