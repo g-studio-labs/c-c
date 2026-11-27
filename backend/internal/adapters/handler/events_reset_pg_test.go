@@ -89,6 +89,54 @@ func TestAJournalTruncatedUnderAListenerLosesNothingNew(t *testing.T) {
 	}
 }
 
+// El caso de todos los días: el diario se vacía y el primer evento nuevo llega
+// varios latidos después. Tras el TRUNCATE no hay cabecera, así que el reset
+// sale sin época. Roturas que atrapa: que la conexión se quede con la época
+// vieja (el latido de después del primer evento ve otra y anuncia el reinicio
+// otra vez, con el 1 repetido: medido en la revisión 558-G como
+// `[0:reset 1 0:reset 1 2]`).
+func TestAJournalTruncatedBeforeItsFirstNewEventRestartsOnce(t *testing.T) {
+	withTokenAuth(t, nil)
+	original := latido
+	latido = 30 * time.Millisecond
+	defer func() { latido = original }()
+
+	db := resetDB(t)
+	hub := events.NewHub()
+	j := service.NewEventJournal(repository.NewUserEventRepository(db), hub)
+	h := NewEventsHandler(hub, nil, j)
+	add := func() {
+		t.Helper()
+		if _, _, err := j.Append(domain.UserEventInput{UserID: tokenOwner, OrgID: "org-1", Type: domain.UserEventNotification}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 12; i++ {
+		add()
+	}
+	_, oldEpoch, _ := j.Head(tokenOwner)
+
+	r, _ := openStreamAt(t, h, goodToken, "12", "epoch="+oldEpoch)
+	time.Sleep(50 * time.Millisecond)
+	if err := db.Exec("TRUNCATE user_events, user_event_heads").Error; err != nil {
+		t.Fatal(err)
+	}
+	if got := r.next(t); !got.env.IsReset() {
+		t.Fatalf("el latido no vio el reinicio: %+v", got)
+	}
+	// Varios latidos con el diario vacío y sin época: nada más que decir.
+	r.quiet(t, 200*time.Millisecond)
+	add()
+	add()
+	for want := int64(1); want <= 2; want++ {
+		if got := r.next(t); got.env.Seq != want || got.env.Type != domain.UserEventNotification {
+			t.Fatalf("se esperaba el %d del diario nuevo una vez, llegó %+v", want, got)
+		}
+	}
+	// Los latidos de después ven la época nueva: no es otro reinicio.
+	r.quiet(t, 200*time.Millisecond)
+}
+
 func resetDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	if repository.GetEnv("DB_HOST", "") == "" {

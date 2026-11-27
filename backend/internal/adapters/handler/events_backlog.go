@@ -130,10 +130,15 @@ func (h *eventsHandler) streamToken(w http.ResponseWriter, r *http.Request, clai
 				return true // el siguiente latido lo vuelve a intentar
 			}
 			// Read ya comparó la época que se le dio: la de la página es la de
-			// ahora, y es la que vale para la siguiente pregunta.
-			if page.Epoch != "" {
-				epoch = page.Epoch
-			}
+			// ahora, y es la que vale para la siguiente pregunta, **también
+			// vacía**. Tras un TRUNCATE no hay cabecera, y el reset sale sin
+			// época hasta el siguiente Append. Quedarse con la vieja hacía que
+			// el primer evento del diario nuevo pasara en vivo y el latido
+			// siguiente, al ver la época nueva, anunciara el reinicio otra vez
+			// y repitiera el diario desde el 1. Una época vacía no se compara
+			// (domain.JournalRestarted): hasta que una página traiga la nueva,
+			// sólo la cabecera puede delatar otro reinicio.
+			epoch = page.Epoch
 			if len(page.Events) == 0 {
 				return true
 			}
