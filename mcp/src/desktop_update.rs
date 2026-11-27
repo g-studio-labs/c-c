@@ -210,10 +210,22 @@ impl Updater {
     /// Lo que pide el botón «Comprobar»: pregunta a la red **ahora**, sin mirar
     /// cuándo se preguntó por última vez, y dice por qué si no puede. Lo
     /// recordado para el aviso diario se pone al día con lo que conteste.
+    /// `Ok(None)` es sólo «estás al día»: una versión anunciada que no se puede
+    /// ofrecer (su release aún no está, no trae fichero para esta máquina, o es
+    /// una compilación de desarrollo) es un error con su motivo, nunca «al día».
     /// Bloquea.
     pub fn check_fresh(&self) -> Result<Option<Offer>, String> {
         let latest = update::check_now(&self.source, self.state_dir.as_deref(), Duration::from_secs(8))?;
-        Ok(self.offer(&latest).filter(|offer| self.is_published(offer)))
+        if !update::is_newer(&latest, &self.current) {
+            return Ok(None);
+        }
+        if self.exe.as_deref().is_some_and(is_dev_build) {
+            return Err(format!("v{latest} is announced, but this is a development build and does not update itself"));
+        }
+        let platform = format!("{}-{}", self.os, self.arch);
+        let offer = self.offer(&latest).ok_or_else(|| format!("v{latest} is announced, but there is no file for {platform}"))?;
+        self.publication(&offer)?;
+        Ok(Some(offer))
     }
 
     /// Si la release de esa versión ya tiene su fichero y su suma. `VERSION` se
@@ -222,8 +234,15 @@ impl Updater {
     /// acabaría en un 404. Sin respuesta tampoco se ofrece: sin red no se
     /// puede bajar nada de todos modos.
     fn is_published(&self, offer: &Offer) -> bool {
-        let url = self.source.asset_url_tagged(&tag(&offer.version), update::CHECKSUMS);
-        update::fetch_text(&url, Duration::from_secs(8)).is_ok_and(|sums| update::checksum_for(&sums, &offer.asset).is_some())
+        self.publication(offer).is_ok()
+    }
+
+    /// Lo mismo que `is_published`, con el motivo de que no.
+    fn publication(&self, offer: &Offer) -> Result<(), String> {
+        let version = &offer.version;
+        let url = self.source.asset_url_tagged(&tag(version), update::CHECKSUMS);
+        let sums = update::fetch_text(&url, Duration::from_secs(8)).map_err(|_| format!("v{version} is announced, but its release isn't published yet"))?;
+        update::checksum_for(&sums, &offer.asset).map(|_| ()).ok_or_else(|| format!("v{version} is announced, but its release has no file for {}-{}", self.os, self.arch))
     }
 
     /// Borra lo que dejaron las descargas de otras ejecuciones (el instalador
@@ -538,6 +557,36 @@ mod tests {
         let offline = Updater { source: Source { version_url: "http://127.0.0.1:9/VERSION".into(), ..app.source.clone() }, ..app.clone() };
         let error = offline.check_fresh().unwrap_err();
         assert!(error.contains("could not reach"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Una versión anunciada que no se puede ofrecer se dice con su motivo, no
+    /// como «al día». Roturas que atrapa: contestar «al día» cuando la release
+    /// aún no existe, cuando no trae el fichero de esta máquina, o en una
+    /// compilación de desarrollo; que el aviso diario (`check`) deje de callar.
+    #[test]
+    fn check_fresh_says_why_an_announced_version_cannot_be_offered() {
+        let releases = FakeReleases::start();
+        let dir = scratch("fresh-why");
+        let app = machine(&releases, &dir, "0.1.0");
+        releases.announce_desktop("0.2.0");
+        let error = app.check_fresh().unwrap_err();
+        assert!(error.contains("v0.2.0") && error.contains("isn't published yet"), "{error}");
+        assert_eq!(app.check(Duration::ZERO), None, "the daily notice stays quiet");
+
+        releases.publish_desktop("0.2.0", &[("cac-desktop-0.2.0-windows-x86_64-setup.exe", b"other system")]);
+        let error = app.check_fresh().unwrap_err();
+        assert!(error.contains("no file for linux-x86_64"), "{error}");
+
+        let other = Updater { arch: "aarch64", ..app.clone() };
+        let error = other.check_fresh().unwrap_err();
+        assert!(error.contains("no file for linux-aarch64"), "{error}");
+
+        publish_linux(&releases, "0.2.0", b"new");
+        assert!(app.check_fresh().unwrap().is_some());
+        let dev = Updater { exe: Some(dir.join("repo").join("target").join("debug").join(APP_BINARY)), ..app.clone() };
+        let error = dev.check_fresh().unwrap_err();
+        assert!(error.contains("development build"), "{error}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

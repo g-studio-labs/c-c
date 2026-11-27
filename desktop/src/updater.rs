@@ -54,8 +54,8 @@ pub enum Manual {
     Idle,
     Checking,
     UpToDate,
-    /// Hay una versión nueva (el aviso de siempre trae su «Actualizar»).
-    Found(String),
+    /// Hay una versión nueva: la fila ofrece «Actualizar» (`update_from_check`).
+    Found(Offer),
     Failed(String),
     /// Esta app no comprueba (`CAC_DESKTOP_NO_UPDATE_CHECK`).
     Disabled,
@@ -131,11 +131,10 @@ impl UpdateNotice {
             this.update(cx, |this, cx| {
                 this.manual = match answer {
                     Ok(Some(offer)) => {
-                        let version = offer.version.clone();
                         if matches!(this.state, State::Quiet | State::Offered(_)) {
-                            this.state = State::Offered(offer);
+                            this.state = State::Offered(offer.clone());
                         }
-                        Manual::Found(version)
+                        Manual::Found(offer)
                     }
                     Ok(None) => Manual::UpToDate,
                     Err(reason) => Manual::Failed(reason),
@@ -145,6 +144,20 @@ impl UpdateNotice {
             .ok();
         })
         .detach();
+    }
+
+    /// El «Actualizar» de la fila «Comprobar»: el mismo flujo que el del aviso
+    /// (no vuelve a comprobar). Una instalación que no se actualiza sola abre
+    /// la página de la release, como el aviso.
+    pub(crate) fn update_from_check(&mut self, cx: &mut Context<Self>) {
+        let Manual::Found(offer) = self.manual.clone() else { return };
+        self.manual = Manual::Idle;
+        if offer.delivery == Delivery::Manual {
+            cx.open_url(&desktop_update::release_page(&offer.version));
+            cx.notify();
+        } else {
+            self.run(offer, cx);
+        }
     }
 
     /// «Ahora no», en el estado que sea: esa versión no vuelve a avisar, ni a
@@ -542,8 +555,25 @@ mod tests {
         m.releases.publish_desktop("0.2.0", &[(&name, b"the new binary")]);
         cx.update(|cx| view.update(cx, |view, _| view.dismissed = Some("0.2.0".into())));
         press(cx);
-        assert_eq!(manual(cx), Manual::Found("0.2.0".into()));
+        assert!(matches!(manual(cx), Manual::Found(offer) if offer.version == "0.2.0"));
         assert!(on_screen(window, "update-offer", cx), "el aviso no sale pese al «ahora no» de otra vez");
+
+        // «Actualizar» de la fila lanza el mismo flujo que el del aviso, sin
+        // volver a comprobar.
+        let asked = |m: &Machine| m.releases.asked().iter().filter(|path| path.as_str() == "/desktop/VERSION").count();
+        let before = asked(&m);
+        cx.update(|cx| view.update(cx, |view, cx| view.update_from_check(cx)));
+        cx.run_until_parked();
+        assert!(on_screen(window, "update-ready", cx), "«Actualizar» de la fila no instaló");
+        assert_eq!(std::fs::read(&m.exe).unwrap(), b"the new binary");
+        assert_eq!(asked(&m), before, "«Actualizar» volvió a comprobar");
+        assert_eq!(manual(cx), Manual::Idle);
+        cx.update(|cx| view.update(cx, |view, _| view.state = State::Quiet));
+
+        // La versión anunciada cuya release aún no está: el motivo, no «al día».
+        m.releases.announce_desktop("0.3.0");
+        press(cx);
+        assert!(matches!(manual(cx), Manual::Failed(reason) if reason.contains("isn't published yet")), "{:?}", manual(cx));
 
         // Sin red: el motivo, no «al día».
         let broken = Updater { source: cac_mcp::update::Source { version_url: "http://127.0.0.1:9/VERSION".into(), ..m.updater.source.clone() }, ..m.updater.clone() };

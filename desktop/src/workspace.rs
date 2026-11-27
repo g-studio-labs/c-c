@@ -6,6 +6,7 @@
 
 use cac_core::{count_badge, counted_label, Locale, NodeAction, NodeKind, ThemePreference, TreeEditError, TreeRow, BELL_CAP, RAIL_CAP};
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
@@ -965,25 +966,61 @@ impl Workspace {
                         .child(div().font_family(mono.clone()).child(concat!("v", env!("CARGO_PKG_VERSION"))))
                         .child(div().flex_1())
                         .child({
-                            let (text, tone) = match check_updater.read(cx).manual.clone() {
+                            let on_primary = cx.theme().primary_foreground;
+                            let manual = check_updater.read(cx).manual.clone();
+                            let (text, tone) = match manual.clone() {
                                 Manual::Idle => (tr(cx, "common:misc.check"), primary),
                                 Manual::Checking => (tr(cx, "nav:updater.checking"), muted),
                                 Manual::UpToDate => (cac_core::text_with(here, "nav:updater.upToDate", &[("version", env!("CARGO_PKG_VERSION"))]), muted),
-                                Manual::Found(version) => (cac_core::text_with(here, "nav:updater.found", &[("version", &version)]), primary),
+                                Manual::Found(offer) => (cac_core::text_with(here, "nav:updater.found", &[("version", &offer.version)]), primary),
                                 Manual::Failed(reason) => (format!("{} {reason}", tr(cx, "nav:updater.checkFailed")), danger),
                                 Manual::Disabled => (tr(cx, "nav:updater.checkDisabled"), muted),
                             };
                             let updater = check_updater.clone();
+                            let checking = matches!(manual, Manual::Checking);
+                            let found = matches!(manual, Manual::Found(_));
+                            // Con el botón no cabe en una línea del menú: baja a la siguiente.
                             div()
-                                .id("account-check")
-                                .test_support()
-                                .max_w(px(170.))
-                                .text_size(px(11.))
-                                .text_color(tone)
-                                .cursor_pointer()
-                                .aria_label(text.clone())
-                                .child(text)
-                                .on_click(move |_, _, cx| updater.update(cx, |this, cx| this.check_now(cx)))
+                                .flex()
+                                .flex_wrap()
+                                .justify_end()
+                                .items_center()
+                                .gap_1p5()
+                                .min_w_0()
+                                .when(checking, |row| row.child(div().id("account-check-busy").test_support().child(Spinner::new().color(muted))))
+                                .child(
+                                    div()
+                                        .id("account-check")
+                                        .test_support()
+                                        .max_w(px(170.))
+                                        .text_size(px(11.))
+                                        .text_color(tone)
+                                        .cursor_pointer()
+                                        .aria_label(text.clone())
+                                        .child(text)
+                                        .on_click({
+                                            let updater = updater.clone();
+                                            move |_, _, cx| updater.update(cx, |this, cx| this.check_now(cx))
+                                        }),
+                                )
+                                .when(found, |row| {
+                                    let label = tr(cx, "nav:updater.update");
+                                    row.child(
+                                        div()
+                                            .id("account-update")
+                                            .test_support()
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded(px(4.))
+                                            .bg(primary)
+                                            .text_color(on_primary)
+                                            .text_size(px(11.))
+                                            .cursor_pointer()
+                                            .aria_label(label.clone())
+                                            .child(label)
+                                            .on_click(move |_, _, cx| updater.update(cx, |this, cx| this.update_from_check(cx))),
+                                    )
+                                })
                         }),
                 )
                 .child(
@@ -3844,7 +3881,7 @@ mod tests {
         let server = server();
         server.mount(Mock::given(method("PATCH")).and(path("/api/v1/auth/locale")).respond_with(ok(json!(null))));
         server.install(cx);
-        let window = open(cx);
+        let (window, workspace) = open_with_view(1100., cx);
         wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
 
         click(window, "account-menu", cx);
@@ -3857,6 +3894,26 @@ mod tests {
         // lo dice en vez de no hacer nada.
         click(window, "account-check", cx);
         wait_until(cx, "«Comprobar» dice por qué no comprueba", |cx| label(window, "account-check", cx) == "Esta app no comprueba versiones nuevas.");
+        // Mientras mira, un spinner; con versión nueva, «Actualizar» ahí mismo.
+        let notice = cx.update(|cx| workspace.read(cx).updater.clone());
+        let set = |manual: crate::updater::Manual, cx: &mut TestAppContext| {
+            cx.update(|cx| notice.update(cx, |notice, cx| {
+                notice.manual = manual;
+                cx.notify();
+            }));
+        };
+        assert!(!on_screen(window, "account-check-busy", cx) && !on_screen(window, "account-update", cx));
+        set(crate::updater::Manual::Checking, cx);
+        assert!(on_screen(window, "account-check-busy", cx), "mirando, sin spinner");
+        let offer = cac_mcp::desktop_update::Offer {
+            version: "0.2.0".into(),
+            asset: "cac-desktop-0.2.0-linux-x86_64".into(),
+            delivery: cac_mcp::desktop_update::Delivery::Replace { exe: "/tmp/cac-desktop".into() },
+        };
+        set(crate::updater::Manual::Found(offer), cx);
+        assert!(!on_screen(window, "account-check-busy", cx), "con el resultado, el spinner sigue");
+        click(window, "account-update", cx);
+        assert_eq!(cx.update(|cx| notice.read(cx).manual.clone()), crate::updater::Manual::Idle, "«Actualizar» de la fila no lanzó el flujo");
         click(window, "account-theme-1", cx);
         assert_eq!(cx.update(|cx| Backend::core(cx).theme()), ThemePreference::Light);
         assert!(on_screen(window, "account-language-1", cx), "elegir el tema cerró el menú");
