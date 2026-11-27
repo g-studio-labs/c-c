@@ -181,6 +181,10 @@ pub struct Workspace {
     /// el panel asomado. Con cualquiera de los dos, se ve.
     over_rail: bool,
     over_panel: bool,
+    /// Los menús abiertos que nacieron del panel. Se pintan en otra capa,
+    /// fuera de sus límites: con el ratón encima, el panel asomado ve «ratón
+    /// fuera», se desmonta y se lleva el menú. Mientras haya uno, se queda.
+    panel_menus_open: std::collections::HashSet<SharedString>,
     /// Dónde está el foco cuando no lo tiene nada: sin nadie enfocado, una
     /// tecla no llega a ningún elemento de la app y Ctrl+B no haría nada
     /// hasta pulsar algo con el ratón.
@@ -295,6 +299,7 @@ impl Workspace {
             panel_pinned: Backend::core(cx).panel_pinned(),
             over_rail: false,
             over_panel: false,
+            panel_menus_open: Default::default(),
             focus_anchor,
             _on_focus_lost: on_focus_lost,
             naming: None,
@@ -565,7 +570,25 @@ impl Workspace {
         let _ = Backend::core(cx).set_panel_pinned(self.panel_pinned);
         self.over_rail = false;
         self.over_panel = false;
+        self.panel_menus_open.clear();
         cx.notify();
+    }
+
+    /// Apunta que el menú `key` del panel se abrió o se cerró. Quien se
+    /// sostiene es el panel asomado, no el menú: al cerrarse el último, si el
+    /// ratón ya no está en el riel ni en el panel, el panel se va.
+    fn set_panel_menu_open(&mut self, key: SharedString, open: bool, cx: &mut Context<Self>) {
+        let changed = if open { self.panel_menus_open.insert(key) } else { self.panel_menus_open.remove(&key) };
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn panel_menu_tracker(&self, key: SharedString, cx: &mut Context<Self>) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
+        let this = cx.entity().downgrade();
+        move |open, _, cx| {
+            this.update(cx, |this, cx| this.set_panel_menu_open(key.clone(), *open, cx)).ok();
+        }
     }
 
     fn switch_org(org_id: String, cx: &App) {
@@ -1579,6 +1602,7 @@ impl Workspace {
             // Siempre, también con una sola organización: desde aquí se crea otra.
             .child(Icon::new(Lucide::ChevronsUpDown).size_3p5().flex_none().opacity(0.6));
         let label = tr(cx, "common:misc.organizations");
+        let track = self.panel_menu_tracker("org-switch".into(), cx);
         Button::new("org-switch").ghost().w_full().h(px(48.)).p_2().child(face).dropdown_menu(move |menu, _, _| {
             let mut menu = menu.min_w(px(224.)).check_side(Side::Right).label(label.clone());
             for org in &orgs.orgs {
@@ -1605,6 +1629,7 @@ impl Workspace {
                     .test_support()
             }))
         })
+        .on_open_change(track)
     }
 
     /// Una fila del árbol, con las medidas de `SpacesNavigator.tsx`: dentro
@@ -1633,6 +1658,7 @@ impl Workspace {
             NodeKind::List => Icon::new(Lucide::ListChecks).size_3p5().flex_none().text_color(muted).into_any_element(),
         };
         let chevron_size = if space { 14. } else { 12. };
+        let menu_open_tracker = self.panel_menu_tracker(SharedString::from(format!("tree-more-{}", row.id)), cx);
         let menu_label = tr(
             cx,
             match row.kind {
@@ -1761,7 +1787,8 @@ impl Workspace {
                                 );
                             }
                             menu
-                        }),
+                        })
+                        .on_open_change(menu_open_tracker),
                 ),
             )
     }
@@ -2128,7 +2155,7 @@ impl Render for Workspace {
         // La tarea abierta, sobre lo que se estuviera mirando.
         let task = snapshot.task.task_id.is_some().then(|| self.task.clone());
         let pinned = self.panel_pinned;
-        let peeking = !pinned && (self.over_rail || self.over_panel);
+        let peeking = !pinned && (self.over_rail || self.over_panel || !self.panel_menus_open.is_empty());
         let inbox = self.render_inbox(cx);
         div()
             .id("open")
@@ -3232,6 +3259,47 @@ mod tests {
         wait_until(cx, "llega la documentación del espacio", |cx| on_screen(window, "doc-body", cx));
         assert_eq!(doc_open(cx).as_deref(), Some("a"));
         assert_eq!(scope(cx), None);
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Con el panel suelto y asomado, el menú que nace de él (la
+    /// organización, el «···» de una fila) lo sostiene aunque el ratón esté
+    /// encima del menú, que se pinta fuera del panel; al cerrarse, con el
+    /// ratón fuera, el panel se va.
+    ///
+    /// Roturas que atrapa: el panel que se pliega al pasar el ratón por su
+    /// menú y se lleva el menú; que cualquier menú nuevo del panel se quede
+    /// sin sostenerlo (lo prueban los dos que hay); un panel que se queda
+    /// asomado para siempre tras cerrar el menú.
+    #[gpui_kit::test]
+    fn a_menu_born_in_the_peeking_panel_holds_it_open(cx: &mut TestAppContext) {
+        let server = server();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        let hover = |id: &'static str, cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.hover(id, cx);
+            })
+            .unwrap();
+        };
+        click(window, "panel-toggle", cx);
+        assert!(!on_screen(window, "panel-peek", cx));
+
+        for (opener, item) in [("org-switch", "org-create"), ("tree-more-a", "tree-act-docs-a")] {
+            hover("rail", cx);
+            assert!(on_screen(window, "panel-peek", cx), "no se asoma con el ratón en el riel");
+            click(window, opener, cx);
+            wait_until(cx, "el menú se abre", |cx| on_screen(window, item, cx));
+            hover(item, cx);
+            assert!(on_screen(window, "panel-peek", cx) && on_screen(window, item, cx), "{opener}: el panel se plegó con el ratón sobre su menú");
+
+            press(window, "escape", cx);
+            hover("new-task", cx);
+            assert!(!on_screen(window, item, cx), "{opener}: el menú no se cerró");
+            assert!(!on_screen(window, "panel-peek", cx), "{opener}: el panel se quedó asomado con el menú cerrado y el ratón fuera");
+        }
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
