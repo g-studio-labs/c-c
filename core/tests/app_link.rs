@@ -126,3 +126,20 @@ async fn what_is_not_a_screen_here_goes_to_the_web_or_is_said() {
     assert_eq!(org(&core).as_deref(), Some("o1"), "nada de eso cambia de organización");
     core.stream().stop();
 }
+
+/// Un enlace cuyo id, descodificado, sale de su sitio (`a/../../x`) no
+/// abre nada y no hace ninguna petición fuera de la ruta que le toca.
+///
+/// Roturas que atrapa: meter en la ruta de la API el id de una nota o de
+/// una publicación del muro tal como llega en el enlace; mirar la barra
+/// antes de descodificar.
+#[tokio::test]
+async fn an_id_from_a_link_never_reaches_another_route() {
+    let (server, core) = rig().await;
+    for sneaky in ["cac://notes/a%2F..%2F..%2Fx", "cac://feedback?post=..%2F..%2Fx"] {
+        assert_eq!(core.open_link(sneaky).await, LinkOpened::Failed, "{sneaky}");
+    }
+    let asked: Vec<String> = server.received_requests().await.unwrap_or_default().iter().map(|request| request.url.path().to_string()).collect();
+    assert!(asked.iter().all(|path| !path.ends_with("/x") && !path.contains("..")), "{asked:?}");
+    core.stream().stop();
+}

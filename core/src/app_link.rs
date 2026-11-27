@@ -202,9 +202,38 @@ pub fn app_link(href: &str, base_url: &str) -> AppLink {
         "/feedback" => Some(AppLink::Wall { post_id: param(query, "post") }),
         "/notes" => Some(AppLink::Notes { id: None }),
         "/organization" => Some(AppLink::Organization),
-        _ => path.strip_prefix("/notes/").filter(|id| !id.is_empty() && !id.contains('/')).map(|id| AppLink::Notes { id: Some(decoded(id)) }),
+        _ => path.strip_prefix("/notes/").map(|id| AppLink::Notes { id: Some(decoded(id)) }),
     };
-    found.unwrap_or_else(browser)
+    match found {
+        Some(screen) if only_plain_ids(&screen) => screen,
+        Some(_) => AppLink::Unopenable,
+        None => browser(),
+    }
+}
+
+/// Un id tal como lo da el servidor (un uuid, `req-7f2a`, `proteus-12`).
+/// Uno vacío no llega aquí: `param` y la ruta de notas ya lo descartan.
+/// Se mira **descodificado**: `a%2F..%2Fx` es `a/../x`, y metido en una ruta
+/// de `/api/v1` pediría otra cosa con la sesión de quien pulsó.
+fn plain_id(id: &str) -> bool {
+    id.len() <= 128 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+/// Todo id de un enlace que acaba en una ruta de la API es un id y nada
+/// más. La pestaña y la sección de un documento no van a ninguna ruta.
+fn only_plain_ids(screen: &AppLink) -> bool {
+    let ids: Vec<Option<&String>> = match screen {
+        AppLink::Task { id } => vec![Some(id)],
+        AppLink::Doc { id, page, .. } => vec![Some(id), page.as_ref()],
+        AppLink::Channel { space_id, message_id } => vec![Some(space_id), message_id.as_ref()],
+        AppLink::Direct { conversation_id } => vec![Some(conversation_id)],
+        AppLink::DirectWith { user_id } => vec![Some(user_id)],
+        AppLink::Requests { code } => vec![code.as_ref()],
+        AppLink::Wall { post_id } => vec![post_id.as_ref()],
+        AppLink::Notes { id } => vec![id.as_ref()],
+        AppLink::Organization | AppLink::Browser { .. } | AppLink::Unopenable => vec![],
+    };
+    ids.into_iter().flatten().all(|id| plain_id(id))
 }
 
 impl Core {
@@ -437,5 +466,31 @@ mod tests {
         for nothing in ["javascript:alert(1)", "file:///etc/passwd", "otra-pagina.md", "", "cac://", "cac:user/u1"] {
             assert_eq!(link(nothing), AppLink::Unopenable, "{nothing:?}");
         }
+    }
+    /// Un id de un enlace es un id: lo que, descodificado, lleva una barra,
+    /// puntos u otra cosa no se abre, porque iría a una ruta de la API.
+    ///
+    /// Roturas que atrapa: mirar la barra antes de descodificar (`%2F`
+    /// pasa); no mirar el id de la publicación, del canal, del directo, de
+    /// la página o del pedido; dejar pasar puntos.
+    #[test]
+    fn an_id_that_is_not_an_id_opens_nothing() {
+        for sneaky in [
+            "cac://notes/a%2F..%2F..%2Fx",
+            "cac://notes/..",
+            "cac://feedback?post=..%2F..%2Fx",
+            "cac://chat?space=s1%2F..%2Fx",
+            "cac://chat?space=s1&message=..%2Fx",
+            "cac://dm?c=..%2Fx",
+            "cac://dm?u=a%3Fb",
+            "cac://tasks?doc=list:l1&page=..%2Fx",
+            "cac://tasks?doc=list:..%2Fx",
+            "cac://requests?open=a%2Fb",
+            "cac://tasks?task=a%2F..%2Fb",
+        ] {
+            assert_eq!(link(sneaky), AppLink::Unopenable, "{sneaky}");
+        }
+        assert_eq!(link("cac://notes/0d6bf322-2267-4259-9b81-337575aca792"), AppLink::Notes { id: Some("0d6bf322-2267-4259-9b81-337575aca792".into()) });
+        assert_eq!(link("cac://feedback?post=p_1"), AppLink::Wall { post_id: Some("p_1".into()) });
     }
 }
