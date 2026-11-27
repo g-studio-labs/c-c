@@ -4,13 +4,14 @@
 //! lleva sólo JSON-RPC. La identidad es la de siempre, `CAC_TOKEN` y `CAC_URL`.
 //!
 //! `cac-mcp update` lo actualiza (nunca se actualiza solo) y `--version` dice
-//! cuál es y, si ya se sabe de una más nueva, cuál hay.
+//! cuál es y, si ya se sabe de una más nueva, cuál hay. `cac-mcp listen`
+//! escucha los eventos de la persona y los deja en un fichero (`listen.rs`).
 
 use std::time::Duration;
 
 use cac_mcp::update::{self, Progress, Source};
 
-const USAGE: &str = "Run it with no arguments to serve MCP over stdio. Other uses: --version, update, update --check.";
+const USAGE: &str = "Run it with no arguments to serve MCP over stdio. Other uses: --version, update, update --check, listen run|follow|ack.";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -30,6 +31,7 @@ fn main() {
         }
         ["update"] => run_update(false),
         ["update", "--check"] => run_update(true),
+        ["listen", rest @ ..] => cac_mcp::listen::main(rest),
         // Un argumento que no se entiende no puede dejar el proceso esperando
         // JSON-RPC por stdin: quien se equivocó al escribirlo no vería nada.
         other => {
