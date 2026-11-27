@@ -54,6 +54,7 @@ func InitBasecampRoutesWith(r *chi.Mux, svc *service.BasecampService) {
 		r.Get("/projects", h.AvailableProjects)
 		r.Put("/projects/{projectId}", h.LinkProject)
 		r.Delete("/projects/{projectId}", h.UnlinkProject)
+		r.Get("/awaiting", h.Awaiting)
 		r.Get("/people", h.People)
 		r.Put("/people/{personId}", h.MatchPerson)
 	})

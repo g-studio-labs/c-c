@@ -32,7 +32,8 @@ const (
 // asignados. El webhook no trae ni las notas ni los asignados, así que se le
 // pregunta a Basecamp; y como se le pregunta por cómo está **ahora**, da igual
 // en qué orden lleguen el alta y las asignaciones.
-func (s *BasecampService) processAssignable(proj *domain.BasecampProject, ev domain.BasecampWebhookEvent, who, actorID string) error {
+func (s *BasecampService) processAssignable(full basecampFull, who, actorID string) error {
+	proj, ev := full.proj, full.ev
 	recording := ev.Recording.ID
 	// Un enlace a mano a un recording de otro proyecto no es de este secreto.
 	if link, err := s.repo.LinkFor(proj.OrgID, recording); err == nil && link.ProjectID != proj.ProjectID {
@@ -75,6 +76,13 @@ func (s *BasecampService) processAssignable(proj *domain.BasecampProject, ev dom
 	if err != nil {
 		return err
 	}
+	// El evento completo, con el to-do ya leído, antes que cualquier aviso.
+	full.item, full.todo = item, &rec
+	full.textHTML = rec.Description
+	if domain.BasecampIsCard(ev.Kind) {
+		full.textHTML = rec.Content
+	}
+	s.publishEvent(full)
 	if item == nil {
 		// Sin tarea (el espacio no tiene listas, o la que tenía se borró):
 		// como en la fase 1, sólo un aviso a quien enlazó el proyecto.
@@ -83,14 +91,14 @@ func (s *BasecampService) processAssignable(proj *domain.BasecampProject, ev dom
 			key = "notify.basecamp.todo_assigned"
 		}
 		s.notifyUnlinked(proj, actorID, nil, basecampNote{who: who, titleKey: key,
-			excerpt: strings.TrimSpace(rec.Title), url: domain.SafeBasecampURL(rec.AppURL)})
+			excerpt: strings.TrimSpace(rec.Title), url: domain.SafeBasecampURL(rec.AppURL), key: full.key})
 		return nil
 	}
 	if created && s.hub != nil {
 		s.hub.Publish(events.Event{Type: "task:new", OrgID: item.OrgID,
 			Data: map[string]string{"listId": item.ListID, "taskId": item.ID}})
 	}
-	return s.syncAssignees(proj, item, rec.Assignees, who, actorID)
+	return s.syncAssignees(proj, item, rec.Assignees, who, actorID, full.key)
 }
 
 // taskFor: la tarea enlazada al recording, creándola si no la hay. nil si el
@@ -161,7 +169,7 @@ func basecampTaskDescription(notesHTML, url string) string {
 // a quien enlazó el proyecto: es lo que hacía la fase 1 con lo que no tenía a
 // quién llegar.
 func (s *BasecampService) syncAssignees(proj *domain.BasecampProject, item *domain.Item,
-	people []domain.BasecampPersonWire, who, actorID string) error {
+	people []domain.BasecampPersonWire, who, actorID, key string) error {
 	var wanted []string
 	unmatched := 0
 	seen := map[string]bool{}
@@ -195,7 +203,7 @@ func (s *BasecampService) syncAssignees(proj *domain.BasecampProject, item *doma
 		if uid != actorID && s.inbox != nil {
 			s.inbox.Notify(domain.Aviso{UserID: uid, OrgID: item.OrgID, Kind: "task:assigned",
 				TitleKey: "notify.item.assigned", Body: item.Title, Link: link,
-				Group: domain.ItemGroup(item.ID), Label: item.Title})
+				Group: domain.ItemGroup(item.ID), Label: item.Title, SourceKey: key})
 		}
 	}
 	byBasecamp, err := s.repo.BasecampAssignees(item.ID)
@@ -219,13 +227,13 @@ func (s *BasecampService) syncAssignees(proj *domain.BasecampProject, item *doma
 	if (len(wanted) > 0 && unmatched == 0) || s.inbox == nil || proj.LinkedByID == "" || proj.LinkedByID == actorID {
 		return nil
 	}
-	key := "notify.basecamp.todo_unmatched"
+	titleKey := "notify.basecamp.todo_unmatched"
 	if len(people) == 0 {
-		key = "notify.basecamp.todo_unassigned"
+		titleKey = "notify.basecamp.todo_unassigned"
 	}
 	s.inbox.Notify(domain.Aviso{UserID: proj.LinkedByID, OrgID: item.OrgID, Kind: domain.BasecampActivityKind,
-		TitleKey: key, TitleArgs: map[string]string{"who": who}, Body: item.Title, Link: link,
-		Group: domain.ItemGroup(item.ID), Label: item.Title})
+		TitleKey: titleKey, TitleArgs: map[string]string{"who": who}, Body: item.Title, Link: link,
+		Group: domain.ItemGroup(item.ID), Label: item.Title, SourceKey: key})
 	return nil
 }
 

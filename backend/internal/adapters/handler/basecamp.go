@@ -104,6 +104,21 @@ func (h *BasecampHandler) Status(w http.ResponseWriter, r *http.Request) {
 	SendResult(w, http.StatusOK, domain.APIResponse[*domain.BasecampStatus]{Success: true, Data: out})
 }
 
+// Awaiting: `GET …/basecamp/awaiting`, para cualquiera de la org: los hilos
+// de Basecamp que esperan respuesta del equipo, del más viejo al más nuevo.
+func (h *BasecampHandler) Awaiting(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := scopeOrg(w, r, domain.OrgRoleViewer)
+	if !ok {
+		return
+	}
+	out, err := h.svc.Awaiting(orgID)
+	if err != nil {
+		basecampError(w, err)
+		return
+	}
+	SendResult(w, http.StatusOK, domain.APIResponse[[]domain.BasecampAwaiting]{Success: true, Data: out})
+}
+
 // Connect: `POST …/basecamp/connect`, admin. Devuelve a dónde mandar el
 // navegador.
 func (h *BasecampHandler) Connect(w http.ResponseWriter, r *http.Request) {

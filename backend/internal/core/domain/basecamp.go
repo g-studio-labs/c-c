@@ -208,6 +208,11 @@ type BasecampAssignable struct {
 	AppURL      string               `json:"app_url"`
 	Bucket      BasecampBucket       `json:"bucket"`
 	Assignees   []BasecampPersonWire `json:"assignees"`
+	// Para el evento completo (command-and-control-558): la lista (o la
+	// columna) en la que vive, su fecha y si está hecho.
+	Parent    *BasecampRecordRef `json:"parent"`
+	DueOn     string             `json:"due_on"`
+	Completed bool               `json:"completed"`
 }
 
 type BasecampRecording struct {
@@ -467,6 +472,9 @@ type BasecampStatus struct {
 	Projects        []BasecampProject `json:"projects"`
 	// Unmatched: cuántas personas quedan sin usuario de cac.
 	Unmatched int64 `json:"unmatched"`
+	// Awaiting: cuántos hilos esperan respuesta del equipo
+	// (`…/basecamp/awaiting`).
+	Awaiting int64 `json:"awaiting"`
 }
 
 // BasecampConnectResponse: a dónde mandar el navegador para autorizar.

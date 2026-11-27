@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -68,5 +69,57 @@ func TestTheBasecampWebhookIsA404ForAnUnknownSecret(t *testing.T) {
 	}
 	if rec := call(domain.OrgRoleMember); rec.Code != http.StatusForbidden {
 		t.Fatalf("a member who is not an admin connecting: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// «Por contestar» (command-and-control-558): cualquier miembro de la org ve
+// los hilos de Basecamp que esperan respuesta; quien no es de la org no ve
+// nada, ni siquiera que existen.
+//
+// Roturas que atrapa: abrir la lista a quien no es miembro; pedir más que
+// mirar (un viewer también la ve); devolver hilos que ya no esperan.
+func TestOnlyMembersSeeWhatAwaitsAReply(t *testing.T) {
+	db, cleanup := githubDB(t)
+	defer cleanup()
+	if err := db.AutoMigrate(&domain.BasecampConnection{}, &domain.BasecampProject{}, &domain.BasecampPerson{},
+		&domain.BasecampLink{}, &domain.BasecampEvent{}, &domain.BasecampThread{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&domain.BasecampProject{OrgID: "org-1", SpaceID: "sp-1", ProjectID: 42, Name: "Proteus",
+		SecretHash: "h"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	since := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	for _, th := range []domain.BasecampThread{
+		{OrgID: "org-1", RecordingID: 5001, ProjectID: 42, Title: "Hilo del cliente", AwaitingReply: true,
+			AwaitingSince: &since, LastExternalName: "Cliente"},
+		{OrgID: "org-1", RecordingID: 5002, ProjectID: 42, Title: "Ya contestado"},
+	} {
+		if err := db.Create(&th).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := chi.NewRouter()
+	InitBasecampRoutesWith(r, service.NewBasecampService(repository.NewBasecampRepository(db), service.BasecampConfig{}, nil, nil, nil))
+	call := func(org string, role domain.OrgRole) *httptest.ResponseRecorder {
+		pair, err := repository.GenerateTokens("u-1", "ana", false, []domain.OrgMembershipClaim{{OrgID: org, Role: role}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/organizations/org-1/basecamp/awaiting", nil)
+		req.Header.Set("Authorization", "Bearer "+pair.AccessToken)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+	rec := call("org-1", domain.OrgRoleViewer)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Hilo del cliente") ||
+		strings.Contains(rec.Body.String(), "Ya contestado") {
+		t.Fatalf("a viewer of org-1: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = call("org-2", domain.OrgRoleAdmin)
+	if rec.Code == http.StatusOK || strings.Contains(rec.Body.String(), "Hilo del cliente") {
+		t.Fatalf("an admin of another org: %d %s", rec.Code, rec.Body.String())
 	}
 }

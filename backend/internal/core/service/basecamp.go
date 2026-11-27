@@ -101,6 +101,10 @@ type BasecampService struct {
 	// dos renovaciones cruzadas guardarían la que perdió.
 	mu         sync.Mutex
 	refreshing map[string]*sync.Mutex
+	// journal: el diario del evento completo; nil, el del proceso
+	// (journalOut). enrichTimeout: el plazo para completarlo.
+	journal       *EventJournal
+	enrichTimeout time.Duration
 }
 
 func NewBasecampService(repo *repository.BasecampRepository, cfg BasecampConfig, hub *events.Hub,
@@ -455,6 +459,10 @@ func (s *BasecampService) getJSON(u, token string, out any) error {
 }
 
 func (s *BasecampService) do(method, u, token string, body any, out any) (http.Header, error) {
+	return s.doCtx(context.Background(), method, u, token, body, out)
+}
+
+func (s *BasecampService) doCtx(ctx context.Context, method, u, token string, body any, out any) (http.Header, error) {
 	var rd io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -463,7 +471,7 @@ func (s *BasecampService) do(method, u, token string, body any, out any) (http.H
 		}
 		rd = bytes.NewReader(raw)
 	}
-	req, err := http.NewRequest(method, u, rd)
+	req, err := http.NewRequestWithContext(ctx, method, u, rd)
 	if err != nil {
 		return nil, err
 	}
@@ -555,6 +563,7 @@ func (s *BasecampService) Status(orgID string) (*domain.BasecampStatus, error) {
 		return nil, err
 	}
 	out.Unmatched = s.repo.CountUnmatched(orgID)
+	out.Awaiting = s.repo.CountAwaiting(orgID)
 	return out, nil
 }
 
@@ -799,6 +808,8 @@ type basecampNote struct {
 	titleKey string
 	excerpt  string
 	url      string
+	// key: la del evento del diario, que el aviso lleva como SourceKey.
+	key string
 }
 
 func (s *BasecampService) process(proj *domain.BasecampProject, ev domain.BasecampWebhookEvent) error {
@@ -807,15 +818,20 @@ func (s *BasecampService) process(proj *domain.BasecampProject, ev domain.Baseca
 		creator = *ev.Recording.Creator
 	}
 	actorID := ""
+	var person *domain.BasecampPerson
 	if creator.ID != 0 {
-		person, err := s.repo.UpsertPerson(proj.OrgID, creator)
+		p, err := s.repo.UpsertPerson(proj.OrgID, creator)
 		if err != nil {
 			return err
 		}
-		actorID = person.UserID
+		person, actorID = p, p.UserID
 	}
+	// El hilo, con tarea y sin ella, y antes que nada que pueda salir antes.
+	author := s.authorOf(proj.OrgID, creator, person)
+	full := basecampFull{proj: proj, ev: ev, key: basecampEventKey(ev), author: author,
+		thread: s.trackThread(proj, ev, author)}
 	targetID, targetTitle, targetURL := ev.Target()
-	note := basecampNote{who: strings.TrimSpace(creator.Name), url: domain.SafeBasecampURL(ev.Recording.AppURL)}
+	note := basecampNote{who: strings.TrimSpace(creator.Name), url: domain.SafeBasecampURL(ev.Recording.AppURL), key: full.key}
 	if note.url == "" {
 		note.url = domain.SafeBasecampURL(targetURL)
 	}
@@ -838,7 +854,7 @@ func (s *BasecampService) process(proj *domain.BasecampProject, ev domain.Baseca
 		}
 	}
 	if domain.BasecampMakesTask(ev.Kind) {
-		return s.processAssignable(proj, ev, note.who, actorID)
+		return s.processAssignable(full, note.who, actorID)
 	}
 	if note.excerpt == "" {
 		note.excerpt = strings.TrimSpace(targetTitle)
@@ -867,6 +883,9 @@ func (s *BasecampService) process(proj *domain.BasecampProject, ev domain.Baseca
 	case err != nil && !errors.Is(err, gorm.ErrRecordNotFound):
 		return err
 	}
+	full.item = item
+	// El evento completo va antes que cualquier aviso.
+	s.publishEvent(full)
 	if item == nil {
 		s.notifyUnlinked(proj, actorID, mentioned, note)
 		return nil
@@ -899,7 +918,8 @@ func (s *BasecampService) process(proj *domain.BasecampProject, ev domain.Baseca
 			// No se adivina a cuál contesta: se le dice que lo haga en cac.
 			s.inbox.Notify(domain.Aviso{UserID: actorID, OrgID: item.OrgID, Kind: domain.RequestNotifyKind,
 				TitleKey: "notify.basecamp.request_ambiguous", TitleArgs: map[string]string{"count": strconv.Itoa(open)},
-				Body: item.Title, Link: "/tasks?task=" + item.ID, Group: domain.ItemGroup(item.ID), Label: item.Title})
+				Body: item.Title, Link: "/tasks?task=" + item.ID, Group: domain.ItemGroup(item.ID), Label: item.Title,
+				SourceKey: note.key})
 		}
 	}
 	return nil
@@ -968,7 +988,7 @@ func (s *BasecampService) notifyLinked(item *domain.Item, actorID string, mentio
 		told[uid] = true
 		s.inbox.Notify(domain.Aviso{UserID: uid, OrgID: item.OrgID, Kind: domain.BasecampMentionKind,
 			TitleKey: "notify.basecamp.mention", TitleArgs: map[string]string{"who": n.who},
-			Body: n.excerpt, Link: link, Group: domain.ItemGroup(item.ID), Label: item.Title})
+			Body: n.excerpt, Link: link, Group: domain.ItemGroup(item.ID), Label: item.Title, SourceKey: n.key})
 	}
 	assignees, err := s.repo.Assignees(item.ID)
 	if err != nil {
@@ -981,7 +1001,7 @@ func (s *BasecampService) notifyLinked(item *domain.Item, actorID string, mentio
 		told[uid] = true
 		s.inbox.Notify(domain.Aviso{UserID: uid, OrgID: item.OrgID, Kind: "task:comment",
 			TitleKey: n.titleKey, TitleArgs: map[string]string{"who": n.who},
-			Body: n.excerpt, Link: link, Group: domain.ItemGroup(item.ID), Label: item.Title})
+			Body: n.excerpt, Link: link, Group: domain.ItemGroup(item.ID), Label: item.Title, SourceKey: n.key})
 	}
 }
 
@@ -996,14 +1016,14 @@ func (s *BasecampService) notifyUnlinked(proj *domain.BasecampProject, actorID s
 	for _, uid := range mentioned {
 		s.inbox.Notify(domain.Aviso{UserID: uid, OrgID: proj.OrgID, Kind: domain.BasecampMentionKind,
 			TitleKey: "notify.basecamp.mention", TitleArgs: map[string]string{"who": n.who},
-			Body: n.excerpt, Link: n.url, Group: group, Label: proj.Name})
+			Body: n.excerpt, Link: n.url, Group: group, Label: proj.Name, SourceKey: n.key})
 	}
 	if len(mentioned) > 0 || proj.LinkedByID == "" || proj.LinkedByID == actorID {
 		return
 	}
 	s.inbox.Notify(domain.Aviso{UserID: proj.LinkedByID, OrgID: proj.OrgID, Kind: domain.BasecampActivityKind,
 		TitleKey: n.titleKey, TitleArgs: map[string]string{"who": n.who},
-		Body: n.excerpt, Link: n.url, Group: group, Label: proj.Name})
+		Body: n.excerpt, Link: n.url, Group: group, Label: proj.Name, SourceKey: n.key})
 }
 
 // Task: la tarea, para que el handler compruebe su org.

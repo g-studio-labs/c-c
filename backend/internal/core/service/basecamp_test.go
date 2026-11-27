@@ -59,6 +59,9 @@ type fakeBasecamp struct {
 	// recordingsStatus: si no es 0, la API de recordings contesta con este
 	// estado (un 403: quien conectó ya no ve el proyecto).
 	recordingsStatus int
+	// recordingsHang: si no es nil, la API de recordings no contesta hasta
+	// que se cierra o quien llama se cansa.
+	recordingsHang chan struct{}
 }
 
 type hookPut struct {
@@ -180,9 +183,16 @@ func newFakeBasecamp(t *testing.T) *fakeBasecamp {
 	recording := func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.recordingReads++
-		down, status := f.recordingsDown, f.recordingsStatus
+		down, status, hang := f.recordingsDown, f.recordingsStatus, f.recordingsHang
 		body, ok := f.recordings[strings.TrimSuffix(r.PathValue("rest"), ".json")]
 		f.mu.Unlock()
+		if hang != nil {
+			select {
+			case <-hang:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		switch {
 		case down:
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -282,7 +292,8 @@ func basecampDB(t *testing.T) *gorm.DB {
 		&domain.TaskList{}, &domain.Item{}, &domain.ItemAssignee{}, &domain.ItemComment{}, &domain.SpaceSource{},
 		&domain.Request{}, &domain.RequestVersion{},
 		&domain.BasecampConnection{}, &domain.BasecampProject{}, &domain.BasecampPerson{},
-		&domain.BasecampLink{}, &domain.BasecampEvent{}, &domain.BasecampOAuthState{}, &domain.BasecampAssignment{}); err != nil {
+		&domain.BasecampLink{}, &domain.BasecampEvent{}, &domain.BasecampOAuthState{}, &domain.BasecampAssignment{},
+		&domain.BasecampThread{}, &domain.UserEvent{}, &domain.UserEventHead{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := repository.EnsureGitHubIndexes(db); err != nil {
