@@ -16,6 +16,12 @@
 //! ventana se olvida. Antes de quitar un registro `cac` que ya hubiera, se
 //! pregunta.
 //!
+//! Los tokens que la persona ya tiene salen en una lista, con su nombre,
+//! permisos y fechas —nunca su valor, que el servidor no guarda—. Se les
+//! cambian los permisos con `PATCH` (el valor no cambia: nada que volver a
+//! pegar) o se revocan, preguntando antes. No se marca cuál usa Claude Code:
+//! saberlo pediría leer el token en claro de su configuración.
+//!
 //! El aspecto es el de `ConnectMcpDialog.tsx`: el título y la entradilla, los
 //! bloques con borde, y la orden en un campo que se copia.
 
@@ -24,7 +30,7 @@ use std::time::Duration;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cac_core::{all_scopes_selected, toggle_all_scopes, toggle_scope, TokenValue, TOKEN_SCOPES};
+use cac_core::{all_scopes_selected, date_with_year, toggle_all_scopes, toggle_scope, PersonalToken, TokenValue, TOKEN_SCOPES};
 use cac_mcp::claude_code::{CardState, Cli, RegisterError, Registration};
 use cac_mcp::update::{Installed, Machine, Progress, Status, Step, TOKEN_PLACEHOLDER};
 use gpui_kit::assets::IconName as Lucide;
@@ -78,6 +84,25 @@ pub enum TokenWork {
     Failed { key: &'static str, reason: String },
 }
 
+/// La lista de tokens personales y cómo va su carga.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TokenList {
+    Loading,
+    Loaded(Vec<PersonalToken>),
+    /// El motivo, tal como lo da el servidor.
+    Failed(String),
+}
+
+/// Lo que se hizo sobre un token de la lista y cómo salió.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RowWork {
+    Idle,
+    Busy,
+    /// Permisos guardados: el nombre del token.
+    Saved(String),
+    Failed { key: &'static str, reason: String },
+}
+
 /// Se pidió cerrar: quien la tiene la quita.
 pub struct ConnectClosed;
 
@@ -101,6 +126,12 @@ pub struct ConnectView {
     /// El del paso a mano: se enseña mientras la ventana sigue abierta.
     pub(crate) shown_token: Option<TokenValue>,
     token_copied: bool,
+    pub(crate) tokens: TokenList,
+    /// El token cuyos permisos se editan y el conjunto que se va marcando.
+    pub(crate) editing: Option<(String, Vec<String>)>,
+    /// El token que se va a revocar y se espera el sí.
+    pub(crate) revoke_ask: Option<String>,
+    pub(crate) row_work: RowWork,
 }
 
 impl EventEmitter<ConnectClosed> for ConnectView {}
@@ -161,6 +192,10 @@ impl ConnectView {
             pending_token: None,
             shown_token: None,
             token_copied: false,
+            tokens: TokenList::Loading,
+            editing: None,
+            revoke_ask: None,
+            row_work: RowWork::Idle,
         }
     }
 
@@ -178,8 +213,150 @@ impl ConnectView {
         if !matches!(self.token_work, TokenWork::Busy { .. }) {
             self.token_work = TokenWork::Idle;
         }
+        self.editing = None;
+        self.revoke_ask = None;
+        if !matches!(self.row_work, RowWork::Busy) {
+            self.row_work = RowWork::Idle;
+        }
         self.look(0, cx);
         self.look_registration(cx);
+        self.load_tokens(cx);
+    }
+
+    /// La lista de tokens del servidor. Sin sesión de la app (las pruebas de
+    /// otras pantallas) no se pide.
+    fn load_tokens(&mut self, cx: &mut Context<Self>) {
+        if !cx.has_global::<Backend>() {
+            return;
+        }
+        let asked = Backend::ask(cx, |core| async move { core.list_personal_tokens().await });
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = asked.await else { return };
+            this.update(cx, |this, cx| {
+                this.tokens = match result {
+                    Ok(list) => TokenList::Loaded(list),
+                    Err(error) => TokenList::Failed(error_text(cx, &error, "nav:mcp.tokensFailed")),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn listed(&self, id: &str) -> Option<&PersonalToken> {
+        match &self.tokens {
+            TokenList::Loaded(list) => list.iter().find(|token| token.id == id),
+            _ => None,
+        }
+    }
+
+    /// El lápiz de una fila: abre sus permisos para editar, o los cierra.
+    pub(crate) fn edit_token(&mut self, id: &str, cx: &mut Context<Self>) {
+        if matches!(self.row_work, RowWork::Busy) {
+            return;
+        }
+        self.revoke_ask = None;
+        self.row_work = RowWork::Idle;
+        if self.editing.as_ref().is_some_and(|(open, _)| open == id) {
+            self.editing = None;
+        } else if let Some(token) = self.listed(id) {
+            self.editing = Some((id.to_string(), token.scopes.clone()));
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_edit_all(&mut self, cx: &mut Context<Self>) {
+        if let Some((_, scopes)) = &mut self.editing {
+            *scopes = toggle_all_scopes(scopes);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn toggle_edit_scope(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
+        if let Some((_, scopes)) = &mut self.editing {
+            *scopes = toggle_scope(scopes, id, on);
+            cx.notify();
+        }
+    }
+
+    /// «Guardar permisos»: `PATCH` del token que se edita.
+    pub(crate) fn save_edit(&mut self, cx: &mut Context<Self>) {
+        let Some((id, scopes)) = self.editing.clone() else { return };
+        if matches!(self.row_work, RowWork::Busy) {
+            return;
+        }
+        self.row_work = RowWork::Busy;
+        cx.notify();
+        let asked = Backend::ask(cx, move |core| async move { core.update_personal_token_scopes(&id, &scopes).await.map(|saved| (id, saved)) });
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = asked.await else { return };
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok((id, saved)) => {
+                        // Se pinta lo que quedó guardado, que puede ser menos
+                        // de lo que se mandó.
+                        let mut name = String::new();
+                        if let TokenList::Loaded(list) = &mut this.tokens {
+                            if let Some(token) = list.iter_mut().find(|token| token.id == id) {
+                                token.scopes = saved.scopes;
+                                name = token.name.clone();
+                            }
+                        }
+                        this.editing = None;
+                        this.row_work = RowWork::Saved(name);
+                    }
+                    Err(error) => {
+                        this.row_work = RowWork::Failed { key: "nav:mcp.tokenSaveFailed", reason: error_text(cx, &error, "nav:mcp.tokenSaveFailed") }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// La papelera de una fila: pregunta antes de revocar.
+    pub(crate) fn ask_revoke(&mut self, id: &str, cx: &mut Context<Self>) {
+        if matches!(self.row_work, RowWork::Busy) {
+            return;
+        }
+        self.editing = None;
+        self.row_work = RowWork::Idle;
+        self.revoke_ask = Some(id.to_string());
+        cx.notify();
+    }
+
+    /// El sí a revocar: `DELETE` de ese token.
+    pub(crate) fn revoke_token(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.revoke_ask.clone() else { return };
+        if matches!(self.row_work, RowWork::Busy) {
+            return;
+        }
+        self.row_work = RowWork::Busy;
+        cx.notify();
+        let asked = Backend::ask(cx, move |core| async move { core.revoke_personal_token(&id).await.map(|()| id) });
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = asked.await else { return };
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(id) => {
+                        if let TokenList::Loaded(list) = &mut this.tokens {
+                            list.retain(|token| token.id != id);
+                        }
+                        this.revoke_ask = None;
+                        this.row_work = RowWork::Idle;
+                    }
+                    Err(error) => {
+                        this.row_work = RowWork::Failed { key: "nav:mcp.tokenRevokeFailed", reason: error_text(cx, &error, "nav:mcp.tokenRevokeFailed") }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Lo que se ve de la orden de registro: con el token sólo si es el del
@@ -282,6 +459,8 @@ impl ConnectView {
             let Ok(result) = receiver.await else { return };
             this.update(cx, |this, cx| {
                 this.token_work = TokenWork::Idle;
+                // El token ya existe aunque el registro no saliera.
+                this.load_tokens(cx);
                 match result {
                     Ok(()) => {
                         this.pending_token = None;
@@ -338,6 +517,7 @@ impl ConnectView {
                         this.shown_token = Some(token);
                         this.token_copied = false;
                         this.token_work = TokenWork::Idle;
+                        this.load_tokens(cx);
                     }
                     Err(error) => {
                         this.token_work = TokenWork::Failed { key: "nav:mcp.tokenFailed", reason: error_text(cx, &error, "nav:mcp.tokenFailed") }
@@ -546,6 +726,241 @@ fn plain(text: String) -> String {
 }
 
 impl ConnectView {
+    /// La lista de permisos en dos columnas, como `ScopeChecklist` en la otra
+    /// app. `editing` dice si marcan los del token que se edita o los del
+    /// token nuevo.
+    fn scope_boxes(&self, selected: &[String], editing: bool, cx: &mut Context<Self>) -> Vec<Div> {
+        let muted = cx.theme().muted_foreground;
+        TOKEN_SCOPES
+            .iter()
+            .map(|scope| {
+                let id = scope.id;
+                let prefix = if editing { "connect-edit-scope" } else { "connect-scope" };
+                div()
+                    .w(relative(0.5))
+                    .pr_3()
+                    .pb_2()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        Checkbox::new(SharedString::from(format!("{prefix}-{id}")))
+                            .checked(selected.iter().any(|picked| picked == id))
+                            .label(tr(cx, scope.label_key))
+                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                                if editing {
+                                    this.toggle_edit_scope(id, *checked, cx);
+                                } else {
+                                    this.scopes = toggle_scope(&this.scopes, id, *checked);
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                    .child(div().w_full().pl_6().text_size(px(11.)).leading_xs().text_color(muted).child(plain(tr(cx, scope.detail_key))))
+            })
+            .collect()
+    }
+
+    /// Qué puede hacer un token, con los nombres de sus permisos.
+    fn scope_summary(&self, token: &PersonalToken, cx: &App) -> String {
+        let known: Vec<String> = TOKEN_SCOPES.iter().filter(|scope| token.scopes.iter().any(|id| id == scope.id)).map(|scope| tr(cx, scope.label_key)).collect();
+        if known.is_empty() {
+            tr(cx, "nav:mcp.tokenScopesNone")
+        } else {
+            known.join(" · ")
+        }
+    }
+
+    /// Los tokens personales de la persona: nombre, permisos y fechas, con
+    /// lápiz y papelera. Nunca el valor.
+    fn render_token_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (muted, success, danger, warning, border, field, mono) =
+            (theme.muted_foreground, theme.success, theme.danger, theme.warning, theme.border, theme.muted.opacity(0.5), theme.mono_font_family.clone());
+        let here = locale(cx);
+        let busy = matches!(self.row_work, RowWork::Busy);
+
+        let body: AnyElement = match self.tokens.clone() {
+            TokenList::Loading => div().id("connect-tokens-loading").test_support().leading_xs().text_color(muted).child(tr(cx, "nav:mcp.tokensLoading")).into_any_element(),
+            TokenList::Failed(reason) => div()
+                .id("connect-tokens-problem")
+                .test_support()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .leading_xs()
+                .text_color(danger)
+                .child(div().w_full().child(tr(cx, "nav:mcp.tokensFailed")))
+                .child(div().w_full().text_size(px(11.)).font_family(mono.clone()).child(reason))
+                .into_any_element(),
+            TokenList::Loaded(list) if list.is_empty() => {
+                div().id("connect-tokens-empty").test_support().leading_xs().text_color(muted).child(tr(cx, "nav:mcp.tokensEmpty")).into_any_element()
+            }
+            TokenList::Loaded(list) => {
+                let rows = list.iter().map(|token| {
+                    let id = token.id.clone();
+                    let used = match &token.last_used_at {
+                        Some(at) => cac_core::text_with(here, "nav:mcp.tokenUsed", &[("date", &date_with_year(here, at))]),
+                        None => tr(cx, "nav:mcp.tokenNeverUsed"),
+                    };
+                    let mut dates = vec![cac_core::text_with(here, "nav:mcp.tokenCreated", &[("date", &date_with_year(here, &token.created_at))]), used];
+                    if let Some(at) = &token.expires_at {
+                        dates.push(cac_core::text_with(here, "nav:mcp.tokenExpires", &[("date", &date_with_year(here, at))]));
+                    }
+                    let is_editing = self.editing.as_ref().is_some_and(|(open, _)| *open == token.id);
+                    let editor = is_editing.then(|| {
+                        let picked = self.editing.as_ref().map(|(_, scopes)| scopes.clone()).unwrap_or_default();
+                        let all = all_scopes_selected(&picked);
+                        let boxes = self.scope_boxes(&picked, true, cx);
+                        div()
+                            .id("connect-token-editor")
+                            .test_support()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .rounded(px(6.))
+                            .bg(field)
+                            .p_2()
+                            .child(
+                                div().flex().items_center().gap_2().child(div().flex_1().leading_xs().child(tr(cx, "nav:mcp.scopes"))).child(
+                                    Button::new("connect-edit-all")
+                                        .ghost()
+                                        .xsmall()
+                                        .label(tr(cx, if all { "nav:mcp.clearAll" } else { "nav:mcp.selectAll" }))
+                                        .on_click(cx.listener(|this, _, _, cx| this.toggle_edit_all(cx))),
+                                ),
+                            )
+                            .child(div().w_full().flex().flex_wrap().children(boxes))
+                            .children(picked.is_empty().then(|| div().w_full().leading_xs().text_color(muted).child(tr(cx, "nav:mcp.readOnly"))))
+                            .child(div().w_full().leading_xs().text_color(muted).child(tr(cx, "nav:mcp.tokenUnchanged")))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("connect-edit-save")
+                                            .primary()
+                                            .small()
+                                            .label(tr(cx, "nav:mcp.tokenSave"))
+                                            .disabled(busy)
+                                            .on_click(cx.listener(|this, _, _, cx| this.save_edit(cx))),
+                                    )
+                                    .child(Button::new("connect-edit-cancel").outline().small().label(tr(cx, "common:action.cancel")).on_click({
+                                        let id = id.clone();
+                                        cx.listener(move |this, _, _, cx| this.edit_token(&id, cx))
+                                    })),
+                            )
+                    });
+                    let ask = (self.revoke_ask.as_deref() == Some(token.id.as_str())).then(|| {
+                        div()
+                            .id("connect-revoke-ask")
+                            .test_support()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(warning)
+                            .p_2()
+                            .child(div().w_full().leading_xs().child(cac_core::text_with(here, "nav:mcp.tokenRevokeAsk", &[("name", &token.name)])))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("connect-revoke-yes")
+                                            .primary()
+                                            .small()
+                                            .label(tr(cx, "nav:mcp.tokenRevoke"))
+                                            .disabled(busy)
+                                            .on_click(cx.listener(|this, _, _, cx| this.revoke_token(cx))),
+                                    )
+                                    .child(Button::new("connect-revoke-no").outline().small().label(tr(cx, "nav:mcp.keep")).on_click(cx.listener(|this, _, _, cx| {
+                                        this.revoke_ask = None;
+                                        cx.notify();
+                                    }))),
+                            )
+                    });
+                    div()
+                        .id(SharedString::from(format!("connect-token-row-{id}")))
+                        .test_support()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .p_2()
+                        .border_b_1()
+                        .border_color(border)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(div().min_w_0().truncate().leading_xs().font_weight(FontWeight::MEDIUM).child(token.name.clone()))
+                                .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).font_family(mono.clone()).text_color(muted).child(token.preview.clone()))
+                                .child(Button::new(SharedString::from(format!("connect-token-edit-{id}"))).ghost().xsmall().icon(Icon::new(Lucide::Pencil)).tooltip(tr(cx, "nav:mcp.tokenEdit")).disabled(busy).on_click({
+                                    let id = id.clone();
+                                    cx.listener(move |this, _, _, cx| this.edit_token(&id, cx))
+                                }))
+                                .child(Button::new(SharedString::from(format!("connect-token-revoke-{id}"))).ghost().xsmall().icon(Icon::new(Lucide::Trash)).tooltip(tr(cx, "nav:mcp.tokenRevoke")).disabled(busy).on_click({
+                                    let id = id.clone();
+                                    cx.listener(move |this, _, _, cx| this.ask_revoke(&id, cx))
+                                })),
+                        )
+                        .child(div().w_full().text_size(px(11.)).leading_xs().text_color(muted).child(self.scope_summary(token, cx)))
+                        .child(div().w_full().text_size(px(11.)).leading_xs().text_color(muted).child(dates.join(" · ")))
+                        .children(editor)
+                        .children(ask)
+                });
+                div().id("connect-token-list").test_support().w_full().flex().flex_col().children(rows.collect::<Vec<_>>()).into_any_element()
+            }
+        };
+
+        let outcome = match &self.row_work {
+            RowWork::Saved(name) => Some(
+                div()
+                    .id("connect-token-saved")
+                    .test_support()
+                    .w_full()
+                    .leading_xs()
+                    .text_color(success)
+                    .child(cac_core::text_with(here, "nav:mcp.tokenSaved", &[("name", name)]))
+                    .into_any_element(),
+            ),
+            RowWork::Failed { key, reason } => Some(
+                div()
+                    .id("connect-token-row-problem")
+                    .test_support()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .leading_xs()
+                    .text_color(danger)
+                    .child(div().w_full().child(tr(cx, key)))
+                    .child(div().w_full().text_size(px(11.)).font_family(mono.clone()).child(reason.clone()))
+                    .into_any_element(),
+            ),
+            RowWork::Busy => Some(div().id("connect-token-row-busy").test_support().flex().items_center().child(Spinner::new().color(muted)).into_any_element()),
+            RowWork::Idle => None,
+        };
+
+        div()
+            .id("connect-tokens")
+            .test_support()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().leading_xs().font_weight(FontWeight::MEDIUM).child(tr(cx, "nav:mcp.tokensTitle")))
+            .child(body)
+            .children(outcome)
+            .into_any_element()
+    }
+
     /// El token personal y el registro en Claude Code.
     fn render_token(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
@@ -569,28 +984,7 @@ impl ConnectView {
         });
 
         let all = all_scopes_selected(&self.scopes);
-        let scopes = TOKEN_SCOPES.iter().map(|scope| {
-            let id = scope.id;
-            // Dos columnas, como `ScopeChecklist` en la otra app.
-            div()
-                .w(relative(0.5))
-                .pr_3()
-                .pb_2()
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .child(
-                    Checkbox::new(SharedString::from(format!("connect-scope-{id}")))
-                        .checked(self.scopes.iter().any(|picked| picked == id))
-                        .label(tr(cx, scope.label_key))
-                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                            this.scopes = toggle_scope(&this.scopes, id, *checked);
-                            cx.notify();
-                        })),
-                )
-                .child(div().w_full().pl_6().text_size(px(11.)).leading_xs().text_color(muted).child(plain(tr(cx, scope.detail_key))))
-        })
-        .collect::<Vec<_>>();
+        let scopes = self.scope_boxes(&self.scopes.clone(), false, cx);
 
         let confirm = self.confirm_replace.clone().map(|command| {
             div()
@@ -767,6 +1161,7 @@ impl Render for ConnectView {
             self.name = Some(cx.new(|cx| InputState::new(window, cx).placeholder(cac_core::DEFAULT_TOKEN_NAME)));
         }
         let token_panel = self.render_token(cx);
+        let tokens_panel = self.render_token_list(cx);
         let theme = cx.theme();
         let (background, popover, border, foreground, muted, danger, success, field, mono) = (
             theme.background,
@@ -910,6 +1305,7 @@ impl Render for ConnectView {
                     .children(outcome),
             )
             .child(panel().child(token_panel))
+            .child(panel().child(tokens_panel))
             .children(command_field.map(|field| panel().child(field)))
             .child(
                 div().flex().justify_end().child(

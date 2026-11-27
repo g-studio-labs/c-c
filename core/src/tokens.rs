@@ -121,6 +121,26 @@ struct TokenWire {
     scopes: Option<Vec<String>>,
 }
 
+/// Un token personal ya creado, como lo lista el servidor: sin su valor, que
+/// el servidor no guarda. `preview` es el comienzo que enseña para reconocerlo.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PersonalToken {
+    pub id: String,
+    pub name: String,
+    pub preview: String,
+    pub scopes: Vec<String>,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+/// Los permisos que la app conoce, en el orden de la lista y sin repetir:
+/// lo único que se manda al crear o cambiar un token.
+fn known_scopes(picked: &[String]) -> Vec<&'static str> {
+    TOKEN_SCOPES.iter().map(|scope| scope.id).filter(|id| picked.iter().any(|picked| picked == id)).collect()
+}
+
 /// El nombre que lleva un token si no se escribe otro, como en la otra app.
 pub const DEFAULT_TOKEN_NAME: &str = "Claude Code";
 
@@ -134,8 +154,7 @@ impl Core {
             "" => DEFAULT_TOKEN_NAME,
             name => name,
         };
-        let scopes: Vec<&str> = TOKEN_SCOPES.iter().map(|scope| scope.id).filter(|id| scopes.iter().any(|picked| picked == id)).collect();
-        let body = serde_json::json!({ "name": name, "scopes": scopes });
+        let body = serde_json::json!({ "name": name, "scopes": known_scopes(scopes) });
         let reply = self.request("POST", "/api/v1/auth/tokens", Some(body.to_string()), true).await?;
         if reply.status >= 400 {
             return Err(crate::session::server_error(&reply));
@@ -147,6 +166,20 @@ impl Core {
             return Err(ApiError::Server { status: reply.status, code: "token-missing".into(), message: "the server did not return the token".into() });
         }
         Ok(CreatedToken { id: created.token.id, name: created.token.name, scopes: created.token.scopes.unwrap_or_default(), value: created.value })
+    }
+
+    /// Los tokens personales de quien está dentro, sin sus valores.
+    pub async fn list_personal_tokens(&self) -> Result<Vec<PersonalToken>, ApiError> {
+        self.get_list("/api/v1/auth/tokens").await
+    }
+
+    /// Cambia los permisos de un token que ya existe, sin tocar su valor: lo
+    /// que lo tiene registrado sigue valiendo. El servidor reemplaza el
+    /// conjunto entero, y una lista vacía lo deja de sólo lectura. Devuelve lo
+    /// que quedó guardado, que puede ser menos de lo que se mandó.
+    pub async fn update_personal_token_scopes(&self, id: &str, scopes: &[String]) -> Result<PersonalToken, ApiError> {
+        let body = serde_json::json!({ "scopes": known_scopes(scopes) });
+        self.call("PATCH", &format!("/api/v1/auth/tokens/{id}"), Some(body)).await
     }
 
     /// Revoca un token personal de quien está dentro (deja de valer ya).
@@ -178,6 +211,19 @@ mod tests {
         let some = ids(&["tasks:write"]);
         assert!(!all_scopes_selected(&some));
         assert_eq!(toggle_all_scopes(&some).len(), TOKEN_SCOPES.len());
+    }
+
+    /// «Seleccionar todos» incluye los permisos que se pidieron aparte
+    /// (compartir páginas y escuchar a cac): lo que jose no podía dar a su
+    /// token ya creado.
+    ///
+    /// Rotura que atrapa: quitar `docs:share` o `events:read` de la lista.
+    #[test]
+    fn select_all_includes_sharing_and_listening() {
+        let all = toggle_all_scopes(&[]);
+        for id in ["docs:share", "events:read"] {
+            assert!(all.iter().any(|picked| picked == id), "falta {id}");
+        }
     }
 
     /// Marcar uno ya marcado no lo repite, y desmarcarlo lo quita.

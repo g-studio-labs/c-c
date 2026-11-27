@@ -2528,6 +2528,37 @@ mod tests {
     }
 
     /// Baja la rueda sobre ese elemento, que tiene su propio scroll.
+    /// Pulsa algo de «Conectar Claude Code», bajando o subiendo la ventana
+    /// hasta que se vea: lo que hay debajo de cada bloque cambia con la
+    /// lista de tokens, y una posición fija de la rueda se rompe con ella.
+    fn click_scrolled(window: AnyWindowHandle, id: &str, cx: &mut TestAppContext) {
+        let target = gpui_kit::SharedString::from(id.to_string());
+        wheel_in(window, "connect-dialog", -5000., cx);
+        for _ in 0..80 {
+            let seen = cx
+                .update_window(window, |_, window, cx| {
+                    window.render_frame(cx);
+                    window.try_find(target.clone()).is_some_and(|element| element.visible())
+                })
+                .unwrap();
+            if seen {
+                break;
+            }
+            wheel_in(window, "connect-dialog", 120., cx);
+        }
+        // Visible por el borde no es pulsable con holgura: se centra.
+        let off_center = cx
+            .update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                let target = window.find(target.clone()).bounds().center().y;
+                let dialog = window.find("connect-dialog").bounds().center().y;
+                f32::from(target - dialog)
+            })
+            .unwrap();
+        wheel_in(window, "connect-dialog", off_center, cx);
+        click(window, id, cx);
+    }
+
     fn wheel_in(window: AnyWindowHandle, id: &str, down: f32, cx: &mut TestAppContext) {
         let id = gpui_kit::SharedString::from(id.to_string());
         cx.update_window(window, |_, window, cx| {
@@ -3574,8 +3605,7 @@ mod tests {
 
         // La orden apunta a donde va a quedar, con el sitio del token marcado.
         // Está debajo del token: la ventana de prueba es baja y hay que bajar.
-        wheel_in(window, "connect-dialog", 3000., cx);
-        click(window, "connect-copy", cx);
+        click_scrolled(window, "connect-copy", cx);
         wheel_in(window, "connect-dialog", -3000., cx);
         let copied = cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
         assert_eq!(copied, format!("claude mcp add cac -s user -e CAC_URL=https://cac.example -e CAC_TOKEN=PASTE_YOUR_TOKEN -- \"{}\"", binary.display()));
@@ -3691,22 +3721,19 @@ mod tests {
         click(window, "connect-select-all", cx);
         assert!(scopes(cx).is_empty(), "no desmarcó");
         click(window, "connect-select-all", cx);
-        wheel_in(window, "connect-dialog", 3000., cx);
-        click(window, "connect-scope-chat:write", cx);
+        click_scrolled(window, "connect-scope-chat:write", cx);
         assert_eq!(scopes(cx).len(), cac_core::TOKEN_SCOPES.len() - 1, "un permiso no se desmarca solo");
-        wheel_in(window, "connect-dialog", -3000., cx);
-        click(window, "connect-select-all", cx);
+        click_scrolled(window, "connect-select-all", cx);
         assert_eq!(scopes(cx).len(), cac_core::TOKEN_SCOPES.len(), "con uno sin marcar no completó");
 
         // Hay otro registro: se pregunta, sin crear token ni quitar nada.
-        wheel_in(window, "connect-dialog", 3000., cx);
-        click(window, "connect-register", cx);
+        click_scrolled(window, "connect-register", cx);
         wait_until(cx, "pregunta antes de quitar", |cx| on_screen(window, "connect-replace-ask", cx));
-        assert_eq!(server.hits("/api/v1/auth/tokens"), 0, "creó un token antes del sí");
+        let created_tokens = |server: &FakeServer| server.requests().iter().filter(|request| request.method.as_str() == "POST" && request.url.path() == "/api/v1/auth/tokens").count();
+        assert_eq!(created_tokens(&server), 0, "creó un token antes del sí");
         assert!(claude.calls().iter().all(|call| call[1] == "get"), "tocó el registro antes del sí: {:?}", claude.calls());
 
-        wheel_in(window, "connect-dialog", 3000., cx);
-        click(window, "connect-replace", cx);
+        click_scrolled(window, "connect-replace", cx);
         wait_until(cx, "queda registrado", |cx| on_screen(window, "connect-registered", cx));
         wait_until(cx, "la tarjeta dice que es éste", |cx| on_screen(window, "connect-claude-this", cx));
         let registered = claude.registered.lock().unwrap().clone();
@@ -3714,7 +3741,7 @@ mod tests {
         let sent: serde_json::Value = server
             .requests()
             .iter()
-            .find(|request| request.url.path() == "/api/v1/auth/tokens")
+            .find(|request| request.method.as_str() == "POST" && request.url.path() == "/api/v1/auth/tokens")
             .map(|request| serde_json::from_slice(&request.body).unwrap())
             .unwrap();
         assert_eq!(sent["scopes"].as_array().unwrap().len(), cac_core::TOKEN_SCOPES.len(), "{sent}");
@@ -3726,13 +3753,11 @@ mod tests {
         assert_eq!(cx.update(|cx| workspace.read(cx).connect.read(cx).token_work.clone()), TokenWork::Registered);
 
         // El paso a mano: se enseña, se copia al pulsar, y se olvida al cerrar.
-        wheel_in(window, "connect-dialog", 3000., cx);
-        click(window, "connect-show-token", cx);
+        click_scrolled(window, "connect-show-token", cx);
         wait_until(cx, "enseña el token", |cx| on_screen(window, "connect-token-shown", cx));
         assert!(visible(cx).contains(&format!("CAC_TOKEN={TOKEN}")), "la orden a mano no sale rellena");
         assert!(!clipboard(cx).contains(TOKEN));
-        wheel_in(window, "connect-dialog", 3000., cx);
-        click(window, "connect-copy-token", cx);
+        click_scrolled(window, "connect-copy-token", cx);
         assert_eq!(clipboard(cx), TOKEN);
         press(window, "escape", cx);
         wait_until(cx, "Escape la cierra", |cx| !on_screen(window, "connect-dialog", cx));
@@ -3807,8 +3832,7 @@ mod tests {
         };
         let failed = |cx: &mut TestAppContext| matches!(cx.update(|cx| workspace.read(cx).connect.read(cx).token_work.clone()), TokenWork::Failed { .. });
         let register = |n: usize, cx: &mut TestAppContext| {
-            wheel_in(window, "connect-dialog", 3000., cx);
-            click(window, "connect-register", cx);
+            click_scrolled(window, "connect-register", cx);
             wait_until(cx, "registrar falla", |cx| adds(cx).len() == n && failed(cx));
         };
 
@@ -3831,8 +3855,7 @@ mod tests {
         assert_eq!(server.hits("/api/v1/auth/tokens/t1"), 0, "revocó el que se iba a reusar");
 
         // Se quitan los permisos: el de antes ya no vale.
-        wheel_in(window, "connect-dialog", -3000., cx);
-        click(window, "connect-select-all", cx);
+        click_scrolled(window, "connect-select-all", cx);
         register(3, cx);
         let sent = created(cx);
         assert_eq!(sent.len(), 2, "registró el token de antes con otros permisos");
@@ -3857,10 +3880,8 @@ mod tests {
         wait_until(cx, "revoca el descartado", |_| server.hits("/api/v1/auth/tokens/t2") == 1);
 
         // «Crear el token y enseñarlo» tras cambiar un permiso: otro, nuevo.
-        wheel_in(window, "connect-dialog", -3000., cx);
-        click(window, "connect-select-all", cx);
-        wheel_in(window, "connect-dialog", 3000., cx);
-        click(window, "connect-show-token", cx);
+        click_scrolled(window, "connect-select-all", cx);
+        click_scrolled(window, "connect-show-token", cx);
         wait_until(cx, "enseña el token", |cx| on_screen(window, "connect-token-shown", cx));
         let sent = created(cx);
         assert_eq!(sent.len(), 4, "enseñó el token de antes con otros permisos");
@@ -3872,6 +3893,101 @@ mod tests {
 
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
         let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    /// «Conectar Claude Code» lista los tokens personales (nombre, permisos y
+    /// fechas, nunca el valor); se les cambian los permisos con `PATCH` sin
+    /// tocar su valor, con «Seleccionar todos»; y se revocan preguntando antes,
+    /// diciendo por qué si el servidor lo rechaza.
+    ///
+    /// Roturas que atrapa: no pedir la lista; pintar o guardar el valor que el
+    /// servidor llegara a mandar; que «Guardar» mande otro id, otros permisos
+    /// o no mande nada; que «Seleccionar todos» no marque todos; pintar lo
+    /// mandado y no lo que el servidor guardó; revocar sin preguntar, o
+    /// revocar otro; quitar de la lista un token que el servidor no revocó, o
+    /// callar el motivo.
+    #[gpui_kit::test]
+    #[cfg(target_os = "linux")]
+    fn claude_code_lists_personal_tokens_and_changes_their_permissions_or_revokes_them(cx: &mut TestAppContext) {
+        let server = server();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/auth/tokens")).respond_with(ok(json!([
+            { "id": "t1", "name": "Claude Code", "preview": "cac_pat_ab…", "scopes": ["tasks:write"], "createdAt": "2026-11-20T10:00:00Z", "lastUsedAt": "2026-11-27T09:00:00Z", "value": "cac_pat_SECRETVALUE" },
+            { "id": "t2", "name": "Portátil", "preview": "cac_pat_cd…", "scopes": [], "createdAt": "2026-11-21T10:00:00Z" }
+        ]))));
+        server.mount(
+            Mock::given(method("PATCH"))
+                .and(path("/api/v1/auth/tokens/t1"))
+                .respond_with(ok(json!({ "id": "t1", "name": "Claude Code", "preview": "cac_pat_ab…", "scopes": ["tasks:write", "docs:share"], "createdAt": "2026-11-20T10:00:00Z" }))),
+        );
+        server.mount(
+            Mock::given(method("DELETE"))
+                .and(path("/api/v1/auth/tokens/t1"))
+                .respond_with(wiremock::ResponseTemplate::new(404).set_body_json(json!({ "success": false, "error": "not-found", "message": "Token not found" }))),
+        );
+        server.mount(Mock::given(method("DELETE")).and(path("/api/v1/auth/tokens/t2")).respond_with(ok(json!(null))));
+        server.install(cx);
+        let (window, workspace) = open_with_view(1100., cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        let listed = |cx: &mut TestAppContext| cx.update(|cx| workspace.read(cx).connect.read(cx).tokens.clone());
+        let sent = |verb: &str, route: &str| -> Vec<serde_json::Value> {
+            server
+                .requests()
+                .iter()
+                .filter(|request| request.method.as_str() == verb && request.url.path() == route)
+                .map(|request| serde_json::from_slice(&request.body).unwrap_or(json!(null)))
+                .collect()
+        };
+
+        click(window, "account-menu", cx);
+        wait_until(cx, "el menú se abre", |cx| on_screen(window, "account-connect", cx));
+        click(window, "account-connect", cx);
+        wait_until(cx, "la ventana se abre", |cx| on_screen(window, "connect-dialog", cx));
+        wait_until(cx, "llega la lista", |cx| on_screen(window, "connect-token-row-t1", cx));
+        assert!(on_screen(window, "connect-token-row-t2", cx));
+        assert!(!format!("{:?}", listed(cx)).contains("SECRETVALUE"), "el valor del token llegó a la pantalla");
+        assert!(!on_screen(window, "connect-token-editor", cx));
+
+        // Cambiar permisos: «Seleccionar todos» y guardar mandan el PATCH de t1.
+        click_scrolled(window, "connect-token-edit-t1", cx);
+        wait_until(cx, "se abre el editor", |cx| on_screen(window, "connect-token-editor", cx));
+        click_scrolled(window, "connect-edit-all", cx);
+        let picked = cx.update(|cx| workspace.read(cx).connect.read(cx).editing.clone().map(|(id, scopes)| (id, scopes.len())));
+        assert_eq!(picked, Some(("t1".to_string(), cac_core::TOKEN_SCOPES.len())), "«Seleccionar todos» no marcó todos");
+        click_scrolled(window, "connect-edit-save", cx);
+        wait_until(cx, "queda guardado", |cx| on_screen(window, "connect-token-saved", cx));
+        let patches = sent("PATCH", "/api/v1/auth/tokens/t1");
+        assert_eq!(patches.len(), 1, "{patches:?}");
+        let all: Vec<&str> = cac_core::TOKEN_SCOPES.iter().map(|scope| scope.id).collect();
+        assert_eq!(patches[0], json!({ "scopes": all }));
+        assert!(!on_screen(window, "connect-token-editor", cx), "el editor sigue abierto tras guardar");
+        // Se pinta lo que el servidor dejó guardado, no lo que se mandó.
+        let crate::connect::TokenList::Loaded(rows) = listed(cx) else { panic!("la lista se perdió") };
+        assert_eq!(rows[0].scopes, vec!["tasks:write".to_string(), "docs:share".to_string()]);
+
+        // Revocar pregunta antes, y «Dejarlo» no toca nada.
+        click_scrolled(window, "connect-token-revoke-t2", cx);
+        wait_until(cx, "pregunta antes de revocar", |cx| on_screen(window, "connect-revoke-ask", cx));
+        assert!(sent("DELETE", "/api/v1/auth/tokens/t2").is_empty() && sent("DELETE", "/api/v1/auth/tokens/t1").is_empty(), "revocó antes del sí");
+        click(window, "connect-revoke-no", cx);
+        assert!(!on_screen(window, "connect-revoke-ask", cx));
+        assert_eq!(server.hits("/api/v1/auth/tokens/t2"), 0, "revocó al decir que no");
+
+        // El sí revoca ese y sólo ese.
+        click_scrolled(window, "connect-token-revoke-t2", cx);
+        wait_until(cx, "pregunta otra vez", |cx| on_screen(window, "connect-revoke-ask", cx));
+        click(window, "connect-revoke-yes", cx);
+        wait_until(cx, "sale de la lista", |cx| !on_screen(window, "connect-token-row-t2", cx));
+        assert_eq!(sent("DELETE", "/api/v1/auth/tokens/t2").len(), 1);
+        assert!(sent("DELETE", "/api/v1/auth/tokens/t1").is_empty(), "revocó otro");
+
+        // Si el servidor lo rechaza, el token sigue y se dice por qué.
+        click_scrolled(window, "connect-token-revoke-t1", cx);
+        wait_until(cx, "pregunta", |cx| on_screen(window, "connect-revoke-ask", cx));
+        click(window, "connect-revoke-yes", cx);
+        wait_until(cx, "dice por qué", |cx| on_screen(window, "connect-token-row-problem", cx));
+        assert!(on_screen(window, "connect-token-row-t1", cx), "quitó de la lista un token que el servidor no revocó");
+
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
     /// El menú de la cuenta ofrece los tres temas y los tres idiomas a la

@@ -683,3 +683,103 @@ async fn revoking_a_personal_token_deletes_it_by_id() {
     assert!(core.revoke_personal_token("t2").await.is_err(), "un rechazo se dio por revocado");
     server.verify().await;
 }
+
+/// La lista de tokens personales trae lo que el servidor cuenta de cada uno
+/// (nombre, permisos, fechas) y nunca un valor.
+///
+/// Roturas que atrapa: pedir otra ruta; perder los permisos o las fechas al
+/// leer (el sobre va en `camelCase`); dar por vacía una lista que falló;
+/// un campo `value` en el tipo (el servidor no lo manda, y si algún día lo
+/// mandara, no debe llegar a la pantalla).
+#[tokio::test]
+async fn listing_personal_tokens_reads_name_scopes_and_dates() {
+    let server = MockServer::start().await;
+    let (core, _) = core_at(&server).await;
+    core.sign_in(ana(false), "access".into(), "refresh".into()).unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/tokens"))
+        .and(header("Authorization", "Bearer access"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true,
+            "data": [
+                { "id": "t1", "name": "Claude Code", "preview": "cac_pat_ab…", "scopes": ["tasks:write", "events:read"], "createdAt": "2026-11-20T10:00:00Z", "lastUsedAt": "2026-11-27T09:00:00Z", "value": "cac_pat_SECRET" },
+                { "id": "t2", "name": "otro", "preview": "cac_pat_cd…", "scopes": [], "createdAt": "2026-11-21T10:00:00Z" }
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let tokens = core.list_personal_tokens().await.unwrap();
+    server.verify().await;
+    assert_eq!(tokens.len(), 2);
+    assert_eq!(tokens[0].id, "t1");
+    assert_eq!(tokens[0].name, "Claude Code");
+    assert_eq!(tokens[0].scopes, vec!["tasks:write".to_string(), "events:read".to_string()]);
+    assert_eq!(tokens[0].created_at, "2026-11-20T10:00:00Z");
+    assert_eq!(tokens[0].last_used_at.as_deref(), Some("2026-11-27T09:00:00Z"));
+    assert_eq!(tokens[1].last_used_at, None);
+    assert!(tokens[1].scopes.is_empty());
+    assert!(!format!("{tokens:?}").contains("SECRET"), "el valor llegó al tipo");
+
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/tokens"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({ "success": false, "error": "boom", "message": "no" })))
+        .mount(&server)
+        .await;
+    assert!(matches!(core.list_personal_tokens().await, Err(ApiError::Server { status: 500, .. })), "un fallo se leyó como lista vacía");
+}
+
+/// Cambiar los permisos de un token es `PATCH /api/v1/auth/tokens/{id}` con
+/// sólo `scopes`, los conocidos y en el orden de la lista; el servidor
+/// reemplaza el conjunto, y una lista vacía se manda (lo deja de sólo
+/// lectura).
+///
+/// Roturas que atrapa: mandar el id de otro o ninguno; mandar el nombre (lo
+/// renombraría); colar un permiso inventado; omitir `scopes` cuando está vacío
+/// (no quitaría nada); dar por guardado un rechazo; no devolver lo que quedó
+/// guardado.
+#[tokio::test]
+async fn updating_a_personal_token_patches_only_its_scopes_by_id() {
+    let server = MockServer::start().await;
+    let (core, _) = core_at(&server).await;
+    core.sign_in(ana(false), "access".into(), "refresh".into()).unwrap();
+
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/auth/tokens/t1"))
+        .and(header("Authorization", "Bearer access"))
+        .and(body_json(serde_json::json!({ "scopes": ["tasks:write", "docs:share", "events:read"] })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true,
+            "data": { "id": "t1", "name": "Claude Code", "preview": "cac_pat_ab…", "scopes": ["tasks:write", "docs:share"], "createdAt": "2026-11-20T10:00:00Z" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let picked = vec!["events:read".to_string(), "made:up".to_string(), "docs:share".to_string(), "tasks:write".to_string(), "docs:share".to_string()];
+    let saved = core.update_personal_token_scopes("t1", &picked).await.unwrap();
+    server.verify().await;
+    assert_eq!(saved.scopes, vec!["tasks:write".to_string(), "docs:share".to_string()], "no devolvió lo guardado");
+
+    server.reset().await;
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/auth/tokens/t1"))
+        .and(body_json(serde_json::json!({ "scopes": [] })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true, "data": { "id": "t1", "scopes": [] } })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    core.update_personal_token_scopes("t1", &[]).await.unwrap();
+    server.verify().await;
+
+    server.reset().await;
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/auth/tokens/t2"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({ "success": false, "error": "not-found", "message": "Token not found" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(matches!(core.update_personal_token_scopes("t2", &[]).await, Err(ApiError::Server { status: 404, .. })), "un rechazo se dio por guardado");
+    server.verify().await;
+}

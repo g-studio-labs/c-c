@@ -68,7 +68,7 @@ pub mod workspace;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub use tokens::{all_scopes_selected, toggle_all_scopes, toggle_scope, CreatedToken, TokenScope, TokenValue, DEFAULT_TOKEN_NAME, TOKEN_SCOPES};
+pub use tokens::{all_scopes_selected, toggle_all_scopes, toggle_scope, CreatedToken, PersonalToken, TokenScope, TokenValue, DEFAULT_TOKEN_NAME, TOKEN_SCOPES};
 pub use account::{check_new_password, check_sign_in, gate, FormCheck, Gate, PasswordChanged, MIN_PASSWORD};
 pub use chat::{
     apply_reaction, around_label, enter_sends, file_token, mention_token, message_body, message_to_send, picture_step, thread_lines, thread_pictures, thread_splice, BodyFile, Chat, ComposerToken, MessageBody,
