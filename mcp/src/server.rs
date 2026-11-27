@@ -11171,6 +11171,8 @@ mod tests {
             "no se confirma ningún `seq` de las líneas impresas antes de ella",
             "`ack --consumer <slug> 0`",
             "**Confirmar el reinicio confirma todo lo de antes de él.**",
+            "**Tras un reinicio puede volver algo que ya viste.**",
+            "**con el mismo `id`**",
             "`data.group:\n  basecamp:<id>`",
             "aunque `external` sea `false`",
             "`data.sourceKey` empieza por `bc:`",

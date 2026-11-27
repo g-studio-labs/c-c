@@ -632,13 +632,25 @@ impl Listener {
     /// cuando su diario nuevo ya pasó de nuestro cursor: por el número solo,
     /// lo nuevo se saltaría como ya escrito. Se adopta la que el backend
     /// contesta, que ya comparó con la nuestra, y se guarda con el cursor.
+    ///
+    /// **También la vacía.** Un diario recién vaciado (`TRUNCATE`) no tiene
+    /// época hasta su siguiente evento, y el reset llega sin ella. Quedarse
+    /// con la vieja hace que, al volver a preguntar con ella, el backend vea
+    /// otra época y anuncie el reinicio otra vez: el diario nuevo se
+    /// reescribiría entero desde el 1. Sin época, sólo la cabecera delata un
+    /// reinicio, hasta que una página traiga la nueva.
+    ///
+    /// Borrarla aquí con una página sin época es un mutante equivalente (lo
+    /// dio `/mutar`): esa página sólo sale de un diario sin cabecera, y con
+    /// el cursor por delante trae el reset, que ya la borró (`reset`). Se
+    /// deja para que las dos puertas digan lo mismo que el backend.
     fn adopt_epoch(&mut self, epoch: Option<&str>) -> Result<(), Failure> {
-        let Some(epoch) = epoch.filter(|e| !e.is_empty()) else { return Ok(()) };
-        if self.journal.epoch().as_deref() == Some(epoch) {
+        let epoch = epoch.filter(|e| !e.is_empty()).map(String::from);
+        if self.journal.epoch() == epoch {
             return Ok(());
         }
         if let Ok(mut current) = self.journal.epoch.lock() {
-            *current = Some(epoch.to_string());
+            *current = epoch;
         }
         match self.cursor {
             Some(cursor) => self.journal.save_cursor(cursor).map_err(|e| Failure::Transient(format!("could not write {}: {e}", self.journal.events.display()))),
@@ -662,8 +674,11 @@ impl Listener {
         let line = gap_line(format!("{GAP}:reset:{seq}:{nanos}"), seq, seq, json!({ "reason": RESET, "previousCursor": previous }));
         let failed = |e: io::Error| Failure::Transient(format!("could not write {}: {e}", self.journal.events.display()));
         self.journal.append(&line).map_err(failed)?;
-        if let (Some(epoch), Ok(mut current)) = (event["data"]["epoch"].as_str().filter(|e| !e.is_empty()), self.journal.epoch.lock()) {
-            *current = Some(epoch.to_string());
+        // La época del reset es la del diario nuevo, también vacía (ver
+        // `adopt_epoch`): con la vieja, el siguiente evento en vivo se
+        // escribiría y la siguiente pregunta volvería a reiniciar.
+        if let Ok(mut current) = self.journal.epoch.lock() {
+            *current = event["data"]["epoch"].as_str().filter(|e| !e.is_empty()).map(String::from);
         }
         self.journal.save_cursor(seq).map_err(failed)?;
         eprintln!("cac-mcp listen: cac's event journal starts again at {seq} (we were at {previous})");
@@ -1316,12 +1331,25 @@ pub mod fake {
     }
 
     impl State {
+        /// Como el backend: tras el `TRUNCATE` no hay cabecera, así que el
+        /// diario no tiene época hasta el siguiente `Append` (`note`).
         fn truncate(&mut self) {
             self.journal.clear();
             self.hidden.clear();
             self.head = 0;
             self.restarts += 1;
-            self.epoch = format!("epoch-{}", self.restarts);
+            self.epoch.clear();
+        }
+
+        /// `UserEventRepository.Append`: apunta el evento y, si el diario no
+        /// tenía época (recién vaciado), le da una.
+        fn note(&mut self, event: &Value) {
+            let seq = event["seq"].as_u64().unwrap();
+            self.head = self.head.max(seq);
+            self.journal.insert(seq, event.clone());
+            if self.epoch.is_empty() {
+                self.epoch = format!("epoch-{}", self.restarts);
+            }
         }
 
         fn visible(&self, event: &Value) -> Value {
@@ -1380,9 +1408,7 @@ pub mod fake {
         pub fn push(&self, event: Value) {
             let (lock, wake) = &*self.state;
             let mut state = lock.lock().unwrap();
-            let seq = event["seq"].as_u64().unwrap();
-            state.head = state.head.max(seq);
-            state.journal.insert(seq, event.clone());
+            state.note(&event);
             state.live.push(event);
             wake.notify_all();
         }
@@ -1391,10 +1417,7 @@ pub mod fake {
         /// consumidor lento, el bus caído): sólo el backlog lo sabe.
         pub fn record_only(&self, event: Value) {
             let (lock, _) = &*self.state;
-            let mut state = lock.lock().unwrap();
-            let seq = event["seq"].as_u64().unwrap();
-            state.head = state.head.max(seq);
-            state.journal.insert(seq, event);
+            lock.lock().unwrap().note(&event);
         }
 
         /// La persona dejó la organización de este evento: desde ahora se
@@ -1411,8 +1434,9 @@ pub mod fake {
         }
 
         /// El diario vuelve a empezar vacío, como tras un `TRUNCATE
-        /// user_events, user_event_heads`: la cabecera vuelve a 0 y la época
-        /// es otra. Corta los streams (un despliegue).
+        /// user_events, user_event_heads`: la cabecera vuelve a 0 y no hay
+        /// época hasta el siguiente evento, que trae otra. Corta los streams
+        /// (un despliegue).
         pub fn restart_journal(&self) {
             let (lock, wake) = &*self.state;
             let mut state = lock.lock().unwrap();
@@ -1496,7 +1520,11 @@ pub mod fake {
             if path == "/api/v1/events/backlog" {
                 let number = |name: &str| param(name).and_then(|v| v.parse::<u64>().ok());
                 let (events, head, gap) = state.read(number("after").unwrap_or(0), number("limit").unwrap_or(200) as usize, &epoch);
-                let mut page = json!({ "events": events, "head": head, "epoch": state.epoch });
+                // `omitempty`, como el backend: un diario sin época no la dice.
+                let mut page = json!({ "events": events, "head": head });
+                if !state.epoch.is_empty() {
+                    page["epoch"] = json!(state.epoch);
+                }
                 if gap {
                     page["gap"] = json!(true);
                 }
@@ -2260,6 +2288,48 @@ mod tests {
         assert_eq!(seqs(listener.journal.events_path()), vec![1, 2, 0, 1, 2, 3, 4, 5]);
         assert_eq!(listener.journal.epoch().as_deref(), Some("epoch-1"));
         assert!(fake.asked().iter().any(|a| a.path == "/api/v1/events/backlog" && a.query.contains("epoch=epoch-0")), "{:?}", fake.asked());
+    }
+
+    /// El caso de todos los días (revisión 558-G): el diario se vacía, el
+    /// reset llega **sin época** (no hay cabecera hasta el siguiente evento)
+    /// y el primer evento nuevo entra en vivo. Roturas que atrapa: que el
+    /// listener se quede con la época vieja tras el reset o tras una página
+    /// sin época (al volver a preguntar, el backend ve otra y reinicia otra
+    /// vez: el 1 se escribiría dos veces).
+    #[test]
+    fn a_reset_without_an_epoch_restarts_the_journal_once() {
+        let dir = scratch("reset-no-epoch");
+        let fake = FakeCac::start("cac_pat_T");
+        for seq in 1..=12 {
+            fake.record_only(ev(seq));
+        }
+        let c = creds(&fake);
+        let mut listener = Listener::new(journal(&dir)).unwrap();
+        listener.cursor = Some(0);
+        rt().block_on(listener.catch_up(&c)).unwrap();
+        assert_eq!(listener.journal.epoch().as_deref(), Some("epoch-0"));
+
+        fake.truncate_journal();
+        // Por el stream (lo que ve un latido antes del primer evento) y por el
+        // backlog, con el diario aún vacío.
+        let reset = fake::reset_envelope(12, "");
+        rt().block_on(listener.deliver(&c, &SseMessage { id: Some("0".into()), event: Some(GAP.into()), data: reset.to_string() })).unwrap();
+        assert_eq!(listener.journal.epoch(), None, "el reset dice que el diario nuevo aún no tiene época");
+        rt().block_on(listener.catch_up(&c)).unwrap();
+        assert_eq!(listener.journal.epoch(), None);
+
+        fake.push(ev(1));
+        rt().block_on(listener.deliver(&c, &SseMessage { id: Some("1".into()), event: None, data: ev(1).to_string() })).unwrap();
+        fake.record_only(ev(2));
+        rt().block_on(listener.catch_up(&c)).unwrap();
+        assert_eq!(listener.journal.epoch().as_deref(), Some("epoch-1"), "la primera página con época la trae");
+        // Al reconectar, desde listen.json.
+        drop(listener);
+        let mut listener = Listener::new(journal(&dir)).unwrap();
+        listener.cursor = listener.journal.recover().unwrap();
+        rt().block_on(listener.catch_up(&c)).unwrap();
+        let all = seqs(listener.journal.events_path());
+        assert_eq!(all[12..], [0, 1, 2], "un reinicio, y el diario nuevo una vez: {all:?}");
     }
 
     /// Roturas que atrapa: compactar por fecha o por tamaño la última línea

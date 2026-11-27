@@ -88,6 +88,11 @@ está ahora. Por cada línea:
      que se imprimió sin confirmar; en cuanto lo confirmas, eso ya no vuelve.
      Por eso, antes de confirmar el reinicio, propón las líneas que se
      imprimieron delante de él.
+   - **Tras un reinicio puede volver algo que ya viste.** Si el diario del
+     servidor se restauró de un respaldo, el nuevo se lee desde el 1 y llega
+     otra vez lo que ya tenías, **con el mismo `id`**. Antes de proponer una
+     línea de después de un reinicio, mira si ese `id` ya salió antes de él:
+     si salió, no la vuelvas a proponer; confírmala y sigue.
 
 ## 4 · Qué es cada línea
 

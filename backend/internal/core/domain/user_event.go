@@ -88,6 +88,12 @@ const GapReasonReset = "reset"
 //
 // Una época vacía (cliente viejo, fila de antes de la columna, diario sin
 // filas) no se compara: no dice nada.
+//
+// Tras restaurar un respaldo se lee desde el 1 lo que quien escucha ya tenía:
+// no hay forma de saber qué números por debajo de la cabecera son del respaldo
+// y cuáles se apuntaron después, así que se prefiere repetir a perder. Lo
+// repetido vuelve con el mismo `id` (la fila restaurada lo conserva), y por él
+// lo descarta quien lee (la skill `cac-listen`).
 func JournalRestarted(after, head int64, asked, current string) bool {
 	return after > head || (asked != "" && current != "" && asked != current)
 }
