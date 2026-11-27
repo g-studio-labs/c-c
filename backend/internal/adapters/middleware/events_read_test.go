@@ -67,9 +67,13 @@ func samplePath(pattern string) string {
 				i++
 			}
 		case rs[i] == '[':
+			start := i
 			for i < len(rs) && rs[i] != ']' {
 				i++
 			}
+			// Una clase de sólo dígitos (el id de un recording de Basecamp)
+			// pide un número, no un UUID.
+			digits := string(rs[start+1:i]) == "0-9"
 			if i+1 < len(rs) && (rs[i+1] == '+') {
 				i++
 			} else if i+3 < len(rs) && rs[i+1] == '{' {
@@ -77,7 +81,11 @@ func samplePath(pattern string) string {
 					i++
 				}
 			}
-			out = append(out, []rune("00000000-0000-0000-0000-000000000000")...)
+			if digits {
+				out = append(out, '1')
+			} else {
+				out = append(out, []rune("00000000-0000-0000-0000-000000000000")...)
+			}
 		default:
 			out = append(out, rs[i])
 		}
