@@ -4107,7 +4107,7 @@ mod tests {
         server.mount(
             Mock::given(method("GET"))
                 .and(path("/api/v1/auth/tokens"))
-                .respond_with(wiremock::ResponseTemplate::new(503).set_body_json(json!({ "success": false, "error": "unavailable", "message": "Backend unavailable" }))),
+                .respond_with(wiremock::ResponseTemplate::new(403).set_body_json(json!({ "success": false, "error": "too-many-op-refs", "message": "raw" }))),
         );
         server.install(cx);
         let (window, _workspace) = open_with_view(1100., cx);
@@ -4117,7 +4117,7 @@ mod tests {
         click(window, "account-connect", cx);
         wait_until(cx, "la ventana se abre", |cx| on_screen(window, "connect-dialog", cx));
         wait_until(cx, "dice que no cargó", |cx| on_screen(window, "connect-tokens-problem", cx));
-        assert_eq!(label(window, "connect-tokens-reason", cx), "No se pudo cargar la lista de tokens.", "no dijo el motivo");
+        assert_eq!(label(window, "connect-tokens-reason", cx), "Demasiadas referencias a secretos.", "no dijo el motivo del servidor");
         assert!(!on_screen(window, "connect-tokens-empty", cx), "dijo «sin tokens» cuando no pudo preguntar");
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
