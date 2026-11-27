@@ -123,7 +123,7 @@ func journalFor(t *testing.T, f *requestFixture) *EventJournal {
 
 func journalOf(t *testing.T, j *EventJournal, user string) []domain.EventEnvelope {
 	t.Helper()
-	page, err := j.Read(user, 0, 50, map[string]bool{"org-1": true})
+	page, err := j.Read(user, 0, 50, map[string]bool{"org-1": true}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

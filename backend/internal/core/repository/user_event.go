@@ -33,7 +33,7 @@ func (r *UserEventRepository) Append(in domain.UserEventInput, data json.RawMess
 	created := false
 	err := r.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).
-			Create(&domain.UserEventHead{UserID: in.UserID}).Error; err != nil {
+			Create(&domain.UserEventHead{UserID: in.UserID, Epoch: uuid.NewString()}).Error; err != nil {
 			return err
 		}
 		var head domain.UserEventHead
@@ -59,8 +59,12 @@ func (r *UserEventRepository) Append(in domain.UserEventInput, data json.RawMess
 		// La hora se toma con la cabecera bloqueada: así `created_at` va en el
 		// orden de `seq` y la retención por edad nunca deja un hueco en medio.
 		next := head.LastSeq + 1
+		update := map[string]any{"last_seq": next}
+		if head.Epoch == "" {
+			update["epoch"] = uuid.NewString()
+		}
 		if err := tx.Model(&domain.UserEventHead{}).Where("user_id = ?", in.UserID).
-			Update("last_seq", next).Error; err != nil {
+			Updates(update).Error; err != nil {
 			return err
 		}
 		out = domain.UserEvent{
@@ -76,14 +80,15 @@ func (r *UserEventRepository) Append(in domain.UserEventInput, data json.RawMess
 	return out, created, err
 }
 
-// Head: el último número dado a esa persona (0 si nunca tuvo ninguno).
-func (r *UserEventRepository) Head(userID string) (int64, error) {
+// Head: el último número dado a esa persona (0 si nunca tuvo ninguno) y la
+// época de su diario ("" si aún no tiene).
+func (r *UserEventRepository) Head(userID string) (int64, string, error) {
 	var head domain.UserEventHead
 	err := r.db.Where("user_id = ?", userID).First(&head).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return 0, nil
+		return 0, "", nil
 	}
-	return head.LastSeq, err
+	return head.LastSeq, head.Epoch, err
 }
 
 // After: hasta `limit` filas de esa persona con número mayor que `after`, en

@@ -44,7 +44,7 @@ func TestSequencesHaveNoGapsUnderConcurrentAppends(t *testing.T) {
 		t.Error(err)
 	}
 
-	page, err := j.Read("u-ana", 0, 500, nil)
+	page, err := j.Read("u-ana", 0, 500, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestARepeatedKeyIsOneEvent(t *testing.T) {
 	if created != 1 {
 		t.Errorf("se apuntaron %d, se esperaba 1", created)
 	}
-	if head, _ := j.Head("u-ana"); head != 1 {
+	if head, _, _ := j.Head("u-ana"); head != 1 {
 		t.Errorf("la cabecera está en %d: una entrega repetida gastó un número", head)
 	}
 }
@@ -110,7 +110,7 @@ func TestTheBacklogIsOnlyOfCurrentOrgs(t *testing.T) {
 		}
 	}
 
-	page, err := j.Read("u-ana", 0, 10, map[string]bool{"org-1": true})
+	page, err := j.Read("u-ana", 0, 10, map[string]bool{"org-1": true}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestAnOldCursorSaysThereIsAGap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	page, err := j.Read("u-ana", 1, 10, nil)
+	page, err := j.Read("u-ana", 1, 10, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestAnOldCursorSaysThereIsAGap(t *testing.T) {
 		t.Errorf("después del hueco tiene que venir lo que queda: %+v", page.Events)
 	}
 
-	page, err = j.Read("u-ana", 3, 10, nil)
+	page, err = j.Read("u-ana", 3, 10, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestNotifyLeavesAnEvent(t *testing.T) {
 	svc.Notify(domain.Aviso{UserID: "u-ana", OrgID: "org-1", Kind: "chat:mention", Title: "Te nombraron", Link: "/chat",
 		SourceKey: "bc:comment_created:9", Detail: map[string]string{"text": "el texto entero"}})
 
-	page, err := journalOut.Read("u-ana", 0, 10, map[string]bool{"org-1": true})
+	page, err := journalOut.Read("u-ana", 0, 10, map[string]bool{"org-1": true}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestThePruneKeepsTheNewest(t *testing.T) {
 	if fmt.Sprint(seqs) != "[2 3 4]" {
 		t.Errorf("quedan %v, se esperaba [2 3 4]", seqs)
 	}
-	if head, _ := j.Head("u-ana"); head != 4 {
+	if head, _, _ := j.Head("u-ana"); head != 4 {
 		t.Errorf("la cabecera retrocedió a %d", head)
 	}
 }
@@ -283,26 +283,98 @@ func journalDB(t *testing.T) (*gorm.DB, func()) {
 	}
 }
 
-// Un cursor por delante de la cabecera es un hueco, no un «al día».
-func TestACursorAheadOfTheHeadIsAGap(t *testing.T) {
+// Un diario que vuelve a empezar (QA 558, criterio 6). Tras un `TRUNCATE`
+// el diario nuevo numera desde el 1, por debajo del cursor de quien escuchaba:
+// hay que avisarle con un reset que no ocupe el número de un evento, y darle
+// todo lo nuevo desde el 1. Y si el diario nuevo ya pasó del cursor, sólo la
+// época lo delata.
+func TestAJournalThatStartsAgainIsReadFromOne(t *testing.T) {
 	db, cleanup := journalDB(t)
 	defer cleanup()
 	j := NewEventJournal(repository.NewUserEventRepository(db), nil)
-	for i := 0; i < 2; i++ {
-		if _, _, err := j.Append(domain.UserEventInput{UserID: "u-ana", Type: domain.UserEventNotification}); err != nil {
-			t.Fatal(err)
+	add := func(n int) {
+		for i := 0; i < n; i++ {
+			if _, _, err := j.Append(domain.UserEventInput{UserID: "u-ana", Type: domain.UserEventNotification}); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
-	page, err := j.Read("u-ana", 9, 10, nil)
+	seqs := func(p domain.EventPage) []int64 {
+		out := []int64{}
+		for _, e := range p.Events {
+			out = append(out, e.Seq)
+		}
+		return out
+	}
+	add(12)
+	_, before, _ := j.Head("u-ana")
+	if before == "" {
+		t.Fatal("un diario nuevo no tiene época")
+	}
+
+	if err := db.Exec("TRUNCATE user_events, user_event_heads").Error; err != nil {
+		t.Fatal(err)
+	}
+	add(2)
+	_, after, _ := j.Head("u-ana")
+	if after == "" || after == before {
+		t.Fatalf("vaciar el diario no le dio otra época: %q → %q", before, after)
+	}
+
+	// La cabecera (2) por debajo del cursor (12), con o sin época.
+	for _, epoch := range []string{before, ""} {
+		page, err := j.Read("u-ana", 12, 10, nil, epoch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Events) == 0 || !page.Events[0].IsReset() || page.Epoch != after {
+			t.Fatalf("época %q: un diario reiniciado no empieza por el reset: %+v", epoch, page)
+		}
+		if got := fmt.Sprint(seqs(page)); got != "[0 1 2]" {
+			t.Fatalf("época %q: tras el reset se esperaba [0 1 2], llegó %s", epoch, got)
+		}
+		var data map[string]any
+		_ = json.Unmarshal(page.Events[0].Data, &data)
+		if data["reason"] != domain.GapReasonReset || data["previousCursor"] != float64(12) {
+			t.Errorf("el reset no dice por qué ni por dónde se iba: %s", page.Events[0].Data)
+		}
+	}
+
+	// El diario nuevo ya pasó del cursor: sólo la época lo dice.
+	add(3)
+	page, err := j.Read("u-ana", 4, 10, nil, before)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Gap || len(page.Events) != 1 || page.Events[0].Type != domain.UserEventGap || page.Events[0].Seq != 2 {
-		t.Fatalf("un cursor por delante de la cabecera no avisa del hueco: %+v", page)
+	if got := fmt.Sprint(seqs(page)); got != "[0 1 2 3 4 5]" || !page.Events[0].IsReset() {
+		t.Fatalf("con otra época y la cabecera por delante se esperaba el reset y [1..5]: %s %+v", got, page)
 	}
-	page, err = j.Read("u-ana", 2, 10, nil)
-	if err != nil || page.Gap || len(page.Events) != 0 {
-		t.Errorf("un cursor igual a la cabecera está al día: %+v err=%v", page, err)
+
+	// Con la época de hoy, o sin época, un cursor al día no es un reinicio.
+	for _, epoch := range []string{after, ""} {
+		page, err := j.Read("u-ana", 4, 10, nil, epoch)
+		if err != nil || fmt.Sprint(seqs(page)) != "[5]" || page.Gap {
+			t.Errorf("época %q: un cursor del diario de hoy se tomó por reinicio: %+v err=%v", epoch, page, err)
+		}
+	}
+}
+
+// Las filas de cabecera de antes de la columna no tienen época: la reciben al
+// apuntar el siguiente evento, sin mover el número.
+func TestAHeadWithoutEpochGetsOneOnTheNextAppend(t *testing.T) {
+	db, cleanup := journalDB(t)
+	defer cleanup()
+	j := NewEventJournal(repository.NewUserEventRepository(db), nil)
+	if _, _, err := j.Append(domain.UserEventInput{UserID: "u-ana", Type: domain.UserEventNotification}); err != nil {
+		t.Fatal(err)
+	}
+	db.Exec("UPDATE user_event_heads SET epoch = ''")
+	if _, _, err := j.Append(domain.UserEventInput{UserID: "u-ana", Type: domain.UserEventNotification}); err != nil {
+		t.Fatal(err)
+	}
+	head, epoch, _ := j.Head("u-ana")
+	if head != 2 || epoch == "" {
+		t.Fatalf("la cabecera vieja no recibió época: head=%d epoch=%q", head, epoch)
 	}
 }
 

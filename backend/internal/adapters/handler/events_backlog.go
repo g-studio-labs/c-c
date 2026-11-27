@@ -52,6 +52,9 @@ func (h *eventsHandler) streamToken(w http.ResponseWriter, r *http.Request, clai
 		}
 		cursor = n
 	}
+	// La época del diario que conoce quien reconecta (ver
+	// domain.JournalRestarted). Sin ella, sólo la cabecera delata un reinicio.
+	epoch := r.URL.Query().Get("epoch")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		SendErrorResponse(w, http.StatusInternalServerError, "Streaming unsupported", "no-flusher")
@@ -64,12 +67,12 @@ func (h *eventsHandler) streamToken(w http.ResponseWriter, r *http.Request, clai
 	// Sin cursor, se escucha desde ahora: la cabecera se lee ya suscrito, así
 	// que lo que llegue a partir de aquí tiene un número mayor.
 	if resume == "" {
-		head, err := h.journal.Head(claims.UserID)
+		head, current, err := h.journal.Head(claims.UserID)
 		if err != nil {
 			SendErrorResponse(w, http.StatusInternalServerError, "Event journal unavailable", "journal-read")
 			return
 		}
-		cursor = head
+		cursor, epoch = head, current
 	}
 
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil {
@@ -88,40 +91,48 @@ func (h *eventsHandler) streamToken(w http.ResponseWriter, r *http.Request, clai
 		flusher.Flush()
 		return true
 	}
-	orgs := service.OrgSet(claims)
-	// Un Last-Event-ID por delante de la cabecera es un hueco: se avisa y se
-	// sigue desde la cabecera, no se calla.
-	if resume != "" {
-		head, err := h.journal.Head(claims.UserID)
-		if err == nil && cursor > head {
-			cursor = head
-			payload, _ := json.Marshal(domain.GapEnvelope(head, head, time.Now()))
-			if !write(fmt.Sprintf("id: %d\nevent: %s\ndata: %s\n\n", head, domain.UserEventGap, payload)) {
-				return
-			}
-		}
-	}
-	// send entrega un sobre si es el siguiente; lo que ya se entregó se salta.
-	send := func(env domain.EventEnvelope) bool {
-		if env.Seq <= cursor {
-			return true
-		}
+	frame := func(env domain.EventEnvelope) bool {
 		payload, err := json.Marshal(env)
 		if err != nil {
 			return false
 		}
-		if !write(fmt.Sprintf("id: %d\nevent: %s\ndata: %s\n\n", env.Seq, env.Type, payload)) {
+		return write(fmt.Sprintf("id: %d\nevent: %s\ndata: %s\n\n", env.Seq, env.Type, payload))
+	}
+	orgs := service.OrgSet(claims)
+	// send entrega un sobre si es el siguiente; lo que ya se entregó se salta.
+	// El reset es la excepción: su `seq` 0 está por detrás de todo cursor a
+	// propósito, se entrega siempre y baja el cursor a 0, para que el diario
+	// nuevo llegue desde el 1 (ver EventJournal.Read).
+	send := func(env domain.EventEnvelope) bool {
+		if env.IsReset() {
+			if !frame(env) {
+				return false
+			}
+			cursor = 0
+			return true
+		}
+		if env.Seq <= cursor {
+			return true
+		}
+		if !frame(env) {
 			return false
 		}
 		cursor = env.Seq
 		return true
 	}
-	// catchUp lee del diario todo lo que hay después del cursor.
+	// catchUp lee del diario todo lo que hay después del cursor. También es
+	// lo que ve un reinicio del diario con la conexión viva: Read lo compara
+	// con la época y el cursor de esta conexión, y lo dice con el reset.
 	catchUp := func() bool {
 		for {
-			page, err := h.journal.Read(claims.UserID, cursor, streamBatch, orgs)
+			page, err := h.journal.Read(claims.UserID, cursor, streamBatch, orgs, epoch)
 			if err != nil {
 				return true // el siguiente latido lo vuelve a intentar
+			}
+			// Read ya comparó la época que se le dio: la de la página es la de
+			// ahora, y es la que vale para la siguiente pregunta.
+			if page.Epoch != "" {
+				epoch = page.Epoch
 			}
 			if len(page.Events) == 0 {
 				return true
@@ -166,10 +177,11 @@ func (h *eventsHandler) streamToken(w http.ResponseWriter, r *http.Request, clai
 			if !open {
 				return
 			}
-			if ev.Seq <= cursor {
-				continue
-			}
-			if ev.Seq > cursor+1 {
+			// Un número que no es el siguiente se mira en el diario: por
+			// detrás del cursor suele ser uno repetido, pero también es lo
+			// primero que llega de un diario que volvió a empezar, y callarlo
+			// dejaría lo nuevo sin entregar hasta que pasara del cursor.
+			if ev.Seq != cursor+1 {
 				if !catchUp() {
 					return
 				}
@@ -212,7 +224,8 @@ func envelopeOf(data any) (domain.EventEnvelope, bool) {
 // Backlog: `GET /api/v1/events/backlog?after=<seq>&limit=`, lo que el diario
 // guarda de quien pregunta después de `after`, tal como lo puede leer hoy
 // (sólo de las organizaciones de las que es miembro). Contesta
-// `{events, head, gap}`.
+// `{events, head, gap, epoch}`; con `?epoch=` (la que contestó la última
+// vez), un diario que volvió a empezar se lee desde el 1 tras un reset.
 //
 // Va bajo AuthMiddleware, que deja pasar cualquier GET de un token: el scope
 // se mira aquí, porque los GET no pasan por la tabla de rutas de un token.
@@ -246,7 +259,7 @@ func (h *eventsHandler) Backlog(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	page, err := h.journal.Read(claims.UserID, after, limit, service.OrgSet(claims))
+	page, err := h.journal.Read(claims.UserID, after, limit, service.OrgSet(claims), r.URL.Query().Get("epoch"))
 	if err != nil {
 		SendErrorResponse(w, http.StatusInternalServerError, "Event journal unavailable", "journal-read")
 		return

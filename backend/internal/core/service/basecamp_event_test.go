@@ -27,7 +27,7 @@ func (f *bcFixture) withJournal(t *testing.T) *EventJournal {
 // miembro de org-1 y org-2.
 func bcEvents(t *testing.T, j *EventJournal, user string) []domain.EventEnvelope {
 	t.Helper()
-	page, err := j.Read(user, 0, 100, map[string]bool{"org-1": true, "org-2": true})
+	page, err := j.Read(user, 0, 100, map[string]bool{"org-1": true, "org-2": true}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

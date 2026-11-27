@@ -28,11 +28,20 @@ type memJournal struct {
 	mu     sync.Mutex
 	hub    *events.Hub
 	rows   map[string][]domain.EventEnvelope
+	epoch  string
 	onRead func() // se llama después de leer, con el diario ya leído
 }
 
 func newMemJournal(hub *events.Hub) *memJournal {
-	return &memJournal{hub: hub, rows: map[string][]domain.EventEnvelope{}}
+	return &memJournal{hub: hub, rows: map[string][]domain.EventEnvelope{}, epoch: "e1"}
+}
+
+// restart vacía el diario y le da otra época, como un TRUNCATE.
+func (j *memJournal) restart(epoch string) {
+	j.mu.Lock()
+	j.rows = map[string][]domain.EventEnvelope{}
+	j.epoch = epoch
+	j.mu.Unlock()
 }
 
 // add apunta un evento; con publish, también lo manda al hub.
@@ -49,15 +58,19 @@ func (j *memJournal) add(userID, orgID string, publish bool) domain.EventEnvelop
 	return env
 }
 
-func (j *memJournal) Head(userID string) (int64, error) {
+func (j *memJournal) Head(userID string) (int64, string, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return int64(len(j.rows[userID])), nil
+	return int64(len(j.rows[userID])), j.epoch, nil
 }
 
-func (j *memJournal) Read(userID string, after int64, limit int, orgs map[string]bool) (domain.EventPage, error) {
+func (j *memJournal) Read(userID string, after int64, limit int, orgs map[string]bool, epoch string) (domain.EventPage, error) {
 	j.mu.Lock()
-	page := domain.EventPage{Head: int64(len(j.rows[userID]))}
+	page := domain.EventPage{Head: int64(len(j.rows[userID])), Epoch: j.epoch}
+	if domain.JournalRestarted(after, page.Head, epoch, j.epoch) {
+		page.Events = append(page.Events, domain.ResetEnvelope(after, j.epoch, time.Now()))
+		after = 0
+	}
 	for _, e := range j.rows[userID] {
 		if e.Seq > after && len(page.Events) < limit {
 			if !e.Visible(orgs) {
@@ -124,11 +137,16 @@ type sseEvent struct {
 // openStream abre el stream contra un servidor de verdad (httptest) para leer
 // los eventos según llegan.
 func openStream(t *testing.T, h EventsHandler, tok, lastEventID string) (*sseReader, context.CancelFunc) {
+	return openStreamAt(t, h, tok, lastEventID, "")
+}
+
+// openStreamAt: openStream con la consulta de la URL (`epoch=…`).
+func openStreamAt(t *testing.T, h EventsHandler, tok, lastEventID, query string) (*sseReader, context.CancelFunc) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(h.Stream))
 	t.Cleanup(srv.Close)
 	ctx, cancel := context.WithCancel(context.Background())
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v1/events", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v1/events?"+query, nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	if lastEventID != "" {
 		req.Header.Set("Last-Event-ID", lastEventID)
@@ -413,8 +431,9 @@ func TestAnEventOfAnOrgYouLeftOnlyKeepsItsNumber(t *testing.T) {
 }
 
 // Un Last-Event-ID por delante de la cabecera (un diario reiniciado) no se
-// acepta en silencio: llega un cac:gap y se sigue desde la cabecera.
-func TestACursorAheadOfTheHeadIsAGapNotSilence(t *testing.T) {
+// acepta en silencio: llega el reset, con `seq` 0, y detrás el diario nuevo
+// desde el 1, sin que el aviso ocupe el número de ningún evento (QA 558).
+func TestACursorAheadOfTheHeadIsAResetNotSilence(t *testing.T) {
 	withTokenAuth(t, nil)
 	original := latido
 	latido = time.Hour
@@ -426,11 +445,105 @@ func TestACursorAheadOfTheHeadIsAGapNotSilence(t *testing.T) {
 	j.add(tokenOwner, "org-1", false)
 
 	r, _ := openStream(t, NewEventsHandler(hub, nil, j), goodToken, "50")
-	if got := r.next(t); got.env.Type != domain.UserEventGap || got.env.Seq != 2 {
-		t.Fatalf("un cursor por delante de la cabecera no avisó del hueco: %+v", got)
+	if got := r.next(t); !got.env.IsReset() || got.id != "0" {
+		t.Fatalf("un cursor por delante de la cabecera no avisó del reinicio: %+v", got)
+	}
+	for want := int64(1); want <= 2; want++ {
+		if got := r.next(t); got.env.Seq != want || got.env.Type != domain.UserEventNotification {
+			t.Fatalf("tras el reinicio se esperaba el %d del diario nuevo, llegó %+v", want, got)
+		}
 	}
 	j.add(tokenOwner, "org-1", true)
 	if got := r.next(t); got.env.Seq != 3 {
-		t.Fatalf("después del hueco no siguió desde la cabecera: %+v", got)
+		t.Fatalf("después del reinicio no siguió en vivo: %+v", got)
 	}
+}
+
+// El diario vuelve a empezar con la conexión abierta (QA 558, criterio 6):
+// lo primero que publica el diario nuevo tiene un número por detrás del
+// cursor, y no se calla. Llega el reset y, detrás, todo desde el 1.
+func TestAJournalThatStartsAgainWhileConnectedIsDelivered(t *testing.T) {
+	withTokenAuth(t, nil)
+	original := latido
+	latido = time.Hour // que no lo arregle el latido
+	defer func() { latido = original }()
+
+	hub := events.NewHub()
+	j := newMemJournal(hub)
+	r, _ := openStream(t, NewEventsHandler(hub, nil, j), goodToken, "")
+	time.Sleep(20 * time.Millisecond)
+	for i := 0; i < 3; i++ {
+		j.add(tokenOwner, "org-1", true)
+		r.next(t)
+	}
+
+	j.restart("e2")
+	j.add(tokenOwner, "org-1", false)
+	j.add(tokenOwner, "org-1", true)
+	if got := r.next(t); !got.env.IsReset() {
+		t.Fatalf("el reinicio con la conexión viva no se dijo: %+v", got)
+	}
+	for want := int64(1); want <= 2; want++ {
+		if got := r.next(t); got.env.Seq != want {
+			t.Fatalf("tras el reinicio se esperaba el %d, llegó %+v", want, got)
+		}
+	}
+	r.quiet(t, 100*time.Millisecond)
+}
+
+// Y si el diario nuevo pasa del cursor antes del latido, sólo la época lo
+// dice: el latido lo ve y entrega el reinicio y todo lo nuevo. Quien
+// reconecta sin decir su época (un cliente viejo) la toma de la primera
+// lectura: sin eso, este reinicio no se vería nunca.
+func TestTheHeartbeatSeesAJournalThatStartedAgainPastTheCursor(t *testing.T) {
+	withTokenAuth(t, nil)
+	original := latido
+	latido = 50 * time.Millisecond
+	defer func() { latido = original }()
+
+	hub := events.NewHub()
+	j := newMemJournal(hub)
+	j.add(tokenOwner, "org-1", false)
+	r, _ := openStream(t, NewEventsHandler(hub, nil, j), goodToken, "1")
+	time.Sleep(20 * time.Millisecond)
+
+	j.restart("e2")
+	for i := 0; i < 3; i++ {
+		j.add(tokenOwner, "org-1", false)
+	}
+	if got := r.next(t); !got.env.IsReset() {
+		t.Fatalf("el latido no vio el reinicio: %+v", got)
+	}
+	for want := int64(1); want <= 3; want++ {
+		if got := r.next(t); got.env.Seq != want {
+			t.Fatalf("tras el reinicio se esperaba el %d, llegó %+v", want, got)
+		}
+	}
+	r.quiet(t, 120*time.Millisecond)
+}
+
+// Quien reconecta con su época ve al conectar un reinicio que la cabecera no
+// delata: el diario nuevo ya pasó de su cursor.
+func TestReconnectingWithAnOldEpochStartsAgain(t *testing.T) {
+	withTokenAuth(t, nil)
+	original := latido
+	latido = time.Hour
+	defer func() { latido = original }()
+
+	hub := events.NewHub()
+	j := newMemJournal(hub)
+	j.restart("e2")
+	for i := 0; i < 3; i++ {
+		j.add(tokenOwner, "org-1", false)
+	}
+	r, _ := openStreamAt(t, NewEventsHandler(hub, nil, j), goodToken, "1", "epoch=e1")
+	if got := r.next(t); !got.env.IsReset() {
+		t.Fatalf("una época vieja al reconectar no avisó del reinicio: %+v", got)
+	}
+	for want := int64(1); want <= 3; want++ {
+		if got := r.next(t); got.env.Seq != want {
+			t.Fatalf("tras el reinicio se esperaba el %d, llegó %+v", want, got)
+		}
+	}
+	r.quiet(t, 100*time.Millisecond)
 }

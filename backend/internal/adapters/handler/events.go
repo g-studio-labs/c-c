@@ -22,8 +22,8 @@ type EventsHandler interface {
 // EventJournal es lo que el stream y el backlog leen del diario de eventos de
 // una persona (service.EventJournal).
 type EventJournal interface {
-	Read(userID string, after int64, limit int, orgs map[string]bool) (domain.EventPage, error)
-	Head(userID string) (int64, error)
+	Read(userID string, after int64, limit int, orgs map[string]bool, epoch string) (domain.EventPage, error)
+	Head(userID string) (int64, string, error)
 }
 
 type eventsHandler struct {

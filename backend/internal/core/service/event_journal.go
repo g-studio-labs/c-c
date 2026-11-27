@@ -95,8 +95,8 @@ func putText(m map[string]any, key, text string) {
 	}
 }
 
-// Head: el último número de esa persona.
-func (j *EventJournal) Head(userID string) (int64, error) { return j.repo.Head(userID) }
+// Head: el último número de esa persona y la época de su diario.
+func (j *EventJournal) Head(userID string) (int64, string, error) { return j.repo.Head(userID) }
 
 // Read: hasta `limit` eventos de esa persona después de `after`, tal como los
 // puede leer hoy quien es miembro de `orgs`.
@@ -105,21 +105,25 @@ func (j *EventJournal) Head(userID string) (int64, error) { return j.repo.Head(u
 // número sí (EventEnvelope.Skipped): el cursor de quien escucha sigue seguido.
 // Y si lo que va desde `after` ya se borró, el primer sobre es un
 // domain.GapEnvelope que ocupa el último número perdido, por lo mismo.
-func (j *EventJournal) Read(userID string, after int64, limit int, orgs map[string]bool) (domain.EventPage, error) {
+//
+// `epoch` es la época que trae quien lee ("" si no la sabe). Si el diario
+// volvió a empezar (domain.JournalRestarted), el primer sobre es un
+// domain.ResetEnvelope, con `seq` 0, y detrás va el diario nuevo **desde el
+// 1**: lo que se apuntó después del reinicio también es nuevo, y quien
+// escucha no lo ha visto aunque su número sea menor que su cursor.
+func (j *EventJournal) Read(userID string, after int64, limit int, orgs map[string]bool, epoch string) (domain.EventPage, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 500
 	}
-	head, err := j.repo.Head(userID)
+	head, current, err := j.repo.Head(userID)
 	if err != nil {
 		return domain.EventPage{}, err
 	}
-	page := domain.EventPage{Events: []domain.EventEnvelope{}, Head: head}
-	if after > head {
-		// Un cursor por delante de la cabecera (un diario reiniciado): no se
-		// acepta en silencio, es un hueco y se sigue desde la cabecera.
+	page := domain.EventPage{Events: []domain.EventEnvelope{}, Head: head, Epoch: current}
+	if domain.JournalRestarted(after, head, epoch, current) {
 		page.Gap = true
-		page.Events = append(page.Events, domain.GapEnvelope(head, head, j.now()))
-		return page, nil
+		page.Events = append(page.Events, domain.ResetEnvelope(after, current, j.now()))
+		after = 0
 	}
 	if after == head {
 		return page, nil

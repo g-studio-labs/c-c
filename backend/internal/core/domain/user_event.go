@@ -64,6 +64,32 @@ type UserEvent struct {
 type UserEventHead struct {
 	UserID  string `gorm:"type:varchar(36);primaryKey"`
 	LastSeq int64  `gorm:"not null;default:0"`
+	// Epoch nombra esta vida del diario de la persona (ver JournalRestarted).
+	// Nace con la fila: si la tabla se vacía, la fila nueva trae otra. Las
+	// filas de antes de la columna la reciben en su siguiente Append.
+	Epoch string `gorm:"type:varchar(36);not null;default:''"`
+}
+
+// GapReasonReset: la razón del cac:gap que dice que el diario volvió a empezar.
+const GapReasonReset = "reset"
+
+// JournalRestarted decide si quien lee desde `after` en la época `asked` lee
+// otro diario que el que hay ahora (cabecera `head`, época `current`).
+//
+// Un diario vuelve a empezar cuando se vacía (`TRUNCATE`, una limpieza a
+// mano) o se restaura de un respaldo. Hay dos señales, y hacen falta las dos:
+//
+//   - la cabecera por debajo del cursor: lo único que se ve tras restaurar un
+//     respaldo (la época vuelve con la fila, la misma de entonces) o con un
+//     cliente que no manda época;
+//   - otra época: lo único que se ve si el diario nuevo ya pasó del cursor
+//     antes de que quien escucha volviera a preguntar. Por la cabecera sola,
+//     esos números se tomarían por los viejos y se saltarían.
+//
+// Una época vacía (cliente viejo, fila de antes de la columna, diario sin
+// filas) no se compara: no dice nada.
+func JournalRestarted(after, head int64, asked, current string) bool {
+	return after > head || (asked != "" && current != "" && asked != current)
 }
 
 // UserEventInput es lo que se le pide al diario que apunte.
@@ -127,6 +153,21 @@ func GapEnvelope(from, to int64, at time.Time) EventEnvelope {
 	return EventEnvelope{Seq: to, ID: "gap", Type: UserEventGap, At: at.UTC(), Data: data}
 }
 
+// ResetEnvelope: el aviso de que el diario volvió a empezar. Lleva el `seq` 0,
+// que no es de ningún evento: así no tapa el número de uno real, y quien lo
+// recibe baja su cursor a 0 y lee el diario nuevo desde el 1. `previousCursor`
+// es por dónde iba quien escuchaba; `epoch`, la época nueva.
+func ResetEnvelope(previous int64, epoch string, at time.Time) EventEnvelope {
+	data, _ := json.Marshal(map[string]any{"from": 0, "to": 0, "reason": GapReasonReset,
+		"previousCursor": previous, "epoch": epoch})
+	return EventEnvelope{Seq: 0, ID: "reset", Type: UserEventGap, At: at.UTC(), Data: data}
+}
+
+// IsReset: si el sobre es un ResetEnvelope.
+func (e EventEnvelope) IsReset() bool {
+	return e.Type == UserEventGap && e.Seq == 0 && e.ID == "reset"
+}
+
 // EventPage es una lectura del diario.
 type EventPage struct {
 	Events []EventEnvelope `json:"events"`
@@ -134,4 +175,7 @@ type EventPage struct {
 	Head int64 `json:"head"`
 	// Gap: lo que va desde el cursor pedido ya no está entero.
 	Gap bool `json:"gap,omitempty"`
+	// Epoch: la época del diario (ver JournalRestarted). Quien escucha la
+	// guarda y la devuelve al preguntar (`?epoch=`).
+	Epoch string `json:"epoch,omitempty"`
 }
