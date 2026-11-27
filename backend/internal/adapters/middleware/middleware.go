@@ -378,6 +378,12 @@ var patWritable = []struct {
 	// Enlazar a mano una PR a una tarea: añade un enlace y una línea al hilo,
 	// no pisa nada. Lo que se lee de GitHub lo lee la App de la org.
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/tasks/[^/]+/git/prs/?$`), domain.ScopeTasksWrite},
+	// Enlazar una tarea con su to-do, mensaje o tarjeta de Basecamp (MCP
+	// `link_basecamp`): añade un enlace, como el de una PR. Soltarlo quita lo
+	// que alguien dejó, así que pide manage. El id es el del recording, un
+	// número (command-and-control-557).
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/tasks/[^/]+/basecamp/?$`), domain.ScopeTasksWrite},
+	{http.MethodDelete, regexp.MustCompile(`^/api/v1/tasks/[^/]+/basecamp/[0-9]+$`), domain.ScopeTasksManage},
 	// Documentación: añadir al final de una sección y registrar una decisión.
 	//
 	// Las dos sólo añaden. `append` concatena en la base sin leer antes, así que

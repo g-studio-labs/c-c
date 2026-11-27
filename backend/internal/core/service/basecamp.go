@@ -437,6 +437,7 @@ func (s *BasecampService) Start(ctx context.Context) {
 		defer t.Stop()
 		for {
 			s.RefreshExpiring()
+			s.ReconcileWebhooks()
 			select {
 			case <-ctx.Done():
 				return
@@ -624,7 +625,8 @@ func (s *BasecampService) LinkProject(orgID, userID string, projectID int64, spa
 	old, _ := s.repo.Project(orgID, projectID)
 	p := &domain.BasecampProject{OrgID: orgID, SpaceID: spaceID, ProjectID: projectID, Name: wire.Name,
 		AppURL: domain.SafeBasecampURL(wire.AppURL), WebhookID: hook.ID,
-		SecretHash: domain.BasecampSecretHash(secret), LinkedByID: userID}
+		SecretHash: domain.BasecampSecretHash(secret), LinkedByID: userID,
+		WebhookTypes: domain.BasecampTypesKey(domain.BasecampWebhookTypes)}
 	if err := s.repo.SaveProject(p); err != nil {
 		// El webhook nuevo no tiene fila que lo reciba: fuera, para que no
 		// quede uno huérfano mandando a una dirección muerta. El viejo sigue.
@@ -741,8 +743,10 @@ func (s *BasecampService) HandleWebhook(secret string, body []byte) error {
 		// Nada que reintentar: un cuerpo así no mejora.
 		return nil
 	}
-	switch ev.Kind {
-	case domain.BasecampCommentCreated, domain.BasecampMessageCreated, domain.BasecampTodoCompleted:
+	switch {
+	case ev.Kind == domain.BasecampCommentCreated, ev.Kind == domain.BasecampMessageCreated,
+		ev.Kind == domain.BasecampTodoCompleted, ev.Kind == domain.BasecampTodoUncompleted,
+		domain.BasecampMakesTask(ev.Kind):
 	default:
 		return nil
 	}
@@ -800,11 +804,17 @@ func (s *BasecampService) process(proj *domain.BasecampProject, ev domain.Baseca
 		note.titleKey = "notify.basecamp.comment"
 	case domain.BasecampMessageCreated:
 		note.titleKey = "notify.basecamp.message"
-	case domain.BasecampTodoCompleted:
+	case domain.BasecampTodoCompleted, domain.BasecampTodoUncompleted:
 		note.titleKey = "notify.basecamp.todo_done"
+		if ev.Kind == domain.BasecampTodoUncompleted {
+			note.titleKey = "notify.basecamp.todo_reopened"
+		}
 		if note.excerpt == "" {
 			note.excerpt = strings.TrimSpace(ev.Recording.Title)
 		}
+	}
+	if domain.BasecampMakesTask(ev.Kind) {
+		return s.processAssignable(proj, ev, note.who, actorID)
 	}
 	if note.excerpt == "" {
 		note.excerpt = strings.TrimSpace(targetTitle)
@@ -877,7 +887,7 @@ func (s *BasecampService) process(proj *domain.BasecampProject, ev domain.Baseca
 // vez, y cada completada es otra línea: lleva su hora.
 func basecampLineKey(ev domain.BasecampWebhookEvent) string {
 	key := fmt.Sprintf("bc:%s:%d", ev.Kind, ev.Recording.ID)
-	if ev.Kind != domain.BasecampTodoCompleted {
+	if ev.Kind != domain.BasecampTodoCompleted && ev.Kind != domain.BasecampTodoUncompleted {
 		return key
 	}
 	if ev.CreatedAt.IsZero() {
@@ -903,6 +913,8 @@ func basecampLine(kind string, n basecampNote, title, targetURL string) string {
 		head = who + " posted " + link + " in Basecamp"
 	case domain.BasecampTodoCompleted:
 		return who + " completed " + link + " in Basecamp"
+	case domain.BasecampTodoUncompleted:
+		return who + " reopened " + link + " in Basecamp"
 	default:
 		head = who + " commented on " + link + " in Basecamp"
 	}

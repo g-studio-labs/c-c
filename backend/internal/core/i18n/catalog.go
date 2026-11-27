@@ -91,6 +91,24 @@ var catalogo = map[string]map[Locale]string{
 		EN: "{{who}} completed a to-do in Basecamp",
 		ES: "{{who}} completó un to-do en Basecamp",
 	},
+	"notify.basecamp.todo_created": {
+		EN: "{{who}} created a to-do in Basecamp",
+		ES: "{{who}} creó un to-do en Basecamp",
+	},
+	"notify.basecamp.todo_reopened": {
+		EN: "{{who}} reopened a to-do in Basecamp",
+		ES: "{{who}} reabrió un to-do en Basecamp",
+	},
+	// Un to-do de Basecamp que llega como tarea sin nadie de cac a cargo: se le
+	// dice a quien enlazó el proyecto (command-and-control-557).
+	"notify.basecamp.todo_unassigned": {
+		EN: "{{who}} left a Basecamp to-do with nobody assigned",
+		ES: "{{who}} dejó un to-do de Basecamp sin nadie asignado",
+	},
+	"notify.basecamp.todo_unmatched": {
+		EN: "{{who}} assigned a Basecamp to-do to someone who is not linked to cac",
+		ES: "{{who}} asignó un to-do de Basecamp a alguien que no está enlazado en cac",
+	},
 	"notify.basecamp.mention": {
 		EN: "{{who}} mentioned you in Basecamp",
 		ES: "{{who}} te nombró en Basecamp",

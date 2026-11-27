@@ -92,6 +92,21 @@ type TaskService struct {
 	// simplemente no deja constancia, que es lo que hacen todas las pruebas que
 	// no van de esto.
 	avisos *avisos
+	// links enlaza la tarea a lo que su descripción cita de un tracker
+	// (Basecamp, command-and-control-557). Opcional, como el hub.
+	links DescriptionLinker
+}
+
+// DescriptionLinker: quien enlaza una tarea con lo que cita su descripción.
+type DescriptionLinker interface {
+	LinkFromDescription(item *domain.Item)
+}
+
+// WithDescriptionLinker: al crear o editar la descripción de una tarea, se
+// enlaza sola con el to-do, mensaje o tarjeta de Basecamp que cite.
+func (s *TaskService) WithDescriptionLinker(l DescriptionLinker) *TaskService {
+	s.links = l
+	return s
 }
 
 // WithNotifier deja constancia de los comentarios, para que uno que llegó con
@@ -567,6 +582,9 @@ func (s *TaskService) CreateTask(ctx context.Context, list *domain.TaskList, org
 			return t, err
 		}
 	}
+	if s.links != nil && t.Description != "" {
+		s.links.LinkFromDescription(t)
+	}
 	s.publish("task:new", orgID, list.ID, t.ID)
 	// Nacida ya en el tablero de un cliente: se le anuncia como a una publicada
 	// después (server-to-server.md §5.b). Sólo salía al publicar una interna, y
@@ -740,6 +758,9 @@ func (s *TaskService) UpdateTask(ctx context.Context, id, actorID string, req do
 		s.dropRemovedAttachments(id, oldDescription, *req.Description)
 	}
 	if t, err := s.repo.FindTask(id); err == nil {
+		if s.links != nil && req.Description != nil {
+			s.links.LinkFromDescription(t)
+		}
 		if moved != nil && moved.Moved {
 			s.leaveMoveTrace(t, actorID, moved)
 			// El tablero que la tenía también tiene que enterarse: el evento de

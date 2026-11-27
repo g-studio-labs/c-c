@@ -43,10 +43,25 @@ type fakeBasecamp struct {
 	hooksDeleted   []string
 	refreshes      int
 	auths          []string
+	hookPosts      int
+	hookPuts       []hookPut
+	hookPayloads   map[string]string
+	recordingReads int
 	// Cómo contesta.
 	failRefresh bool
 	access      string
 	nextHook    int
+	// recordings: lo que devuelve la API por to-do o tarjeta, por su ruta
+	// (`todos/6001`, `card_tables/cards/7001`).
+	recordings map[string]string
+	// recordingsDown: la API de recordings no contesta.
+	recordingsDown bool
+}
+
+type hookPut struct {
+	hook       string
+	payloadURL string
+	types      []string
 }
 
 // bcOtherAccount: la cuenta que autoriza el code `other-code`, con su propio
@@ -54,7 +69,7 @@ type fakeBasecamp struct {
 const bcOtherAccount = int64(1000)
 
 func newFakeBasecamp(t *testing.T) *fakeBasecamp {
-	f := &fakeBasecamp{access: "at-1", nextHook: 7}
+	f := &fakeBasecamp{access: "at-1", nextHook: 7, recordings: map[string]string{}, hookPayloads: map[string]string{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /authorization/token", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -126,6 +141,8 @@ func newFakeBasecamp(t *testing.T) *fakeBasecamp {
 		f.hookPayloadURL, f.hookTypes = body.PayloadURL, body.Types
 		id := f.nextHook
 		f.nextHook++
+		f.hookPosts++
+		f.hookPayloads[fmt.Sprintf("%d.json", id)] = body.PayloadURL
 		f.mu.Unlock()
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprintf(w, `{"id":%d,"active":true}`, id)
@@ -136,6 +153,43 @@ func newFakeBasecamp(t *testing.T) *fakeBasecamp {
 		f.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	}))
+	mux.HandleFunc(fmt.Sprintf("GET /%d/buckets/%d/webhooks/{hook}", bcAccount, bcProject), authed(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		u, ok := f.hookPayloads[r.PathValue("hook")]
+		f.mu.Unlock()
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fmt.Fprintf(w, `{"id":1,"active":true,"payload_url":%q,"types":["Comment"]}`, u)
+	}))
+	mux.HandleFunc(fmt.Sprintf("PUT /%d/buckets/%d/webhooks/{hook}", bcAccount, bcProject), authed(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			PayloadURL string   `json:"payload_url"`
+			Types      []string `json:"types"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.mu.Lock()
+		f.hookPuts = append(f.hookPuts, hookPut{hook: r.PathValue("hook"), payloadURL: body.PayloadURL, types: body.Types})
+		f.mu.Unlock()
+		fmt.Fprint(w, `{"id":1,"active":true}`)
+	}))
+	recording := func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.recordingReads++
+		down := f.recordingsDown
+		body, ok := f.recordings[strings.TrimSuffix(r.PathValue("rest"), ".json")]
+		f.mu.Unlock()
+		switch {
+		case down:
+			w.WriteHeader(http.StatusServiceUnavailable)
+		case !ok:
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			fmt.Fprint(w, body)
+		}
+	}
+	mux.HandleFunc(fmt.Sprintf("GET /%d/buckets/%d/{rest...}", bcAccount, bcProject), authed(recording))
 	mux.HandleFunc(fmt.Sprintf("GET /%d/projects/%d/people.json", bcAccount, bcProject), authed(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `[
 			{"id":101,"name":"Ana Bc","email_address":"ANA@dwit.mx","attachable_sgid":"sgid-ana"},
@@ -223,7 +277,7 @@ func basecampDB(t *testing.T) *gorm.DB {
 		&domain.TaskList{}, &domain.Item{}, &domain.ItemAssignee{}, &domain.ItemComment{}, &domain.SpaceSource{},
 		&domain.Request{}, &domain.RequestVersion{},
 		&domain.BasecampConnection{}, &domain.BasecampProject{}, &domain.BasecampPerson{},
-		&domain.BasecampLink{}, &domain.BasecampEvent{}, &domain.BasecampOAuthState{}); err != nil {
+		&domain.BasecampLink{}, &domain.BasecampEvent{}, &domain.BasecampOAuthState{}, &domain.BasecampAssignment{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := repository.EnsureGitHubIndexes(db); err != nil {

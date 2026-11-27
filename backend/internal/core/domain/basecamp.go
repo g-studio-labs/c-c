@@ -26,6 +26,15 @@ import (
 // Los tipos de recording a los que se suscribe cada webhook.
 var BasecampWebhookTypes = []string{"Comment", "Message", "Todo", "Kanban::Card"}
 
+// BasecampLegacyWebhookTypes: con qué tipos se dieron de alta los webhooks de
+// la fase 1, que no lo apuntaron. Un proyecto sin `webhook_types` se lee así;
+// si BasecampWebhookTypes cambia, el reloj de fondo los pone al día
+// (BasecampService.ReconcileWebhooks), sin crear otro webhook.
+var BasecampLegacyWebhookTypes = []string{"Comment", "Message", "Todo", "Kanban::Card"}
+
+// BasecampTypesKey: cómo se guardan y se comparan los tipos de un webhook.
+func BasecampTypesKey(types []string) string { return strings.Join(types, ",") }
+
 // Las clases de aviso de Basecamp (ver NotificationPrefs.Allows).
 const (
 	// BasecampMentionKind: te nombraron en Basecamp. No se calla, como una
@@ -94,6 +103,9 @@ type BasecampProject struct {
 	// LinkedByID: quien lo enlazó. Lo que pasa sin tarea enlazada ni mención
 	// le llega a él: sin alguien a quien avisar, se perdería en silencio.
 	LinkedByID string `gorm:"type:varchar(36)" json:"linkedById"`
+	// WebhookTypes: los tipos con que quedó dado de alta el webhook
+	// (BasecampTypesKey). Vacío: los de la fase 1.
+	WebhookTypes string `gorm:"type:varchar(300);not null;default:''" json:"-"`
 }
 
 func (BasecampProject) TableName() string { return "basecamp_projects" }
@@ -131,6 +143,18 @@ type BasecampLink struct {
 
 func (BasecampLink) TableName() string { return "basecamp_links" }
 
+// BasecampAssignment: un responsable que puso Basecamp en una tarea. Sólo
+// éstos los quita Basecamp cuando el to-do deja de estar asignado a esa
+// persona; a quien puso el equipo no lo toca.
+type BasecampAssignment struct {
+	ItemID    string    `gorm:"type:varchar(36);primaryKey"`
+	UserID    string    `gorm:"type:varchar(36);primaryKey"`
+	OrgID     string    `gorm:"type:varchar(36);index;not null"`
+	CreatedAt time.Time `gorm:"not null"`
+}
+
+func (BasecampAssignment) TableName() string { return "basecamp_assignments" }
+
 // BasecampEvent: un evento ya recibido. Basecamp reintenta lo que no contestó
 // a tiempo, y el mismo evento no puede avisar dos veces.
 type BasecampEvent struct {
@@ -163,6 +187,27 @@ type BasecampWebhookEvent struct {
 	CreatedAt time.Time          `json:"created_at"`
 	Recording BasecampRecording  `json:"recording"`
 	Creator   BasecampPersonWire `json:"creator"`
+	Details   BasecampDetails    `json:"details"`
+}
+
+// BasecampDetails: lo que un evento de asignación dice que cambió. Sólo se
+// lee para saber si hay algo que hacer: quién queda asignado se le pregunta
+// al to-do, que no depende del orden en que lleguen los eventos.
+type BasecampDetails struct {
+	AddedPersonIDs   []int64 `json:"added_person_ids"`
+	RemovedPersonIDs []int64 `json:"removed_person_ids"`
+}
+
+// BasecampAssignable: un to-do o una tarjeta como los devuelve la API (el
+// webhook no trae ni las notas ni los asignados).
+type BasecampAssignable struct {
+	ID          int64                `json:"id"`
+	Title       string               `json:"title"`
+	Content     string               `json:"content"`
+	Description string               `json:"description"`
+	AppURL      string               `json:"app_url"`
+	Bucket      BasecampBucket       `json:"bucket"`
+	Assignees   []BasecampPersonWire `json:"assignees"`
 }
 
 type BasecampRecording struct {
@@ -202,7 +247,30 @@ const (
 	BasecampCommentCreated = "comment_created"
 	BasecampMessageCreated = "message_created"
 	BasecampTodoCompleted  = "todo_completed"
+	// Fase 3 (command-and-control-557): un to-do o una tarjeta nuevos o
+	// asignados son una tarea enlazada; reabrir un to-do es una línea más.
+	BasecampTodoUncompleted = "todo_uncompleted"
+	BasecampTodoCreated     = "todo_created"
+	BasecampTodoAssignment  = "todo_assignment_changed"
+	BasecampCardCreated     = "kanban_card_created"
+	BasecampCardAssignment  = "kanban_card_assignment_changed"
 )
+
+// BasecampMakesTask: el evento trae (o pone al día) la tarea de su to-do o su
+// tarjeta, con sus responsables.
+func BasecampMakesTask(kind string) bool {
+	switch kind {
+	case BasecampTodoCreated, BasecampTodoAssignment, BasecampCardCreated, BasecampCardAssignment:
+		return true
+	}
+	return false
+}
+
+// BasecampIsCard: el evento es de una tarjeta (Kanban::Card), que se lee por
+// otra ruta de la API y guarda su descripción en `content`.
+func BasecampIsCard(kind string) bool {
+	return kind == BasecampCardCreated || kind == BasecampCardAssignment
+}
 
 // Target: el recording del que trata el evento, el que se enlaza a una
 // tarea. Un comentario habla de su padre (el to-do, el mensaje); lo demás, de
@@ -328,6 +396,27 @@ func SafeBasecampURL(raw string) string {
 		return ""
 	}
 	return u.String()
+}
+
+// reBasecampURL: una URL de Basecamp dentro de un texto. Lo que la cierra es
+// lo que no puede ir en una dirección de markdown ni de texto corrido.
+var reBasecampURL = regexp.MustCompile(`https://[A-Za-z0-9.-]*basecamp\.com/[^\s)<>\]"'` + "`" + `]+`)
+
+// BasecampURLsIn: las URLs de recordings de Basecamp de un texto (una
+// descripción), cada una una vez y en el orden en que salen.
+func BasecampURLsIn(text string) []string {
+	var out []string
+	seen := map[int64]bool{}
+	for _, raw := range reBasecampURL.FindAllString(text, -1) {
+		raw = strings.TrimRight(raw, ".,;:!?")
+		_, _, rec, err := ParseBasecampRecordingURL(raw)
+		if err != nil || seen[rec] {
+			continue
+		}
+		seen[rec] = true
+		out = append(out, raw)
+	}
+	return out
 }
 
 var reRecordingPath = regexp.MustCompile(`^/(\d+)/buckets/(\d+)/(?:[a-z_]+/)+(\d+)(?:\.json)?/?$`)

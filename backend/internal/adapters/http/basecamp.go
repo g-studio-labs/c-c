@@ -25,7 +25,9 @@ func BasecampConfigFromEnv() service.BasecampConfig {
 	}
 }
 
-func InitBasecampRoutes(db *gorm.DB, r *chi.Mux, hub *events.Hub, cfg service.BasecampConfig) *service.BasecampService {
+// NewBasecampServiceFor: el servicio, antes que las rutas de tareas, que lo
+// usan para enlazar una tarea con lo que cita su descripción.
+func NewBasecampServiceFor(db *gorm.DB, hub *events.Hub, cfg service.BasecampConfig) *service.BasecampService {
 	inbox := service.NewNotificationService(repository.NewNotificationRepository(db))
 	requests := service.NewRequestService(repository.NewRequestRepository(db), repository.NewTaskRepository(db),
 		repository.NewDocRepository(db), hub, inbox)
@@ -33,7 +35,6 @@ func InitBasecampRoutes(db *gorm.DB, r *chi.Mux, hub *events.Hub, cfg service.Ba
 	if !svc.Configured() {
 		lg.Warn("basecamp: BASECAMP_CLIENT_ID / BASECAMP_CLIENT_SECRET not set — connecting Basecamp answers basecamp-off")
 	}
-	InitBasecampRoutesWith(r, svc)
 	return svc
 }
 

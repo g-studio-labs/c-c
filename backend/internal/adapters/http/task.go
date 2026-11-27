@@ -16,8 +16,9 @@ import (
 )
 
 // InitTaskRoutes mounts the task module. Everything is JWT-authenticated and
-// org-scoped through the space that owns each node.
-func InitTaskRoutes(db *gorm.DB, r *chi.Mux, hub *events.Hub, calls *service.CallSessionService) {
+// org-scoped through the space that owns each node. `links` enlaza una tarea
+// con lo que cita su descripción (Basecamp); nil, nada.
+func InitTaskRoutes(db *gorm.DB, r *chi.Mux, hub *events.Hub, calls *service.CallSessionService, links service.DescriptionLinker) {
 	taskRepo := repository.NewTaskRepository(db)
 	// El buzón se construye antes que nada porque ahora lo comparten cuatro
 	// servicios, no dos. Ver el comentario de más abajo, que ya explicaba por
@@ -25,6 +26,9 @@ func InitTaskRoutes(db *gorm.DB, r *chi.Mux, hub *events.Hub, calls *service.Cal
 	inbox := service.NewNotificationService(repository.NewNotificationRepository(db))
 	svc := service.NewTaskService(taskRepo, repository.NewReportRepository(db), repository.NewOrganizationRepository(db), hub).
 		WithNotifier(inbox)
+	if links != nil {
+		svc.WithDescriptionLinker(links)
+	}
 	// The same channel service the reports screen uses. One row, one set of
 	// rules, reachable from wherever the person happens to be.
 	channels := service.NewReportProjectService(

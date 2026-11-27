@@ -37,7 +37,7 @@ import (
 func TestAReaderCannotChangeDocumentation(t *testing.T) {
 	db := docReaderDB(t)
 	r := chi.NewRouter()
-	InitTaskRoutes(db, r, events.NewHub(), nil)
+	InitTaskRoutes(db, r, events.NewHub(), nil, nil)
 
 	// Los tokens personales de la prueba: `cac_pat_<rol>_<scope>`, de org-1.
 	middleware.UsePATAuthenticator(func(tok string) (*domain.ClaimsJWT, error) {

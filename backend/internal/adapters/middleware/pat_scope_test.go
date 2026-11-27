@@ -47,6 +47,9 @@ func TestEachEndpointAsksForTheRightScope(t *testing.T) {
 		{http.MethodPost, "/api/v1/tasks/abc/attachments", domain.ScopeTasksWrite},
 		// Enlazar a mano una PR a una tarea: añade, no pisa.
 		{http.MethodPost, "/api/v1/tasks/abc/git/prs", domain.ScopeTasksWrite},
+		// Enlazar con Basecamp añade; soltar quita lo que alguien dejó.
+		{http.MethodPost, "/api/v1/tasks/abc/basecamp", domain.ScopeTasksWrite},
+		{http.MethodDelete, "/api/v1/tasks/abc/basecamp/5001", domain.ScopeTasksManage},
 		{http.MethodPatch, "/api/v1/notes/abc", domain.ScopeNotesManage},
 		{http.MethodPost, "/api/v1/reports/abc/comments", domain.ScopeReportsWrite},
 		{http.MethodPost, "/api/v1/reports/abc/images", domain.ScopeReportsWrite},

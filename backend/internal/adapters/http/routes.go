@@ -70,7 +70,10 @@ func InitRoutes(db *gorm.DB) *chi.Mux {
 	InitReportRoutes(db, r, hub)
 	// Las llamadas guardadas, antes que quien da entradas a las salas.
 	calls := InitCallSessionRoutes(db, r, hub)
-	InitTaskRoutes(db, r, hub, calls)
+	// Basecamp se construye antes que las tareas: una tarea que cita un to-do
+	// en su descripción se enlaza sola (command-and-control-557).
+	basecamp := NewBasecampServiceFor(db, hub, BasecampConfigFromEnv())
+	InitTaskRoutes(db, r, hub, calls, basecamp)
 	// El muro de feedback y comunicados. Usa el Broadcast del hub.
 	InitPostRoutes(db, r, hub)
 	// La campana al teléfono (W2): Web Push con las llaves VAPID del entorno.
@@ -88,7 +91,8 @@ func InitRoutes(db *gorm.DB) *chi.Mux {
 	InitGitHubRoutesWith(r, gh)
 	// Basecamp (command-and-control-516): conectar, sus webhooks y la
 	// renovación de los tokens, que caducan a las dos semanas.
-	startBasecampRefresher(InitBasecampRoutes(db, r, hub, BasecampConfigFromEnv()))
+	InitBasecampRoutesWith(r, basecamp)
+	startBasecampRefresher(basecamp)
 	InitActivityRoutes(db, r)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {

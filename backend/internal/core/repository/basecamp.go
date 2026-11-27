@@ -405,3 +405,126 @@ func (r *BasecampRepository) AdminIDs(orgID string) ([]string, error) {
 		orgID, domain.OrgRoleAdmin).Scan(&ids).Error
 	return ids, err
 }
+
+// ─── Tareas que trae Basecamp (fase 3, command-and-control-557) ──────────────
+
+// FirstListOf: la lista donde caen las tareas que trae Basecamp a un espacio:
+// la primera del espacio, las de fuera de carpetas antes. "" si no tiene.
+func (r *BasecampRepository) FirstListOf(spaceID string) string {
+	var ids []string
+	r.db.Raw(`SELECT id FROM task_lists WHERE space_id = ?
+		ORDER BY (folder_id IS NULL) DESC, rank ASC, created_at ASC, id ASC LIMIT 1`, spaceID).Scan(&ids)
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
+}
+
+// CreateLinkedTask crea la tarea y su enlace al recording en una sola
+// transacción, o devuelve la que ya estaba enlazada (created=false).
+//
+// El candado consultivo por org y recording es lo que hace que dos entregas
+// a la vez (el alta y la asignación del mismo to-do llegan casi juntas) no
+// creen dos tareas; y si a la vez alguien lo enlazó a mano, el índice único
+// de basecamp_links tumba ésta entera y se contesta con la de esa persona.
+func (r *BasecampRepository) CreateLinkedTask(t *domain.Item, l *domain.BasecampLink) (*domain.Item, bool, error) {
+	var existing string
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`SELECT pg_advisory_xact_lock(hashtext(?))`,
+			"basecamp-task:"+l.OrgID+":"+strconv.FormatInt(l.RecordingID, 10)).Error; err != nil {
+			return err
+		}
+		var old domain.BasecampLink
+		err := tx.First(&old, "org_id = ? AND recording_id = ?", l.OrgID, l.RecordingID).Error
+		if err == nil {
+			existing = old.ItemID
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if t.ID == "" {
+			t.ID = uuid.NewString()
+		}
+		if err := (&TaskRepository{db: tx}).createTaskRaw(t, t.SpaceID); err != nil {
+			return err
+		}
+		l.ItemID = t.ID
+		if l.ID == "" {
+			l.ID = uuid.NewString()
+		}
+		return tx.Create(l).Error
+	})
+	if err != nil {
+		// Otro lo enlazó entre medias: vale la suya.
+		if old, e := r.LinkFor(l.OrgID, l.RecordingID); e == nil {
+			it, e := r.Item(old.ItemID)
+			return it, false, e
+		}
+		return nil, false, err
+	}
+	if existing != "" {
+		it, err := r.Item(existing)
+		return it, false, err
+	}
+	// Lo que hace CreateTask después de crear: la búsqueda y las claves de
+	// fuera. Fuera de la transacción, como allí.
+	syncText(r.db, domain.EntityTask, t.ID)
+	syncTaskKeys(r.db, t.ID)
+	return t, true, nil
+}
+
+// AddBasecampAssignee pone al usuario de responsable y apunta que lo puso
+// Basecamp. Si ya lo era (lo puso el equipo), no apunta nada: así Basecamp no
+// lo quita nunca. Dice si entró ahora.
+func (r *BasecampRepository) AddBasecampAssignee(orgID, itemID, userID string) (bool, error) {
+	added := false
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&domain.ItemAssignee{ItemID: itemID, UserID: userID})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return nil
+		}
+		added = true
+		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&domain.BasecampAssignment{
+			ItemID: itemID, UserID: userID, OrgID: orgID, CreatedAt: time.Now().UTC()}).Error
+	})
+	return added, err
+}
+
+// BasecampAssignees: los responsables de la tarea que puso Basecamp.
+func (r *BasecampRepository) BasecampAssignees(itemID string) ([]string, error) {
+	var ids []string
+	err := r.db.Model(&domain.BasecampAssignment{}).Where("item_id = ?", itemID).Order("user_id").Pluck("user_id", &ids).Error
+	return ids, err
+}
+
+// RemoveBasecampAssignee quita al responsable sólo si lo puso Basecamp.
+func (r *BasecampRepository) RemoveBasecampAssignee(itemID, userID string) (bool, error) {
+	removed := false
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Where("item_id = ? AND user_id = ?", itemID, userID).Delete(&domain.BasecampAssignment{})
+		if res.Error != nil || res.RowsAffected == 0 {
+			return res.Error
+		}
+		res = tx.Where("item_id = ? AND user_id = ?", itemID, userID).Delete(&domain.ItemAssignee{})
+		removed = res.RowsAffected > 0
+		return res.Error
+	})
+	return removed, err
+}
+
+// SetWebhookTypes apunta con qué tipos quedó el webhook del proyecto.
+func (r *BasecampRepository) SetWebhookTypes(id, types string) error {
+	return r.db.Model(&domain.BasecampProject{}).Where("id = ?", id).
+		Updates(map[string]any{"webhook_types": types, "updated_at": time.Now().UTC()}).Error
+}
+
+// AllProjects: los proyectos enlazados de todas las orgs, para el reloj.
+func (r *BasecampRepository) AllProjects() ([]domain.BasecampProject, error) {
+	var out []domain.BasecampProject
+	err := r.db.Order("org_id, project_id").Find(&out).Error
+	return out, err
+}

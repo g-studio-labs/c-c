@@ -31,7 +31,7 @@ import (
 func TestWhoChangedTheStatusCannotRewriteOrWithdrawTheLine(t *testing.T) {
 	db := systemLineDB(t)
 	r := chi.NewRouter()
-	InitTaskRoutes(db, r, events.NewHub(), nil)
+	InitTaskRoutes(db, r, events.NewHub(), nil, nil)
 
 	const ana = "u-ana"
 	item := &domain.Item{OrgID: "org-1", ListID: "list-1", Title: "Interna", Status: domain.ReportInProgress, Visibility: domain.VisibilityInternal}
