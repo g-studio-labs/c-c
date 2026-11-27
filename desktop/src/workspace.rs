@@ -185,6 +185,17 @@ pub struct Workspace {
     /// fuera de sus límites: con el ratón encima, el panel asomado ve «ratón
     /// fuera», se desmonta y se lleva el menú. Mientras haya uno, se queda.
     panel_menus_open: std::collections::HashSet<SharedString>,
+    /// Los disparadores de esos menús que se pintaron en este frame. El kit
+    /// sólo avisa del cierre si el menú se cierra: si su botón deja de
+    /// pintarse (Ctrl+3 a otro módulo, la fila que se va del árbol), su
+    /// estado se recoge en silencio y el menú, sin esto, sostendría el panel
+    /// para siempre.
+    panel_menus_painted: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<SharedString>>>,
+    /// Dónde se pintaron el riel y el panel asomado. Con el ratón sobre un
+    /// menú (otra capa) el panel no recibe hover; al cerrarse, dónde está el
+    /// ratón se pregunta aquí, no al último hover.
+    rail_place: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    peek_place: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// Dónde está el foco cuando no lo tiene nada: sin nadie enfocado, una
     /// tecla no llega a ningún elemento de la app y Ctrl+B no haría nada
     /// hasta pulsar algo con el ratón.
@@ -300,6 +311,9 @@ impl Workspace {
             over_rail: false,
             over_panel: false,
             panel_menus_open: Default::default(),
+            panel_menus_painted: Default::default(),
+            rail_place: Default::default(),
+            peek_place: Default::default(),
             focus_anchor,
             _on_focus_lost: on_focus_lost,
             naming: None,
@@ -577,18 +591,84 @@ impl Workspace {
     /// Apunta que el menú `key` del panel se abrió o se cerró. Quien se
     /// sostiene es el panel asomado, no el menú: al cerrarse el último, si el
     /// ratón ya no está en el riel ni en el panel, el panel se va.
-    fn set_panel_menu_open(&mut self, key: SharedString, open: bool, cx: &mut Context<Self>) {
+    fn set_panel_menu_open(&mut self, key: SharedString, open: bool, window: &Window, cx: &mut Context<Self>) {
         let changed = if open { self.panel_menus_open.insert(key) } else { self.panel_menus_open.remove(&key) };
-        if changed {
-            cx.notify();
+        if !changed {
+            return;
         }
+        // Mientras el menú tapaba el panel, su hover decía «fuera»: si al
+        // cerrarse (elegir con un clic) el ratón quedó quieto encima, el
+        // panel se plegaría debajo de él. Vale dónde está ahora.
+        if self.panel_menus_open.is_empty() {
+            let at = window.mouse_position();
+            let over = |place: &std::cell::Cell<Option<Bounds<Pixels>>>| place.get().is_some_and(|bounds| bounds.contains(&at));
+            self.over_rail = over(&self.rail_place);
+            self.over_panel = over(&self.peek_place);
+        }
+        cx.notify();
     }
 
     fn panel_menu_tracker(&self, key: SharedString, cx: &mut Context<Self>) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
         let this = cx.entity().downgrade();
-        move |open, _, cx| {
-            this.update(cx, |this, cx| this.set_panel_menu_open(key.clone(), *open, cx)).ok();
+        move |open, window, cx| {
+            this.update(cx, |this, cx| this.set_panel_menu_open(key.clone(), *open, window, cx)).ok();
         }
+    }
+
+    /// Va junto al botón que abre el menú `key`: apunta que se pintó.
+    fn panel_menu_mark(&self, key: SharedString) -> impl IntoElement {
+        let painted = self.panel_menus_painted.clone();
+        canvas(move |_, _, _| _ = painted.borrow_mut().insert(key), |_, _, _, _| {}).absolute().inset_0()
+    }
+
+    /// Lo último que se pinta del panel asomado: mide dónde quedó y suelta
+    /// los menús cuyo botón ya no se pintó en este frame.
+    fn panel_peek_probe(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (painted, place, this) = (self.panel_menus_painted.clone(), self.peek_place.clone(), cx.entity().downgrade());
+        canvas(
+            move |bounds, window, cx| {
+                place.set(Some(bounds));
+                let entity = this.upgrade()?;
+                let painted = painted.borrow();
+                let gone: Vec<SharedString> = entity.read(cx).panel_menus_open.iter().filter(|key| !painted.contains(*key)).cloned().collect();
+                if !gone.is_empty() {
+                    let entity = entity.clone();
+                    window.defer(cx, move |window, cx| {
+                        entity.update(cx, |this, cx| gone.into_iter().for_each(|key| this.set_panel_menu_open(key, false, window, cx)));
+                    });
+                }
+                Some(entity)
+            },
+            // El «dentro» que se apunta al cerrar un menú no lo sabe el hover
+            // del panel (para él, el ratón seguía en el menú), así que no
+            // avisaría al salir. La salida se mira aquí, por los límites.
+            |bounds, entity, window, _| {
+                let Some(entity) = entity else { return };
+                let leave = |entity: &Entity<Workspace>, cx: &mut App| {
+                    entity.update(cx, |this, cx| {
+                        if this.over_panel {
+                            this.over_panel = false;
+                            cx.notify();
+                        }
+                    })
+                };
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseMoveEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Bubble && !bounds.contains(&event.position) {
+                            leave(&entity, cx);
+                        }
+                    }
+                });
+                window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        leave(&entity, cx);
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
     }
 
     fn switch_org(org_id: String, cx: &App) {
@@ -1603,7 +1683,8 @@ impl Workspace {
             .child(Icon::new(Lucide::ChevronsUpDown).size_3p5().flex_none().opacity(0.6));
         let label = tr(cx, "common:misc.organizations");
         let track = self.panel_menu_tracker("org-switch".into(), cx);
-        Button::new("org-switch").ghost().w_full().h(px(48.)).p_2().child(face).dropdown_menu(move |menu, _, _| {
+        let mark = self.panel_menu_mark("org-switch".into());
+        Button::new("org-switch").ghost().w_full().h(px(48.)).p_2().child(face).child(mark).dropdown_menu(move |menu, _, _| {
             let mut menu = menu.min_w(px(224.)).check_side(Side::Right).label(label.clone());
             for org in &orgs.orgs {
                 let id = org.id.clone();
@@ -1659,6 +1740,7 @@ impl Workspace {
         };
         let chevron_size = if space { 14. } else { 12. };
         let menu_open_tracker = self.panel_menu_tracker(SharedString::from(format!("tree-more-{}", row.id)), cx);
+        let menu_mark = self.panel_menu_mark(SharedString::from(format!("tree-more-{}", row.id)));
         let menu_label = tr(
             cx,
             match row.kind {
@@ -1762,7 +1844,7 @@ impl Workspace {
             // `popover.rs`); si deja de hacerlo, lo dice la prueba del menú.
             // El «···» es sólo su icono (`size-3.5`), sin caja de botón.
             .child(
-                div().id(SharedString::from(format!("tree-menu-{}", row.id))).test_support().flex_none().child(
+                div().id(SharedString::from(format!("tree-menu-{}", row.id))).test_support().flex_none().relative().child(menu_mark).child(
                     Button::new(SharedString::from(format!("tree-more-{}", row.id)))
                         .ghost()
                         .xsmall()
@@ -2047,6 +2129,8 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Lo vuelven a llenar los botones de los menús del panel al pintarse.
+        self.panel_menus_painted.borrow_mut().clear();
         let (on_comms, stage_shown) = {
             let snapshot = Backend::snapshot(cx).read(cx);
             let voice = &snapshot.voice;
@@ -2200,11 +2284,16 @@ impl Render for Workspace {
                             .test_support()
                             .h_full()
                             .flex_none()
+                            .relative()
                             .on_hover(cx.listener(|this, over: &bool, _, cx| {
                                 this.over_rail = *over;
                                 cx.notify();
                             }))
-                            .child(self.render_rail(cx)),
+                            .child(self.render_rail(cx))
+                            .child({
+                                let place = self.rail_place.clone();
+                                canvas(move |bounds, _, _| place.set(Some(bounds)), |_, _, _, _| {}).absolute().inset_0()
+                            }),
                     )
                     .when(pinned, |this| this.child(self.render_panel(cx)))
                     .child(
@@ -2237,7 +2326,8 @@ impl Render for Workspace {
                                     this.over_panel = *over;
                                     cx.notify();
                                 }))
-                                .child(self.render_panel(cx)),
+                                .child(self.render_panel(cx))
+                                .child(self.panel_peek_probe(cx)),
                         )
                     })
                     // La tarea abierta es una página sobre todo lo demás, no
@@ -3300,6 +3390,50 @@ mod tests {
             assert!(!on_screen(window, item, cx), "{opener}: el menú no se cerró");
             assert!(!on_screen(window, "panel-peek", cx), "{opener}: el panel se quedó asomado con el menú cerrado y el ratón fuera");
         }
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Al cerrarse el menú del panel asomado, lo que decide si se pliega es
+    /// dónde está el ratón ahora, y un menú cuyo botón ya no se pinta deja
+    /// de sostenerlo aunque el kit no avise de que se cerró.
+    ///
+    /// Roturas que atrapa: elegir un elemento del menú con el ratón quieto
+    /// sobre el panel lo pliega debajo de él (decide el último hover, que
+    /// el menú tapaba); un atajo a otro módulo con el «···» abierto deja el
+    /// panel asomado para siempre (sólo se suelta con un cierre avisado).
+    #[gpui_kit::test]
+    fn a_closed_panel_menu_folds_by_where_the_mouse_is_now(cx: &mut TestAppContext) {
+        let server = server();
+        server.install(cx);
+        let window = open(cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        let hover = |id: &'static str, cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.hover(id, cx);
+            })
+            .unwrap();
+        };
+        click(window, "panel-toggle", cx);
+
+        hover("rail", cx);
+        click(window, "org-switch", cx);
+        wait_until(cx, "el menú se abre", |cx| on_screen(window, "org-create", cx));
+        hover("org-create", cx);
+        click(window, "org-create", cx);
+        wait_until(cx, "el menú se cierra", |cx| !on_screen(window, "org-create", cx));
+        assert!(on_screen(window, "panel-peek", cx), "el panel se plegó debajo del ratón al elegir");
+        hover("new-task", cx);
+        assert!(!on_screen(window, "panel-peek", cx), "con el ratón fuera, el panel no se plegó");
+
+        hover("rail", cx);
+        click(window, "tree-more-a", cx);
+        wait_until(cx, "el menú se abre", |cx| on_screen(window, "tree-act-docs-a", cx));
+        hover("tree-act-docs-a", cx);
+        press(window, "secondary-3", cx);
+        wait_until(cx, "⌘3 lleva a Comunicación", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).comms.on_screen) && !on_screen(window, "tree-more-a", cx));
+        hover("top-bar", cx);
+        assert!(!on_screen(window, "panel-peek", cx), "el menú de una fila que ya no está sostiene el panel");
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 
