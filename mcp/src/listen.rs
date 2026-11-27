@@ -117,11 +117,22 @@ fn credentials_from(env: &dyn Fn(&str) -> Option<String>, read: &dyn Fn(&Path) -
 pub struct Journal {
     events: PathBuf,
     state_dir: PathBuf,
+    /// La época del diario del backend a la que pertenece el cursor (ver
+    /// `Listener::adopt_epoch`). Viaja en `listen.json` junto al cursor.
+    epoch: std::sync::Mutex<Option<String>>,
 }
 
 impl Journal {
     pub fn new(events: PathBuf, state_dir: PathBuf) -> Self {
-        Journal { events, state_dir }
+        let epoch = fs::read_to_string(state_dir.join("listen.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|v| v["epoch"].as_str().filter(|e| !e.is_empty()).map(String::from));
+        Journal { events, state_dir, epoch: std::sync::Mutex::new(epoch) }
+    }
+
+    pub fn epoch(&self) -> Option<String> {
+        self.epoch.lock().map(|e| e.clone()).unwrap_or(None)
     }
 
     pub fn events_path(&self) -> &Path {
@@ -218,7 +229,11 @@ impl Journal {
     }
 
     pub fn save_cursor(&self, seq: u64) -> io::Result<()> {
-        write_atomic(&self.cursor_path(), &json!({ "cursor": seq }))
+        let mut state = json!({ "cursor": seq });
+        if let Some(epoch) = self.epoch() {
+            state["epoch"] = json!(epoch);
+        }
+        write_atomic(&self.cursor_path(), &state)
     }
 
     /// Lo que hace con cada evento quien escucha.
@@ -471,6 +486,7 @@ pub struct Listener {
 struct Backlog {
     events: Vec<Value>,
     head: u64,
+    epoch: Option<String>,
 }
 
 impl Listener {
@@ -526,7 +542,7 @@ impl Listener {
         if let Err(f) = self.catch_up(creds).await {
             return (false, f);
         }
-        let mut request = self.client.get(format!("{}/api/v1/events", creds.base)).bearer_auth(&creds.token).header("Accept", "text/event-stream");
+        let mut request = self.client.get(format!("{}/api/v1/events{}", creds.base, self.epoch_query('?'))).bearer_auth(&creds.token).header("Accept", "text/event-stream");
         if let Some(cursor) = self.cursor {
             request = request.header("Last-Event-ID", cursor.to_string());
         }
@@ -600,15 +616,38 @@ impl Listener {
         self.write(&line, to)
     }
 
-    /// Un `cac:gap` del backend con un número por detrás del cursor: el
-    /// diario del backend volvió a empezar (se borró, se restauró de un
-    /// respaldo, o el token es de otra persona) y su cabecera es ese número.
-    /// Igual al cursor no: eso es el mismo hueco que ya se escribió.
+    /// Un `cac:gap` del backend por detrás del cursor: su diario volvió a
+    /// empezar (se vació, se restauró de un respaldo, o el token es de otra
+    /// persona). El backend de ahora lo manda con `reason: "reset"` y `seq` 0,
+    /// y detrás el diario nuevo desde el 1 (`domain.ResetEnvelope`); uno de
+    /// antes, sin razón y con `seq` igual a su cabecera. Con el cursor en 0 no
+    /// hay nada que bajar: lo que llegue es del diario nuevo. Un `cac:gap` con
+    /// el número igual al cursor es el mismo hueco que ya se escribió.
     fn behind_the_head(&self, event: &Value) -> bool {
         event["type"] == GAP && event["seq"].as_u64().is_some_and(|seq| seq < self.cursor.unwrap_or(0))
     }
 
-    /// El diario del backend volvió a empezar en `seq`. El cursor **baja**
+    /// La época del diario del backend con la que se lee. Se devuelve en cada
+    /// pregunta (`?epoch=`), y es lo que deja al backend ver un reinicio
+    /// cuando su diario nuevo ya pasó de nuestro cursor: por el número solo,
+    /// lo nuevo se saltaría como ya escrito. Se adopta la que el backend
+    /// contesta, que ya comparó con la nuestra, y se guarda con el cursor.
+    fn adopt_epoch(&mut self, epoch: Option<&str>) -> Result<(), Failure> {
+        let Some(epoch) = epoch.filter(|e| !e.is_empty()) else { return Ok(()) };
+        if self.journal.epoch().as_deref() == Some(epoch) {
+            return Ok(());
+        }
+        if let Ok(mut current) = self.journal.epoch.lock() {
+            *current = Some(epoch.to_string());
+        }
+        match self.cursor {
+            Some(cursor) => self.journal.save_cursor(cursor).map_err(|e| Failure::Transient(format!("could not write {}: {e}", self.journal.events.display()))),
+            None => Ok(()),
+        }
+    }
+
+    /// El diario del backend volvió a empezar en `seq` (0 desde la 1.35: se
+    /// lee desde el 1 lo que el diario nuevo ya tenga). El cursor **baja**
     /// allí (si no, todo lo que llegue hasta el número viejo se saltaría como
     /// ya escrito) y el fichero sigue con una línea `cac:gap` de razón
     /// `reset`: lo de antes lleva números del diario viejo, pero se deja
@@ -623,6 +662,9 @@ impl Listener {
         let line = gap_line(format!("{GAP}:reset:{seq}:{nanos}"), seq, seq, json!({ "reason": RESET, "previousCursor": previous }));
         let failed = |e: io::Error| Failure::Transient(format!("could not write {}: {e}", self.journal.events.display()));
         self.journal.append(&line).map_err(failed)?;
+        if let (Some(epoch), Ok(mut current)) = (event["data"]["epoch"].as_str().filter(|e| !e.is_empty()), self.journal.epoch.lock()) {
+            *current = Some(epoch.to_string());
+        }
         self.journal.save_cursor(seq).map_err(failed)?;
         eprintln!("cac-mcp listen: cac's event journal starts again at {seq} (we were at {previous})");
         self.cursor = Some(seq);
@@ -636,6 +678,7 @@ impl Listener {
     async fn catch_up(&mut self, creds: &Credentials) -> Result<(), Failure> {
         let Some(mut cursor) = self.cursor else {
             let page = self.backlog(creds, 0, 1).await?;
+            self.adopt_epoch(page.epoch.as_deref())?;
             if page.head > 0 {
                 self.write_gap(1, page.head, "first-run")?;
             } else {
@@ -646,6 +689,8 @@ impl Listener {
         };
         loop {
             let page = self.backlog(creds, cursor, BACKLOG_PAGE).await?;
+            // El reset va primero en la página y sus eventos detrás: se
+            // ordena por `seq` sin moverlo (su `seq` 0 ya es el menor).
             let mut events = page.events;
             events.sort_by_key(|e| e["seq"].as_u64().unwrap_or(0));
             let before = cursor;
@@ -665,14 +710,25 @@ impl Listener {
                 self.write(&event, seq)?;
                 cursor = seq;
             }
+            self.adopt_epoch(page.epoch.as_deref())?;
             if cursor == before || cursor >= page.head {
                 return Ok(());
             }
         }
     }
 
+    /// `?epoch=…` (o `&epoch=…`) si se sabe la época. Sólo con caracteres
+    /// que no hay que escapar: la época es un UUID, y otra cosa no se manda.
+    fn epoch_query(&self, sep: char) -> String {
+        self.journal
+            .epoch()
+            .filter(|e| e.len() <= 64 && e.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+            .map(|e| format!("{sep}epoch={e}"))
+            .unwrap_or_default()
+    }
+
     async fn backlog(&self, creds: &Credentials, after: u64, limit: u64) -> Result<Backlog, Failure> {
-        let url = format!("{}/api/v1/events/backlog?after={after}&limit={limit}", creds.base);
+        let url = format!("{}/api/v1/events/backlog?after={after}&limit={limit}{}", creds.base, self.epoch_query('&'));
         let response = self
             .client
             .get(url)
@@ -695,6 +751,7 @@ impl Listener {
         Ok(Backlog {
             events: body["events"].as_array().cloned().unwrap_or_default(),
             head: body["head"].as_u64().unwrap_or(0),
+            epoch: body["epoch"].as_str().map(String::from),
         })
     }
 }
@@ -781,7 +838,11 @@ impl Filter {
                     _ => None,
                 })
                 .collect();
-            if !self.projects.iter().any(|p| names.contains(&p.to_lowercase())) {
+            // Un `notification:new` de Basecamp no trae `project`: sólo su
+            // grupo, `basecamp:<id del proyecto>` (QA 558). Uno enlazado a una
+            // tarea de cac lleva el de la tarea, y ése no dice el proyecto.
+            let group = event["data"]["group"].as_str().unwrap_or("").to_lowercase();
+            if !self.projects.iter().any(|p| names.contains(&p.to_lowercase()) || group == format!("basecamp:{}", p.to_lowercase())) {
                 return false;
             }
         }
@@ -799,21 +860,27 @@ fn consumer_path(state_dir: &Path, consumer: &str) -> PathBuf {
 }
 
 /// Por dónde va un consumidor: hasta qué `seq` confirmó (`None`: nada desde
-/// el último reinicio, así que hasta el `seq` 0 se le entrega) y el `id` de
-/// la última línea `cac:gap` de reinicio que ya le bajó lo confirmado.
+/// el último reinicio, así que hasta el `seq` 0 se le entrega), el `id` de
+/// la última línea `cac:gap` de reinicio que ya le bajó lo confirmado y lo
+/// que tenía confirmado justo antes de ella (`before_reset`, en los números
+/// del diario viejo): lo que el fichero guarda delante del reinicio por
+/// encima de eso se imprimió sin confirmar, y vuelve mientras el reinicio
+/// siga sin confirmarse. `None` es un consumidor de antes de la 1.35, que no
+/// lo apuntó: a ése no se le repite nada.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Progress {
     pub acked: Option<u64>,
     pub epoch: Option<String>,
+    pub before_reset: Option<u64>,
 }
 
 pub fn progress(state_dir: &Path, consumer: &str) -> Progress {
     let value = fs::read_to_string(consumer_path(state_dir, consumer)).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()).unwrap_or(Value::Null);
-    Progress { acked: value["acked"].as_u64(), epoch: value["epoch"].as_str().map(String::from) }
+    Progress { acked: value["acked"].as_u64(), epoch: value["epoch"].as_str().map(String::from), before_reset: value["beforeReset"].as_u64() }
 }
 
 fn save_progress(state_dir: &Path, consumer: &str, progress: &Progress) -> io::Result<()> {
-    write_atomic(&consumer_path(state_dir, consumer), &json!({ "acked": progress.acked, "epoch": progress.epoch }))
+    write_atomic(&consumer_path(state_dir, consumer), &json!({ "acked": progress.acked, "epoch": progress.epoch, "beforeReset": progress.before_reset }))
 }
 
 pub fn acked(state_dir: &Path, consumer: &str) -> u64 {
@@ -915,33 +982,62 @@ impl Tail {
 /// aunque su `seq` no pase de lo confirmado, y **baja** lo confirmado: los
 /// números vuelven a empezar, y sin bajarlo todo lo que llegue hasta el
 /// número viejo se daría por visto.
+///
+/// Lo que un `follow` anterior imprimió delante de esa línea sin que se
+/// confirmara vuelve, antes de ella, mientras ella misma siga sin
+/// confirmarse (ver `Progress::before_reset`): el Monitor pudo morir entre
+/// imprimirlo y proponerlo.
 pub fn follow(events: &Path, state_dir: &Path, consumer: &str, filter: &Filter, once: bool, out: &mut dyn Write, poll: Duration, keep_going: &dyn Fn() -> bool) -> io::Result<()> {
     let mut progress = progress(state_dir, consumer);
     let mut seen = progress.acked;
     let mut tail = Tail { file: None, id: 0, pos: 0, partial: Vec::new(), reopened: false };
     // Quien ya bajó por un reinicio no vuelve a leer lo que el fichero guarda
-    // delante de esa línea: son números del diario viejo.
+    // delante de esa línea: son números del diario viejo. Salvo lo que se le
+    // imprimió sin confirmar (`redeliver_after`), y sólo lo del tramo justo
+    // anterior a la línea: delante de otro reinicio, los números son de otro
+    // diario aún más viejo.
     let mut waiting_for: Option<String> = None;
+    let mut redeliver_after: Option<u64> = None;
+    let mut stale: Vec<(Vec<u8>, Value)> = Vec::new();
+    // Este proceso ya pasó la línea de su reinicio: lo de delante ya lo
+    // imprimió él, y una compactación no se lo hace repetir.
+    let mut passed_reset = false;
     loop {
         let lines = tail.read(events)?;
         if std::mem::take(&mut tail.reopened) {
             waiting_for = progress.epoch.clone().filter(|epoch| has_reset_line(events, epoch));
+            redeliver_after = if passed_reset || progress.acked.is_some() { None } else { progress.before_reset };
+            stale.clear();
         }
         for line in lines {
             let Ok(event) = serde_json::from_slice::<Value>(&line) else { continue };
             let Some(seq) = event["seq"].as_u64() else { continue };
             if let Some(epoch) = &waiting_for {
                 if event["id"].as_str() != Some(epoch.as_str()) {
+                    if is_reset(&event) {
+                        stale.clear();
+                    } else if redeliver_after.is_some_and(|after| seq > after) {
+                        stale.push((line, event));
+                    }
                     continue;
                 }
                 waiting_for = None;
+                passed_reset = true;
+                for (line, event) in stale.drain(..) {
+                    if filter.passes(&event) {
+                        out.write_all(&line)?;
+                        out.write_all(b"\n")?;
+                    }
+                }
             }
             let new_epoch = is_reset(&event).then(|| event["id"].as_str().unwrap_or("").to_string()).filter(|id| progress.epoch.as_ref() != Some(id));
             if let Some(epoch) = new_epoch {
                 // Lo confirmado queda en «nada»: la línea de reinicio sigue
-                // pendiente hasta que el consumidor la confirme.
-                progress = Progress { acked: None, epoch: Some(epoch) };
+                // pendiente hasta que el consumidor la confirme. Lo que tenía
+                // confirmado se guarda, para repetirle lo de delante.
+                progress = Progress { acked: None, epoch: Some(epoch), before_reset: Some(progress.acked.unwrap_or(0)) };
                 save_progress(state_dir, consumer, &progress)?;
+                passed_reset = true;
             } else if seen.is_some_and(|seen| seq <= seen) {
                 continue;
             }
@@ -1138,7 +1234,10 @@ pub mod fake {
     /// bueno.
     #[derive(Clone, Debug)]
     pub struct Asked {
+        /// La ruta, sin la consulta.
         pub path: String,
+        /// La consulta (`after=…&epoch=…`), sin el `?`.
+        pub query: String,
         pub last_event_id: Option<String>,
         pub authorized: bool,
     }
@@ -1150,6 +1249,10 @@ pub mod fake {
         /// El último número dado (`user_event_heads`): la retención no lo
         /// baja; sólo un diario que vuelve a empezar.
         head: u64,
+        /// La época del diario (`user_event_heads.epoch`): cambia cuando el
+        /// diario vuelve a empezar.
+        epoch: String,
+        restarts: u64,
         /// Los números de una organización que la persona dejó: se entregan
         /// como `cac:skipped`.
         hidden: BTreeSet<u64>,
@@ -1185,6 +1288,16 @@ pub mod fake {
         })
     }
 
+    /// `domain.ResetEnvelope`: el diario volvió a empezar; `seq` 0, y detrás
+    /// el diario nuevo desde el 1.
+    pub fn reset_envelope(previous: u64, epoch: &str) -> Value {
+        json!({
+            "seq": 0, "id": "reset", "type": super::GAP, "at": "2026-11-27T00:00:00Z",
+            "orgId": "", "key": "", "mine": false, "external": false,
+            "data": { "from": 0, "to": 0, "reason": super::RESET, "previousCursor": previous, "epoch": epoch },
+        })
+    }
+
     /// `domain.GapEnvelope`: se perdió de `from` a `to`, y ocupa `to`.
     pub fn gap_envelope(from: u64, to: u64) -> Value {
         json!({
@@ -1203,6 +1316,14 @@ pub mod fake {
     }
 
     impl State {
+        fn truncate(&mut self) {
+            self.journal.clear();
+            self.hidden.clear();
+            self.head = 0;
+            self.restarts += 1;
+            self.epoch = format!("epoch-{}", self.restarts);
+        }
+
         fn visible(&self, event: &Value) -> Value {
             if self.hidden.contains(&event["seq"].as_u64().unwrap_or(0)) {
                 skipped(event)
@@ -1211,18 +1332,22 @@ pub mod fake {
             }
         }
 
-        /// `EventJournal.Read`: `(events, head, gap)`.
-        fn read(&self, after: u64, limit: usize) -> (Vec<Value>, u64, bool) {
+        /// `EventJournal.Read`: `(events, head, gap)`, con la época que trae
+        /// quien lee (`domain.JournalRestarted`).
+        fn read(&self, after: u64, limit: usize, epoch: &str) -> (Vec<Value>, u64, bool) {
             let limit = if limit == 0 || limit > 500 { 500 } else { limit };
             let head = self.head;
-            if after > head {
-                return (vec![gap_envelope(head, head)], head, true);
-            }
-            if after == head {
-                return (Vec::new(), head, false);
-            }
             let mut events = Vec::new();
             let mut gap = false;
+            let mut after = after;
+            if after > head || (!epoch.is_empty() && !self.epoch.is_empty() && epoch != self.epoch) {
+                events.push(reset_envelope(after, &self.epoch));
+                gap = true;
+                after = 0;
+            }
+            if after == head {
+                return (events, head, gap);
+            }
             let first_kept = self.journal.keys().next().copied().unwrap_or(head + 1);
             if after + 1 < first_kept {
                 gap = true;
@@ -1238,6 +1363,7 @@ pub mod fake {
             let listener = TcpListener::bind("127.0.0.1:0").expect("un puerto libre en esta máquina");
             let base = format!("http://{}", listener.local_addr().unwrap());
             let fake = FakeCac { base, token: token.to_string(), state: Arc::default() };
+            fake.state.0.lock().unwrap().epoch = "epoch-0".into();
             let server = fake.clone();
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
@@ -1284,17 +1410,21 @@ pub mod fake {
             lock.lock().unwrap().journal.retain(|s, _| *s >= seq);
         }
 
-        /// El diario vuelve a empezar vacío, como tras un `DROP TABLE
-        /// user_events, user_event_heads` o un Postgres restaurado: la
-        /// cabecera vuelve a 0. Corta los streams (un despliegue).
+        /// El diario vuelve a empezar vacío, como tras un `TRUNCATE
+        /// user_events, user_event_heads`: la cabecera vuelve a 0 y la época
+        /// es otra. Corta los streams (un despliegue).
         pub fn restart_journal(&self) {
             let (lock, wake) = &*self.state;
             let mut state = lock.lock().unwrap();
-            state.journal.clear();
-            state.hidden.clear();
-            state.head = 0;
             state.generation += 1;
+            state.truncate();
             wake.notify_all();
+        }
+
+        /// `TRUNCATE user_events, user_event_heads` con los streams abiertos:
+        /// el diario vuelve a empezar y nadie cuelga (QA 558, criterio 6).
+        pub fn truncate_journal(&self) {
+            self.state.0.lock().unwrap().truncate();
         }
 
         /// Todo contesta este estado (401, 403…) hasta `accept`. Un stream
@@ -1343,11 +1473,16 @@ pub mod fake {
                 }
                 line.clear();
             }
-            let path = first.split_whitespace().nth(1).unwrap_or("/").to_string();
+            let target = first.split_whitespace().nth(1).unwrap_or("/").to_string();
+            let (path, query) = match target.split_once('?') {
+                Some((path, query)) => (path.to_string(), query.to_string()),
+                None => (target.clone(), String::new()),
+            };
+            let param = |name: &str| query.split('&').find_map(|kv| kv.strip_prefix(&format!("{name}="))).map(String::from);
             let authorized = authorization.as_deref() == Some(&format!("Bearer {}", self.token));
             let (lock, wake) = &*self.state;
             let mut state = lock.lock().unwrap();
-            state.asked.push(Asked { path: path.clone(), last_event_id: last_event_id.clone(), authorized });
+            state.asked.push(Asked { path: path.clone(), query: query.clone(), last_event_id: last_event_id.clone(), authorized });
             wake.notify_all();
             let mut out = stream;
             let status = state.refuse.or((!authorized).then_some(401));
@@ -1357,10 +1492,11 @@ pub mod fake {
                 let _ = write!(out, "HTTP/1.1 {status} No\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 return;
             }
-            if let Some(query) = path.strip_prefix("/api/v1/events/backlog?") {
-                let param = |name: &str| query.split('&').find_map(|kv| kv.strip_prefix(&format!("{name}="))).and_then(|v| v.parse::<u64>().ok());
-                let (events, head, gap) = state.read(param("after").unwrap_or(0), param("limit").unwrap_or(200) as usize);
-                let mut page = json!({ "events": events, "head": head });
+            let epoch = param("epoch").unwrap_or_default();
+            if path == "/api/v1/events/backlog" {
+                let number = |name: &str| param(name).and_then(|v| v.parse::<u64>().ok());
+                let (events, head, gap) = state.read(number("after").unwrap_or(0), number("limit").unwrap_or(200) as usize, &epoch);
+                let mut page = json!({ "events": events, "head": head, "epoch": state.epoch });
                 if gap {
                     page["gap"] = json!(true);
                 }
@@ -1374,14 +1510,15 @@ pub mod fake {
                 let _ = write!(out, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                 return;
             }
-            // `streamToken`: sin `Last-Event-ID` se empieza en la cabecera; uno
-            // por delante de ella es un `cac:gap` con `seq = head` y se sigue
-            // desde la cabecera; después, ponerse al día con el diario y en
-            // vivo, sólo lo que pasa del cursor.
+            // `streamToken`: sin `Last-Event-ID` se empieza en la cabecera;
+            // después, ponerse al día con el diario (que dice el reinicio con
+            // `seq` 0 y sigue desde el 1) y en vivo, sólo lo que pasa del
+            // cursor; un número que no es el siguiente se mira en el diario.
             let generation = state.generation;
             let head = state.head;
             let resume: Option<u64> = last_event_id.as_deref().and_then(|id| id.parse().ok());
             let mut cursor = resume.unwrap_or(head);
+            let mut epoch = if resume.is_some() { epoch } else { state.epoch.clone() };
             let mut next_live = state.live.len();
             drop(state);
             let send = |out: &mut TcpStream, event: &Value| -> bool {
@@ -1391,20 +1528,26 @@ pub mod fake {
             if write!(out, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").is_err() {
                 return;
             }
-            if resume.is_some() && cursor > head {
-                cursor = head;
-                if !send(&mut out, &gap_envelope(head, head)) {
-                    return;
-                }
-            }
-            let catch_up = |out: &mut TcpStream, cursor: &mut u64| -> bool {
+            let catch_up = |out: &mut TcpStream, cursor: &mut u64, epoch: &mut String| -> bool {
                 loop {
-                    let (events, head, _) = lock.lock().unwrap().read(*cursor, 500);
+                    let (events, head, now) = {
+                        let state = lock.lock().unwrap();
+                        let (events, head, _) = state.read(*cursor, 500, epoch);
+                        (events, head, state.epoch.clone())
+                    };
+                    *epoch = now;
                     if events.is_empty() {
                         return true;
                     }
                     for event in &events {
                         let seq = event["seq"].as_u64().unwrap_or(0);
+                        if event["id"] == "reset" {
+                            if !send(out, event) {
+                                return false;
+                            }
+                            *cursor = 0;
+                            continue;
+                        }
                         if seq <= *cursor {
                             continue;
                         }
@@ -1418,7 +1561,7 @@ pub mod fake {
                     }
                 }
             };
-            if out.write_all(b": connected\n\n").is_err() || !catch_up(&mut out, &mut cursor) {
+            if out.write_all(b": connected\n\n").is_err() || !catch_up(&mut out, &mut cursor, &mut epoch) {
                 return;
             }
             loop {
@@ -1438,18 +1581,15 @@ pub mod fake {
                 if pending.is_empty() {
                     // El latido: además vuelve a mirar el diario, por si el
                     // hub tiró algo.
-                    if out.write_all(b"event: ping\ndata: {}\n\n").is_err() || !catch_up(&mut out, &mut cursor) {
+                    if out.write_all(b"event: ping\ndata: {}\n\n").is_err() || !catch_up(&mut out, &mut cursor, &mut epoch) {
                         return;
                     }
                     continue;
                 }
                 for event in &pending {
                     let seq = event["seq"].as_u64().unwrap_or(0);
-                    if seq <= cursor {
-                        continue;
-                    }
-                    if seq > cursor + 1 {
-                        if !catch_up(&mut out, &mut cursor) {
+                    if seq != cursor + 1 {
+                        if !catch_up(&mut out, &mut cursor, &mut epoch) {
                             return;
                         }
                         continue;
@@ -1692,7 +1832,9 @@ mod tests {
         assert_eq!(got, vec![3, 4, 5]);
     }
 
-    /// Roturas que atrapa: que `--mine`, `--type` o `--project` dejen pasar
+    /// Roturas que atrapa: que `--project` deje fuera el `notification:new`
+    /// de ese proyecto de Basecamp (sólo trae `group: basecamp:<id>`) o que
+    /// case un proyecto que sólo empieza igual. Y que `--mine`, `--type` o `--project` dejen pasar
     /// lo que no es, o que escondan una línea `cac:gap`.
     #[test]
     fn the_filters_are_the_readers() {
@@ -1705,12 +1847,15 @@ mod tests {
         j.record(&envelope(2, "basecamp:event", "2026-11-27T00:00:00Z", json!({ "project": { "id": 7, "name": "Otro" } }))).unwrap();
         j.record(&envelope(3, "notification:new", "2026-11-27T00:00:00Z", json!({}))).unwrap();
         j.record(&envelope(4, GAP, "2026-11-27T00:00:00Z", json!({}))).unwrap();
+        // Una mención de Basecamp como aviso: sólo trae el grupo del proyecto.
+        j.record(&envelope(5, "notification:new", "2026-11-27T00:00:00Z", json!({ "kind": "basecamp:mention", "group": "basecamp:42" }))).unwrap();
+        j.record(&envelope(6, "notification:new", "2026-11-27T00:00:00Z", json!({ "kind": "basecamp:mention", "group": "basecamp:420" }))).unwrap();
         let f = |projects: &[&str], types: &[&str], mine: bool| Filter { projects: projects.iter().map(|s| s.to_string()).collect(), types: types.iter().map(|s| s.to_string()).collect(), mine };
-        assert_eq!(follow_once(&j, &state, "a", &f(&[], &[], false)), vec![1, 2, 3, 4]);
+        assert_eq!(follow_once(&j, &state, "a", &f(&[], &[], false)), vec![1, 2, 3, 4, 5, 6]);
         assert_eq!(follow_once(&j, &state, "a", &f(&[], &[], true)), vec![1, 4]);
-        assert_eq!(follow_once(&j, &state, "a", &f(&[], &["notification:new"], false)), vec![3, 4]);
+        assert_eq!(follow_once(&j, &state, "a", &f(&[], &["notification:new"], false)), vec![3, 4, 5, 6]);
         assert_eq!(follow_once(&j, &state, "a", &f(&["tcg"], &[], false)), vec![1, 4]);
-        assert_eq!(follow_once(&j, &state, "a", &f(&["42"], &[], false)), vec![1, 4]);
+        assert_eq!(follow_once(&j, &state, "a", &f(&["42"], &[], false)), vec![1, 4, 5], "el aviso de Basecamp casa por su grupo, y basecamp:420 no es el 42");
         assert_eq!(follow_once(&j, &state, "a", &f(&["sp-1"], &["basecamp:event"], false)), vec![1, 4]);
     }
 
@@ -1800,8 +1945,10 @@ mod tests {
 
     /// Roturas que atrapa: descartar un `cac:gap` del backend por estar por
     /// detrás del cursor (todo lo que llegue hasta el número viejo se
-    /// saltaría como ya escrito), no bajar el cursor guardado, o que
-    /// `recover` lo vuelva a subir con el mayor de la línea y el estado.
+    /// saltaría como ya escrito), no bajar el cursor guardado, no leer el
+    /// diario nuevo desde el 1 tras el reset (QA 558: el 1 y el 2 no llegaban
+    /// nunca), o que `recover` lo vuelva a subir con el mayor de la línea y el
+    /// estado.
     #[test]
     fn a_journal_that_starts_again_lowers_the_cursor() {
         let dir = scratch("reset");
@@ -1816,16 +1963,16 @@ mod tests {
         let c = creds(&fake);
         rt().block_on(listener.catch_up(&c)).unwrap();
         let lines = lines_of(listener.journal.events_path());
-        assert_eq!(lines.len(), 3, "lo de antes se queda delante: {lines:?}");
+        assert_eq!(seqs(listener.journal.events_path()), vec![799, 800, 0, 1, 2, 3], "lo de antes se queda delante, y lo nuevo llega entero desde el 1");
         let reset = &lines[2];
-        assert_eq!((reset["seq"].as_u64(), reset["type"].as_str(), reset["data"]["reason"].as_str()), (Some(3), Some(GAP), Some(RESET)));
+        assert_eq!((reset["seq"].as_u64(), reset["type"].as_str(), reset["data"]["reason"].as_str()), (Some(0), Some(GAP), Some(RESET)));
         assert_eq!(reset["data"]["previousCursor"], 800);
         assert_eq!(listener.cursor, Some(3));
         assert_eq!(listener.journal.saved_cursor(), Some(3));
 
         // Lo siguiente del diario nuevo se escribe.
         rt().block_on(listener.deliver(&c, &SseMessage { id: None, event: None, data: ev(4).to_string() })).unwrap();
-        assert_eq!(seqs(listener.journal.events_path()), vec![799, 800, 3, 4]);
+        assert_eq!(seqs(listener.journal.events_path()), vec![799, 800, 0, 1, 2, 3, 4]);
 
         // Murió entre reescribir el fichero y guardar el cursor: manda la
         // línea, no el mayor.
@@ -1842,10 +1989,11 @@ mod tests {
         let mut listener = Listener::new(journal(&dir)).unwrap();
         listener.cursor = Some(800);
         let c = creds(&fake);
-        let gap = fake::gap_envelope(0, 0);
+        let gap = fake::reset_envelope(800, "epoch-9");
         rt().block_on(listener.deliver(&c, &SseMessage { id: Some("0".into()), event: Some(GAP.into()), data: gap.to_string() })).unwrap();
         assert_eq!(listener.cursor, Some(0));
         assert_eq!(seqs(listener.journal.events_path()), vec![0]);
+        assert_eq!(listener.journal.epoch().as_deref(), Some("epoch-9"), "el reset trae la época nueva");
         // Un hueco que ya se escribió (su número es el cursor) y que llega
         // otra vez no es otro reinicio: no se lleva lo que hay.
         let expired = fake::gap_envelope(1, 1);
@@ -2007,11 +2155,11 @@ mod tests {
         ack(&state, "tcg", 800).unwrap();
         rt().block_on(listener.catch_up(&creds(&fake))).unwrap();
         listener.journal.record(&ev(2)).unwrap();
-        assert_eq!(follow_once(&listener.journal, &state, "tcg", &Filter::default()), vec![1, 2]);
+        assert_eq!(follow_once(&listener.journal, &state, "tcg", &Filter::default()), vec![0, 1, 2]);
         assert_eq!(progress(&state, "tcg").acked, None);
-        assert_eq!(follow_once(&listener.journal, &state, "tcg", &Filter { types: vec!["nada".into()], ..Filter::default() }), vec![1]);
-        ack(&state, "tcg", 1).unwrap();
-        assert_eq!(follow_once(&listener.journal, &state, "tcg", &Filter::default()), vec![2]);
+        assert_eq!(follow_once(&listener.journal, &state, "tcg", &Filter { types: vec!["nada".into()], ..Filter::default() }), vec![0]);
+        ack(&state, "tcg", 0).unwrap();
+        assert_eq!(follow_once(&listener.journal, &state, "tcg", &Filter::default()), vec![1, 2]);
         ack(&state, "tcg", 2).unwrap();
         assert_eq!(follow_once(&listener.journal, &state, "tcg", &Filter::default()), Vec::<u64>::new());
     }
@@ -2035,14 +2183,83 @@ mod tests {
         rt().block_on(listener.catch_up(&creds(&fake))).unwrap();
         listener.journal.record(&ev(2)).unwrap();
         let j = &listener.journal;
-        assert_eq!(follow_once(j, &state, "tcg", &Filter::default()), vec![791, 792, 793, 794, 795, 796, 797, 798, 799, 800, 1, 2]);
+        assert_eq!(follow_once(j, &state, "tcg", &Filter::default()), vec![791, 792, 793, 794, 795, 796, 797, 798, 799, 800, 0, 1, 2]);
         ack(&state, "tcg", 2).unwrap();
         // Con lo confirmado en el diario nuevo, lo de delante ya no se lee.
         assert_eq!(follow_once(j, &state, "tcg", &Filter::default()), Vec::<u64>::new());
         // Quien bajó por el reinicio y no confirmó nada aún tampoco las ve.
         let fresh = dir.join("state2");
         write_atomic(&consumer_path(&fresh, "late"), &json!({ "acked": null, "epoch": progress(&state, "tcg").epoch })).unwrap();
-        assert_eq!(follow_once(j, &fresh, "late", &Filter::default()), vec![1, 2]);
+        assert_eq!(follow_once(j, &fresh, "late", &Filter::default()), vec![0, 1, 2]);
+    }
+
+    /// Roturas que atrapa (QA 558): que lo que un `follow` imprimió delante
+    /// del reinicio sin que se confirmara no vuelva en el siguiente (el
+    /// Monitor murió entre imprimirlo y proponerlo); que vuelva lo que ya
+    /// estaba confirmado, o lo de delante de un reinicio anterior (otros
+    /// números); que siga volviendo una vez confirmado el reinicio; o que el
+    /// mismo proceso lo repita tras una compactación.
+    #[test]
+    fn what_was_printed_before_a_reset_without_an_ack_comes_back() {
+        let dir = scratch("reset-reprint");
+        let state = dir.join("state");
+        let j = journal(&dir);
+        let reset = |id: &str| gap_line(id.into(), 0, 0, json!({ "reason": RESET, "previousCursor": 12 }));
+        j.append(&ev(10)).unwrap();
+        j.append(&reset("r1")).unwrap();
+        for seq in 7..=12 {
+            j.append(&ev(seq)).unwrap();
+        }
+        // tcg ya pasó r1 y confirmó hasta el 8 del tramo r1.
+        write_atomic(&consumer_path(&state, "tcg"), &json!({ "acked": 8, "epoch": "r1" })).unwrap();
+        j.append(&reset("r2")).unwrap();
+        j.append(&ev(1)).unwrap();
+        assert_eq!(follow_once(&j, &state, "tcg", &Filter::default()), vec![9, 10, 11, 12, 0, 1]);
+        // El Monitor murió sin proponer nada: vuelve lo de delante sin
+        // confirmar, nunca el 10 de antes de r1.
+        assert_eq!(follow_once(&j, &state, "tcg", &Filter::default()), vec![9, 10, 11, 12, 0, 1]);
+        assert_eq!(follow_once(&j, &state, "tcg", &Filter { types: vec!["nada".into()], ..Filter::default() }), vec![0]);
+        ack(&state, "tcg", 0).unwrap();
+        assert_eq!(follow_once(&j, &state, "tcg", &Filter::default()), vec![1]);
+
+        // Un mismo `follow` que ya pasó el reinicio no lo repite cuando la
+        // compactación cambia el fichero por otro.
+        let got = follow_rounds(&j, &state, "live", &[&|| {
+            let copy = j.events_path().with_extension("copy");
+            fs::copy(j.events_path(), &copy).unwrap();
+            fs::rename(&copy, j.events_path()).unwrap();
+            j.append(&ev(2)).unwrap();
+        }]);
+        assert_eq!(got, vec![10, 0, 7, 8, 9, 10, 11, 12, 0, 1, 2]);
+    }
+
+    /// Roturas que atrapa (QA 558, criterio 6): que el listener no mande su
+    /// época al backend (un diario nuevo que ya pasó del cursor no se ve, y
+    /// sus primeros números se saltan como ya escritos), que no adopte la
+    /// que contesta el backend, o que no la guarde con el cursor.
+    #[test]
+    fn a_journal_that_started_again_past_the_cursor_is_seen_by_its_epoch() {
+        let dir = scratch("reset-epoch");
+        let fake = FakeCac::start("cac_pat_T");
+        fake.record_only(ev(1));
+        fake.record_only(ev(2));
+        let c = creds(&fake);
+        let mut listener = Listener::new(journal(&dir)).unwrap();
+        listener.cursor = Some(0);
+        rt().block_on(listener.catch_up(&c)).unwrap();
+        assert_eq!(listener.journal.epoch().as_deref(), Some("epoch-0"));
+        drop(listener);
+
+        fake.truncate_journal();
+        for seq in 1..=5 {
+            fake.record_only(ev(seq));
+        }
+        let mut listener = Listener::new(journal(&dir)).unwrap();
+        assert_eq!(listener.journal.epoch().as_deref(), Some("epoch-0"), "la época vuelve de listen.json");
+        rt().block_on(listener.catch_up(&c)).unwrap();
+        assert_eq!(seqs(listener.journal.events_path()), vec![1, 2, 0, 1, 2, 3, 4, 5]);
+        assert_eq!(listener.journal.epoch().as_deref(), Some("epoch-1"));
+        assert!(fake.asked().iter().any(|a| a.path == "/api/v1/events/backlog" && a.query.contains("epoch=epoch-0")), "{:?}", fake.asked());
     }
 
     /// Roturas que atrapa: compactar por fecha o por tamaño la última línea

@@ -212,9 +212,9 @@ fn a_journal_that_starts_again_is_followed_from_its_new_head() {
     assert!(run(binary(&dir).args(["listen", "ack", "--consumer", "tcg", "800"])).status.success());
 
     let mut child = binary(&dir).env("CAC_TOKEN", TOKEN).env("CAC_URL", &fake.base).args(["listen", "run"]).spawn().unwrap();
-    eventually("abre el stream desde la cabecera nueva", &mut child, || streams_opened(&fake) == vec![Some("3".to_string())]);
+    eventually("abre el stream tras leer el diario nuevo desde el 1", &mut child, || streams_opened(&fake) == vec![Some("3".to_string())]);
     fake.push(ev(4));
-    eventually("escribe el 4", &mut child, || seqs(&dir) == vec![799, 800, 3, 4]);
+    eventually("escribe el 4", &mut child, || seqs(&dir) == vec![799, 800, 0, 1, 2, 3, 4]);
     let said = stop(child);
     assert!(!said.contains(TOKEN), "{said}");
     assert_eq!(lines(&dir)[2]["data"]["reason"], "reset");
@@ -224,14 +224,43 @@ fn a_journal_that_starts_again_is_followed_from_its_new_head() {
     let mut again = binary(&dir).env("CAC_TOKEN", TOKEN).env("CAC_URL", &fake.base).args(["listen", "run"]).spawn().unwrap();
     eventually("vuelve desde el 4", &mut again, || streams_opened(&fake).len() == 2);
     fake.push(ev(5));
-    eventually("escribe el 5", &mut again, || seqs(&dir) == vec![799, 800, 3, 4, 5]);
+    eventually("escribe el 5", &mut again, || seqs(&dir) == vec![799, 800, 0, 1, 2, 3, 4, 5]);
     stop(again);
     assert_eq!(streams_opened(&fake)[1], Some("4".to_string()));
 
     let follow = |consumer: &str| run(binary(&dir).args(["listen", "follow", "--consumer", consumer, "--once"]));
-    assert_eq!(printed(&follow("tcg")), vec![3, 4, 5]);
+    assert_eq!(printed(&follow("tcg")), vec![0, 1, 2, 3, 4, 5]);
     assert!(run(binary(&dir).args(["listen", "ack", "--consumer", "tcg", "4"])).status.success());
     assert!(run(binary(&dir).args(["listen", "ack", "--consumer", "tcg", "800"])).status.success());
     assert_eq!(printed(&follow("tcg")), vec![5]);
-    assert_eq!(printed(&follow("otro")), vec![799, 800, 3, 4, 5], "lo del diario viejo que nadie leyó se entrega antes del reinicio");
+    assert_eq!(printed(&follow("otro")), vec![799, 800, 0, 1, 2, 3, 4, 5], "lo del diario viejo que nadie leyó se entrega antes del reinicio");
+}
+
+/// El escenario de la QA 558 (criterio 6) con el binario: escuchando en el
+/// cursor 12, el diario de cac se vacía (`TRUNCATE`) sin cortar el stream y
+/// la cliente comenta (dos eventos). Roturas que atrapa: que el listener
+/// descarte el reset del stream por ir detrás del cursor, o que tras él no
+/// escriba el 1 y el 2 del diario nuevo.
+#[test]
+fn a_journal_truncated_while_listening_loses_nothing_new() {
+    let dir = scratch("truncate-live");
+    let fake = FakeCac::start(TOKEN);
+    for seq in 1..=12 {
+        fake.record_only(ev(seq));
+    }
+    std::fs::create_dir_all(dir.join("state")).unwrap();
+    std::fs::write(dir.join("state").join("listen.json"), json!({ "cursor": 12 }).to_string()).unwrap();
+    let mut child = binary(&dir).env("CAC_TOKEN", TOKEN).env("CAC_URL", &fake.base).args(["listen", "run"]).spawn().unwrap();
+    eventually("abre el stream en el 12", &mut child, || streams_opened(&fake) == vec![Some("12".to_string())]);
+
+    fake.truncate_journal();
+    fake.record_only(ev(1));
+    fake.push(ev(2));
+    eventually("escribe el reset, el 1 y el 2", &mut child, || seqs(&dir) == vec![0, 1, 2]);
+    fake.push(ev(3));
+    eventually("sigue en vivo", &mut child, || seqs(&dir) == vec![0, 1, 2, 3]);
+    stop(child);
+    assert_eq!(streams_opened(&fake).len(), 1, "sin colgar: lo vio la conexión viva");
+    let reset = &lines(&dir)[0];
+    assert_eq!((reset["data"]["reason"].as_str(), reset["data"]["previousCursor"].as_u64()), (Some("reset"), Some(12)));
 }

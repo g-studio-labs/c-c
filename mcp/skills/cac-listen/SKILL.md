@@ -44,7 +44,11 @@ cac-mcp listen follow --consumer <slug> [--project <id|nombre>] [--type <tipo>] 
 ```
 
 - `--mine`: sólo lo que te nombra, te asignan o es un aviso tuyo.
-- `--project`: sólo ese proyecto de Basecamp o ese espacio.
+- `--project`: sólo ese proyecto de Basecamp (por id o nombre) o ese
+  espacio. Con el id de un proyecto de Basecamp también pasan sus
+  `notification:new`, que no traen `project` sino `data.group:
+  basecamp:<id>`; los avisos de un hilo enlazado a una tarea de cac llevan el
+  grupo de la tarea y no pasan: el `basecamp:event` del mismo hecho sí.
 - `--type`: `notification:new`, `basecamp:event` o `request:answered`.
 - Los filtros son de quien lee: el fichero lo guarda todo, y un `cac:gap` pasa
   siempre.
@@ -77,7 +81,13 @@ está ahora. Por cada línea:
    - **Tras un `cac:gap` con `reason: "reset"`** (el diario volvió a empezar),
      **no se confirma ningún `seq` de las líneas impresas antes de ella**: son
      del diario viejo y su número ya no vale. La siguiente confirmación es la
-     del propio reinicio.
+     del propio reinicio (su `seq` es `0`: `ack --consumer <slug> 0`), y
+     detrás llega el diario nuevo desde el 1.
+   - **Confirmar el reinicio confirma todo lo de antes de él.** Mientras no
+     lo confirmes, un `follow` nuevo te vuelve a dar, delante del reinicio, lo
+     que se imprimió sin confirmar; en cuanto lo confirmas, eso ya no vuelve.
+     Por eso, antes de confirmar el reinicio, propón las líneas que se
+     imprimieron delante de él.
 
 ## 4 · Qué es cada línea
 
