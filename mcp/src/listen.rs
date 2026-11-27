@@ -217,24 +217,6 @@ impl Journal {
         })
     }
 
-    /// Empieza el fichero de nuevo con sólo esta línea (el diario del backend
-    /// se reinició: lo de antes lleva números de otro diario). Escribe al lado
-    /// y renombra, como la compactación: quien sigue el fichero ve otro inodo.
-    fn restart_with(&self, event: &Value) -> io::Result<()> {
-        if let Some(dir) = self.events.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        let tmp = self.events.with_extension("jsonl.reset");
-        {
-            let mut out = private_options().write(true).create(true).truncate(true).open(&tmp)?;
-            let mut line = serde_json::to_vec(event).map_err(io::Error::other)?;
-            line.push(b'\n');
-            out.write_all(&line)?;
-            out.sync_all()?;
-        }
-        fs::rename(&tmp, &self.events)
-    }
-
     pub fn save_cursor(&self, seq: u64) -> io::Result<()> {
         write_atomic(&self.cursor_path(), &json!({ "cursor": seq }))
     }
@@ -262,17 +244,23 @@ fn compact_file(path: &Path, now: u64, max_age: u64, max_bytes: u64) -> io::Resu
     };
     let lines: Vec<&[u8]> = text.split_inclusive(|b| *b == b'\n').collect();
     let oldest = now.saturating_sub(max_age);
+    // La última línea de reinicio no se compacta nunca: un consumidor que
+    // vuelve después de ella la necesita para saber que los números
+    // empezaron otra vez (sin ella daría por vistos todos hasta el viejo).
+    let last_reset = lines.iter().rposition(|line| serde_json::from_slice::<Value>(line).is_ok_and(|v| is_reset(&v)));
     let mut kept: Vec<&[u8]> = lines
         .iter()
-        .copied()
-        .filter(|line| {
+        .enumerate()
+        .filter(|(i, line)| {
             let at = serde_json::from_slice::<Value>(line).ok().and_then(|v| v["at"].as_str().and_then(unix_of_iso));
-            at.is_none_or(|at| at >= oldest)
+            Some(*i) == last_reset || at.is_none_or(|at| at >= oldest)
         })
+        .map(|(_, line)| *line)
         .collect();
+    let reset_at = last_reset.and_then(|i| kept.iter().position(|k| std::ptr::eq(*k, lines[i])));
     let mut size: u64 = kept.iter().map(|l| l.len() as u64).sum();
     let mut drop = 0;
-    while size > max_bytes && drop < kept.len() {
+    while size > max_bytes && drop < reset_at.unwrap_or(kept.len()) {
         size -= kept[drop].len() as u64;
         drop += 1;
     }
@@ -617,8 +605,10 @@ impl Listener {
 
     /// El diario del backend volvió a empezar en `seq`. El cursor **baja**
     /// allí (si no, todo lo que llegue hasta el número viejo se saltaría como
-    /// ya escrito) y el fichero vuelve a empezar con una línea `cac:gap` de
-    /// razón `reset`: lo de antes lleva números del diario viejo. Su `id` es
+    /// ya escrito) y el fichero sigue con una línea `cac:gap` de razón
+    /// `reset`: lo de antes lleva números del diario viejo, pero se deja
+    /// delante (son eventos reales que algún consumidor puede no haber leído)
+    /// y `follow` las entrega en orden, antes del reinicio. Su `id` es
     /// único, porque es lo que `follow` usa para saber si ya bajó lo
     /// confirmado de un consumidor por este reinicio.
     fn reset(&mut self, event: &Value) -> Result<(), Failure> {
@@ -627,7 +617,7 @@ impl Listener {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let line = gap_line(format!("{GAP}:reset:{seq}:{nanos}"), seq, seq, json!({ "reason": RESET, "previousCursor": previous }));
         let failed = |e: io::Error| Failure::Transient(format!("could not write {}: {e}", self.journal.events.display()));
-        self.journal.restart_with(&line).map_err(failed)?;
+        self.journal.append(&line).map_err(failed)?;
         self.journal.save_cursor(seq).map_err(failed)?;
         eprintln!("cac-mcp listen: cac's event journal starts again at {seq} (we were at {previous})");
         self.cursor = Some(seq);
@@ -840,6 +830,10 @@ fn is_reset(event: &Value) -> bool {
     event["type"] == GAP && event["data"]["reason"] == RESET
 }
 
+fn has_reset_line(path: &Path, id: &str) -> bool {
+    fs::read(path).is_ok_and(|text| text.split(|b| *b == b'\n').any(|line| serde_json::from_slice::<Value>(line).is_ok_and(|v| is_reset(&v) && v["id"].as_str() == Some(id))))
+}
+
 /// Por dónde va la lectura del fichero: qué fichero (su inodo) y hasta qué
 /// byte. Si el fichero cambia de inodo o se encoge (la compactación), se
 /// vuelve a leer desde el principio: lo que no repite es el `seq`.
@@ -848,6 +842,8 @@ struct Tail {
     id: u64,
     pos: u64,
     partial: Vec<u8>,
+    /// Se volvió a leer desde el principio desde la última vez que se miró.
+    reopened: bool,
 }
 
 #[cfg(unix)]
@@ -877,6 +873,7 @@ impl Tail {
             self.id = file_id(&meta);
             self.pos = 0;
             self.partial.clear();
+            self.reopened = true;
         }
         let file = self.file.as_mut().expect("abierto arriba");
         // Media línea leída que ya no está: `recover` la cortó (el que
@@ -916,11 +913,24 @@ impl Tail {
 pub fn follow(events: &Path, state_dir: &Path, consumer: &str, filter: &Filter, once: bool, out: &mut dyn Write, poll: Duration, keep_going: &dyn Fn() -> bool) -> io::Result<()> {
     let mut progress = progress(state_dir, consumer);
     let mut seen = progress.acked;
-    let mut tail = Tail { file: None, id: 0, pos: 0, partial: Vec::new() };
+    let mut tail = Tail { file: None, id: 0, pos: 0, partial: Vec::new(), reopened: false };
+    // Quien ya bajó por un reinicio no vuelve a leer lo que el fichero guarda
+    // delante de esa línea: son números del diario viejo.
+    let mut waiting_for: Option<String> = None;
     loop {
-        for line in tail.read(events)? {
+        let lines = tail.read(events)?;
+        if std::mem::take(&mut tail.reopened) {
+            waiting_for = progress.epoch.clone().filter(|epoch| has_reset_line(events, epoch));
+        }
+        for line in lines {
             let Ok(event) = serde_json::from_slice::<Value>(&line) else { continue };
             let Some(seq) = event["seq"].as_u64() else { continue };
+            if let Some(epoch) = &waiting_for {
+                if event["id"].as_str() != Some(epoch.as_str()) {
+                    continue;
+                }
+                waiting_for = None;
+            }
             let new_epoch = is_reset(&event).then(|| event["id"].as_str().unwrap_or("").to_string()).filter(|id| progress.epoch.as_ref() != Some(id));
             if let Some(epoch) = new_epoch {
                 // Lo confirmado queda en «nada»: la línea de reinicio sigue
@@ -1800,15 +1810,16 @@ mod tests {
         let c = creds(&fake);
         rt().block_on(listener.catch_up(&c)).unwrap();
         let lines = lines_of(listener.journal.events_path());
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert_eq!((lines[0]["seq"].as_u64(), lines[0]["type"].as_str(), lines[0]["data"]["reason"].as_str()), (Some(3), Some(GAP), Some(RESET)));
-        assert_eq!(lines[0]["data"]["previousCursor"], 800);
+        assert_eq!(lines.len(), 3, "lo de antes se queda delante: {lines:?}");
+        let reset = &lines[2];
+        assert_eq!((reset["seq"].as_u64(), reset["type"].as_str(), reset["data"]["reason"].as_str()), (Some(3), Some(GAP), Some(RESET)));
+        assert_eq!(reset["data"]["previousCursor"], 800);
         assert_eq!(listener.cursor, Some(3));
         assert_eq!(listener.journal.saved_cursor(), Some(3));
 
         // Lo siguiente del diario nuevo se escribe.
         rt().block_on(listener.deliver(&c, &SseMessage { id: None, event: None, data: ev(4).to_string() })).unwrap();
-        assert_eq!(seqs(listener.journal.events_path()), vec![3, 4]);
+        assert_eq!(seqs(listener.journal.events_path()), vec![799, 800, 3, 4]);
 
         // Murió entre reescribir el fichero y guardar el cursor: manda la
         // línea, no el mayor.
@@ -1997,5 +2008,63 @@ mod tests {
         assert_eq!(follow_once(&listener.journal, &state, "tcg", &Filter::default()), vec![2]);
         ack(&state, "tcg", 2).unwrap();
         assert_eq!(follow_once(&listener.journal, &state, "tcg", &Filter::default()), Vec::<u64>::new());
+    }
+
+    /// Roturas que atrapa: que el reinicio borre las líneas del diario viejo
+    /// que un consumidor no había leído (tcg confirmó 790 y el fichero
+    /// llegaba a 800: las 791 a 800 son eventos reales), o que quien ya bajó
+    /// por el reinicio las vuelva a leer (sus números son del diario viejo).
+    #[test]
+    fn a_reset_keeps_what_nobody_had_read_and_nobody_reads_it_twice() {
+        let dir = scratch("reset-unread");
+        let state = dir.join("state");
+        let fake = FakeCac::start("cac_pat_T");
+        fake.record_only(ev(1));
+        let mut listener = Listener::new(journal(&dir)).unwrap();
+        for seq in 790..=800 {
+            listener.journal.record(&ev(seq)).unwrap();
+        }
+        listener.cursor = Some(800);
+        ack(&state, "tcg", 790).unwrap();
+        rt().block_on(listener.catch_up(&creds(&fake))).unwrap();
+        listener.journal.record(&ev(2)).unwrap();
+        let j = &listener.journal;
+        assert_eq!(follow_once(j, &state, "tcg", &Filter::default()), vec![791, 792, 793, 794, 795, 796, 797, 798, 799, 800, 1, 2]);
+        ack(&state, "tcg", 2).unwrap();
+        // Con lo confirmado en el diario nuevo, lo de delante ya no se lee.
+        assert_eq!(follow_once(j, &state, "tcg", &Filter::default()), Vec::<u64>::new());
+        // Quien bajó por el reinicio y no confirmó nada aún tampoco las ve.
+        let fresh = dir.join("state2");
+        write_atomic(&consumer_path(&fresh, "late"), &json!({ "acked": null, "epoch": progress(&state, "tcg").epoch })).unwrap();
+        assert_eq!(follow_once(j, &fresh, "late", &Filter::default()), vec![1, 2]);
+    }
+
+    /// Roturas que atrapa: compactar por fecha o por tamaño la última línea
+    /// de reinicio. Quien vuelve con 800 confirmado y no la encuentra se
+    /// traga en silencio todo lo que llegue hasta el 800.
+    #[test]
+    fn compacting_never_takes_the_last_reset_line() {
+        let dir = scratch("compact-reset");
+        let j = journal(&dir);
+        let day = 86_400;
+        let t = 1_800_000_000;
+        let old = iso_of_unix(t - 30 * day);
+        let reset = |id: &str| gap_line(id.into(), 3, 3, json!({ "reason": RESET, "previousCursor": 800 }));
+        let mut first = reset("r1");
+        first["at"] = json!(old);
+        let mut second = reset("r2");
+        second["at"] = json!(old);
+        j.append(&envelope(799, "notification:new", &old, json!({}))).unwrap();
+        j.append(&first).unwrap();
+        j.append(&envelope(4, "notification:new", &old, json!({}))).unwrap();
+        j.append(&second).unwrap();
+        j.append(&envelope(5, "notification:new", &iso_of_unix(t), json!({}))).unwrap();
+        j.compact(t).unwrap();
+        let kept: Vec<String> = lines_of(j.events_path()).iter().map(|l| l["id"].as_str().unwrap().to_string()).collect();
+        assert_eq!(kept.len(), 2, "{kept:?}");
+        assert_eq!(kept[0], "r2");
+        // Por tamaño: aunque lo más viejo no quepa, la de reinicio se queda.
+        compact_file(j.events_path(), t, 365 * day, 1).unwrap();
+        assert_eq!(lines_of(j.events_path()).iter().map(|l| l["id"].as_str().unwrap().to_string()).next(), Some("r2".to_string()));
     }
 }

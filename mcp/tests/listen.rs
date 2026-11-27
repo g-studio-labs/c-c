@@ -214,17 +214,17 @@ fn a_journal_that_starts_again_is_followed_from_its_new_head() {
     let mut child = binary(&dir).env("CAC_TOKEN", TOKEN).env("CAC_URL", &fake.base).args(["listen", "run"]).spawn().unwrap();
     eventually("abre el stream desde la cabecera nueva", &mut child, || streams_opened(&fake) == vec![Some("3".to_string())]);
     fake.push(ev(4));
-    eventually("escribe el 4", &mut child, || seqs(&dir) == vec![3, 4]);
+    eventually("escribe el 4", &mut child, || seqs(&dir) == vec![799, 800, 3, 4]);
     let said = stop(child);
     assert!(!said.contains(TOKEN), "{said}");
-    assert_eq!(lines(&dir)[0]["data"]["reason"], "reset");
+    assert_eq!(lines(&dir)[2]["data"]["reason"], "reset");
 
     // Arranca otra vez: la línea manda sobre el estado, aunque éste diga más.
     std::fs::write(dir.join("state").join("listen.json"), json!({ "cursor": 800 }).to_string()).unwrap();
     let mut again = binary(&dir).env("CAC_TOKEN", TOKEN).env("CAC_URL", &fake.base).args(["listen", "run"]).spawn().unwrap();
     eventually("vuelve desde el 4", &mut again, || streams_opened(&fake).len() == 2);
     fake.push(ev(5));
-    eventually("escribe el 5", &mut again, || seqs(&dir) == vec![3, 4, 5]);
+    eventually("escribe el 5", &mut again, || seqs(&dir) == vec![799, 800, 3, 4, 5]);
     stop(again);
     assert_eq!(streams_opened(&fake)[1], Some("4".to_string()));
 
@@ -233,5 +233,5 @@ fn a_journal_that_starts_again_is_followed_from_its_new_head() {
     assert!(run(binary(&dir).args(["listen", "ack", "--consumer", "tcg", "4"])).status.success());
     assert!(run(binary(&dir).args(["listen", "ack", "--consumer", "tcg", "800"])).status.success());
     assert_eq!(printed(&follow("tcg")), vec![5]);
-    assert_eq!(printed(&follow("otro")), vec![3, 4, 5]);
+    assert_eq!(printed(&follow("otro")), vec![799, 800, 3, 4, 5], "lo del diario viejo que nadie leyó se entrega antes del reinicio");
 }
