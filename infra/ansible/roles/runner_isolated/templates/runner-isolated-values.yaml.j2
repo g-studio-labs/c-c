@@ -20,10 +20,10 @@ containerMode:
   type: kubernetes
   kubernetesModeWorkVolumeClaim:
     accessModes: ["ReadWriteOnce"]
-    storageClassName: local-path
+    storageClassName: {{ runner_isolated_work_class }}
     resources:
       requests:
-        storage: 10Gi
+        storage: {{ runner_isolated_work_size }}
 
 template:
   spec:

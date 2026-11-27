@@ -82,6 +82,42 @@
   register: local_path_default
   changed_when: "'(no change)' not in local_path_default.stdout"
 
+# `local-ram`: volúmenes en /dev/shm (tmpfs del host) para el directorio de
+# trabajo de los runners de CI. Cada job crea su volumen, escribe ~0,6 GB y lo
+# borra; con 8 a la vez en el disco virtual de gstd la espera de E/S llegó a
+# `full` 9 % (27-nov-2026), y frenaba también etcd y el Postgres de cac. La RAM
+# sobraba. Va después del manifiesto porque éste devuelve la ConfigMap a su
+# versión y se llevaría `storageClassConfigs`; el provisionador sólo la relee
+# al reiniciar.
+- name: La clase local-ram (volúmenes de CI en RAM)
+  ansible.builtin.shell:
+    cmd: kubectl apply --server-side --force-conflicts -f -
+    stdin: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata: {name: local-path-config, namespace: local-path-storage}
+      data:
+        config.json: |-
+          {
+            "nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/opt/local-path-provisioner"]}],
+            "storageClassConfigs":{
+              "local-ram":{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/dev/shm/ci-ram"]}]}
+            }
+          }
+      ---
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata: {name: local-ram}
+      provisioner: rancher.io/local-path
+      reclaimPolicy: Delete
+      volumeBindingMode: WaitForFirstConsumer
+  register: local_ram_apply
+  changed_when: "'serverside-applied' in local_ram_apply.stdout and 'unchanged' not in local_ram_apply.stdout"
+
+- name: El provisionador relee su configuración
+  ansible.builtin.command: kubectl -n local-path-storage rollout restart deploy/local-path-provisioner
+  when: local_ram_apply is changed or local_path_apply is changed
+
 - name: MetalLB {{ metallb_version }}
   kubernetes.core.helm:
     name: metallb

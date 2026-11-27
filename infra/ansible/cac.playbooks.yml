@@ -409,6 +409,8 @@ playbooks:
       - { name: runner_isolated_max, description: "Cuántos jobs a la vez como mucho: los de un PR entero, o el que sobra espera minutos a que GitHub lo vuelva a ofrecer.", default: 6 }
       - { name: runner_isolated_cpu, description: "CPU reservada como mucho entre todos sus pods (cuota). Lo reservado se le quita a lo demás del nodo: que quede sitio para que cac despliegue.", default: "4" }
       - { name: runner_isolated_memory, description: "Memoria reservada como mucho entre todos sus pods (cuota).", default: 16Gi }
+      - { name: runner_isolated_work_class, description: "Dónde vive el directorio de trabajo de cada job. local-ram (RAM del host, de k8s-site) quita la E/S de disco que frenaba al nodo; local-path lo devuelve al disco.", default: local-ram }
+      - { name: runner_isolated_work_size, description: "Tamaño pedido para ese directorio. Un job de TCG usa 0,5–0,8 GB; con local-ram sale de la RAM.", default: 2Gi }
       - name: runner_isolated_github_app_id
         secret: true
         from: ISOLATED_ARC_GITHUB_APP_ID
