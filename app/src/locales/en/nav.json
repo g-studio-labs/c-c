@@ -155,6 +155,11 @@
     "viewRelease": "View the download",
     "failed": "It could not be updated, and what was there is untouched.",
     "retry": "Try again",
-    "restartFailed": "It could not be restarted. Close the app and open it again."
+    "restartFailed": "It could not be restarted. Close the app and open it again.",
+    "checking": "Checking…",
+    "upToDate": "You are up to date (v{{version}})",
+    "found": "A new version is out: v{{version}}",
+    "checkFailed": "Could not check:",
+    "checkDisabled": "This app does not check for new versions."
   }
 }

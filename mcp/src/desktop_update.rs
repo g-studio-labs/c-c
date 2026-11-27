@@ -207,6 +207,15 @@ impl Updater {
         self.offer(&latest).filter(|offer| self.is_published(offer))
     }
 
+    /// Lo que pide el botón «Comprobar»: pregunta a la red **ahora**, sin mirar
+    /// cuándo se preguntó por última vez, y dice por qué si no puede. Lo
+    /// recordado para el aviso diario se pone al día con lo que conteste.
+    /// Bloquea.
+    pub fn check_fresh(&self) -> Result<Option<Offer>, String> {
+        let latest = update::check_now(&self.source, self.state_dir.as_deref(), Duration::from_secs(8))?;
+        Ok(self.offer(&latest).filter(|offer| self.is_published(offer)))
+    }
+
     /// Si la release de esa versión ya tiene su fichero y su suma. `VERSION` se
     /// sube a `main` antes de que el workflow publique, y durante la
     /// compilación (o para siempre, si un sistema falla) ofrecer esa versión
@@ -507,6 +516,28 @@ mod tests {
 
         publish_linux(&releases, "0.10.0", b"new");
         assert_eq!(app.check(Duration::ZERO).map(|offer| offer.version), Some("0.10.0".into()), "published, and the notice never came");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// «Comprobar» pregunta siempre, aunque se haya preguntado hace un momento,
+    /// y un fallo se devuelve con su motivo. Roturas que atrapa: reutilizar lo
+    /// recordado del día (la versión nueva no saldría hasta mañana); tragarse
+    /// el error de la red y contestar «al día».
+    #[test]
+    fn check_fresh_asks_the_network_every_time_and_reports_failures() {
+        let releases = FakeReleases::start();
+        let dir = scratch("fresh");
+        let app = machine(&releases, &dir, "0.9.0");
+        releases.announce_desktop("0.9.0");
+        assert_eq!(app.check_fresh(), Ok(None), "up to date");
+
+        publish_linux(&releases, "0.10.0", b"new");
+        let offer = app.check_fresh().unwrap().expect("a new version, minutes after the last look");
+        assert_eq!(offer.version, "0.10.0");
+
+        let offline = Updater { source: Source { version_url: "http://127.0.0.1:9/VERSION".into(), ..app.source.clone() }, ..app.clone() };
+        let error = offline.check_fresh().unwrap_err();
+        assert!(error.contains("could not reach"), "{error}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

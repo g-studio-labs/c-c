@@ -21,7 +21,7 @@ use crate::chat::ChatView;
 use crate::comms::CommsView;
 use crate::connect::{ConnectClosed, ConnectView};
 use crate::theme::Leading as _;
-use crate::updater::UpdateNotice;
+use crate::updater::{Manual, UpdateNotice};
 use crate::docs::DocsView;
 use crate::lang::{locale, tr};
 use crate::mywork::MyWorkView;
@@ -215,7 +215,7 @@ pub struct Workspace {
     /// El menú de la cuenta, abierto. Lo lleva esta vista y no el menú para
     /// poder cerrarlo al abrir desde él algo que va encima.
     account_menu_open: bool,
-    _on_connect: [Subscription; 2],
+    _on_connect: [Subscription; 3],
     /// «Cambiar contraseña», abierto encima de todo. Uno nuevo cada vez: lo
     /// escrito en una vez no sigue en la siguiente.
     pub(crate) password: Option<(Entity<PasswordDialog>, Subscription)>,
@@ -278,6 +278,8 @@ impl Workspace {
             // Lo que sabe cambia desde otro hilo (mirar la máquina, instalar):
             // el punto del menú se repinta con ello.
             cx.observe(&connect, |_, _, cx| cx.notify()),
+            // «Comprobar» dice su resultado en el menú: se repinta con él.
+            cx.observe(&updater, |_, _, cx| cx.notify()),
             cx.subscribe_in(&connect, window, |this, _, _: &ConnectClosed, window, cx| {
                 this.connect_open = false;
                 window.focus(&this.focus_anchor, cx);
@@ -839,6 +841,7 @@ impl Workspace {
                 .ok();
             })
             .trigger(trigger);
+        let check_updater = self.updater.clone();
         menu.content(move |_, _, cx| {
             let opener = opener.clone();
             let inbox_opener = opener.clone();
@@ -869,7 +872,6 @@ impl Workspace {
             })
             .collect();
             let rule = move || div().my_1().h(px(1.)).bg(border);
-            let not_yet = tr(cx, "common:misc.notInThisApp");
             div()
                 .id("account-items")
                 .w(px(ACCOUNT_MENU_WIDTH))
@@ -962,17 +964,27 @@ impl Workspace {
                         .child(Icon::new(Lucide::CircleCheck).size_3p5().flex_none().text_color(success))
                         .child(div().font_family(mono.clone()).child(concat!("v", env!("CARGO_PKG_VERSION"))))
                         .child(div().flex_1())
-                        .child(
-                            // Esta app todavía no se actualiza sola: el
-                            // enlace está donde va a estar, y lo dice.
+                        .child({
+                            let (text, tone) = match check_updater.read(cx).manual.clone() {
+                                Manual::Idle => (tr(cx, "common:misc.check"), primary),
+                                Manual::Checking => (tr(cx, "nav:updater.checking"), muted),
+                                Manual::UpToDate => (cac_core::text_with(here, "nav:updater.upToDate", &[("version", env!("CARGO_PKG_VERSION"))]), muted),
+                                Manual::Found(version) => (cac_core::text_with(here, "nav:updater.found", &[("version", &version)]), primary),
+                                Manual::Failed(reason) => (format!("{} {reason}", tr(cx, "nav:updater.checkFailed")), danger),
+                                Manual::Disabled => (tr(cx, "nav:updater.checkDisabled"), muted),
+                            };
+                            let updater = check_updater.clone();
                             div()
                                 .id("account-check")
                                 .test_support()
+                                .max_w(px(170.))
                                 .text_size(px(11.))
-                                .text_color(primary)
-                                .child(tr(cx, "common:misc.check"))
-                                .tooltip(move |window, cx| Tooltip::new(not_yet.clone()).build(window, cx)),
-                        ),
+                                .text_color(tone)
+                                .cursor_pointer()
+                                .aria_label(text.clone())
+                                .child(text)
+                                .on_click(move |_, _, cx| updater.update(cx, |this, cx| this.check_now(cx)))
+                        }),
                 )
                 .child(
                     Self::account_row("account-log-out", Lucide::LogOut, tr(cx, "nav:account.logOut"), true, cx)
@@ -3841,6 +3853,10 @@ mod tests {
         for row in ["account-profile", "account-password", "account-connect", "account-notifications", "account-check"] {
             assert!(on_screen(window, row, cx), "falta {row} en el menú de la cuenta");
         }
+        // Sin actualizador (como con `CAC_DESKTOP_NO_UPDATE_CHECK`), «Comprobar»
+        // lo dice en vez de no hacer nada.
+        click(window, "account-check", cx);
+        wait_until(cx, "«Comprobar» dice por qué no comprueba", |cx| label(window, "account-check", cx) == "Esta app no comprueba versiones nuevas.");
         click(window, "account-theme-1", cx);
         assert_eq!(cx.update(|cx| Backend::core(cx).theme()), ThemePreference::Light);
         assert!(on_screen(window, "account-language-1", cx), "elegir el tema cerró el menú");

@@ -48,10 +48,24 @@ pub enum State {
     RestartFailed { exe: PathBuf, version: String },
 }
 
+/// Lo que dice el botón «Comprobar» del menú de la cuenta.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Manual {
+    Idle,
+    Checking,
+    UpToDate,
+    /// Hay una versión nueva (el aviso de siempre trae su «Actualizar»).
+    Found(String),
+    Failed(String),
+    /// Esta app no comprueba (`CAC_DESKTOP_NO_UPDATE_CHECK`).
+    Disabled,
+}
+
 pub struct UpdateNotice {
     pub(crate) state: State,
+    pub(crate) manual: Manual,
     /// La versión que se dijo «ahora no»: no vuelve a avisar de ésa.
-    dismissed: Option<String>,
+    pub(crate) dismissed: Option<String>,
 }
 
 enum Report {
@@ -84,7 +98,7 @@ impl UpdateNotice {
             })
             .detach();
         }
-        Self { state: State::Quiet, dismissed: None }
+        Self { state: State::Quiet, manual: Manual::Idle, dismissed: None }
     }
 
     /// Una versión nueva publicada. No pisa lo que la persona tiene entre
@@ -95,6 +109,42 @@ impl UpdateNotice {
             self.state = State::Offered(offer);
             cx.notify();
         }
+    }
+
+    /// El botón «Comprobar»: mira ya, sin esperar al día ni al «ahora no» de la
+    /// versión, y deja dicho el resultado en `manual`. Sólo ofrece; instalar
+    /// sigue siendo un clic en «Actualizar».
+    pub(crate) fn check_now(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.manual, Manual::Checking) {
+            return;
+        }
+        let Some(setup) = cx.try_global::<UpdateSetup>() else {
+            self.manual = Manual::Disabled;
+            cx.notify();
+            return;
+        };
+        let updater = setup.0.clone();
+        self.manual = Manual::Checking;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let answer = cx.background_spawn(async move { updater.check_fresh() }).await;
+            this.update(cx, |this, cx| {
+                this.manual = match answer {
+                    Ok(Some(offer)) => {
+                        let version = offer.version.clone();
+                        if matches!(this.state, State::Quiet | State::Offered(_)) {
+                            this.state = State::Offered(offer);
+                        }
+                        Manual::Found(version)
+                    }
+                    Ok(None) => Manual::UpToDate,
+                    Err(reason) => Manual::Failed(reason),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// «Ahora no», en el estado que sea: esa versión no vuelve a avisar, ni a
@@ -307,7 +357,7 @@ mod tests {
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{px, size, AnyWindowHandle, AppContext, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowOptions};
 
-    use super::{State, UpdateNotice, UpdateSetup};
+    use super::{Manual, State, UpdateNotice, UpdateSetup};
     use crate::testing::FakeServer;
 
     const OLD: &[u8] = b"the running binary";
@@ -460,6 +510,54 @@ mod tests {
         click(window, "update-dismiss", cx);
         cx.update(|cx| view.update(cx, |view, cx| view.found(offer.clone(), cx)));
         assert!(!on_screen(window, "update-notice", cx), "tras «ahora no» al reinicio, vuelve a ofrecer lo ya puesto");
+        finish(cx, m);
+    }
+
+    /// «Comprobar» mira ya (aunque se mirara hace un momento y esa versión se
+    /// hubiera dejado con «ahora no»), y dice el resultado: al día, versión
+    /// nueva o el motivo del fallo; sin actualizador, que no comprueba.
+    ///
+    /// Roturas que atrapa: que use lo recordado del día (la versión nueva no
+    /// saldría); que el «ahora no» la calle también aquí; un fallo de red que
+    /// se cuente como «al día»; un botón que no hace nada sin actualizador.
+    #[gpui_kit::test]
+    #[cfg(target_os = "linux")]
+    fn check_now_says_up_to_date_new_version_or_why_it_failed(cx: &mut TestAppContext) {
+        let m = machine("manual", "linux", "x86_64", cx);
+        let (name, _) = asset_name("0.2.0", "linux", "x86_64").unwrap();
+        m.releases.announce_desktop("0.1.0");
+        let (window, view) = open(cx);
+        let manual = |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).manual.clone());
+        let press = |cx: &mut TestAppContext| {
+            cx.update(|cx| view.update(cx, |view, cx| view.check_now(cx)));
+            cx.run_until_parked();
+        };
+
+        press(cx);
+        assert_eq!(manual(cx), Manual::UpToDate);
+        assert!(!on_screen(window, "update-notice", cx));
+
+        // Lo recordado dice «al día» y vale un día: «Comprobar» pregunta igual.
+        m.releases.announce_desktop("0.2.0");
+        m.releases.publish_desktop("0.2.0", &[(&name, b"the new binary")]);
+        cx.update(|cx| view.update(cx, |view, _| view.dismissed = Some("0.2.0".into())));
+        press(cx);
+        assert_eq!(manual(cx), Manual::Found("0.2.0".into()));
+        assert!(on_screen(window, "update-offer", cx), "el aviso no sale pese al «ahora no» de otra vez");
+
+        // Sin red: el motivo, no «al día».
+        let broken = Updater { source: cac_mcp::update::Source { version_url: "http://127.0.0.1:9/VERSION".into(), ..m.updater.source.clone() }, ..m.updater.clone() };
+        cx.update(|cx| cx.set_global(UpdateSetup(broken)));
+        press(cx);
+        assert!(matches!(manual(cx), Manual::Failed(reason) if reason.contains("could not reach")));
+
+        // Sin actualizador no se comprueba, y se dice.
+        cx.update(|cx| view.update(cx, |view, _| view.state = State::Quiet));
+        cx.update(|cx| {
+            cx.remove_global::<UpdateSetup>();
+            view.update(cx, |view, cx| view.check_now(cx));
+        });
+        assert_eq!(manual(cx), Manual::Disabled);
         finish(cx, m);
     }
 

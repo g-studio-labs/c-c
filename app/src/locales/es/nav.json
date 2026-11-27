@@ -155,6 +155,11 @@
     "viewRelease": "Ver la descarga",
     "failed": "No se pudo actualizar, y lo que había sigue intacto.",
     "retry": "Reintentar",
-    "restartFailed": "No se pudo reiniciar. Cierra la app y ábrela otra vez."
+    "restartFailed": "No se pudo reiniciar. Cierra la app y ábrela otra vez.",
+    "checking": "Comprobando…",
+    "upToDate": "Estás al día (v{{version}})",
+    "found": "Hay una versión nueva: v{{version}}",
+    "checkFailed": "No se pudo comprobar:",
+    "checkDisabled": "Esta app no comprueba versiones nuevas."
   }
 }
