@@ -56,6 +56,9 @@ type fakeBasecamp struct {
 	recordings map[string]string
 	// recordingsDown: la API de recordings no contesta.
 	recordingsDown bool
+	// recordingsStatus: si no es 0, la API de recordings contesta con este
+	// estado (un 403: quien conectó ya no ve el proyecto).
+	recordingsStatus int
 }
 
 type hookPut struct {
@@ -177,12 +180,14 @@ func newFakeBasecamp(t *testing.T) *fakeBasecamp {
 	recording := func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.recordingReads++
-		down := f.recordingsDown
+		down, status := f.recordingsDown, f.recordingsStatus
 		body, ok := f.recordings[strings.TrimSuffix(r.PathValue("rest"), ".json")]
 		f.mu.Unlock()
 		switch {
 		case down:
 			w.WriteHeader(http.StatusServiceUnavailable)
+		case status != 0:
+			w.WriteHeader(status)
 		case !ok:
 			w.WriteHeader(http.StatusNotFound)
 		default:

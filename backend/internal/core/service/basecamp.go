@@ -482,7 +482,7 @@ func (s *BasecampService) do(method, u, token string, body any, out any) (http.H
 		return res.Header, gorm.ErrRecordNotFound
 	}
 	if res.StatusCode/100 != 2 {
-		return res.Header, fmt.Errorf("%w: %s %d", domain.ErrBasecampUnreachable, method, res.StatusCode)
+		return res.Header, basecampStatusError{method: method, code: res.StatusCode}
 	}
 	if out != nil && res.StatusCode != http.StatusNoContent {
 		if err := json.NewDecoder(io.LimitReader(res.Body, 4<<20)).Decode(out); err != nil {
@@ -490,6 +490,30 @@ func (s *BasecampService) do(method, u, token string, body any, out any) (http.H
 		}
 	}
 	return res.Header, nil
+}
+
+// basecampStatusError: Basecamp contestó con un estado que no es 2xx ni 404.
+// Para quien llama sigue siendo ErrBasecampUnreachable; basecampRefused
+// distingue el «no» que ningún reintento cambia.
+type basecampStatusError struct {
+	method string
+	code   int
+}
+
+func (e basecampStatusError) Error() string {
+	return fmt.Sprintf("%s: %s %d", domain.ErrBasecampUnreachable, e.method, e.code)
+}
+
+func (e basecampStatusError) Unwrap() error { return domain.ErrBasecampUnreachable }
+
+// basecampRefused: Basecamp contestó que no (4xx), y no es «espera» (408,
+// 429): reintentar el mismo evento daría lo mismo.
+func basecampRefused(err error) bool {
+	var se basecampStatusError
+	if !errors.As(err, &se) {
+		return false
+	}
+	return se.code/100 == 4 && se.code != http.StatusRequestTimeout && se.code != http.StatusTooManyRequests
 }
 
 // api: una llamada a la cuenta de la org, con el token renovado si hace falta.

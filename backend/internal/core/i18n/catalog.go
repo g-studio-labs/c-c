@@ -95,6 +95,11 @@ var catalogo = map[string]map[Locale]string{
 		EN: "{{who}} created a to-do in Basecamp",
 		ES: "{{who}} creó un to-do en Basecamp",
 	},
+	// Un to-do que cambió de asignados y no tiene tarea (la suya se borró).
+	"notify.basecamp.todo_assigned": {
+		EN: "{{who}} changed who has a to-do in Basecamp",
+		ES: "{{who}} cambió a quién le toca un to-do en Basecamp",
+	},
 	"notify.basecamp.todo_reopened": {
 		EN: "{{who}} reopened a to-do in Basecamp",
 		ES: "{{who}} reabrió un to-do en Basecamp",

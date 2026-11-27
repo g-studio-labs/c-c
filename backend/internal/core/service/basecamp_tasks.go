@@ -51,10 +51,11 @@ func (s *BasecampService) processAssignable(proj *domain.BasecampProject, ev dom
 			// Ya no existe (a la papelera antes de que llegara el evento).
 			return nil
 		case errors.Is(err, domain.ErrBasecampNotConnected), errors.Is(err, domain.ErrBasecampReconnect),
-			errors.Is(err, domain.ErrBasecampOff):
+			errors.Is(err, domain.ErrBasecampOff), basecampRefused(err):
 			// Reintentar no lo arregla, y Basecamp desactiva el webhook tras
 			// diez fallos: se perdería también lo de la fase 1. Los admins ya
-			// tienen el aviso de volver a conectar.
+			// tienen el aviso de volver a conectar. Un «no» de Basecamp (403:
+			// quien conectó ya no ve ese proyecto) tampoco cambia al reintentar.
 			lg.Warn(fmt.Sprintf("basecamp: reading recording %d of project %d: %v", recording, proj.ProjectID, err))
 			return nil
 		}
@@ -69,9 +70,13 @@ func (s *BasecampService) processAssignable(proj *domain.BasecampProject, ev dom
 		return err
 	}
 	if item == nil {
-		// El espacio no tiene ninguna lista donde ponerla: como antes, sólo
-		// un aviso a quien enlazó el proyecto.
-		s.notifyUnlinked(proj, actorID, nil, basecampNote{who: who, titleKey: "notify.basecamp.todo_created",
+		// Sin tarea (el espacio no tiene listas, o la que tenía se borró):
+		// como en la fase 1, sólo un aviso a quien enlazó el proyecto.
+		key := "notify.basecamp.todo_created"
+		if ev.Kind == domain.BasecampTodoAssignment || ev.Kind == domain.BasecampCardAssignment {
+			key = "notify.basecamp.todo_assigned"
+		}
+		s.notifyUnlinked(proj, actorID, nil, basecampNote{who: who, titleKey: key,
 			excerpt: strings.TrimSpace(rec.Title), url: domain.SafeBasecampURL(rec.AppURL)})
 		return nil
 	}
@@ -83,11 +88,16 @@ func (s *BasecampService) processAssignable(proj *domain.BasecampProject, ev dom
 }
 
 // taskFor: la tarea enlazada al recording, creándola si no la hay. nil si el
-// espacio no tiene listas.
+// espacio no tiene listas, o si la tarea enlazada se borró: quien la borró lo
+// hizo a propósito, así que no se recrea; y un error aquí haría reintentar a
+// Basecamp hasta desactivar el webhook entero.
 func (s *BasecampService) taskFor(proj *domain.BasecampProject, ev domain.BasecampWebhookEvent,
 	rec domain.BasecampAssignable, actorID string) (*domain.Item, bool, error) {
 	if link, err := s.repo.LinkFor(proj.OrgID, rec.ID); err == nil {
 		it, err := s.repo.Item(link.ItemID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, false, nil
+		}
 		return it, false, err
 	}
 	listID := s.repo.FirstListOf(proj.SpaceID)

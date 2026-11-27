@@ -445,6 +445,10 @@ func (r *BasecampRepository) CreateLinkedTask(t *domain.Item, l *domain.Basecamp
 	if err != nil {
 		if old, e := r.LinkFor(l.OrgID, l.RecordingID); e == nil {
 			it, e := r.Item(old.ItemID)
+			if errors.Is(e, gorm.ErrRecordNotFound) {
+				// La que ganó ya se borró: sin tarea, como si no hubiera.
+				return nil, false, nil
+			}
 			return it, false, e
 		}
 		return nil, false, err

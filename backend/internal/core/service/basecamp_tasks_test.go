@@ -278,6 +278,10 @@ func TestBothGuardsOfOneTaskPerTodo(t *testing.T) {
 // Roturas que atrapa: no quitar a quien Basecamp ya no asigna; quitar también
 // a quien puso el equipo; apuntar como «de Basecamp» a quien ya era
 // responsable; avisar otra vez a quien ya lo era.
+//
+// Rotura equivalente, no un hueco: quitar la guarda `RowsAffected == 0` de
+// RemoveBasecampAssignee no cambia nada que se vea, porque syncAssignees sólo
+// le pasa ids que salen de BasecampAssignees (los que puso Basecamp).
 func TestAssigneesFollowBasecampButOnlyThoseItPut(t *testing.T) {
 	f := newBasecampFixture(t)
 	f.setTodo(bcNewTodo, "Revisar el checkout", "", bcBob)
@@ -580,5 +584,106 @@ func TestBasecampURLsInADescription(t *testing.T) {
 	want := []string{"https://3.basecamp.com/1/buckets/2/todos/3", "https://3.basecamp.com/1/buckets/2/card_tables/cards/4"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// Un to-do cuya tarea de cac se borró sigue llegando como «sin tarea», igual
+// que en la fase 1: no se recrea (quien la borró lo hizo a propósito), se
+// avisa a quien enlazó el proyecto, y el webhook contesta que lo atendió.
+// Un error aquí haría reintentar a Basecamp diez veces y desactivar el
+// webhook entero del proyecto, y con él lo de la fase 1.
+//
+// Roturas que atrapa: devolver el error de la tarea que no está (tanto al
+// buscar la enlazada como al perder la carrera contra un enlace a una tarea
+// borrada); recrear la tarea borrada; no avisar a nadie; avisar de la
+// asignación como si fuera un alta.
+func TestADeletedTaskDoesNotFailTheWebhook(t *testing.T) {
+	f := newBasecampFixture(t)
+	f.setTodo(bcNewTodo, "Revisar el checkout", "", bcBob)
+	f.deliver(t, todoEvent(400, domain.BasecampTodoCreated, bcNewTodo, bcClient))
+	task := f.taskOf(t, bcNewTodo)
+	if task == nil {
+		t.Fatal("a new to-do made no task")
+	}
+	if err := f.db.Delete(&domain.Item{}, "id = ?", task.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	before := f.countItems(t)
+	f.inbox.reset()
+
+	f.setTodo(bcNewTodo, "Revisar el checkout", "", bcCarla)
+	comment := []byte(strings.ReplaceAll(string(commentEvent(403, 9403, bcClient, "<div>¿Sigue?</div>")),
+		fmt.Sprint(bcTodo), fmt.Sprint(bcNewTodo)))
+	for _, body := range [][]byte{
+		todoEvent(401, domain.BasecampTodoAssignment, bcNewTodo, bcClient),
+		todoEvent(402, domain.BasecampTodoCompleted, bcNewTodo, bcClient),
+		comment,
+		todoEvent(404, domain.BasecampTodoUncompleted, bcNewTodo, bcClient),
+		todoEvent(405, domain.BasecampTodoCreated, bcNewTodo, bcClient),
+	} {
+		if err := f.svc.HandleWebhook(f.secret, body); err != nil {
+			t.Fatalf("an event of a to-do whose task was deleted failed the webhook: %v", err)
+		}
+	}
+	if n := f.countItems(t) - before; n != 0 {
+		t.Fatalf("the deleted task came back as %d new ones", n)
+	}
+	if got := noticesOfKind(f.inbox.of("u-carla"), "task:assigned"); len(got) != 0 {
+		t.Fatalf("Carla was given a deleted task: %+v", got)
+	}
+	var keys []string
+	for _, a := range f.inbox.of("u-ana") {
+		keys = append(keys, a.TitleKey)
+	}
+	want := "notify.basecamp.todo_assigned,notify.basecamp.todo_done,notify.basecamp.comment," +
+		"notify.basecamp.todo_reopened,notify.basecamp.todo_created"
+	if strings.Join(keys, ",") != want {
+		t.Fatalf("whoever linked the project was told %v, want %s", keys, want)
+	}
+
+	// La carrera: el enlace que ganó apunta a una tarea borrada.
+	got, created, err := repository.NewBasecampRepository(f.db).CreateLinkedTask(
+		&domain.Item{OrgID: "org-1", SpaceID: "sp-1", ListID: "l-1", Title: "Tarde", Status: domain.ReportPending,
+			Visibility: domain.VisibilityInternal},
+		&domain.BasecampLink{OrgID: "org-1", RecordingID: bcNewTodo, ProjectID: bcProject})
+	if err != nil || created || got != nil {
+		t.Fatalf("losing the race to a deleted task gave %+v created=%v err=%v", got, created, err)
+	}
+	if n := f.countItems(t) - before; n != 0 {
+		t.Fatalf("losing the race left %d tasks", n)
+	}
+}
+
+// Basecamp contesta que no (403: quien conectó ya no ve ese proyecto) al leer
+// el to-do: es una respuesta, no un silencio, y reintentar da lo mismo. Se
+// atiende; sólo se suelta cuando Basecamp no contesta (5xx) o pide esperar.
+//
+// Roturas que atrapa: soltar el evento ante un 403 (Basecamp reintenta hasta
+// desactivar el webhook); atender un 429 o un 5xx (se perdería el to-do).
+func TestABasecampRefusalIsHandledButAnOutageIsRetried(t *testing.T) {
+	f := newBasecampFixture(t)
+	f.setTodo(bcNewTodo, "Revisar el checkout", "", bcBob)
+	set := func(status int) {
+		f.fake.mu.Lock()
+		f.fake.recordingsStatus = status
+		f.fake.mu.Unlock()
+	}
+	set(403)
+	if err := f.svc.HandleWebhook(f.secret, todoEvent(410, domain.BasecampTodoCreated, bcNewTodo, bcAna)); err != nil {
+		t.Fatalf("a 403 from Basecamp was released for a retry that cannot change it: %v", err)
+	}
+	if f.taskOf(t, bcNewTodo) != nil {
+		t.Fatal("a to-do Basecamp refused to show made a task")
+	}
+	for i, status := range []int{429, 502} {
+		set(status)
+		if err := f.svc.HandleWebhook(f.secret, todoEvent(411+int64(i), domain.BasecampTodoCreated, bcNewTodo, bcAna)); err == nil {
+			t.Fatalf("a %d was taken as handled: the to-do would be lost", status)
+		}
+	}
+	set(0)
+	f.deliver(t, todoEvent(412, domain.BasecampTodoCreated, bcNewTodo, bcAna))
+	if f.taskOf(t, bcNewTodo) == nil {
+		t.Fatal("the retry after an outage made no task")
 	}
 }
