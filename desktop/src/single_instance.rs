@@ -17,6 +17,11 @@
 //! - **Un socket viejo no bloquea.** Si la app murió sin borrarlo, conectar
 //!   falla; entonces se borra —sólo si es un socket y es de uno— y se escucha
 //!   de nuevo.
+//! - **Dos que arrancan a la vez no se quedan las dos.** Mirar si hay
+//!   alguien, borrar el socket viejo y escuchar se hace con un cerrojo
+//!   (`flock`) de la carpeta: sin él, la segunda borraba el socket recién
+//!   creado por la primera y quedaban dos ventanas (un doble clic en el
+//!   lanzador bastaba).
 //! - **Lo que entra se lee poco y con desconfianza**: una línea, como mucho
 //!   [`MAX_LINE`] bytes, y sólo `focus` u `open <enlace>`. El enlace pasa por
 //!   el traductor del core como cualquier otro: lo que no es de cac va al
@@ -30,6 +35,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const SOCKET: &str = "instance.sock";
+
+/// El cerrojo del reclamo (ver [`claim`]).
+const LOCK: &str = "instance.lock";
 
 /// Lo más que se lee de quien llama. Un enlace de cac cabe de sobra.
 const MAX_LINE: usize = 8 * 1024;
@@ -177,34 +185,46 @@ pub(crate) enum Claim {
     Delivered,
 }
 
-/// Le pasa el mensaje a la instancia abierta, o se queda con el socket si
-/// no hay ninguna. `me` es quien arranca ([`my_uid`]).
-pub(crate) fn claim(dir: &Path, me: u32, message: &Message) -> io::Result<Claim> {
-    prepare_dir(dir, me)?;
-    let path = dir.join(SOCKET);
-    // Dos vueltas: si otra arrancó a la vez y ganó el sitio, la segunda la
-    // encuentra escuchando.
-    for _ in 0..2 {
-        if let Call::Delivered = call(&path, me, message)? {
-            return Ok(Claim::Delivered);
+/// Un cerrojo exclusivo sobre el fichero de la carpeta; se suelta al
+/// soltar el `File`.
+fn lock(dir: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(dir.join(LOCK))?;
+    loop {
+        // SAFETY: el descriptor es de `file`, que vive durante la llamada.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(file);
         }
-        // Nadie escucha: lo que quede es de una app que murió. `call` ya
-        // comprobó que es un socket de uno.
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        match UnixListener::bind(&path) {
-            Ok(listener) => {
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-                return Ok(Claim::First(listener));
-            }
-            Err(error) if error.kind() == io::ErrorKind::AddrInUse => continue,
-            Err(error) => return Err(error),
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
         }
     }
-    Err(io::Error::new(io::ErrorKind::AddrInUse, "otra instancia está arrancando a la vez"))
+}
+
+/// Le pasa el mensaje a la instancia abierta, o se queda con el socket si
+/// no hay ninguna. `me` es quien arranca ([`my_uid`]).
+///
+/// Todo bajo el cerrojo: quien lo tiene después de otra que ya escucha la
+/// encuentra (su socket ya está en disco, y conectar entra en la cola
+/// aunque aún no atienda), y nunca borra un socket vivo.
+pub(crate) fn claim(dir: &Path, me: u32, message: &Message) -> io::Result<Claim> {
+    prepare_dir(dir, me)?;
+    let _held = lock(dir)?;
+    let path = dir.join(SOCKET);
+    if let Call::Delivered = call(&path, me, message)? {
+        return Ok(Claim::Delivered);
+    }
+    // Nadie escucha: lo que quede es de una app que murió. `call` ya
+    // comprobó que es un socket de uno.
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let listener = UnixListener::bind(&path)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(Claim::First(listener))
 }
 
 /// Lee lo que pide quien llama, si es este mismo usuario.
@@ -216,6 +236,10 @@ fn answer(mut stream: UnixStream, me: u32) -> Option<Message> {
     stream.set_write_timeout(Some(PATIENCE)).ok()?;
     let mut line = String::new();
     BufReader::new((&stream).take(MAX_LINE as u64)).read_line(&mut line).ok()?;
+    // Sin el salto de línea, se cortó en el límite: no es un mensaje entero.
+    if !line.ends_with('\n') {
+        return None;
+    }
     let message = Message::decode(&line)?;
     stream.write_all(b"ok\n").ok()?;
     Some(message)
@@ -326,6 +350,96 @@ mod tests {
         assert!(dir.join(SOCKET).exists(), "y su socket no se toca");
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(claim(&dir, me, &Message::Focus).is_err(), "una carpeta que otros pueden abrir no se usa");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// Dos que arrancan a la vez: una se queda escuchando y la otra le
+    /// entrega su enlace. Cientos de rondas, la mitad con el socket viejo
+    /// de la ronda anterior en disco y la otra mitad sin nada.
+    ///
+    /// No se cronometra nada: la ganadora atiende hasta que las dos han
+    /// dicho qué les tocó, y el veredicto es la cuenta. Rotura que atrapa:
+    /// reclamar sin cerrojo, con lo que la segunda borraba el socket recién
+    /// creado por la primera y escuchaban las dos (en la caja, hacia la
+    /// ronda veinte).
+    #[test]
+    fn two_launches_at_once_leave_exactly_one_listening() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let dir = scratch("race");
+        let me = my_uid();
+        prepare_dir(&dir, me).unwrap();
+        for round in 0..400 {
+            if round % 2 == 0 {
+                let _ = std::fs::remove_file(dir.join(SOCKET));
+            }
+            let start = Arc::new(Barrier::new(2));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (told, outcomes) = mpsc::channel();
+            let launches: Vec<_> = (0..2)
+                .map(|n| {
+                    let (dir, start, stop, told) = (dir.clone(), start.clone(), stop.clone(), told.clone());
+                    std::thread::spawn(move || {
+                        start.wait();
+                        match claim(&dir, me, &Message::Open(format!("cac://tasks?task={n}"))) {
+                            Ok(Claim::First(listener)) => {
+                                told.send("first").unwrap();
+                                listener.set_nonblocking(true).unwrap();
+                                while !stop.load(Ordering::SeqCst) {
+                                    match listener.accept() {
+                                        Ok((stream, _)) => {
+                                            stream.set_nonblocking(false).unwrap();
+                                            answer(stream, me);
+                                        }
+                                        Err(_) => std::thread::yield_now(),
+                                    }
+                                }
+                            }
+                            Ok(Claim::Delivered) => told.send("delivered").unwrap(),
+                            Err(error) => told.send(if error.kind() == io::ErrorKind::AddrInUse { "addr-in-use" } else { "error" }).unwrap(),
+                        }
+                    })
+                })
+                .collect();
+            let mut seen = [outcomes.recv().unwrap(), outcomes.recv().unwrap()];
+            stop.store(true, Ordering::SeqCst);
+            for launch in launches {
+                launch.join().unwrap();
+            }
+            seen.sort();
+            assert_eq!(seen, ["delivered", "first"], "ronda {round}");
+        }
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// Un enlace demasiado largo no se manda, y una línea enorme por el
+    /// socket no se lee entera ni se toma por un mensaje.
+    ///
+    /// Roturas que atrapa: mandar cualquier longitud (`encode` sin su
+    /// condición); leer sin límite (`take` quitado); aceptar como enlace la
+    /// línea cortada en el límite.
+    #[test]
+    fn a_line_is_read_only_up_to_its_limit() {
+        let near = Message::Open(format!("cac://{}", "a".repeat(MAX_LINE - 15)));
+        assert!(near.encode().starts_with("open "), "lo que cabe viaja");
+        assert!(near.encode().len() <= MAX_LINE);
+        let long = Message::Open(format!("cac://{}", "a".repeat(MAX_LINE)));
+        assert_eq!(long.encode(), "focus\n", "lo que no cabe se queda en «al frente»");
+
+        let dir = scratch("long");
+        let me = my_uid();
+        let (sender, received) = mpsc::channel();
+        serve(first(&dir, me), me, move |message| sender.send(message).unwrap());
+        let mut raw = UnixStream::connect(dir.join(SOCKET)).unwrap();
+        let _ = raw.write_all(format!("open cac://{}\n", "a".repeat(4 * MAX_LINE)).as_bytes());
+        let mut answered = String::new();
+        let _ = raw.read_to_string(&mut answered);
+        assert_eq!(answered, "", "no se le contesta");
+        // La abierta atiende de una en una: lo siguiente que llega dice si
+        // la línea enorme pasó.
+        assert!(matches!(claim(&dir, me, &Message::Focus).unwrap(), Claim::Delivered));
+        assert_eq!(received.recv_timeout(PATIENCE).unwrap(), Message::Focus);
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 
