@@ -242,6 +242,7 @@ impl Updater {
         let version = &offer.version;
         update::release_has(&self.source, &tag(version), &offer.asset).map_err(|why| match why {
             update::Unpublished::NoRelease => format!("v{version} is announced, but its release isn't published yet"),
+            update::Unpublished::Unreachable(reason) => format!("couldn't check whether v{version}'s release is published: {reason}"),
             update::Unpublished::NoFile => format!("v{version} is announced, but its release has no file for {}-{}", self.os, self.arch),
         })
     }

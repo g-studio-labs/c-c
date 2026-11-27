@@ -76,6 +76,7 @@ fn run_update(only_check: bool) -> i32 {
     if let Err(why) = update::confirm_offerable(&source, update::state_dir().as_deref(), &latest) {
         match why {
             update::Unpublished::NoRelease => println!("cac-mcp {latest} is announced, but its release isn't published yet. Nothing to update; try again later."),
+            update::Unpublished::Unreachable(reason) => println!("cac-mcp {latest} is announced, but it couldn't be checked whether its release is published ({reason}). Nothing to update; try again later."),
             update::Unpublished::NoFile => println!("cac-mcp {latest} is announced, but its release has no file for this machine. Nothing to update."),
         }
         return 0;

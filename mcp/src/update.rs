@@ -118,13 +118,17 @@ pub fn asset_name(os: &str, arch: &str) -> Option<&'static str> {
 }
 
 /// Por qué una versión anunciada no se puede ofrecer todavía.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unpublished {
-    /// La release no existe, o no tiene su `SHA256SUMS`: `VERSION` se sube a
-    /// `main` antes de que el workflow publique, y durante la compilación (o
-    /// para siempre, si un sistema falla) ofrecerla acabaría en un 404. Sin
-    /// respuesta tampoco se ofrece: sin red no se puede bajar nada.
+    /// GitHub contestó que la release no existe (404 en su `SHA256SUMS`):
+    /// `VERSION` se sube a `main` antes de que el workflow publique, y durante
+    /// la compilación (o para siempre, si un sistema falla) ofrecerla
+    /// acabaría en ese 404.
     NoRelease,
+    /// No se pudo comprobar (sin red, o contestó otra cosa que un 404), y no
+    /// es lo mismo que «no publicada»: sin respuesta tampoco se ofrece, pero
+    /// no se dice que falte la release. Lleva el motivo.
+    Unreachable(String),
     /// La release está, y no trae fichero para esta máquina.
     NoFile,
 }
@@ -133,7 +137,7 @@ pub enum Unpublished {
 /// Es la comprobación que comparten `cac-mcp` y la app nativa (`desktop_update`)
 /// antes de ofrecer una versión. Bloquea: sale a la red.
 pub fn release_has(source: &Source, tag: &str, asset: &str) -> Result<(), Unpublished> {
-    let sums = fetch_text(&source.asset_url_tagged(tag, CHECKSUMS), Duration::from_secs(8)).map_err(|_| Unpublished::NoRelease)?;
+    let sums = fetch_sums(&source.asset_url_tagged(tag, CHECKSUMS), Duration::from_secs(8))?;
     checksum_for(&sums, asset).map(|_| ()).ok_or(Unpublished::NoFile)
 }
 
@@ -198,6 +202,22 @@ pub fn fetch_latest(source: &Source, timeout: Duration) -> Result<String, String
     })?;
     let version = text.trim();
     parse_version(version).map(|_| version.to_string()).ok_or_else(|| format!("{} did not answer with a version", source.version_url))
+}
+
+/// El `SHA256SUMS` de una release: un 404 es «sin publicar», cualquier otro
+/// fallo es «no se pudo comprobar».
+fn fetch_sums(url: &str, timeout: Duration) -> Result<String, Unpublished> {
+    let unreachable = |reason: String| Unpublished::Unreachable(reason);
+    runtime().map_err(unreachable)?.block_on(async {
+        let res = client(timeout).map_err(unreachable)?.get(url).send().await.map_err(|e| Unpublished::Unreachable(format!("could not reach {url}: {e}")))?;
+        if res.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(Unpublished::NoRelease);
+        }
+        if !res.status().is_success() {
+            return Err(Unpublished::Unreachable(format!("{url} answered {}", res.status())));
+        }
+        res.text().await.map_err(|e| Unpublished::Unreachable(e.to_string()))
+    })
 }
 
 /// Un texto de una dirección; `Err` si no contesta o no es un 200.
@@ -594,7 +614,8 @@ pub enum Step {
     Install,
     /// Está y hay una más nueva: actualizarlo.
     Update,
-    /// Está y no se sabe de ninguna más nueva: nada que hacer.
+    /// Nada que ofrecer: está y no se sabe de ninguna más nueva, o la que hay
+    /// anunciada aún no se puede bajar (con o sin nada instalado).
     Current,
 }
 
@@ -612,6 +633,7 @@ pub struct Status {
 impl Status {
     pub fn step(&self) -> Step {
         match (&self.installed, &self.latest) {
+            (None, _) if self.unpublished.is_some() => Step::Current,
             (None, _) => Step::Install,
             (Some(installed), Some(latest)) if is_newer(latest, &installed.version) && self.unpublished.is_none() => Step::Update,
             _ => Step::Current,
@@ -647,8 +669,10 @@ impl Machine {
         let latest = self.state_dir.as_deref().and_then(|dir| latest_known_within(&self.source, dir, now(), max_age));
         // Sólo se ofrece lo que se puede bajar: se mira la release de la
         // anunciada cuando es más nueva que lo instalado.
+        // Sin nada instalado, «Instalar» baja la anunciada: se mira igual.
         let unpublished = match (&installed, &latest) {
             (Some(installed), Some(latest)) if is_newer(latest, &installed.version) => offerable(&self.source, latest).err(),
+            (None, Some(latest)) => offerable(&self.source, latest).err(),
             _ => None,
         };
         Status { installed, latest, unpublished }
@@ -1047,6 +1071,10 @@ mod tests {
         let held = |why| Status { installed: at("1.33.0"), latest: Some("1.34.0".into()), unpublished: Some(why) };
         assert_eq!(held(Unpublished::NoRelease).step(), Step::Current);
         assert_eq!(held(Unpublished::NoFile).step(), Step::Current);
+        assert_eq!(held(Unpublished::Unreachable("no network".into())).step(), Step::Current);
+        // Sin nada instalado, «Instalar» tampoco se ofrece por una versión que no se puede bajar.
+        let bare = Status { installed: None, latest: Some("1.34.0".into()), unpublished: Some(Unpublished::NoRelease) };
+        assert_eq!(bare.step(), Step::Current);
     }
 
     /// Lo que la máquina ofrece depende de que la release de la versión
@@ -1091,6 +1119,57 @@ mod tests {
         let status = machine.look(0);
         assert_eq!(status.unpublished, None);
         assert_eq!(status.step(), Step::Update);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Sin red no se sabe si la release está publicada, y no se dice que no
+    /// lo esté; y sin nada instalado, «Instalar» sigue la misma regla que
+    /// «Actualizar»: ni por una release sin publicar ni por una que no se
+    /// pudo comprobar.
+    ///
+    /// Roturas que atrapa: contar un fallo de red como «release sin publicar»
+    /// (la nativa diría algo falso); ofrecer «Instalar» con la versión
+    /// anunciada sin mirar su release (acaba en el 404 de `SHA256SUMS`); no
+    /// volver a ofrecerlo cuando se publica.
+    #[test]
+    fn a_failed_check_is_not_an_unpublished_release_and_a_bare_machine_is_not_offered_install() {
+        let releases = FakeReleases::start();
+        releases.announce("1.34.0");
+        let dir = scratch("bare");
+        let machine = |source: Source| Machine { source, state_dir: Some(dir.join("state")), look_in: vec![dir.join("bin/cac-mcp")], install_to: Some(dir.join("bin/cac-mcp")) };
+
+        // La release no está: 404, y sin nada instalado tampoco hay botón.
+        let status = machine(releases.source()).look(0);
+        assert_eq!(status.installed, None);
+        assert_eq!(status.unpublished, Some(Unpublished::NoRelease));
+        assert_eq!(status.step(), Step::Current, "ofrece instalar una versión cuya release no existe");
+
+        // No se puede ni preguntar (nadie escucha en esa dirección): se dice que no se pudo comprobar.
+        let unreachable = Source { download_base: "http://127.0.0.1:1/download".into(), ..releases.source() };
+        let status = machine(unreachable).look(0);
+        assert!(matches!(&status.unpublished, Some(Unpublished::Unreachable(reason)) if !reason.is_empty()), "{:?}", status.unpublished);
+        assert_eq!(status.step(), Step::Current, "ofrece instalar sin poder comprobar la release");
+
+        // GitHub contesta, pero con un fallo que no es un 404: tampoco es «sin publicar».
+        let broken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let broken_base = format!("http://{}", broken.local_addr().unwrap());
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in broken.incoming().flatten().take(1) {
+                let mut stream = stream;
+                let _ = stream.read(&mut [0u8; 1024]);
+                let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            }
+        });
+        let failing = Source { download_base: format!("{broken_base}/download"), ..releases.source() };
+        let status = machine(failing).look(0);
+        assert!(matches!(&status.unpublished, Some(Unpublished::Unreachable(reason)) if reason.contains("500")), "{:?}", status.unpublished);
+
+        // Publicada: «Instalar».
+        releases.publish("1.34.0", b"#!/bin/sh\necho 'cac-mcp 1.34.0'\n");
+        let status = machine(releases.source()).look(0);
+        assert_eq!(status.unpublished, None);
+        assert_eq!(status.step(), Step::Install);
         let _ = std::fs::remove_dir_all(dir);
     }
 

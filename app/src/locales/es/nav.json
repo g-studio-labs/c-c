@@ -158,7 +158,8 @@
     "tokenRevokeAsk": "¿Revocar «{{name}}»? Deja de valer ya, y lo que lo use pierde el acceso.",
     "tokenRevokeFailed": "No se pudo revocar el token.",
     "unpublished": "v{{version}} está anunciada, pero su release aún no está publicada.",
-    "unpublishedFile": "v{{version}} está anunciada, pero su release no trae el fichero para esta máquina."
+    "unpublishedFile": "v{{version}} está anunciada, pero su release no trae el fichero para esta máquina.",
+    "unpublishedUnknown": "No se pudo comprobar si la release de v{{version}} está publicada: {{reason}}"
   },
   "updater": {
     "available": "Hay una versión nueva de cac: v{{version}}",

@@ -3731,6 +3731,29 @@ mod tests {
         wait_until(cx, "el menú se abre", |cx| on_screen(window, "account-connect", cx));
         assert!(on_screen(window, "account-connect-update", cx), "publicada, y el punto no avisa");
 
+        // No se pudo comprobar (nadie contesta en esa dirección): se dice así, no «sin publicar», y sin botón.
+        let dead = cac_mcp::update::Source { download_base: "http://127.0.0.1:1/download".into(), ..releases.source() };
+        let fresh_state = scratch.join("state-unreachable");
+        let machine = Machine { source: dead, state_dir: Some(fresh_state), look_in: vec![binary.clone()], install_to: Some(binary.clone()) };
+        std::fs::write(&binary, "#!/bin/sh\necho 'cac-mcp 1.33.0'\n").unwrap();
+        cx.update(|cx| cx.set_global(McpSetup { machine, server_url: "https://cac.example".into(), claude: std::sync::Arc::new(cac_mcp::claude_code::fake::FakeClaude::new(None)) }));
+        press(window, "escape", cx);
+        open_connect(cx);
+        wait_until(cx, "dice que no pudo comprobar", |cx| on_screen(window, "connect-unpublished-unknown", cx));
+        assert!(!on_screen(window, "connect-unpublished", cx), "dice «sin publicar» cuando no pudo comprobarlo");
+        assert!(!on_screen(window, "connect-run", cx), "ofrece una versión que no pudo comprobar");
+        close(cx);
+
+        // Sin nada instalado, «Instalar» tampoco se ofrece por una release sin publicar.
+        let unpublished = FakeReleases::start();
+        unpublished.announce("1.35.0");
+        let machine = Machine { source: unpublished.source(), state_dir: Some(scratch.join("state-bare")), look_in: vec![scratch.join("nothing/cac-mcp")], install_to: Some(scratch.join("nothing/cac-mcp")) };
+        cx.update(|cx| cx.set_global(McpSetup { machine, server_url: "https://cac.example".into(), claude: std::sync::Arc::new(cac_mcp::claude_code::fake::FakeClaude::new(None)) }));
+        open_connect(cx);
+        wait_until(cx, "dice que está anunciada", |cx| on_screen(window, "connect-unpublished", cx));
+        assert!(on_screen(window, "connect-missing", cx) && !on_screen(window, "connect-run", cx), "ofrece instalar una versión sin release");
+        close(cx);
+
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
         let _ = std::fs::remove_dir_all(scratch);
     }
@@ -4067,7 +4090,35 @@ mod tests {
         click(window, "connect-revoke-yes", cx);
         wait_until(cx, "dice por qué", |cx| on_screen(window, "connect-token-row-problem", cx));
         assert!(on_screen(window, "connect-token-row-t1", cx), "quitó de la lista un token que el servidor no revocó");
+        assert!(label(window, "connect-token-row-reason", cx).contains("no es tuyo para verlo"), "no dijo el motivo del servidor: {:?}", label(window, "connect-token-row-reason", cx));
 
+        cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+    }
+
+    /// Si la lista de tokens no llega, la ventana lo dice con el motivo del
+    /// servidor, en vez de quedarse en «Cargando…» o vacía.
+    ///
+    /// Roturas que atrapa: no pintar el fallo de la lista; pintarlo sin el
+    /// motivo; pintar «sin tokens» cuando en realidad no se pudo preguntar.
+    #[gpui_kit::test]
+    #[cfg(target_os = "linux")]
+    fn a_token_list_that_does_not_load_says_why(cx: &mut TestAppContext) {
+        let server = server();
+        server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/auth/tokens"))
+                .respond_with(wiremock::ResponseTemplate::new(503).set_body_json(json!({ "success": false, "error": "unavailable", "message": "Backend unavailable" }))),
+        );
+        server.install(cx);
+        let (window, _workspace) = open_with_view(1100., cx);
+        wait_until(cx, "el árbol llega", |cx| on_screen(window, "tree-a", cx));
+        click(window, "account-menu", cx);
+        wait_until(cx, "el menú se abre", |cx| on_screen(window, "account-connect", cx));
+        click(window, "account-connect", cx);
+        wait_until(cx, "la ventana se abre", |cx| on_screen(window, "connect-dialog", cx));
+        wait_until(cx, "dice que no cargó", |cx| on_screen(window, "connect-tokens-problem", cx));
+        assert_eq!(label(window, "connect-tokens-reason", cx), "No se pudo cargar la lista de tokens.", "no dijo el motivo");
+        assert!(!on_screen(window, "connect-tokens-empty", cx), "dijo «sin tokens» cuando no pudo preguntar");
         cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
     }
 

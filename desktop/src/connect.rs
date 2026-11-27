@@ -646,12 +646,19 @@ impl ConnectView {
         let published = match (status.step(), &status.latest) {
             // Anunciada y sin poder bajarse: se dice, sin botón que falle.
             (_, Some(latest)) if status.unpublished.is_some() => {
-                let (id, key) = if status.unpublished == Some(Unpublished::NoFile) {
-                    ("connect-unpublished-file", "nav:mcp.unpublishedFile")
-                } else {
-                    ("connect-unpublished", "nav:mcp.unpublished")
+                let (id, key, reason) = match &status.unpublished {
+                    Some(Unpublished::NoFile) => ("connect-unpublished-file", "nav:mcp.unpublishedFile", ""),
+                    Some(Unpublished::Unreachable(reason)) => ("connect-unpublished-unknown", "nav:mcp.unpublishedUnknown", reason.as_str()),
+                    _ => ("connect-unpublished", "nav:mcp.unpublished", ""),
                 };
-                Some(div().id(id).test_support().text_color(muted).child(cac_core::text_with(here, key, &[("version", latest)])).into_any_element())
+                Some(
+                    div()
+                        .id(id)
+                        .test_support()
+                        .text_color(muted)
+                        .child(cac_core::text_with(here, key, &[("version", latest), ("reason", reason)]))
+                        .into_any_element(),
+                )
             }
             (Step::Update, Some(latest)) => Some(
                 div()
@@ -801,7 +808,7 @@ impl ConnectView {
                 .leading_xs()
                 .text_color(danger)
                 .child(div().w_full().child(tr(cx, "nav:mcp.tokensFailed")))
-                .child(div().w_full().text_size(px(11.)).font_family(mono.clone()).child(reason))
+                .child(div().id("connect-tokens-reason").aria_label(reason.clone()).test_support().w_full().text_size(px(11.)).font_family(mono.clone()).child(reason))
                 .into_any_element(),
             TokenList::Loaded(list) if list.is_empty() => {
                 div().id("connect-tokens-empty").test_support().leading_xs().text_color(muted).child(tr(cx, "nav:mcp.tokensEmpty")).into_any_element()
@@ -950,7 +957,7 @@ impl ConnectView {
                     .leading_xs()
                     .text_color(danger)
                     .child(div().w_full().child(tr(cx, key)))
-                    .child(div().w_full().text_size(px(11.)).font_family(mono.clone()).child(reason.clone()))
+                    .child(div().id("connect-token-row-reason").aria_label(reason.clone()).test_support().w_full().text_size(px(11.)).font_family(mono.clone()).child(reason.clone()))
                     .into_any_element(),
             ),
             RowWork::Busy => Some(div().id("connect-token-row-busy").test_support().flex().items_center().child(Spinner::new().color(muted)).into_any_element()),
