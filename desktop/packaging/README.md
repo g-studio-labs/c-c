@@ -32,6 +32,9 @@ bash packaging/linux/package.sh
   `Exec=cac-desktop %u` (el sistema lanza el binario con el enlace como primer
   argumento). El `.deb` lo registra en su `postinst`; con el `.tar.gz`, se corre
   una vez `sh ~/.local/share/doc/cac-desktop/register-url-scheme.sh`.
+  **Quien se actualiza con el actualizador** (que sólo cambia el binario) no
+  recibe el `.desktop` nuevo: no tendrá `cac://` hasta que reinstale el
+  paquete o corra ese script.
 - Necesita en la máquina: Vulkan con su controlador (`libvulkan1` y el de la
   gráfica), `libxkbcommon`, `libxcb` y, en Wayland, `libwayland-client`.
 - El binario pide la glibc de donde se compiló: el del CI (Ubuntu 24.04) no

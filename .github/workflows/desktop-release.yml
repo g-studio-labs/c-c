@@ -325,4 +325,4 @@ jobs:
             echo "La release $tag ya existe. Una versión publicada no se re-corta." >&2
             exit 1
           fi
-          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false --title "CAC Nativa $VERSION" --notes "La app de escritorio nativa de cac. Sin firmar: macOS y Windows avisarán al abrirla. La app instalada avisa sola de las versiones nuevas." ./*
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false --title "CAC Nativa $VERSION" --notes "La app de escritorio nativa de cac. Sin firmar: macOS y Windows avisarán al abrirla. La app instalada avisa sola de las versiones nuevas. Los enlaces cac:// funcionan al instalar con el paquete; quien se actualiza con el actualizador (sólo cambia el binario) tiene que reinstalar o, en Linux, correr register-url-scheme.sh." ./*

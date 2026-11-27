@@ -228,13 +228,52 @@ fn the_macos_app_is_signed_with_the_fixed_identity_and_declares_mic_and_camera()
     assert!(import < position(&workflow, "bash packaging/macos/package.sh"), "firma antes de importar el certificado");
 }
 
+/// Los `<string>` del array `CFBundleURLSchemes` que cuelga de `CFBundleURLTypes`,
+/// sin los comentarios `<!-- … -->`: un bloque comentado no declara nada, y un
+/// `cac` en otra clave no es un esquema.
+fn url_schemes(plist: &str) -> Vec<String> {
+    let mut clean = String::new();
+    let mut rest = plist;
+    while let Some((before, after)) = rest.split_once("<!--") {
+        clean.push_str(before);
+        rest = after.split_once("-->").expect("comentario sin cerrar en el Info.plist").1;
+    }
+    clean.push_str(rest);
+
+    let mut lines = clean.lines().map(str::trim).skip_while(|l| *l != "<key>CFBundleURLTypes</key>");
+    assert!(lines.next().is_some(), "el Info.plist no declara CFBundleURLTypes");
+    let (mut depth, mut schemes) = (0, Vec::new());
+    while let Some(line) = lines.next() {
+        match line {
+            "<array>" => depth += 1,
+            "</array>" => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            "<key>CFBundleURLSchemes</key>" if depth == 1 => {
+                assert_eq!(lines.next(), Some("<array>"), "CFBundleURLSchemes sin array");
+                for item in lines.by_ref().take_while(|l| *l != "</array>") {
+                    schemes.push(item.strip_prefix("<string>").and_then(|i| i.strip_suffix("</string>")).unwrap_or_else(|| panic!("no es un <string>: {item}")).to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    schemes
+}
+
 /// Cada paquete de la app nativa registra el esquema `cac://` y le pasa el
 /// enlace al binario.
 ///
 /// Roturas que atrapa: quitar el `MimeType` del lanzador de Linux o el `%u` del
 /// `Exec` (el sistema abriría la app sin el enlace); que el `.deb` no lleve su
-/// `postinst` (la caché de lanzadores no se refresca) o `cargo-deb` no lo
-/// apunte; que el `.tar.gz` no lleve el script de registro; quitar `cac` de
+/// `postinst`, que no ejecute `update-desktop-database` (también si queda
+/// comentada) o que `cargo-deb` no lo apunte; que `register-url-scheme.sh`
+/// apunte a otro lanzador que el `.desktop`; en macOS, comentar el bloque o
+/// poner `cac` fuera de `CFBundleURLSchemes`; en Windows, escribir el esquema en
+/// `HKLM`; que el `.tar.gz` no lleve el script de registro; quitar `cac` de
 /// `CFBundleURLTypes` en macOS; en Windows, perder `URL Protocol`, el `"%1"`
 /// del comando, o que el desinstalador no borre la clave (cac:// quedaría
 /// apuntando a un programa que ya no está).
@@ -247,19 +286,27 @@ fn every_package_registers_the_cac_scheme_and_passes_the_link() {
 
     let manifest = read("../desktop/Cargo.toml");
     assert!(manifest.contains("maintainer-scripts = \"packaging/linux/debian\""), "cargo-deb no lleva los scripts");
-    let postinst = read("../desktop/packaging/linux/debian/postinst");
-    assert!(postinst.contains("update-desktop-database"), "el postinst no refresca los lanzadores");
+    // La orden, no la palabra: `command -v update-desktop-database` también la lleva.
+    let postinst = commands(&read("../desktop/packaging/linux/debian/postinst"));
+    assert!(postinst.iter().any(|l| l.starts_with("update-desktop-database ")), "el postinst no ejecuta update-desktop-database: {postinst:#?}");
     let tarball = commands(&read("../desktop/packaging/linux/package.sh"));
     assert!(tarball.iter().any(|l| l.contains("register-url-scheme.sh")), "el .tar.gz no lleva el script de registro");
     let register = read("../desktop/packaging/linux/register-url-scheme.sh");
     assert!(register.contains("xdg-mime default") && register.contains("x-scheme-handler/cac"));
+    let app_id = read("../desktop/packaging/identity.env").lines().find_map(|l| l.strip_prefix("APP_ID=\"")?.strip_suffix('"').map(str::to_string)).expect("identity.env no tiene APP_ID");
+    assert!(register.lines().any(|l| l == format!("DESKTOP_ID=\"{app_id}.desktop\"")), "register-url-scheme.sh apunta a otro lanzador que {app_id}.desktop");
 
-    let plist = read("../desktop/packaging/macos/Info.plist");
-    let types = plist.split_once("<key>CFBundleURLTypes</key>").expect("el Info.plist no declara CFBundleURLTypes").1;
-    assert!(types.contains("<key>CFBundleURLSchemes</key>") && types.contains("<string>cac</string>"), "macOS no conoce cac://");
+    let schemes = url_schemes(&read("../desktop/packaging/macos/Info.plist"));
+    assert!(schemes.iter().any(|scheme| scheme == "cac"), "macOS no conoce cac://: {schemes:?}");
 
-    let installer = commands(&read("../desktop/packaging/windows/installer.nsi"));
+    let installer: Vec<String> = commands(&read("../desktop/packaging/windows/installer.nsi")).into_iter().filter(|l| !l.starts_with(';')).collect();
     assert!(installer.iter().any(|l| l == "!define SCHEME_KEY \"Software\\Classes\\cac\""));
+    // El instalador corre sin privilegios: una escritura en HKLM falla sin decir nada.
+    let touching: Vec<&String> = installer.iter().filter(|l| (l.starts_with("WriteReg") || l.starts_with("DeleteReg")) && (l.contains("SCHEME_KEY") || l.contains("Classes\\cac"))).collect();
+    assert!(touching.len() >= 5, "el instalador toca menos claves de cac:// de las esperadas: {touching:#?}");
+    for l in &touching {
+        assert_eq!(l.split_whitespace().nth(1), Some("HKCU"), "el esquema se escribe fuera de HKCU: {l}");
+    }
     assert!(installer.iter().any(|l| l.starts_with("WriteRegStr HKCU \"${SCHEME_KEY}\" \"URL Protocol\"")), "falta URL Protocol");
     let open = installer.iter().find(|l| l.contains("${SCHEME_KEY}\\shell\\open\\command")).expect("falta shell\\open\\command");
     assert!(open.ends_with("'\"$INSTDIR\\${APP_BINARY}.exe\" \"%1\"'"), "el comando no pasa %1: {open}");
