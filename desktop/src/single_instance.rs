@@ -316,9 +316,13 @@ mod tests {
         assert!(received.recv_timeout(Duration::from_millis(300)).is_err(), "y no le lee nada");
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 
+        // Vacía: sin socket dentro que delate al dueño, sólo la carpeta lo dice.
         let dir = scratch("owner");
-        drop(first(&dir, me));
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).unwrap();
         assert!(claim(&dir, someone_else, &Message::Focus).is_err(), "la carpeta es de otro");
+        assert!(!dir.join(SOCKET).exists(), "y no se escucha en ella");
+        drop(first(&dir, me));
+        assert!(claim(&dir, someone_else, &Message::Focus).is_err(), "ni con el socket de otro dentro");
         assert!(dir.join(SOCKET).exists(), "y su socket no se toca");
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(claim(&dir, me, &Message::Focus).is_err(), "una carpeta que otros pueden abrir no se usa");
