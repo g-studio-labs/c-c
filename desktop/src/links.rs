@@ -43,7 +43,7 @@ pub(crate) fn open_organization(cx: &mut App) {
 /// Un fallo se dice con un aviso del sistema: el enlace puede venir de fuera
 /// de la ventana (otra app, un aviso), y entonces no hay vista donde
 /// escribirlo.
-fn settle(opened: LinkOpened, cx: &mut App) {
+fn settle(opened: LinkOpened, href: &str, cx: &mut App) {
     match opened {
         LinkOpened::Opened => {}
         LinkOpened::Organization => open_organization(cx),
@@ -51,7 +51,7 @@ fn settle(opened: LinkOpened, cx: &mut App) {
         LinkOpened::Failed => cx.show_system_notification(SystemNotification {
             tag: SharedString::from(FAILED_TAG),
             title: SharedString::from(crate::identity::APP_NAME),
-            body: tr(cx, "common:last.openLinkFailed").into(),
+            body: format!("{}\n{href}", tr(cx, "common:last.openLinkFailed")).into(),
             actions: Vec::new(),
         }),
     }
@@ -59,21 +59,24 @@ fn settle(opened: LinkOpened, cx: &mut App) {
 
 /// Abre un enlace de cac donde lleva, sin preguntar qué es.
 fn follow(href: String, cx: &mut App) {
-    let answer = Backend::ask(cx, move |core| async move { core.open_link(&href).await });
+    let asked = href.clone();
+    let answer = Backend::ask(cx, move |core| async move { core.open_link(&asked).await });
     cx.spawn(async move |cx| {
         let Ok(opened) = answer.await else { return };
-        cx.update(|cx| settle(opened, cx));
+        cx.update(|cx| settle(opened, &href, cx));
     })
     .detach();
 }
 
 /// Un enlace pulsado dentro de la app (una tarea, una nota, un pedido): lo
 /// de cac se abre aquí, lo de fuera en el navegador, y una mención o algo
-/// que no es un enlace no va a ningún sitio.
+/// que no es un enlace no va a ningún sitio. Un enlace de cac que no se
+/// sabe abrir (un id que no es un id) lo dice, como el que no se encuentra.
 pub(crate) fn open(href: &str, cx: &mut App) {
-    match Backend::core(cx).app_link(href) {
+    let core = Backend::core(cx);
+    match core.app_link(href) {
         AppLink::Browser { url } => cx.open_url(&url),
-        AppLink::Unopenable => {}
+        AppLink::Unopenable if core.app_route(href).is_none() => {}
         _ => follow(href.to_string(), cx),
     }
 }
@@ -206,7 +209,8 @@ mod tests {
     /// Roturas que atrapa: un enlace de cac que sale al navegador; no
     /// cambiar a la organización de la tarea (se abriría encima de otra);
     /// darle al navegador una ruta sin el servidor ni `/app`; una mención
-    /// que intenta abrirse.
+    /// que intenta abrirse; un enlace de cac con un id que no es un id que
+    /// no hace nada sin decirlo.
     #[gpui_kit::test]
     fn a_cac_link_clicked_in_the_app_opens_here_and_not_in_the_browser(cx: &mut TestAppContext) {
         let server = server();
@@ -223,6 +227,13 @@ mod tests {
         cx.update(|cx| open("cac:user/11111111-1111-4111-8111-111111111111", cx));
         cx.run_until_parked();
         assert_eq!(cx.opened_url(), None, "una mención no va a ningún sitio");
+
+        let said = |cx: &mut TestAppContext| cx.shown_system_notifications().iter().filter(|shown| shown.tag.as_ref() == FAILED_TAG).count();
+        assert_eq!(said(cx), 0);
+        cx.update(|cx| open("cac://notes/a%2F..%2Fx", cx));
+        wait_until(cx, "un id que no es un id lo dice", |cx| said(cx) == 1);
+        assert_eq!(cx.shown_system_notifications().last().unwrap().body.as_ref(), "No se pudo abrir el enlace\ncac://notes/a%2F..%2Fx");
+        assert_eq!(cx.opened_url(), None);
 
         cx.update(|cx| open("cac://servers/x", cx));
         wait_until(cx, "lo que la app no tiene va a la web", |cx| cx.opened_url().is_some());
@@ -286,7 +297,7 @@ mod tests {
         cx.update(|cx| open_from_outside("/tasks?task=no-existe-1".into(), cx));
         wait_until(cx, "dice que no se pudo abrir", |cx| cx.shown_system_notifications().iter().any(|shown| shown.tag.as_ref() == FAILED_TAG));
         let shown = cx.shown_system_notifications();
-        assert_eq!(shown.last().unwrap().body.as_ref(), "No se pudo abrir el enlace");
+        assert_eq!(shown.last().unwrap().body.as_ref(), "No se pudo abrir el enlace\n/tasks?task=no-existe-1");
 
         let asked = Rc::new(std::cell::Cell::new(0));
         let counted = asked.clone();

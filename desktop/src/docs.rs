@@ -2617,8 +2617,8 @@ mod tests {
     }
 
     /// Un enlace escrito en el texto, al pulsarlo, va a donde apunta: el de
-    /// una página de este documento la abre, y el que no se sabe abrir lo
-    /// dice en pantalla, con su equis para quitarlo. Y lo que nombra a una
+    /// una página de este documento la abre, y el que no se sabe abrir (un
+    /// id de nota que no es un id) lo dice en pantalla, con su equis para quitarlo. Y lo que nombra a una
     /// página, al pie, se abre también: aquí, una tarea.
     ///
     /// Roturas que atrapa: un enlace del texto que no hace nada al pulsarlo
@@ -2628,7 +2628,7 @@ mod tests {
     #[gpui_kit::test]
     fn a_link_in_the_text_goes_where_it_points(cx: &mut TestAppContext) {
         let (server, kept) = server("member");
-        kept.lock().unwrap().body = "[Arquitectura](/tasks?doc=space:a&page=p1)\n\n[Notas](/notes/n1)".into();
+        kept.lock().unwrap().body = "[Arquitectura](/tasks?doc=space:a&page=p1)\n\n[Notas](/notes/a%2F..%2Fx)".into();
         let (window, _) = open(&server, 1400., cx);
         let docs = |cx: &mut TestAppContext| cx.update(|cx| Backend::snapshot(cx).read(cx).docs.clone());
 
@@ -2637,7 +2637,7 @@ mod tests {
         click_at(window, "doc-prose-0", 10., 52., cx);
         wait_until(cx, "se dice que no se pudo abrir", |cx| on_screen(window, "doc-link-failed", cx));
         assert_eq!(label_of(window, "doc-link-failed", cx), "No se pudo abrir el enlace");
-        assert_eq!(label_of(window, "doc-link-failed-href", cx), "/notes/n1");
+        assert_eq!(label_of(window, "doc-link-failed-href", cx), "/notes/a%2F..%2Fx");
         assert!(!docs(cx).on_page());
         click(window, "doc-link-failed-close", cx);
         wait_until(cx, "la equis quita el aviso", |cx| !on_screen(window, "doc-link-failed", cx));
