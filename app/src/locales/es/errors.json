@@ -288,5 +288,9 @@
   "request-not-publishable": "Sólo se publica un mensaje aprobado.",
   "request-scope": "El filtro es «míos» o «equipo».",
   "request-status": "Ese estado de pedido no existe.",
-  "agent-messages-only": "Un agente sólo puede retirar los mensajes que escribió un agente; los tuyos los retiras tú desde la app."
+  "agent-messages-only": "Un agente sólo puede retirar los mensajes que escribió un agente; los tuyos los retiras tú desde la app.",
+  "no-journal": "Este servidor de cac no tiene el diario de eventos activo.",
+  "bad-last-event-id": "El último evento recibido no es un número válido.",
+  "bad-after": "El cursor de eventos no es un número válido.",
+  "journal-read": "No se pudo leer el diario de eventos. Prueba de nuevo en un momento."
 }

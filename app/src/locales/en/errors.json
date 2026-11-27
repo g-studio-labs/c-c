@@ -288,5 +288,9 @@
   "request-not-publishable": "Only an approved message is published.",
   "request-scope": "The filter is mine or team.",
   "request-status": "That request status doesn't exist.",
-  "agent-messages-only": "An agent can only withdraw messages an agent wrote; withdraw your own from the app."
+  "agent-messages-only": "An agent can only withdraw messages an agent wrote; withdraw your own from the app.",
+  "no-journal": "This cac server doesn't have the event journal on.",
+  "bad-last-event-id": "The last received event isn't a valid number.",
+  "bad-after": "The event cursor isn't a valid number.",
+  "journal-read": "Couldn't read the event journal. Try again in a moment."
 }
