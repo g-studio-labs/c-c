@@ -20,6 +20,12 @@ pub struct Opener(pub Arc<dyn Fn(&Path) + Send + Sync>);
 
 impl Global for Opener {}
 
+/// Lo mismo para mostrar un fichero en su carpeta: separado de `Opener` para
+/// que una prueba vea si un botón revela o abre.
+pub struct Revealer(pub Arc<dyn Fn(&Path) + Send + Sync>);
+
+impl Global for Revealer {}
+
 /// Abre un fichero o una carpeta con lo que el sistema asocia, por las reglas
 /// de `cac_mcp::host::open_path`: un documento con su programa, una carpeta en
 /// el gestor de ficheros, y lo ejecutable o dudoso sólo se muestra. Si no se
@@ -32,14 +38,18 @@ impl Global for Opener {}
 /// muere sin que nadie lo vea, y con el portal gtk de bspwm no hay otro
 /// camino que lo recoja. `host` limpia ese entorno (ver CLAUDE.md, «Lo que la
 /// app lanza del sistema hereda la AppImage») y dice por qué falla.
-/// Guardián: `no_gpui_open_outside_files`.
+/// Guardián: `no_gpui_open_outside_host`.
 pub fn open_with_system<V: 'static>(path: &Path, cx: &mut Context<V>, say: impl Fn(&mut V, String, &mut Context<V>) + 'static) {
-    launch(path, cx, say, |path| cac_mcp::host::open_path(path));
+    launch(path, cx, say, cac_mcp::host::open_path);
 }
 
 /// Lo mismo, pero mostrando el fichero seleccionado en su carpeta, sin abrirlo
 /// (`cac_mcp::host::reveal`). Una carpeta se abre.
 pub fn reveal_in_folder<V: 'static>(path: &Path, cx: &mut Context<V>, say: impl Fn(&mut V, String, &mut Context<V>) + 'static) {
+    if let Some(revealer) = cx.try_global::<Revealer>().map(|revealer| revealer.0.clone()) {
+        revealer(path);
+        return;
+    }
     launch(path, cx, say, |path| cac_mcp::host::reveal(path).map(|()| Opened::Revealed(None)));
 }
 
@@ -120,8 +130,7 @@ mod tests {
     use cac_core::{ApiError, Locale};
     use cac_mcp::host::{NotOpened, Opened, RevealError};
 
-    /// Las fuentes de la app, sin lo que va tras `#[cfg(test)]` ni los
-    /// comentarios.
+    /// Las fuentes de la app, sin sus módulos de pruebas ni los comentarios.
     fn code_lines() -> Vec<(String, usize, String)> {
         fn walk(dir: &std::path::Path, out: &mut Vec<(String, usize, String)>) {
             for entry in std::fs::read_dir(dir).unwrap() {
@@ -130,7 +139,7 @@ mod tests {
                     walk(&path, out);
                 } else if path.extension().is_some_and(|ext| ext == "rs") {
                     let text = std::fs::read_to_string(&path).unwrap();
-                    let code = text.split("#[cfg(test)]").next().unwrap_or("");
+                    let code = cac_mcp::host::production_code(&text);
                     for (i, line) in code.lines().enumerate().filter(|(_, line)| !line.trim_start().starts_with("//")) {
                         out.push((path.display().to_string(), i + 1, line.to_string()));
                     }

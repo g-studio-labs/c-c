@@ -392,9 +392,36 @@ pub fn clean_with(cmd: &mut Command, env: &[(String, String)]) {
     }
 }
 
+/// El texto de un fichero sin su módulo de pruebas (`#[cfg(test)]` + `mod x {`
+/// hasta su `}` en columna 0), con las líneas quitadas en blanco para que los
+/// números no se muevan. Un `#[cfg(test)]` suelto (un `use`, un `const`, un
+/// `mod x;`) no corta nada: cortar en el primero dejaba sin mirar casi todo
+/// el fichero de `main.rs`, `theme.rs`… Lo usan los guardianes que leen las
+/// fuentes.
+#[doc(hidden)]
+pub fn production_code(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut skipping = false;
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        if skipping {
+            skipping = line != "}";
+            out.push('\n');
+            continue;
+        }
+        if line.trim_end() == "#[cfg(test)]" && lines.peek().is_some_and(|next| next.starts_with("mod ") && next.trim_end().ends_with('{')) {
+            skipping = true;
+            out.push('\n');
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 /// Las líneas de código de `dir` que lanzan un programa por su nombre sin
-/// pasar por aquí. Sólo mira el código, no las pruebas (lo que va tras
-/// `#[cfg(test)]`), y se salta `host.rs`. Es la mitad que comparten los dos
+/// pasar por aquí. Sólo mira el código, no el módulo de pruebas, y se salta `host.rs`. Es la mitad que comparten los dos
 /// guardianes `every_system_program_is_launched_through_here`, el de este crate
 /// y el de la app: cada uno mira las dos carpetas.
 #[doc(hidden)]
@@ -408,7 +435,7 @@ pub fn unclean_launches(dir: &Path) -> Vec<String> {
         }
         seen += 1;
         let text = std::fs::read_to_string(&p).unwrap();
-        let code = text.split("#[cfg(test)]").next().unwrap_or("");
+        let code = production_code(&text);
         for (i, line) in code.lines().enumerate() {
             if line.contains("Command::new(\"") || line.contains("CommandBuilder::new(\"") && !code.contains("clean_pty") {
                 bad.push(format!("{}:{}: {}", p.file_name().unwrap().to_string_lossy(), i + 1, line.trim()));
@@ -423,6 +450,18 @@ pub fn unclean_launches(dir: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rotura que detecta: cortar el fichero en el primer `#[cfg(test)]` (el
+    /// código que sigue a un `use` de pruebas dejaría de mirarse), o no quitar
+    /// el módulo de pruebas (sus rutas falsas darían falsos avisos).
+    #[test]
+    fn production_code_drops_only_the_test_module() {
+        let text = "#[cfg(test)]\nuse x;\nlet a = 1;\n#[cfg(test)]\nmod tests {\n    let bad = 2;\n}\nlet after = 3;\n";
+        let code = production_code(text);
+        assert!(code.contains("let a = 1;") && code.contains("let after = 3;"), "{code}");
+        assert!(!code.contains("bad"), "{code}");
+        assert_eq!(code.lines().count(), text.lines().count(), "las líneas se mueven");
+    }
 
     /// Rotura que detecta: no expandir `~/` (abriría una ruta relativa que no
     /// existe), o expandir una `~` que no abre la ruta.

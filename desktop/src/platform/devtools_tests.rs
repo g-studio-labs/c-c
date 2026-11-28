@@ -35,17 +35,18 @@ fn a_token_with_another_secret_says_its_signature_is_invalid(cx: &mut TestAppCon
 }
 
 /// La carpeta de una imagen comprimida es la del original: ahí se propone
-/// guardar, y el botón de la fila la abre.
+/// guardar, y el botón de la fila la muestra (y, guardada, muestra el fichero).
 ///
-/// Rotura que atrapa: un botón que abre otra carpeta (la de inicio, la
-/// temporal) o que no abre nada.
+/// Roturas que atrapa: un botón que abre otra carpeta (la de inicio, la
+/// temporal) o que no hace nada; que abra el fichero guardado en vez de
+/// revelarlo (`open_with_system` por `reveal_in_folder`).
 #[gpui_kit::test]
 fn the_folder_button_opens_where_the_original_was(cx: &mut TestAppContext) {
     use gpui_kit::{ExternalPaths, FileDropEvent, PlatformInput};
     let (_server, window) = platform_as("member", cx);
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<std::path::PathBuf>::new()));
     let opened = seen.clone();
-    cx.update(|cx| cx.set_global(crate::files::Opener(std::sync::Arc::new(move |path| opened.lock().unwrap().push(path.to_path_buf())))));
+    cx.update(|cx| cx.set_global(crate::files::Revealer(std::sync::Arc::new(move |path| opened.lock().unwrap().push(path.to_path_buf())))));
     let dir = std::env::temp_dir().join(format!("cac-image-folder-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let photo = dir.join("foto.png");
@@ -115,4 +116,28 @@ fn opening_without_an_opener_launches_the_path_and_says_a_failure(cx: &mut TestA
         LAUNCHED.lock().unwrap().push(path.to_string());
         Ok(cac_mcp::host::Opened::WithItsProgram)
     }
+}
+
+/// Sin ningún gancho de prueba (como en producción), `open_with_system` y
+/// `reveal_in_folder` llegan a `cac_mcp::host`, que resuelve la ruta antes de
+/// lanzar nada: una ruta que no existe vuelve con su propia línea, con la ruta.
+///
+/// Roturas que atrapa: abrir con un `xdg-open` sin reglas (`host::open_dir`,
+/// que ejecutaría un `.sh` adjunto) o con algo que no mira la ruta: no diría
+/// que falta; y que `reveal_in_folder` no pase por `host`.
+#[gpui_kit::test]
+fn opening_by_default_goes_through_host(cx: &mut TestAppContext) {
+    struct Probe(Vec<String>);
+    let (_server, _window) = platform_as("member", cx);
+    let probe = cx.new(|_| Probe(Vec::new()));
+    let missing = std::path::PathBuf::from("/tmp/cac-575/no-existe/adjunto.sh");
+    probe.update(cx, |_, cx| crate::files::open_with_system(&missing, cx, |probe: &mut Probe, text, _| probe.0.push(text)));
+    probe.update(cx, |_, cx| crate::files::reveal_in_folder(&missing, cx, |probe: &mut Probe, text, _| probe.0.push(text)));
+    cx.run_until_parked();
+    let lines = probe.read_with(cx, |probe, _| probe.0.clone());
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    for line in &lines {
+        assert!(line.contains("/tmp/cac-575/no-existe/adjunto.sh"), "{line}");
+    }
+    cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
 }
