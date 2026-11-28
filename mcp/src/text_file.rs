@@ -114,27 +114,40 @@ pub fn check(path: &str) -> Result<PathBuf, Refusal> {
     Ok(real)
 }
 
-/// Carpetas donde sólo hay llaves.
+/// Carpetas donde sólo hay llaves (`.docker` guarda `config.json` con los
+/// tokens de los registros).
 const SECRET_DIRS: &[&str] = &[".ssh", ".gnupg", ".aws", ".kube", ".password-store", ".docker"];
 
-/// Por el nombre: lo que no se adjunta ni se copia aunque sea texto.
+/// Los tipos de llave que `ssh-keygen` pone tras `id_`: `id_rsa.bak` o
+/// `id_ed25519-old` siguen siendo la llave.
+const KEY_TYPES: &[&str] = &["rsa", "dsa", "ecdsa", "ed25519"];
+
+/// Por el nombre: lo que no se adjunta ni se copia aunque sea texto. Todo en
+/// minúsculas: el disco de macOS y el de Windows no distinguen, y allí
+/// `~/.SSH/ID_RSA` es la llave.
 pub fn looks_secret(path: &Path) -> bool {
-    if path.components().any(|c| SECRET_DIRS.contains(&c.as_os_str().to_string_lossy().as_ref())) {
+    let parts: Vec<String> = path.components().map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase()).collect();
+    if parts.iter().any(|c| SECRET_DIRS.contains(&c.as_str())) {
         return true;
     }
     let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()) else {
         return false;
     };
+    // El token de `gh`.
+    if name == "hosts.yml" && parts.iter().rev().nth(1).is_some_and(|d| d == "gh") {
+        return true;
+    }
     let ext = Path::new(&name).extension().map(|e| e.to_string_lossy().into_owned());
     let ext = ext.as_deref();
+    let key_file = name.strip_prefix("id_").is_some_and(|rest| matches!(ext, None | Some("pub")) || KEY_TYPES.iter().any(|t| rest.starts_with(t)));
     name == ".env"
         || name.starts_with(".env.")
         || ext == Some("env")
-        || matches!(ext, Some("pem" | "key" | "p12" | "pfx" | "kdbx" | "keystore" | "jks" | "asc" | "gpg"))
-        || (name.starts_with("id_") && matches!(ext, None | Some("pub")))
+        || matches!(ext, Some("pem" | "key" | "ppk" | "p12" | "pfx" | "kdbx" | "keystore" | "jks" | "asc" | "gpg"))
+        || key_file
         || name.starts_with("credentials")
         || name.starts_with("secret")
-        || matches!(name.as_str(), ".netrc" | ".pgpass" | ".npmrc" | ".pypirc" | ".git-credentials")
+        || matches!(name.as_str(), ".netrc" | "_netrc" | ".pgpass" | ".npmrc" | ".pypirc" | ".git-credentials")
 }
 
 #[cfg(test)]
@@ -201,6 +214,56 @@ mod tests {
         assert!(looks_secret(Path::new("/home/ana/.ssh/config")));
         assert!(looks_secret(Path::new("/home/ana/.aws/config")));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// En macOS y Windows el disco no distingue mayúsculas: `.ENV`, `ID_RSA`
+    /// o `~/.SSH/config` son el mismo secreto.
+    ///
+    /// Roturas que detecta: comparar el nombre o la carpeta sin pasarlos a
+    /// minúsculas.
+    #[test]
+    fn a_secret_in_capitals_is_still_a_secret() {
+        let dir = temp("caps");
+        for name in [".ENV", "ID_RSA", "Server.PEM", "Prod.Env", "CREDENTIALS.json"] {
+            std::fs::write(dir.join(name), "X=1").unwrap();
+            assert_eq!(read(&dir.join(name).to_string_lossy()), Err(Refusal::Secret), "{name}");
+        }
+        for path in ["/Users/ana/.SSH/config", "/Users/ana/.Aws/credentials", "C:/Users/ana/.Docker/config.json", "/Users/ana/.config/GH/Hosts.yml"] {
+            assert!(looks_secret(Path::new(path)), "{path}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Lo que guarda una llave o un token aunque no se llame `.env`.
+    ///
+    /// Roturas que detecta: dejar pasar una copia de una llave (`id_rsa.bak`),
+    /// una llave de PuTTY, un almacén de certificados o de contraseñas, el
+    /// token de `gh`, el de Docker o los ficheros de credenciales de npm, pip,
+    /// git y Postgres. Y, al revés, tomar por llave un `id_mapping.sql` o
+    /// cualquier `hosts.yml` que no es el de `gh`.
+    #[test]
+    fn keys_tokens_and_their_copies_are_secrets() {
+        for path in [
+            "/home/ana/keys/id_rsa.bak",
+            "/home/ana/keys/id_ed25519.old",
+            "/home/ana/keys/id_ecdsa-2024",
+            "/home/ana/keys/server.ppk",
+            "/home/ana/certs/client.p12",
+            "/home/ana/certs/client.pfx",
+            "/home/ana/vault.kdbx",
+            "/home/ana/.netrc",
+            "/home/ana/.pgpass",
+            "/home/ana/.npmrc",
+            "/home/ana/.pypirc",
+            "/home/ana/.git-credentials",
+            "/home/ana/.docker/config.json",
+            "/home/ana/.config/gh/hosts.yml",
+        ] {
+            assert!(looks_secret(Path::new(path)), "{path}");
+        }
+        for fine in ["/home/ana/tcg/id_mapping.sql", "/home/ana/tcg/id_rsvp.csv", "/home/ana/ansible/hosts.yml", "/home/ana/tcg/apply.sql"] {
+            assert!(!looks_secret(Path::new(fine)), "{fine}");
+        }
     }
 
     #[test]

@@ -192,11 +192,7 @@ pub fn reveal_path(path: &str, open_dir: &dyn Fn(&Path) -> Result<(), String>) -
         std::io::ErrorKind::NotFound => RevealError::NotFound,
         _ => RevealError::Failed(e.to_string()),
     })?;
-    let shown = canonical.to_string_lossy();
-    let canonical = match shown.strip_prefix(r"\\?\") {
-        Some(plain) if !plain.starts_with("UNC") => std::path::PathBuf::from(plain),
-        _ => canonical.clone(),
-    };
+    let canonical = without_verbatim_prefix(&canonical);
     if canonical.is_dir() && opens_folders(THIS_OS) {
         return open_dir(&canonical).map_err(RevealError::Failed);
     }
@@ -208,14 +204,25 @@ pub fn reveal_path(path: &str, open_dir: &dyn Fn(&Path) -> Result<(), String>) -
     }
 }
 
+/// En Windows, `canonicalize` devuelve `\\?\C:\…`, que `explorer` no
+/// entiende: se le quita ese prefijo (salvo a una ruta de red, `\\?\UNC\…`).
+fn without_verbatim_prefix(path: &Path) -> std::path::PathBuf {
+    let shown = path.to_string_lossy();
+    match shown.strip_prefix(r"\\?\") {
+        Some(plain) if !plain.starts_with("UNC") => std::path::PathBuf::from(plain),
+        _ => path.to_path_buf(),
+    }
+}
+
 /// Lo que se abre con su programa al pulsar su ruta en un pedido
 /// (command-and-control-567: jose quiere el `apply.sql` en su editor, no en
 /// Thunar). Sólo documentos: texto, PDF, imágenes. Lo demás (un `.jar`, un
 /// `.sh`, un `.desktop`, algo sin extensión) se sigue mostrando, porque para el
-/// sistema abrirlo es ejecutarlo; y un `.html` tampoco, que corre su código.
+/// sistema abrirlo es ejecutarlo; y nada que abra un navegador (`.html`,
+/// `.htm`, `.xhtml`, `.xml`, `.svg`), que corre el `<script>` que lleve.
 const OPENS_WITH_ITS_PROGRAM: &[&str] = &[
-    "sql", "txt", "md", "markdown", "json", "yaml", "yml", "toml", "csv", "tsv", "log", "xml", "ini", "conf", "diff",
-    "patch", "pdf", "png", "jpg", "jpeg", "gif", "webp",
+    "sql", "txt", "md", "markdown", "json", "yaml", "yml", "toml", "csv", "tsv", "log", "ini", "conf", "diff", "patch",
+    "pdf", "png", "jpg", "jpeg", "gif", "webp",
 ];
 
 /// Si un fichero (ya resuelto) se abre con su programa: un documento por su
@@ -235,7 +242,7 @@ pub fn opens_with_its_program(real: &Path) -> bool {
 
 /// El programa que abre `target` con lo que el sistema le asocia.
 pub fn open_command(os: Os, target: &Path) -> (&'static str, Vec<String>) {
-    let target = target.to_string_lossy().into_owned();
+    let target = without_verbatim_prefix(target).to_string_lossy().into_owned();
     match os {
         Os::Linux => ("xdg-open", vec![target]),
         Os::Mac => ("open", vec![target]),
@@ -417,7 +424,14 @@ mod tests {
         std::fs::set_permissions(&runnable_sql, std::fs::Permissions::from_mode(0o755)).unwrap();
         let doc_link = dir.join("notes.txt");
         symlink(&script, &doc_link).unwrap();
-        for target in [&script, &bare, &runnable_sql, &doc_link] {
+        // Lo que abre un navegador corre su `<script>`: se muestra.
+        let mut browser = vec![];
+        for name in ["page.xml", "icon.svg", "page.xhtml", "page.htm", "page.html", "PAGE.XML"] {
+            let p = dir.join(name);
+            std::fs::write(&p, "<html xmlns=\"http://www.w3.org/1999/xhtml\"><script>x()</script></html>").unwrap();
+            browser.push(p);
+        }
+        for target in [&script, &bare, &runnable_sql, &doc_link].into_iter().chain(browser.iter()) {
             reset();
             open_path_with(&target.to_string_lossy(), &|_| Ok(())).unwrap();
             let real = std::fs::canonicalize(target).unwrap();
@@ -462,6 +476,19 @@ mod tests {
         assert_eq!(*opened.borrow(), vec![real_dir.clone()]);
         reveal_path(&dir.to_string_lossy(), &record).unwrap();
         assert_eq!(*opened.borrow(), vec![real_dir.clone(), real_dir], "una carpeta se abre ella misma");
+    }
+
+    /// En Windows, `explorer` no entiende la ruta `\\?\C:\…` que da
+    /// `canonicalize`: abrir un documento le pasa la ruta sin el prefijo, y
+    /// una de red (`\\?\UNC\…`) la deja como está.
+    ///
+    /// Rotura que detecta: pasarle a `explorer` el `canonicalize` crudo, con lo
+    /// que en Windows pulsar la ruta de un `.sql` no abre nada.
+    #[test]
+    fn on_windows_a_document_is_opened_without_the_verbatim_prefix() {
+        assert_eq!(open_command(Os::Windows, Path::new(r"\\?\C:\tcg\apply.sql")), ("explorer", vec![r"C:\tcg\apply.sql".to_string()]));
+        assert_eq!(open_command(Os::Windows, Path::new(r"\\?\UNC\srv\x.sql")), ("explorer", vec![r"\\?\UNC\srv\x.sql".to_string()]));
+        assert_eq!(open_command(Os::Linux, Path::new("/tmp/apply.sql")), ("xdg-open", vec!["/tmp/apply.sql".to_string()]));
     }
 
     /// El comando de mostrar de cada sistema selecciona el fichero y no lo abre.
