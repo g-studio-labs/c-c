@@ -66,6 +66,53 @@ fn the_folder_button_opens_where_the_original_was(cx: &mut TestAppContext) {
     wait_until(cx, "sale la fila", |cx| on_screen(window, "image-folder-1", cx));
     click(window, "image-folder-1", cx);
     assert_eq!(*seen.lock().unwrap(), [dir.clone()]);
+
+    // Guardada en otra carpeta, el botón muestra ese fichero, no la carpeta
+    // de antes.
+    let out = dir.join("salida");
+    std::fs::create_dir_all(&out).unwrap();
+    let saved = out.join("foto-guardada.png");
+    click(window, "image-download-1", cx);
+    let chosen = saved.clone();
+    cx.simulate_new_path_selection(move |_| Some(chosen));
+    wait_until(cx, "queda guardada", |_| saved.exists());
+    wait_until(cx, "la fila lo sabe", |cx| on_screen(window, "image-folder-1", cx));
+    cx.run_until_parked();
+    click(window, "image-folder-1", cx);
+    assert_eq!(seen.lock().unwrap().last(), Some(&saved));
     let _ = std::fs::remove_dir_all(&dir);
     cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+}
+
+static LAUNCHED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Sin `Opener` (como en producción), abrir lanza por la función de `host`
+/// con la ruta tal cual, y si falla se dice en la pantalla; si abre, no.
+///
+/// Roturas que atrapa: lanzar con otra ruta (el padre, la carpeta
+/// temporal); tragarse el fallo; avisar aunque se abriera.
+#[gpui_kit::test]
+fn opening_without_an_opener_launches_the_path_and_says_a_failure(cx: &mut TestAppContext) {
+    struct Probe(Vec<String>);
+    let (_server, _window) = platform_as("member", cx);
+    LAUNCHED.lock().unwrap().clear();
+    let probe = cx.new(|_| Probe(Vec::new()));
+    let folder = std::path::PathBuf::from("/tmp/cac-575/carpeta");
+    for (run, lines_so_far) in [(fail as fn(&str) -> _, 1), (succeed as fn(&str) -> _, 1)] {
+        probe.update(cx, |_, cx| crate::files::launch(&folder, cx, |probe: &mut Probe, text, _| probe.0.push(text), run));
+        cx.run_until_parked();
+        assert_eq!(probe.read_with(cx, |probe, _| probe.0.len()), lines_so_far, "el fallo se dice una vez y el que abrió no dice nada");
+    }
+    assert_eq!(*LAUNCHED.lock().unwrap(), ["/tmp/cac-575/carpeta", "/tmp/cac-575/carpeta"]);
+    assert!(probe.read_with(cx, |probe, _| probe.0[0].contains("No se pudo abrir")));
+    cx.update(|cx| Backend::run(cx, |core| async move { core.stream().stop() }));
+
+    fn fail(path: &str) -> Result<cac_mcp::host::Opened, cac_mcp::host::RevealError> {
+        LAUNCHED.lock().unwrap().push(path.to_string());
+        Err(cac_mcp::host::RevealError::Failed("sin gestor".into()))
+    }
+    fn succeed(path: &str) -> Result<cac_mcp::host::Opened, cac_mcp::host::RevealError> {
+        LAUNCHED.lock().unwrap().push(path.to_string());
+        Ok(cac_mcp::host::Opened::WithItsProgram)
+    }
 }

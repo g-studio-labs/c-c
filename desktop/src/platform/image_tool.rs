@@ -34,6 +34,9 @@ struct Item {
     /// La carpeta del original: ahí se propone guardar y ahí lleva el botón
     /// de la carpeta hasta que se guarda en otra.
     folder: PathBuf,
+    /// El fichero tal como se guardó, para mostrarlo seleccionado en su
+    /// carpeta; `None` hasta que se guarda.
+    saved: Option<PathBuf>,
 }
 
 pub struct ImageToolView {
@@ -96,7 +99,7 @@ impl ImageToolView {
                         Ok((result, folder)) => {
                             let preview = ImageFormat::from_mime_type(&result.mime).filter(|_| result.format != "avif").map(|format| Arc::new(Image::from_bytes(format, result.data.clone())));
                             this.next_id += 1;
-                            fresh.push(Item { id: this.next_id, result, preview, saving: Saving::Idle, folder });
+                            fresh.push(Item { id: this.next_id, result, preview, saving: Saving::Idle, folder, saved: None });
                         }
                         Err(error) => this.error = Some(error),
                     }
@@ -121,8 +124,8 @@ impl ImageToolView {
         cx.spawn(async move |this, cx| {
             let outcome = match chosen.await {
                 Ok(Ok(Some(target))) => {
-                    let folder = target.parent().map(PathBuf::from);
-                    Some(cx.background_executor().spawn(async move { std::fs::write(target, data).map_err(|error| error.to_string()) }).await.map(|_| folder))
+                    let saved = target.clone();
+                    Some(cx.background_executor().spawn(async move { std::fs::write(target, data).map_err(|error| error.to_string()) }).await.map(|_| saved))
                 }
                 _ => None,
             };
@@ -130,8 +133,11 @@ impl ImageToolView {
                 let language = locale(cx);
                 if let Some(item) = this.items.iter_mut().find(|item| item.id == id) {
                     item.saving = if matches!(outcome, Some(Ok(_))) { Saving::Done } else { Saving::Idle };
-                    if let Some(Ok(Some(folder))) = &outcome {
-                        item.folder = folder.clone();
+                    if let Some(Ok(saved)) = &outcome {
+                        if let Some(folder) = saved.parent() {
+                            item.folder = folder.to_path_buf();
+                        }
+                        item.saved = Some(saved.clone());
                     }
                 }
                 if let Some(Err(error)) = outcome {
@@ -142,6 +148,17 @@ impl ImageToolView {
             .ok();
         })
         .detach();
+    }
+
+    /// El botón de la carpeta: el fichero guardado, seleccionado en su carpeta;
+    /// si aún no se guardó, la carpeta del original.
+    fn show_saved(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(item) = self.items.iter().find(|item| item.id == id) else { return };
+        let target = item.saved.clone().unwrap_or_else(|| item.folder.clone());
+        crate::files::reveal_in_folder(&target, cx, |this, text, cx| {
+            this.error = Some(text);
+            cx.notify();
+        });
     }
 
     /// Una carpeta y todos dentro, cada uno con su nombre.
@@ -182,6 +199,7 @@ impl ImageToolView {
                         item.saving = if ok { Saving::Done } else { Saving::Idle };
                         if ok {
                             item.folder = folder.clone();
+                            item.saved = Some(folder.join(&name));
                         }
                     }
                     if let Err(error) = result {
@@ -286,7 +304,6 @@ impl ImageToolView {
                 };
                 let id = item.id;
                 let saving = item.saving;
-                let folder = item.folder.clone();
                 let actions = div()
                     .flex()
                     .justify_end()
@@ -306,7 +323,7 @@ impl ImageToolView {
                             .xsmall()
                             .icon(Icon::new(Lucide::FolderOpen))
                             .tooltip(tr(cx, "common:devtools.image.openFolder"))
-                            .on_click(move |_, _, cx| crate::files::open_with_system(&folder, cx)),
+                            .on_click(cx.listener(move |this, _, _, cx| this.show_saved(id, cx))),
                     )
                     .child(
                         Button::new(SharedString::from(format!("image-remove-{id}")))

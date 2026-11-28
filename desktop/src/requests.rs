@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use cac_core::{AgentRequest, AnswerDraft, InboxTarget, LinkSegment, RequestFile, RequestFileSlot, RequestFilter, RequestKind, RequestScope, RequestStatus, RequestStatusFilter};
-use cac_mcp::host::{NotOpened, Opened};
+use cac_mcp::host::Opened;
 use cac_mcp::text_file::Refusal;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -426,18 +426,8 @@ impl RequestsView {
                 cx.spawn(async move |this, cx| {
                     let result = cx.background_executor().spawn(async move { open_path(&path) }).await;
                     this.update(cx, |this, cx| {
-                        let name = file_name(&shown);
-                        match result {
-                            Ok(Opened::WithItsProgram | Opened::Revealed(None)) => return,
-                            Ok(Opened::Revealed(Some(NotOpened::ContentType(mime)))) => {
-                                this.said = Some(cac_core::text_with(locale(cx), "work:requests.revealedByContent", &[("name", &name), ("type", &mime)]))
-                            }
-                            Ok(Opened::Revealed(Some(NotOpened::TypeUnknown))) => {
-                                this.said = Some(cac_core::text_with(locale(cx), "work:requests.revealedTypeUnknown", &[("name", &name)]))
-                            }
-                            Err(cac_mcp::host::RevealError::Failed(_)) => this.said = Some(tr(cx, "common:last.openLinkFailed")),
-                            Err(_) => this.said = Some(cac_core::text_with(locale(cx), "work:requests.pathMissing", &[("path", &shown)])),
-                        }
+                        let Some(line) = crate::files::failure_line(&result, &shown, locale(cx)) else { return };
+                        this.said = Some(line);
                         cx.notify();
                     })
                     .ok();

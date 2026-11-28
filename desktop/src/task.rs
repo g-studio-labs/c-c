@@ -373,7 +373,7 @@ impl TaskView {
         cx.spawn_in(window, async move |this, cx| {
             let Ok(result) = answer.await else { return };
             this.update_in(cx, |this, _, cx| match result {
-                Ok(path) => files::open_with_system(&path, cx),
+                Ok(path) => files::open_with_system(&path, cx, move |this, text, cx| this.say_problem(task_id.clone(), text, cx)),
                 Err(error) => {
                     let text = match error {
                         Some(error) => error_text(cx, &error, "work:task.errOpenFile"),

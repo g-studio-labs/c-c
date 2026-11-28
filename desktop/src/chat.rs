@@ -383,7 +383,7 @@ impl ChatView {
         cx.spawn_in(window, async move |this, cx| {
             let Ok(result) = answer.await else { return };
             this.update_in(cx, |this, _, cx| match result {
-                Ok(path) => files::open_with_system(&path, cx),
+                Ok(path) => files::open_with_system(&path, cx, |this, text, cx| this.say(text, cx)),
                 Err(Some(error)) => {
                     let text = error_text(cx, &error, "work:task.errOpenFile");
                     this.say(text, cx);
