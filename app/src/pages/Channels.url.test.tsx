@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 
 /**
  * El canal que se ve está en la dirección (command-and-control-576), también
@@ -23,6 +23,8 @@ const { MemoryRouter, useLocation, useNavigationType } = await import("react-rou
 const { default: Channels } = await import("@/pages/Channels");
 const { useTasksStore } = await import("@/store/tasks.store");
 const { SidebarProvider } = await import("@/components/ui/sidebar");
+const { useChatStore } = await import("@/store/chat.store");
+const { useOrgsStore } = await import("@/store/orgs.store");
 
 let search = "";
 let how = "";
@@ -44,6 +46,7 @@ const montar = (url: string) =>
 
 beforeEach(() => {
   mobile.on = false;
+  useOrgsStore.setState({ currentOrgId: null } as never);
   useTasksStore.setState({
     tree: [
       { id: "sp-1", orgId: "o", name: "Uno", color: "#888", folders: [], lists: [] },
@@ -76,5 +79,37 @@ describe("la dirección dice el canal", () => {
     montar("/chat");
     await Promise.resolve();
     expect(search).toBe("");
+  });
+
+  it("un canal pedido que aún no está en el árbol (cambio de org) no se reescribe, y se abre al llegar", async () => {
+    useOrgsStore.setState({ currentOrgId: "o-b" } as never);
+    useTasksStore.setState({
+      tree: [{ id: "sp-a", orgId: "o-a", name: "A", color: "#888", folders: [], lists: [] }],
+    } as never);
+    montar("/chat?space=sp-b");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(search).toBe("?space=sp-b");
+
+    act(() => {
+      useTasksStore.setState({
+        tree: [
+          { id: "sp-b0", orgId: "o-b", name: "General", color: "#888", folders: [], lists: [] },
+          { id: "sp-b", orgId: "o-b", name: "B", color: "#888", folders: [], lists: [] },
+        ],
+      } as never);
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(search).toBe("?space=sp-b");
+    expect(useChatStore.getState().spaceId).toBe("sp-b");
+  });
+
+  it("con el árbol de la org cargado, un pedido que no existe sí cae al canal que se ve", async () => {
+    useOrgsStore.setState({ currentOrgId: "o" } as never);
+    montar("/chat?space=sp-borrado");
+    await waitFor(() => expect(search).toBe("?space=sp-1"));
   });
 });

@@ -63,8 +63,13 @@ export default function Channels() {
   // recordado o del general: así se copia o se abre en la app
   // (command-and-control-576). En el teléfono no: sin `?space=` es la lista.
   const shownId = space?.id;
+  // Un pedido que aún no está en el árbol puede ser de otra org (`goInOrg`
+  // navega a `?space=B` con el árbol de la anterior todavía puesto): no se
+  // reescribe hasta que el árbol sea de esta org y de verdad no lo tenga.
+  const treeIsOfThisOrg = !orgId || tree.some((s) => s.orgId === orgId);
+  const requestedIsGone = !requested || (treeIsOfThisOrg && !tree.some((s) => s.id === requested));
   useEffect(() => {
-    if (mobile || !shownId || requested === shownId) return;
+    if (mobile || !shownId || requested === shownId || !requestedIsGone) return;
     setParams(
       (prev) => {
         const next = new URLSearchParams(prev);
@@ -73,7 +78,7 @@ export default function Channels() {
       },
       { replace: true },
     );
-  }, [shownId, requested, mobile, setParams]);
+  }, [shownId, requested, requestedIsGone, mobile, setParams]);
 
   // Says which channel is on screen, so the event handler can keep quiet about
   // messages you are watching arrive. It used to read "is the panel open on
