@@ -197,6 +197,13 @@ async fn what_is_not_read_yet_is_not_loaded() {
 #[tokio::test]
 async fn opening_a_task_or_a_doc_from_the_bell_leaves_overview_and_requests() {
     let rig = rig().await;
+    // `open` de un documento dice si llegó a él: el documento tiene que existir.
+    let doc = json!({ "doc": null, "orgId": "o1", "decisions": [], "attachments": [], "tabs": [{ "key": "overview", "body": "", "bodyHash": "h1" }] });
+    get("/api/v1/docs/list/l1").respond_with(ok(doc)).mount(&rig.server).await;
+    get("/api/v1/docs/list/l1/pages").respond_with(ok(json!([]))).mount(&rig.server).await;
+    let space = json!({ "id": "s1", "orgId": "o1", "name": "App", "color": "#888", "people": [], "folders": [], "lists": [{ "id": "l1", "name": "Sprint", "openCount": 1, "taskCount": 2 }] });
+    get("/api/v1/task-spaces/").respond_with(ok(json!([space]))).mount(&rig.server).await;
+    rig.core.tree().load("o1").await;
     for link in ["/tasks?task=t1", "/tasks?doc=list:l1"] {
         rig.core.overview().show();
         assert!(rig.core.overview().state().on_screen);
