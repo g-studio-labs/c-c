@@ -449,3 +449,36 @@ async fn the_inbox_says_truly_whether_it_opened_a_doc() {
     assert!(!inbox.open("/tasks?doc=space:a&page=ya-no-esta", "o1").await);
     assert_eq!(rig.target().as_deref(), Some("a"));
 }
+
+/// Por la bandeja, un id que no es un id no le pide nada al servidor, por
+/// ninguna rama, y `open` dice que no lo abrió. Con `doc_link` el id de una
+/// tarea llega descodificado: sin filtro, `task=..%2F..%2Fx` era un
+/// `GET /api/x` con la sesión de quien pulsa un pedido de agente.
+///
+/// Rotura que atrapa: volver a abrir la tarea con `tasks().open(&id)` sin
+/// filtrar el id descodificado; quitar el filtro de la publicación, del
+/// canal o del directo.
+#[tokio::test]
+async fn an_inbox_link_with_an_id_that_is_not_an_id_asks_the_server_nothing() {
+    let rig = rig().await;
+    let inbox = rig.core.inbox();
+    let before = rig.requests().await;
+
+    for link in [
+        "/tasks?task=..%2F..%2Fx",
+        "/tasks?task=a%2Fb",
+        "/tasks?task=%2e%2e",
+        "/feedback?post=..%2Fx",
+        "/feedback?post=../x",
+        "/chat?space=../x",
+        "/dm?c=a/b",
+    ] {
+        assert!(!inbox.open(link, "o1").await, "{link}: la bandeja dice que lo abrió");
+    }
+    let asked: Vec<String> = rig.server.received_requests().await.unwrap()[before..].iter().map(|request| request.url.path().to_string()).collect();
+    assert!(asked.is_empty(), "pidió algo al servidor por un id que no es un id: {asked:?}");
+
+    // Y una tarea de verdad se sigue abriendo.
+    assert!(inbox.open(&format!("/tasks?task={TASK}"), "o1").await);
+    assert_eq!(rig.reads(&format!("/api/v1/tasks/{TASK}")).await, 1);
+}

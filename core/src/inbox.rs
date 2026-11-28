@@ -32,6 +32,7 @@ use std::time::Duration;
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::app_link::plain_id;
 use crate::comms::Conversation;
 use crate::counters::{count_badge, rings_bell};
 use crate::doc_links::{doc_link, DocLink};
@@ -283,20 +284,29 @@ pub enum InboxTarget {
 }
 
 /// A dónde lleva un enlace de la bandeja (los que escribe el servidor).
+///
+/// Todo id que sale de aquí acaba pegado en una ruta de la API (la tarea, el
+/// canal, el directo, la publicación, el documento), así que tiene que ser un
+/// id y nada más: un aviso o un pedido de agente con `task=..%2F..%2Fx` haría
+/// un GET a otra ruta con la sesión de quien pulsa. Lo que no lo es no es de
+/// aquí, y `links::open` lo pasa por `app_link`, que lo filtra igual.
 pub fn link_target(link: &str) -> InboxTarget {
     let path = link.split('?').next().unwrap_or_default();
+    let id = |name: &str| query_param(link, name).filter(|id| plain_id(id));
     match path {
-        "/chat" => query_param(link, "space").map(|id| InboxTarget::Conversation { conversation: Conversation::Channel { space_id: id.into() } }),
-        "/dm" => query_param(link, "c").map(|id| InboxTarget::Conversation { conversation: Conversation::Direct { conversation_id: id.into() } }),
+        "/chat" => id("space").map(|id| InboxTarget::Conversation { conversation: Conversation::Channel { space_id: id.into() } }),
+        "/dm" => id("c").map(|id| InboxTarget::Conversation { conversation: Conversation::Direct { conversation_id: id.into() } }),
         // El mismo traductor que el resto de enlaces de la app: descodifica,
-        // quita el ancla y sólo acepta las clases de nodo que existen.
+        // quita el ancla y sólo acepta las clases de nodo que existen. Lo
+        // descodificado es lo que se filtra. La página, la pestaña y la
+        // sección las filtra `Docs::follow_link`.
         "/tasks" => match doc_link(link) {
-            DocLink::Task { id } => Some(InboxTarget::Task { task_id: id }),
-            DocLink::Doc { id, .. } => Some(InboxTarget::Doc { node_id: id, route: link.into() }),
+            DocLink::Task { id } if plain_id(&id) => Some(InboxTarget::Task { task_id: id }),
+            DocLink::Doc { id, .. } if plain_id(&id) => Some(InboxTarget::Doc { node_id: id, route: link.into() }),
             _ => None,
         },
-        "/requests" => query_param(link, "open").map(|code| InboxTarget::Request { code: code.into() }),
-        "/feedback" => query_param(link, "post").map(|id| InboxTarget::Post { post_id: id.into() }),
+        "/requests" => id("open").map(|code| InboxTarget::Request { code: code.into() }),
+        "/feedback" => id("post").map(|id| InboxTarget::Post { post_id: id.into() }),
         _ => None,
     }
     .unwrap_or(InboxTarget::NotHere)
@@ -836,6 +846,29 @@ mod tests {
         assert_eq!(group_key_of(&direct), "dm:c1");
         assert_eq!(link_target(&channel.link), InboxTarget::Conversation { conversation: Conversation::Channel { space_id: "s1".into() } });
         assert_eq!(link_target(&direct.link), InboxTarget::Conversation { conversation: Conversation::Direct { conversation_id: "c1".into() } });
+    }
+
+    /// Un id que no es un id no sale de la bandeja, por ninguna rama: todos
+    /// acaban en una ruta de la API. Roturas que atrapa: quitar el filtro de
+    /// cualquiera de las ramas (canal, directo, tarea, documento, pedido,
+    /// publicación), o filtrar la tarea antes de descodificarla.
+    #[test]
+    fn an_id_that_is_not_an_id_goes_nowhere() {
+        for link in [
+            "/chat?space=../x",
+            "/chat?space=a/b",
+            "/dm?c=../../x",
+            "/dm?c=a%2Fb",
+            "/tasks?task=..%2F..%2Fx",
+            "/tasks?task=a%2Fb",
+            "/tasks?task=%2e%2e",
+            "/tasks?doc=space:..%2Fx",
+            "/requests?open=../x",
+            "/feedback?post=../x",
+            "/feedback?post=a/b",
+        ] {
+            assert_eq!(link_target(link), InboxTarget::NotHere, "{link}");
+        }
     }
 
     /// A dónde lleva cada enlace. Roturas que atrapa: confundir un canal con
