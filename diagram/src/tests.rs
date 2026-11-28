@@ -432,6 +432,66 @@ fn cache_hits_by_content_and_theme() {
 }
 
 #[test]
+fn a_shrunk_diagram_has_the_same_size_drawn_and_from_the_cache() {
+    // Cuarenta nodos en fila: a 2× pasa de `MAX_SIDE` y se encoge. El primer
+    // dibujo y la caché (la misma y una reabierta) tienen que ocupar lo mismo
+    // en pantalla; antes el primero salía cuatro veces más ancho.
+    let source = format!(
+        "flowchart LR\n{}",
+        (0..40)
+            .map(|i| format!("  N{i} --> N{}\n", i + 1))
+            .collect::<String>()
+    );
+    let dir = temp_dir("shrunk");
+    let drawn = Cache::new(&dir)
+        .get_or_draw(painter(), &source, Theme::Light, 2.0)
+        .unwrap();
+    assert_eq!(drawn.pixel_width, MAX_SIDE, "the diagram is not shrunk");
+    let cached = Cache::new(&dir)
+        .get_or_draw(painter(), &source, Theme::Light, 2.0)
+        .unwrap();
+    let cache = Cache::new(&dir);
+    let again = cache
+        .get_or_draw(painter(), &source, Theme::Light, 2.0)
+        .unwrap();
+    let again_same_cache = cache
+        .get_or_draw(painter(), &source, Theme::Light, 2.0)
+        .unwrap();
+    for (what, picture) in [
+        ("reopened", &cached),
+        ("another reopened", &again),
+        ("same cache", &again_same_cache),
+    ] {
+        assert_eq!(
+            (picture.width(), picture.height()),
+            (drawn.width(), drawn.height()),
+            "{what}"
+        );
+    }
+    // Sin borrón: a la escala pedida, el diagrama no ocupa más píxeles de
+    // pantalla de los que tiene el PNG.
+    assert!(drawn.width() * 2.0 <= drawn.pixel_width as f32 + 0.5);
+    assert!(drawn.height() * 2.0 <= drawn.pixel_height as f32 + 0.5);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_scale_that_is_not_a_number_draws_at_one_also_from_the_cache() {
+    let dir = temp_dir("bad-scale");
+    for scale in [0.0, f32::NAN] {
+        let drawn = Cache::new(&dir)
+            .get_or_draw(painter(), "flowchart LR\n A-->B", Theme::Light, scale)
+            .unwrap();
+        let cached = Cache::new(&dir)
+            .get_or_draw(painter(), "flowchart LR\n A-->B", Theme::Light, scale)
+            .unwrap();
+        assert_eq!(drawn.scale, 1.0);
+        assert_eq!((cached.width(), cached.height()), (drawn.width(), drawn.height()));
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn a_cached_file_that_is_not_ours_is_drawn_again() {
     let dir = temp_dir("not-ours");
     let counter = Counting::default();

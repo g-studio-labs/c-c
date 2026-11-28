@@ -4,8 +4,9 @@
 //! Un fichero `<clave>.png` por diagrama, donde la clave es el sha256 de la
 //! versión de `merman`, el tema, la escala y el texto sin directivas. El PNG
 //! es él mismo el registro: su tamaño en píxeles sale de su cabecera, y la
-//! escala va en la clave. Los errores no se guardan: un `merman` nuevo puede
-//! dibujar lo que éste no.
+//! escala va en la clave. Como `Picture::scale` es siempre la pedida (ver
+//! `Picture`), leído de aquí da el mismo tamaño lógico que el primer dibujo.
+//! Los errores no se guardan: un `merman` nuevo puede dibujar lo que éste no.
 
 use std::fs;
 use std::io::Write;
@@ -16,8 +17,8 @@ use std::time::SystemTime;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    strip_directives, DiagramError, Draw, Picture, Theme, MAX_SIDE, MAX_SOURCE_BYTES,
-    MERMAN_VERSION,
+    requested_scale, strip_directives, DiagramError, Draw, Picture, Theme, MAX_SIDE,
+    MAX_SOURCE_BYTES, MERMAN_VERSION,
 };
 
 /// Cuántos diagramas se guardan. Al pasar, se borran los menos usados.
@@ -137,7 +138,7 @@ fn read(path: &Path, scale: f32) -> Option<Picture> {
         png,
         pixel_width,
         pixel_height,
-        scale,
+        scale: requested_scale(scale),
     })
 }
 

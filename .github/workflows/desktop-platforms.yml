@@ -11,6 +11,9 @@ on:
     paths:
       - "desktop/Cargo.toml"
       - "desktop/Cargo.lock"
+      # El crate de los diagramas lo enlaza la nativa: un cambio sólo ahí
+      # (sus features, `merman-export`) también puede dejar de compilar.
+      - "diagram/**"
       - ".github/workflows/desktop-platforms.yml"
   workflow_dispatch:
 

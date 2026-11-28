@@ -65,7 +65,11 @@ impl Theme {
 }
 
 /// Un diagrama dibujado. `png` mide `pixel_width × pixel_height`; en pantalla
-/// ocupa eso entre `scale` (ver `width` y `height`).
+/// ocupa eso entre `scale` (ver `width` y `height`). `scale` es siempre la
+/// pedida, también si el dibujo se encogió para caber en `MAX_SIDE`: así un
+/// diagrama encogido sale más pequeño, un píxel del PNG por píxel de la
+/// pantalla, y no estirado y borroso; y la caché, que sólo tiene el PNG,
+/// puede dar el mismo tamaño que el primer dibujo.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Picture {
     pub png: Vec<u8>,
@@ -216,15 +220,16 @@ impl Painter {
         let tree = usvg::Tree::from_str(svg, &options)
             .map_err(|error| DiagramError::Invalid(error.to_string()))?;
         let size = tree.size();
-        let scale = fit_scale(size.width(), size.height(), scale);
-        let width = ((size.width() * scale).ceil() as u32).clamp(1, MAX_SIDE);
-        let height = ((size.height() * scale).ceil() as u32).clamp(1, MAX_SIDE);
+        let requested = requested_scale(scale);
+        let fit = fit_scale(size.width(), size.height(), requested);
+        let width = ((size.width() * fit).ceil() as u32).clamp(1, MAX_SIDE);
+        let height = ((size.height() * fit).ceil() as u32).clamp(1, MAX_SIDE);
         let mut pixmap = tiny_skia::Pixmap::new(width, height)
             .ok_or_else(|| DiagramError::Invalid("empty diagram".into()))?;
         // Fondo transparente: el de la app es el que se ve detrás.
         resvg::render(
             &tree,
-            tiny_skia::Transform::from_scale(scale, scale),
+            tiny_skia::Transform::from_scale(fit, fit),
             &mut pixmap.as_mut(),
         );
         let png = pixmap
@@ -234,7 +239,7 @@ impl Painter {
             png,
             pixel_width: width,
             pixel_height: height,
-            scale,
+            scale: requested,
         })
     }
 }
@@ -245,13 +250,17 @@ impl Draw for Painter {
     }
 }
 
-/// La escala pedida, o menos si así el lado más largo pasaría de `MAX_SIDE`.
-fn fit_scale(width: f32, height: f32, scale: f32) -> f32 {
-    let scale = if scale.is_finite() && scale > 0.0 {
+/// La escala con la que se pide dibujar, o 1 si no es un número que sirva.
+pub(crate) fn requested_scale(scale: f32) -> f32 {
+    if scale.is_finite() && scale > 0.0 {
         scale
     } else {
         1.0
-    };
+    }
+}
+
+/// La escala pedida, o menos si así el lado más largo pasaría de `MAX_SIDE`.
+fn fit_scale(width: f32, height: f32, scale: f32) -> f32 {
     let longest = width.max(height) * scale;
     if longest > MAX_SIDE as f32 {
         scale * MAX_SIDE as f32 / longest
