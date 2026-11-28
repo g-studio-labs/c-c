@@ -11,7 +11,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use cac_core::{AgentRequest, AnswerDraft, InboxTarget, LinkSegment, RequestFilter, RequestKind, RequestScope, RequestStatus, RequestStatusFilter};
+use cac_core::{AgentRequest, AnswerDraft, InboxTarget, LinkSegment, RequestFile, RequestFileSlot, RequestFilter, RequestKind, RequestScope, RequestStatus, RequestStatusFilter};
+use cac_mcp::text_file::Refusal;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -59,6 +60,19 @@ enum Mode {
     Fails,
 }
 
+/// Lo que se sabe de una ruta de esta máquina que nombra un pedido: si se
+/// puede copiar su contenido (command-and-control-567). Se mira una vez, fuera
+/// del hilo de la ventana, con las reglas de adjuntar (`cac_mcp::text_file`).
+#[derive(Clone, PartialEq, Eq)]
+enum LocalFile {
+    Checking,
+    Copyable(String),
+    Refused(Refusal),
+}
+
+/// Un fichero adjunto con más líneas se enseña plegado.
+const FOLDED_LINES: usize = 12;
+
 /// Lo escrito en una tarjeta. Vive mientras el pedido siga abierto: la lista
 /// se vuelve a pedir con cada evento, y lo escrito no se pierde por eso.
 struct Card {
@@ -76,6 +90,10 @@ pub struct RequestsView {
     problems: HashMap<String, String>,
     /// El último ID copiado: su botón dice que ya está.
     copied: Option<String>,
+    /// Las rutas que nombran los pedidos, por ruta tal como se escribió.
+    local_files: HashMap<String, LocalFile>,
+    /// Los ficheros adjuntos desplegados (por su id en pantalla).
+    unfolded: HashSet<String>,
     /// Lo que se dice tras pulsar algo que esta app todavía no tiene.
     said: Option<String>,
     /// La búsqueda: se manda un rato después de dejar de escribir, no con
@@ -115,6 +133,8 @@ impl RequestsView {
             busy: HashSet::new(),
             problems: HashMap::new(),
             copied: None,
+            local_files: HashMap::new(),
+            unfolded: HashSet::new(),
             said: None,
             search,
             search_turn: 0,
@@ -386,7 +406,7 @@ impl RequestsView {
                 // Mirar si existe puede tardar (una ruta de red): fuera del hilo de la ventana.
                 let shown = path.clone();
                 cx.spawn(async move |this, cx| {
-                    let result = cx.background_executor().spawn(async move { reveal(&path) }).await;
+                    let result = cx.background_executor().spawn(async move { open_path(&path) }).await;
                     this.update(cx, |this, cx| {
                         match result {
                             Ok(()) => return,
@@ -440,7 +460,7 @@ impl RequestsView {
         }
         let paths: Vec<bool> = targets.iter().map(|target| matches!(target, LinkSegment::Path { .. })).collect();
         let (view, org_id) = (cx.entity().downgrade(), org_id.to_string());
-        let hint = tr(cx, "work:requests.revealPath");
+        let hint = tr(cx, "work:requests.openPath");
         let at = |url: &str| url.strip_prefix("cac-link:").and_then(|n| n.parse::<usize>().ok());
         let follow = move |url: &SharedString, _: &ClickEvent, _: &mut Window, cx: &mut App| {
             if let Some(target) = at(url).and_then(|n| targets.get(n)).cloned() {
@@ -465,6 +485,172 @@ impl RequestsView {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.copied = code;
         cx.notify();
+    }
+
+    /// Mira una vez si una ruta se puede copiar; mientras, no se ofrece nada.
+    fn check_local_file(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.local_files.contains_key(path) {
+            return;
+        }
+        self.local_files.insert(path.to_string(), LocalFile::Checking);
+        let asked = path.to_string();
+        cx.spawn(async move |this, cx| {
+            let looked = asked.clone();
+            let result = cx.background_executor().spawn(async move { cac_mcp::text_file::check(&looked) }).await;
+            this.update(cx, |this, cx| {
+                let state = match result {
+                    Ok(_) => LocalFile::Copyable(file_name(&asked)),
+                    Err(why) => LocalFile::Refused(why),
+                };
+                this.local_files.insert(asked, state);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// «Copiar apply.sql» de una ruta: se lee al pulsar (pudo cambiar desde
+    /// que se miró), y si ya no se puede, se dice por qué.
+    fn copy_local_file(&mut self, path: String, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let read = path.clone();
+            let result = cx.background_executor().spawn(async move { cac_mcp::text_file::read(&read) }).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(file) => {
+                        this.copy(file.content, None, cx);
+                        this.said = Some(cac_core::text_with(locale(cx), "work:requests.fileCopied", &[("name", &file.name)]));
+                    }
+                    Err(why) => {
+                        this.said = Some(refusal_line(&file_name(&path), &why, cx));
+                        this.local_files.insert(path, LocalFile::Refused(why));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Debajo de un texto que nombra ficheros de esta máquina: por cada uno,
+    /// «Copiar <nombre>» a la vista (jose: de un botonazo, sin pedírselo al
+    /// agente) y «Mostrar en la carpeta» aparte; o por qué no se puede copiar.
+    /// Una carpeta no lleva nada: pulsarla ya la abre.
+    fn path_actions(&mut self, id: &str, texts: &[&str], cx: &mut Context<Self>) -> Option<AnyElement> {
+        let mut paths: Vec<String> = Vec::new();
+        for text in texts {
+            for segment in cac_core::link_segments(text) {
+                if let LinkSegment::Path { path, .. } = segment {
+                    if !paths.contains(&path) {
+                        paths.push(path);
+                    }
+                }
+            }
+        }
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for (n, path) in paths.into_iter().enumerate() {
+            self.check_local_file(&path, cx);
+            let state = self.local_files.get(&path).cloned().unwrap_or(LocalFile::Checking);
+            let copy: AnyElement = match state {
+                LocalFile::Checking | LocalFile::Refused(Refusal::NotAFile) => continue,
+                LocalFile::Copyable(name) => {
+                    let target = path.clone();
+                    Button::new(SharedString::from(format!("{id}-copy-path-{n}")))
+                        .outline()
+                        .small()
+                        .icon(Icon::new(Lucide::Copy))
+                        .label(cac_core::text_with(locale(cx), "work:requests.copyFile", &[("name", &name)]))
+                        .on_click(cx.listener(move |this, _, _, cx| this.copy_local_file(target.clone(), cx)))
+                        .into_any_element()
+                }
+                LocalFile::Refused(why) => {
+                    let line = refusal_line(&file_name(&path), &why, cx);
+                    div()
+                        .id(SharedString::from(format!("{id}-cannot-copy-{n}")))
+                        .aria_label(line.clone())
+                        .leading_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(line)
+                        .test_support()
+                        .into_any_element()
+                }
+            };
+            let shown = path.clone();
+            let reveal_button = Button::new(SharedString::from(format!("{id}-reveal-path-{n}")))
+                .ghost()
+                .small()
+                .icon(Icon::new(Lucide::FolderOpen))
+                .tooltip(tr(cx, "work:requests.revealPath"))
+                .on_click(cx.listener(move |this, _, _, cx| this.reveal_in_folder(shown.clone(), cx)));
+            rows.push(div().flex().flex_wrap().items_center().gap_2().child(copy).child(reveal_button).into_any_element());
+        }
+        (!rows.is_empty()).then(|| div().id(SharedString::from(format!("{id}-paths"))).flex().flex_col().gap_1().children(rows).into_any_element())
+    }
+
+    fn reveal_in_folder(&mut self, path: String, cx: &mut Context<Self>) {
+        let shown = path.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { reveal(&path) }).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => return,
+                    Err(cac_mcp::host::RevealError::Failed(_)) => this.said = Some(tr(cx, "common:last.openLinkFailed")),
+                    Err(_) => this.said = Some(cac_core::text_with(locale(cx), "work:requests.pathMissing", &[("path", &shown)])),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Un fichero adjunto: «Copiar <nombre>» a la vista y su contenido en mono,
+    /// plegado si es largo. El contenido es texto: ni enlaces ni nada que se
+    /// pulse (lo escribió un agente).
+    fn file_block(&mut self, code: &str, n: usize, file: &RequestFile, cx: &mut Context<Self>) -> AnyElement {
+        let id = format!("request-file-{code}-{n}");
+        let total = file.content.lines().count();
+        let unfolded = self.unfolded.contains(&id);
+        let shown = if total > FOLDED_LINES && !unfolded { file.content.lines().take(FOLDED_LINES).collect::<Vec<_>>().join("\n") } else { file.content.clone() };
+        let (content, name) = (file.content.clone(), file.name.clone());
+        let copy = Button::new(SharedString::from(format!("{id}-copy")))
+            .outline()
+            .small()
+            .icon(Icon::new(Lucide::Copy))
+            .label(cac_core::text_with(locale(cx), "work:requests.copyFile", &[("name", &file.name)]))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.copy(content.clone(), None, cx);
+                this.said = Some(cac_core::text_with(locale(cx), "work:requests.fileCopied", &[("name", &name)]));
+            }));
+        let toggle = (total > FOLDED_LINES).then(|| {
+            let key = id.clone();
+            let label = if unfolded { tr(cx, "work:requests.fold") } else { cac_core::text_with(locale(cx), "work:requests.unfold", &[("count", &total.to_string())]) };
+            Button::new(SharedString::from(format!("{id}-fold")))
+                .ghost()
+                .small()
+                .label(label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.unfolded.remove(&key) {
+                        this.unfolded.insert(key.clone());
+                    }
+                    cx.notify();
+                }))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().flex().flex_wrap().items_center().gap_2().child(copy).children(toggle))
+            .child(self.block(format!("{id}-content"), shown, true, None, cx).test_support())
+            .into_any_element()
+    }
+
+    /// Los adjuntos de un sitio de la tarjeta, o nada.
+    fn files_in(&mut self, request: &AgentRequest, slot: RequestFileSlot, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let code = request.code.clone();
+        request.body.files.iter().enumerate().filter(|(_, file)| file.slot() == slot).map(|(n, file)| self.file_block(&code, n, file, cx)).collect()
     }
 
     fn render_card(&mut self, request: &AgentRequest, highlighted: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -540,6 +726,7 @@ impl RequestsView {
             );
 
         let summary = self.rich(format!("request-summary-{code}"), &request.summary, &request.org_id, cx);
+        let summary_paths = self.path_actions(&format!("request-summary-{code}"), &[&request.summary], cx);
         let (tops, anchor, scroll, noted) = (self.tops.clone(), self.anchor.clone(), self.scroll.clone(), code.clone());
         let mut column = div()
             .id(SharedString::from(format!("request-{code}")))
@@ -581,6 +768,7 @@ impl RequestsView {
             .leading_sm()
             .child(header)
             .child(div().whitespace_normal().child(summary))
+            .children(summary_paths)
             .child(div().leading_xs().text_color(muted).child(asked))
             .child(self.render_body(request, cx));
         column = if open {
@@ -636,14 +824,23 @@ impl RequestsView {
             .children(lines)
     }
 
-    /// Lo que el agente dejó, según el tipo.
+    /// Un campo con su etiqueta, lo que lleva, y debajo los botones de sus
+    /// ficheros (los que nombra por su ruta y los adjuntos de su sitio).
+    fn field(label: String, content: impl IntoElement, below: Vec<AnyElement>, cx: &App) -> Div {
+        div().flex().flex_col().gap_1().child(Self::field_label(label, cx)).child(content).children(below)
+    }
+
+    /// Lo que el agente dejó, según el tipo. Los ficheros adjuntos van junto a
+    /// lo que se corre («apply») y bajo «Para deshacerlo» («undo»); en un tipo
+    /// sin comando, al final.
     fn render_body(&mut self, request: &AgentRequest, cx: &mut Context<Self>) -> AnyElement {
         let code = request.code.clone();
-        let body = &request.body;
+        let body = request.body.clone();
         let primary = cx.theme().primary;
         let org = request.org_id.clone();
         let column = div().flex().flex_col().gap_2();
-        match request.kind {
+        let paths = |this: &mut Self, name: &str, texts: &[&str], cx: &mut Context<Self>| this.path_actions(&format!("request-{name}-{code}"), texts, cx).into_iter().collect::<Vec<_>>();
+        let column = match request.kind {
             RequestKind::ApproveMessage => {
                 let draft_block = self.block(format!("request-draft-{code}"), body.draft.clone(), false, Some(&org), cx);
                 let destination: AnyElement = if body.destination_url.is_empty() {
@@ -669,14 +866,10 @@ impl RequestsView {
                         this.copy(draft.clone(), None, cx);
                         this.said = Some(tr(cx, "work:requests.draftCopied"));
                     }));
+                let draft_paths = paths(self, "draft", &[&body.draft], cx);
                 column
-                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.destination"), cx)).child(destination))
-                    .child(
-                        div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.draft"), cx)).child(
-                            div().flex().items_start().gap_2().child(draft_block.flex_1().test_support()).child(copy_draft),
-                        ),
-                    )
-                    .into_any_element()
+                    .child(Self::field(tr(cx, "work:requests.destination"), destination, Vec::new(), cx))
+                    .child(Self::field(tr(cx, "work:requests.draft"), div().flex().items_start().gap_2().child(draft_block.flex_1().test_support()).child(copy_draft), draft_paths, cx))
             }
             RequestKind::Test => {
                 let steps: Vec<AnyElement> = body
@@ -685,7 +878,10 @@ impl RequestsView {
                     .enumerate()
                     .map(|(n, step)| div().flex().gap_1p5().child(div().flex_none().child(format!("{}.", n + 1))).child(div().min_w_0().child(self.rich(format!("request-step-{code}-{n}"), step, &org, cx))).into_any_element())
                     .collect();
+                let steps_text: Vec<&str> = body.steps.iter().map(String::as_str).collect();
+                let step_paths = paths(self, "steps", &steps_text, cx);
                 let expected = self.rich(format!("request-expected-{code}"), &body.expected, &org, cx);
+                let expected_paths = paths(self, "expected", &[&body.expected], cx);
                 let (url, org) = (body.url.clone(), request.org_id.clone());
                 column
                     .when(!body.url.is_empty(), |this| {
@@ -700,13 +896,13 @@ impl RequestsView {
                             ),
                         )
                     })
-                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.steps"), cx)).children(steps))
-                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.expected"), cx)).child(expected))
-                    .into_any_element()
+                    .child(Self::field(tr(cx, "work:requests.steps"), div().flex().flex_col().gap_1().children(steps), step_paths, cx))
+                    .child(Self::field(tr(cx, "work:requests.expected"), expected, expected_paths, cx))
             }
             RequestKind::Decide => {
                 let question = self.rich(format!("request-question-{code}"), &body.question, &org, cx);
-                column.when(!body.question.is_empty(), |this| this.child(div().font_weight(FontWeight::MEDIUM).child(question))).into_any_element()
+                let question_paths = paths(self, "question", &[&body.question], cx);
+                column.when(!body.question.is_empty(), |this| this.child(div().font_weight(FontWeight::MEDIUM).child(question)).children(question_paths))
             }
             RequestKind::Run => {
                 let command = body.command.clone();
@@ -715,42 +911,49 @@ impl RequestsView {
                     self.rich(format!("request-expected-{code}"), &body.expected, &org, cx),
                     self.rich(format!("request-undo-{code}"), &body.undo, &org, cx),
                 );
+                let where_paths = paths(self, "where", &[&body.where_], cx);
+                let expected_paths = paths(self, "expected", &[&body.expected], cx);
+                let mut command_below = paths(self, "command", &[&body.command], cx);
+                command_below.extend(self.files_in(request, RequestFileSlot::Apply, cx));
+                let mut undo_below = paths(self, "undo", &[&body.undo], cx);
+                undo_below.extend(self.files_in(request, RequestFileSlot::Undo, cx));
+                let has_undo = !body.undo.is_empty() || !undo_below.is_empty();
                 let command_block = self.block(format!("request-command-{code}"), body.command.clone(), true, Some(&org), cx);
+                let command_row = div().flex().items_start().gap_2().child(command_block.flex_1().test_support()).child(
+                    Button::new(SharedString::from(format!("request-copy-command-{code}")))
+                        .outline()
+                        .small()
+                        .icon(Icon::new(Lucide::Copy))
+                        .tooltip(tr(cx, "work:requests.copyCommand"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.copy(command.clone(), None, cx);
+                            this.said = Some(tr(cx, "work:requests.commandCopied"));
+                        })),
+                );
                 column
-                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.where"), cx)).child(where_))
-                    .child(
-                        div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.command"), cx)).child(
-                            div()
-                                .flex()
-                                .items_start()
-                                .gap_2()
-                                .child(command_block.flex_1().test_support())
-                                .child(
-                                    Button::new(SharedString::from(format!("request-copy-command-{code}")))
-                                        .outline()
-                                        .small()
-                                        .icon(Icon::new(Lucide::Copy))
-                                        .tooltip(tr(cx, "work:requests.copyCommand"))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.copy(command.clone(), None, cx);
-                                            this.said = Some(tr(cx, "work:requests.commandCopied"));
-                                        })),
-                                ),
-                        ),
-                    )
-                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.expected"), cx)).child(expected))
-                    .when(!body.undo.is_empty(), |this| this.child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.undo"), cx)).child(undo)))
-                    .into_any_element()
+                    .child(Self::field(tr(cx, "work:requests.where"), where_, where_paths, cx))
+                    .child(Self::field(tr(cx, "work:requests.command"), command_row, command_below, cx))
+                    .child(Self::field(tr(cx, "work:requests.expected"), expected, expected_paths, cx))
+                    .when(has_undo, |this| this.child(Self::field(tr(cx, "work:requests.undo"), div().when(!body.undo.is_empty(), |this| this.child(undo)), undo_below, cx)))
             }
             RequestKind::Obtain => {
                 let (what, from) = (self.rich(format!("request-what-{code}"), &body.what, &org, cx), self.rich(format!("request-from-{code}"), &body.from, &org, cx));
-                column
-                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.what"), cx)).child(what))
-                    .child(div().flex().flex_col().gap_1().child(Self::field_label(tr(cx, "work:requests.from"), cx)).child(from))
-                    .into_any_element()
+                let what_paths = paths(self, "what", &[&body.what], cx);
+                column.child(Self::field(tr(cx, "work:requests.what"), what, what_paths, cx)).child(Self::field(tr(cx, "work:requests.from"), from, Vec::new(), cx))
             }
-            RequestKind::Unknown => column.into_any_element(),
+            RequestKind::Unknown => column,
+        };
+        // Lo que el tipo no colocó: sin comando, lo de aplicar va con el resto.
+        let mut rest = Vec::new();
+        if request.kind != RequestKind::Run {
+            rest.extend(self.files_in(request, RequestFileSlot::Apply, cx));
         }
+        rest.extend(self.files_in(request, RequestFileSlot::Other, cx));
+        let undo = if request.kind != RequestKind::Run { self.files_in(request, RequestFileSlot::Undo, cx) } else { Vec::new() };
+        column
+            .when(!rest.is_empty(), |this| this.child(Self::field(tr(cx, "work:requests.files"), div().flex().flex_col().gap_2().children(rest), Vec::new(), cx)))
+            .when(!undo.is_empty(), |this| this.child(Self::field(tr(cx, "work:requests.undo"), div().flex().flex_col().gap_2().children(undo), Vec::new(), cx)))
+            .into_any_element()
     }
 
     fn textarea(id: String, field: &Entity<TextareaState>, mono: bool, cx: &App) -> Stateful<Div> {
@@ -985,6 +1188,37 @@ impl RequestsView {
             .child(chip("requests-scope-mine", RequestScope::Mine, "work:requests.scope.mine", cx))
             .child(chip("requests-scope-team", RequestScope::Team, "work:requests.scope.team", cx))
     }
+}
+
+/// El nombre de un fichero por su ruta, para el botón.
+fn file_name(path: &str) -> String {
+    let path = path.trim_end_matches(['/', '\\']);
+    path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
+}
+
+/// «apply.sql: es un enlace que apunta fuera de su carpeta».
+fn refusal_line(name: &str, why: &Refusal, cx: &App) -> String {
+    let reason = tr(cx, &format!("work:requests.fileRefused.{}", why.code()));
+    cac_core::text_with(locale(cx), "work:requests.cannotCopy", &[("name", name), ("why", &reason)])
+}
+
+/// Pulsar una ruta: un documento se abre con su programa, lo demás se
+/// muestra en la carpeta (`cac_mcp::host::open_path_with`). En las pruebas se
+/// decide igual, con la misma regla, y se anota en vez de lanzar.
+fn open_path(path: &str) -> Result<(), cac_mcp::host::RevealError> {
+    #[cfg(test)]
+    {
+        let Ok(real) = std::fs::canonicalize(cac_mcp::host::expand_home(path)) else {
+            return Err(cac_mcp::host::RevealError::NotFound);
+        };
+        if !cac_mcp::host::opens_with_its_program(&real) {
+            return reveal(path);
+        }
+        tests::OPENED_FILES.lock().unwrap().push(path.to_string());
+        Ok(())
+    }
+    #[cfg(not(test))]
+    cac_mcp::host::open_path(path)
 }
 
 /// Mostrar una ruta en el gestor de ficheros, seleccionada: nunca se abre
@@ -1252,6 +1486,8 @@ mod tests {
 
     /// Las rutas que la pantalla habría mostrado en el gestor de ficheros.
     pub(super) static OPENED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    /// Los ficheros que habría abierto con su programa.
+    pub(super) static OPENED_FILES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
     fn request(code: &str, kind: &str, task: &str, of: (&str, &str), mine: bool, body: Value) -> Value {
         json!({
@@ -1573,24 +1809,130 @@ mod tests {
         let window = open_sized(&server, 2400., cx);
         show_list(window, "req-u1", cx);
         wait_until(cx, "el último pedido", |cx| on_screen(window, "request-summary-req-r1", cx));
-        OPENED.lock().unwrap().clear();
 
         click_start(window, "request-summary-req-u1", cx);
         assert_eq!(cx.opened_url().as_deref(), Some("https://supabase.example/sql/new"));
-        assert!(OPENED.lock().unwrap().is_empty(), "una dirección no es una ruta");
+        assert!(!OPENED.lock().unwrap().iter().any(|p| p.contains("supabase")), "una dirección no es una ruta");
 
+        // Otras pruebas anotan sus rutas a la vez: se cuentan sólo las suyas.
+        let mine = |wanted: &str| OPENED.lock().unwrap().iter().filter(|p| *p == wanted || p.starts_with("/no/existe")).count();
         click_start(window, "request-summary-req-p1", cx);
-        wait_until(cx, "la ruta mostrada", |_| !OPENED.lock().unwrap().is_empty());
-        assert_eq!(OPENED.lock().unwrap().clone(), [here.clone()]);
+        wait_until(cx, "la ruta mostrada", |_| mine(&here) == 1);
 
         click_start(window, "request-summary-req-p2", cx);
-        assert_eq!(OPENED.lock().unwrap().len(), 1, "una ruta que no existe no se abre");
+        assert_eq!(mine(&here), 1, "una ruta que no existe no se abre");
         wait_until(cx, "el aviso de que no existe", |cx| label(window, "requests-said", cx).contains("/no/existe/cac-504.sql"));
 
         click_start(window, "request-summary-req-r1", cx);
         assert_eq!(cx.opened_url().as_deref(), Some("https://supabase.example/sql/new"), "la pantalla de la app no se le da al navegador");
         wait_until(cx, "la tarea se abre dentro", |cx| cx.update(|cx| Backend::snapshot(cx).read(cx).task.task_id.clone()).as_deref() == Some("t1"));
         stop(cx);
+    }
+
+    fn clipboard(cx: &mut TestAppContext) -> Option<String> {
+        cx.read_from_clipboard().and_then(|item| item.text())
+    }
+
+    /// Un «Ejecutar» con `apply.sql` y `restore.sql` adjuntos: cada uno con su
+    /// botón «Copiar <nombre>» a la vista, el de aplicar junto al comando y el
+    /// de deshacer bajo «Para deshacerlo», y cada botón copia el contenido
+    /// exacto de su fichero (command-and-control-567). Uno largo sale plegado.
+    ///
+    /// Roturas que atrapa: un botón sin el nombre del fichero; copiar el otro
+    /// fichero, o el contenido recortado o plegado; el de deshacer junto al
+    /// comando; no decir qué se copió; enseñar entero uno largo.
+    #[gpui_kit::test]
+    fn the_attached_files_are_copied_whole_each_in_its_place(cx: &mut TestAppContext) {
+        let apply: String = (1..=20).map(|n| format!("update pagos set moneda = 'USD' where id = {n};\n")).collect();
+        let restore = "  update pagos set moneda = 'MXN';\n\n".to_string();
+        let run = request("req-f1", "run", "t1", ("u1", "Ana Ruiz"), true, json!({
+            "command": "Pegar apply.sql en el SQL Editor", "where": "Supabase", "expected": "UPDATE 20", "undo": "Pegar restore.sql",
+            "files": [{ "name": "apply.sql", "content": apply, "role": "apply" }, { "name": "restore.sql", "content": restore, "role": "undo" }],
+        }));
+        let server = live_server(&Arc::new(Mutex::new(vec![run])), &Arc::new(Mutex::new(Vec::new())));
+        let window = open_sized(&server, 2400., cx);
+        show_list(window, "req-f1", cx);
+        wait_until(cx, "los ficheros", |cx| on_screen(window, "request-file-req-f1-1-copy", cx));
+
+        assert_eq!(label(window, "request-file-req-f1-0-copy", cx), "Copiar apply.sql");
+        assert_eq!(label(window, "request-file-req-f1-1-copy", cx), "Copiar restore.sql");
+        let at = |id: &str, cx: &mut TestAppContext| bounds(window, id, cx).unwrap_or_else(|| panic!("{id} no está"));
+        let (command, expected, undo) = (at("request-command-req-f1", cx), at("request-expected-req-f1", cx), at("request-undo-req-f1", cx));
+        let (apply_button, restore_button) = (at("request-file-req-f1-0-copy", cx), at("request-file-req-f1-1-copy", cx));
+        assert!(apply_button.top() > command.bottom() && apply_button.bottom() < expected.top(), "apply.sql va junto al comando");
+        assert!(restore_button.top() > undo.bottom(), "restore.sql va bajo «Para deshacerlo»");
+
+        assert!(on_screen(window, "request-file-req-f1-0-content-line-11", cx));
+        assert!(!on_screen(window, "request-file-req-f1-0-content-line-12", cx), "uno largo sale plegado");
+        click(window, "request-file-req-f1-0-copy", cx);
+        assert_eq!(clipboard(cx).as_deref(), Some(apply.as_str()), "se copia entero, aunque esté plegado");
+        assert_eq!(label(window, "requests-said", cx), "Copiado apply.sql");
+        click(window, "request-file-req-f1-1-copy", cx);
+        assert_eq!(clipboard(cx).as_deref(), Some(restore.as_str()));
+        assert_eq!(label(window, "requests-said", cx), "Copiado restore.sql");
+
+        click(window, "request-file-req-f1-0-fold", cx);
+        assert!(on_screen(window, "request-file-req-f1-0-content-line-19", cx), "desplegado se ve entero");
+        stop(cx);
+    }
+
+    /// Un pedido que nombra un `.sql` de esta máquina por su ruta lleva
+    /// «Copiar apply.sql», que copia su contenido exacto; pulsar la ruta lo
+    /// abre con su programa y «Mostrar en la carpeta» lo muestra. Un `.env` y
+    /// un enlace que sale de su carpeta no ofrecen copiar y dicen por qué
+    /// (command-and-control-567).
+    ///
+    /// Roturas que atrapa: no ofrecer copiar una ruta; copiar otra cosa que
+    /// el contenido; ofrecer copiar un secreto o lo que apunta un enlace que
+    /// sale de su carpeta; callar el motivo; revelar el fichero en vez de
+    /// abrirlo al pulsarlo; «Mostrar en la carpeta» que no lo muestra.
+    #[gpui_kit::test]
+    fn a_path_named_in_a_request_copies_its_content_and_opens_with_its_program(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("cac-567-paths-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("cac-567-outside-{}", std::process::id()));
+        for d in [&dir, &outside] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let sql = "update pagos set moneda = 'USD';\n-- fin\n";
+        std::fs::write(dir.join("apply.sql"), sql).unwrap();
+        std::fs::write(dir.join(".env"), "DATABASE_URL=postgres://x").unwrap();
+        std::fs::write(outside.join("notes.txt"), "fuera").unwrap();
+        std::os::unix::fs::symlink(outside.join("notes.txt"), dir.join("link.sql")).unwrap();
+        let path = |name: &str| dir.join(name).to_string_lossy().to_string();
+        let run = request("req-p1", "run", "t1", ("u1", "Ana Ruiz"), true, json!({
+            "command": format!("{} en el SQL Editor", path("apply.sql")), "where": path(".env"), "expected": "UPDATE 1", "undo": path("link.sql"),
+        }));
+        let server = live_server(&Arc::new(Mutex::new(vec![run])), &Arc::new(Mutex::new(Vec::new())));
+        let window = open_sized(&server, 2400., cx);
+        show_list(window, "req-p1", cx);
+        wait_until(cx, "el botón de copiar", |cx| on_screen(window, "request-command-req-p1-copy-path-0", cx));
+        wait_until(cx, "el motivo del enlace", |cx| on_screen(window, "request-undo-req-p1-cannot-copy-0", cx));
+        wait_until(cx, "el motivo del .env", |cx| on_screen(window, "request-where-req-p1-cannot-copy-0", cx));
+
+        assert_eq!(label(window, "request-command-req-p1-copy-path-0", cx), "Copiar apply.sql");
+        click(window, "request-command-req-p1-copy-path-0", cx);
+        wait_until(cx, "lo copiado", |cx| label(window, "requests-said", cx) == "Copiado apply.sql");
+        assert_eq!(clipboard(cx).as_deref(), Some(sql));
+
+        assert!(!on_screen(window, "request-where-req-p1-copy-path-0", cx), "un .env no se ofrece");
+        assert!(label(window, "request-where-req-p1-cannot-copy-0", cx).contains("parece un secreto"), "{}", label(window, "request-where-req-p1-cannot-copy-0", cx));
+        assert!(!on_screen(window, "request-undo-req-p1-copy-path-0", cx), "un enlace que sale de su carpeta no se ofrece");
+        assert!(label(window, "request-undo-req-p1-cannot-copy-0", cx).contains("fuera de su carpeta"));
+
+        // Otras pruebas anotan sus rutas a la vez: se miran sólo las de aquí.
+        let here = dir.to_string_lossy().to_string();
+        let ours = |list: &Mutex<Vec<String>>| list.lock().unwrap().iter().filter(|p| p.starts_with(&here)).cloned().collect::<Vec<_>>();
+        click_start(window, "request-command-req-p1-line-0", cx);
+        wait_until(cx, "el fichero abierto", |_| !ours(&OPENED_FILES).is_empty());
+        assert_eq!(ours(&OPENED_FILES), [path("apply.sql")]);
+        assert!(ours(&OPENED).is_empty(), "pulsar la ruta lo abre, no lo revela");
+        click(window, "request-command-req-p1-reveal-path-0", cx);
+        wait_until(cx, "la carpeta", |_| !ours(&OPENED).is_empty());
+        assert_eq!(ours(&OPENED), [path("apply.sql")]);
+        stop(cx);
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
     }
 
     /// Arrastra el ratón de un extremo a otro de un texto y pulsa Ctrl+C.
