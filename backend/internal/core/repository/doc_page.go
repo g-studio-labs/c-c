@@ -468,6 +468,37 @@ func (r *DocRepository) Breadcrumb(pageID string) ([]domain.DocPageCrumb, error)
 	return out, nil
 }
 
+// Breadcrumbs: Breadcrumb de varias páginas en una sola consulta, por id. La
+// búsqueda la pide para cada página que enseña, y eran una consulta por
+// página (command-and-control-570). Ante un fallo, ninguna: el acierto sale
+// sólo con el nodo, como antes.
+func (r *DocRepository) Breadcrumbs(pageIDs []string) map[string][]domain.DocPageCrumb {
+	out := map[string][]domain.DocPageCrumb{}
+	if len(pageIDs) == 0 {
+		return out
+	}
+	type row struct {
+		PageID, ID, Title string
+		Depth             int
+	}
+	var rows []row
+	if err := r.db.Raw(`
+		WITH RECURSIVE up AS (
+			SELECT id AS page_id, parent_id AS id, 1 AS depth FROM doc_pages WHERE id IN ?
+			UNION ALL
+			SELECT u.page_id, p.parent_id, u.depth + 1 FROM doc_pages p JOIN up u ON p.id = u.id
+			WHERE u.depth < 64
+		)
+		SELECT u.page_id, p.id, p.title, u.depth FROM up u JOIN doc_pages p ON p.id = u.id
+		ORDER BY u.page_id, u.depth DESC`, pageIDs).Scan(&rows).Error; err != nil {
+		return out
+	}
+	for _, x := range rows {
+		out[x.PageID] = append(out[x.PageID], domain.DocPageCrumb{ID: x.ID, Title: x.Title})
+	}
+	return out
+}
+
 // Children: las hijas vivas de una página (o de la portada, con nil), en orden.
 func (r *DocRepository) Children(docID string, parentID *string) ([]domain.DocPageTreeItem, error) {
 	out := []domain.DocPageTreeItem{}

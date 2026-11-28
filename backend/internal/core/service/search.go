@@ -2,16 +2,26 @@ package service
 
 import (
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/guz-studio/cac/backend/internal/core/domain"
 	"github.com/guz-studio/cac/backend/internal/core/repository"
 )
 
-type SearchService struct{ repo *repository.SearchRepository }
+type SearchService struct {
+	repo *repository.SearchRepository
+	// orgWorkers: cuántas orgs se buscan a la vez en SearchOrgs.
+	orgWorkers int
+}
+
+// searchOrgWorkers: el tope de orgs a la vez. Cada una son cuatro o cinco
+// consultas seguidas y el pool de la base es de 20 conexiones: con cuatro,
+// una búsqueda de un token con muchas orgs no deja sin conexión al resto.
+const searchOrgWorkers = 4
 
 func NewSearchService(repo *repository.SearchRepository) *SearchService {
-	return &SearchService{repo: repo}
+	return &SearchService{repo: repo, orgWorkers: searchOrgWorkers}
 }
 
 // Search asks each source separately and hands back the answers still apart.
@@ -25,15 +35,20 @@ func NewSearchService(repo *repository.SearchRepository) *SearchService {
 // A short query returns nothing rather than everything. One or two letters
 // match most of a database, which is a slow way to be useless.
 func (s *SearchService) Search(query, orgID, userID string, limit int) (domain.SearchResults, error) {
+	return s.SearchWith(query, orgID, userID, limit, domain.SearchForPeople())
+}
+
+// SearchWith: Search con las fuentes que se piden (ver domain.SearchOptions).
+func (s *SearchService) SearchWith(query, orgID, userID string, limit int, opts domain.SearchOptions) (domain.SearchResults, error) {
 	if limit <= 0 || limit > 20 {
 		limit = 8
 	}
 	p := s.plan(query)
-	out, err := s.searchWith(query, p, orgID, userID, limit)
+	out, err := s.searchWith(query, p, orgID, userID, limit, opts, true)
 	if err != nil || !out.NothingForAnAgent() || p.loose == "" {
 		return out, err
 	}
-	l, err := s.looseWith(query, p.loose, orgID, userID, limit)
+	l, err := s.looseWith(query, p.loose, orgID, userID, limit, true)
 	if err != nil || l.NothingForAnAgent() {
 		return out, err
 	}
@@ -62,8 +77,10 @@ func (s *SearchService) plan(query string) searchPlan {
 	return p
 }
 
-// searchWith: la primera vuelta en una organización.
-func (s *SearchService) searchWith(query string, p searchPlan, orgID, userID string, limit int) (domain.SearchResults, error) {
+// searchWith: la primera vuelta en una organización. `notes`: si se buscan
+// las notas aquí; SearchOrgs las busca una vez aparte, porque son de la
+// persona y no de la org.
+func (s *SearchService) searchWith(query string, p searchPlan, orgID, userID string, limit int, opts domain.SearchOptions, notes bool) (domain.SearchResults, error) {
 	var out domain.SearchResults
 	out.Tasks, out.Notes = []domain.SearchHit{}, []domain.SearchHit{}
 	out.People, out.Messages, out.DMs = []domain.SearchHit{}, []domain.SearchHit{}, []domain.SearchHit{}
@@ -73,7 +90,11 @@ func (s *SearchService) searchWith(query string, p searchPlan, orgID, userID str
 		return out, nil
 	}
 	if p.id != "" {
-		out.Tasks, out.Notes, out.Docs = s.repo.ByID(p.id, orgID, userID)
+		uid := userID
+		if !notes {
+			uid = ""
+		}
+		out.Tasks, out.Notes, out.Docs = s.repo.ByID(p.id, orgID, uid)
 		stampOrg(orgID, out.Tasks, out.Docs)
 		return out, nil
 	}
@@ -82,17 +103,25 @@ func (s *SearchService) searchWith(query string, p searchPlan, orgID, userID str
 	if out.Tasks, err = s.repo.TasksTS(query, p.strict, orgID, limit); err != nil {
 		return out, err
 	}
-	if out.Notes, err = s.repo.NotesTS(query, p.strict, userID, limit); err != nil {
-		return out, err
+	if notes {
+		if out.Notes, err = s.repo.NotesTS(query, p.strict, userID, limit); err != nil {
+			return out, err
+		}
 	}
-	if out.People, err = s.repo.People(query, orgID, userID, limit); err != nil {
-		return out, err
+	if opts.People {
+		if out.People, err = s.repo.People(query, orgID, userID, limit); err != nil {
+			return out, err
+		}
 	}
-	if out.Messages, err = s.repo.Messages(query, orgID, limit); err != nil {
-		return out, err
+	if opts.Messages {
+		if out.Messages, err = s.repo.Messages(query, orgID, limit); err != nil {
+			return out, err
+		}
 	}
-	if out.DMs, err = s.repo.DMs(query, orgID, userID, limit); err != nil {
-		return out, err
+	if opts.DMs {
+		if out.DMs, err = s.repo.DMs(query, orgID, userID, limit); err != nil {
+			return out, err
+		}
 	}
 	if out.Docs, err = s.repo.DocsTS(query, p.strict, orgID, limit); err != nil {
 		return out, err
@@ -103,14 +132,16 @@ func (s *SearchService) searchWith(query string, p searchPlan, orgID, userID str
 
 // looseWith: la segunda vuelta, con alguna de las palabras, sólo en lo que
 // le llega a un agente (tareas, notas y docs).
-func (s *SearchService) looseWith(query, tsq, orgID, userID string, limit int) (domain.SearchResults, error) {
+func (s *SearchService) looseWith(query, tsq, orgID, userID string, limit int, notes bool) (domain.SearchResults, error) {
 	var out domain.SearchResults
 	var err error
 	if out.Tasks, err = s.repo.TasksTS(query, tsq, orgID, limit); err != nil {
 		return out, err
 	}
-	if out.Notes, err = s.repo.NotesTS(query, tsq, userID, limit); err != nil {
-		return out, err
+	if notes {
+		if out.Notes, err = s.repo.NotesTS(query, tsq, userID, limit); err != nil {
+			return out, err
+		}
 	}
 	if out.Docs, err = s.repo.DocsTS(query, tsq, orgID, limit); err != nil {
 		return out, err
@@ -133,14 +164,24 @@ func stampOrg(orgID string, lists ...[]domain.SearchHit) {
 // sale, sin repetir y sin pasar del límite por tipo. Busca **sólo** en las que
 // se le pasan: quién decide cuáles son es quien llama (el handler, con las
 // membresías del token).
+func (s *SearchService) SearchOrgs(query string, orgIDs []string, userID string, limit int) (domain.SearchResults, error) {
+	return s.SearchOrgsWith(query, orgIDs, userID, limit, domain.SearchForPeople())
+}
+
+// SearchOrgsWith: SearchOrgs con las fuentes que se piden.
 //
-// Las notas son de la persona y no de una org, así que salen en cada una: se
-// quedan una vez.
+// Las orgs se buscan a la vez, como mucho `orgWorkers`, y se juntan en el
+// orden en que llegaron: el resultado es el mismo que buscándolas una detrás
+// de otra (command-and-control-570; antes iban en serie y era lo que más
+// sumaba con muchas orgs).
+//
+// Las notas son de la persona y no de una org: se buscan una vez, no en cada
+// org para quedarse con las de la primera.
 //
 // La segunda vuelta («con alguna palabra») se decide sobre **todas** las
 // orgs juntas, no en cada una: si una org casa con todas las palabras, lo
 // parcial de otra no se mezcla con eso.
-func (s *SearchService) SearchOrgs(query string, orgIDs []string, userID string, limit int) (domain.SearchResults, error) {
+func (s *SearchService) SearchOrgsWith(query string, orgIDs []string, userID string, limit int, opts domain.SearchOptions) (domain.SearchResults, error) {
 	var out domain.SearchResults
 	out.Tasks, out.Notes = []domain.SearchHit{}, []domain.SearchHit{}
 	out.People, out.Messages, out.DMs = []domain.SearchHit{}, []domain.SearchHit{}, []domain.SearchHit{}
@@ -164,13 +205,22 @@ func (s *SearchService) SearchOrgs(query string, orgIDs []string, userID string,
 		seen[k] = map[string]bool{}
 	}
 	p := s.plan(query)
-	for _, org := range orgIDs {
-		r, err := s.searchWith(query, p, org, userID, limit)
-		if err != nil {
-			return out, err
-		}
+	if len(orgIDs) == 0 || len(strings.TrimSpace(query)) < 2 {
+		return out, nil
+	}
+	notes, err := s.searchWith(query, p, "", userID, limit, domain.SearchForAgent(), true)
+	if err != nil {
+		return out, err
+	}
+	merge(&out.Notes, seen["notes"], notes.Notes)
+	results, err := eachOrg(orgIDs, s.orgWorkers, func(org string) (domain.SearchResults, error) {
+		return s.searchWith(query, p, org, userID, limit, opts, false)
+	})
+	if err != nil {
+		return out, err
+	}
+	for _, r := range results {
 		merge(&out.Tasks, seen["tasks"], r.Tasks)
-		merge(&out.Notes, seen["notes"], r.Notes)
 		merge(&out.People, seen["people"], r.People)
 		merge(&out.Messages, seen["messages"], r.Messages)
 		merge(&out.DMs, seen["dms"], r.DMs)
@@ -179,17 +229,51 @@ func (s *SearchService) SearchOrgs(query string, orgIDs []string, userID string,
 	if !out.NothingForAnAgent() || p.loose == "" {
 		return out, nil
 	}
-	for _, org := range orgIDs {
-		r, err := s.looseWith(query, p.loose, org, userID, limit)
-		if err != nil {
-			return out, err
-		}
+	loose, err := s.looseWith(query, p.loose, "", userID, limit, true)
+	if err != nil {
+		return out, err
+	}
+	merge(&out.Notes, seen["notes"], loose.Notes)
+	results, err = eachOrg(orgIDs, s.orgWorkers, func(org string) (domain.SearchResults, error) {
+		return s.looseWith(query, p.loose, org, userID, limit, false)
+	})
+	if err != nil {
+		return out, err
+	}
+	for _, r := range results {
 		merge(&out.Tasks, seen["tasks"], r.Tasks)
-		merge(&out.Notes, seen["notes"], r.Notes)
 		merge(&out.Docs, seen["docs"], r.Docs)
 	}
 	out.Partial = !out.NothingForAnAgent()
 	return out, nil
+}
+
+// eachOrg corre `search` en cada org, como mucho `workers` a la vez, y
+// devuelve los resultados en el orden de `orgIDs`. Con un fallo, el de la
+// primera org que falló, como cuando iban en serie.
+func eachOrg(orgIDs []string, workers int, search func(org string) (domain.SearchResults, error)) ([]domain.SearchResults, error) {
+	if workers < 1 {
+		workers = 1
+	}
+	results := make([]domain.SearchResults, len(orgIDs))
+	errs := make([]error, len(orgIDs))
+	slots := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	for i, org := range orgIDs {
+		wg.Add(1)
+		slots <- struct{}{}
+		go func(i int, org string) {
+			defer func() { <-slots; wg.Done() }()
+			results[i], errs[i] = search(org)
+		}(i, org)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return results, nil
 }
 
 // RecordMiss: ver domain.SearchMiss. Una consulta demasiado corta para buscar

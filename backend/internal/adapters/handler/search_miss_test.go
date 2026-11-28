@@ -46,12 +46,15 @@ type fakeSearcher struct {
 	res         domain.SearchResults
 	missed      []string
 	missesAsked []string
+	opts        []domain.SearchOptions
 }
 
-func (f *fakeSearcher) Search(q, orgID, userID string, limit int) (domain.SearchResults, error) {
+func (f *fakeSearcher) SearchWith(q, orgID, userID string, limit int, opts domain.SearchOptions) (domain.SearchResults, error) {
+	f.opts = append(f.opts, opts)
 	return f.res, nil
 }
-func (f *fakeSearcher) SearchOrgs(q string, orgIDs []string, userID string, limit int) (domain.SearchResults, error) {
+func (f *fakeSearcher) SearchOrgsWith(q string, orgIDs []string, userID string, limit int, opts domain.SearchOptions) (domain.SearchResults, error) {
+	f.opts = append(f.opts, opts)
 	return f.res, nil
 }
 func (f *fakeSearcher) Misses(orgID string, unscoped bool, days int) ([]domain.SearchMissSummary, error) {

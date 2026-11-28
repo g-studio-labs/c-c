@@ -17,8 +17,8 @@ type SearchHandler interface {
 // searcher: lo que el handler usa de service.SearchService. Interfaz para que
 // la prueba de las búsquedas fallidas no necesite todas las tablas que busca.
 type searcher interface {
-	Search(query, orgID, userID string, limit int) (domain.SearchResults, error)
-	SearchOrgs(query string, orgIDs []string, userID string, limit int) (domain.SearchResults, error)
+	SearchWith(query, orgID, userID string, limit int, opts domain.SearchOptions) (domain.SearchResults, error)
+	SearchOrgsWith(query string, orgIDs []string, userID string, limit int, opts domain.SearchOptions) (domain.SearchResults, error)
 	RecordMiss(userID, orgID, query string) error
 	Misses(orgID string, unscoped bool, days int) ([]domain.SearchMissSummary, error)
 }
@@ -43,6 +43,7 @@ func (h *searchHandler) Search(w http.ResponseWriter, r *http.Request) {
 	}
 	orgID := r.URL.Query().Get("orgId")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	opts := searchOptions(r)
 	var res domain.SearchResults
 	var err error
 	if orgID == "" {
@@ -50,14 +51,14 @@ func (h *searchHandler) Search(w http.ResponseWriter, r *http.Request) {
 		// en ninguna más — tampoco siendo superadmin, que vería las de todo el
 		// servidor. Es lo que pide el MCP, y lo que sale de ahí va al contexto
 		// de un agente.
-		res, err = h.svc.SearchOrgs(r.URL.Query().Get("q"), MemberOrgs(user), user.UserID, limit)
+		res, err = h.svc.SearchOrgsWith(r.URL.Query().Get("q"), MemberOrgs(user), user.UserID, limit, opts)
 	} else {
 		if !user.Superadmin {
 			if _, member := user.RoleInOrg(orgID); !member {
 				orgID = ""
 			}
 		}
-		res, err = h.svc.Search(r.URL.Query().Get("q"), orgID, user.UserID, limit)
+		res, err = h.svc.SearchWith(r.URL.Query().Get("q"), orgID, user.UserID, limit, opts)
 	}
 	if err != nil {
 		SendErrorResponse(w, http.StatusInternalServerError, "Search failed", err.Error())
@@ -67,6 +68,20 @@ func (h *searchHandler) Search(w http.ResponseWriter, r *http.Request) {
 		_ = h.svc.RecordMiss(user.UserID, missOrg(user, orgID), r.URL.Query().Get("q"))
 	}
 	SendResult(w, http.StatusOK, domain.APIResponse[domain.SearchResults]{Success: true, Data: res})
+}
+
+// searchOptions: qué fuentes se buscan. Todas para la app; para el MCP, sólo
+// lo que le llega al agente (ver domain.SearchOptions); y `kinds`, si viene,
+// manda sobre las dos.
+func searchOptions(r *http.Request) domain.SearchOptions {
+	opts := domain.SearchForPeople()
+	if domain.ViaFrom(r.Context()) == domain.ViaMCP {
+		opts = domain.SearchForAgent()
+	}
+	if k := r.URL.Query().Get("kinds"); k != "" {
+		opts = opts.WithKinds(k)
+	}
+	return opts
 }
 
 // agentFoundNothing: si es una búsqueda del MCP que no le dio nada al agente

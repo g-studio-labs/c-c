@@ -2,6 +2,7 @@ package repository
 
 import (
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,7 +16,11 @@ import (
 // SearchRepository answers the palette. One method per source, and every method
 // carries its own fence — see domain.SearchResults for why they are never
 // merged into a single query.
-type SearchRepository struct{ db *gorm.DB }
+type SearchRepository struct {
+	db *gorm.DB
+	// columns: lo que contestó hasSearchColumn, por tabla.
+	columns sync.Map
+}
 
 func NewSearchRepository(db *gorm.DB) *SearchRepository { return &SearchRepository{db: db} }
 
@@ -436,6 +441,13 @@ func (r *SearchRepository) DocsTS(query, tsq, orgID string, limit int) ([]domain
 	if err != nil {
 		return r.docsLike(query, orgID, limit)
 	}
+	var pageIDs []string
+	for _, x := range rows {
+		if x.Src == "page" {
+			pageIDs = append(pageIDs, x.PageID)
+		}
+	}
+	crumbs := (&DocRepository{db: r.db}).Breadcrumbs(pageIDs)
 	for _, x := range rows {
 		if x.Src == "repo" {
 			out = append(out, domain.SearchHit{
@@ -472,10 +484,8 @@ func (r *SearchRepository) DocsTS(query, tsq, orgID string, limit int) ([]domain
 			// La ruta, para saber de qué página hablamos sin abrirla: el nodo y
 			// las madres, como las migas de pan de la propia página.
 			path := []string{x.Name}
-			if crumbs, err := (&DocRepository{db: r.db}).Breadcrumb(x.PageID); err == nil {
-				for _, c := range crumbs {
-					path = append(path, c.Title)
-				}
+			for _, c := range crumbs[x.PageID] {
+				path = append(path, c.Title)
 			}
 			hit.Where = strings.Join(path, " › ")
 			hit.Link = link + "&page=" + x.PageID
@@ -617,10 +627,20 @@ func snippet(body string) string {
 
 // hasSearchColumn: si la tabla existe y tiene su columna de texto completo
 // (ver EnsureSearchIndexes).
+//
+// Se pregunta una vez por tabla y repositorio: el esquema no cambia con el
+// servidor en marcha (lo monta el arranque, antes de crear el repositorio), y
+// eran tres consultas a `information_schema` por org en cada búsqueda.
 func (r *SearchRepository) hasSearchColumn(table string) bool {
+	if v, ok := r.columns.Load(table); ok {
+		return v.(bool)
+	}
 	var ok bool
-	r.db.Raw(`SELECT EXISTS (SELECT 1 FROM information_schema.columns
-		WHERE table_name = ? AND column_name = 'search')`, table).Scan(&ok)
+	if err := r.db.Raw(`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		WHERE table_name = ? AND column_name = 'search')`, table).Scan(&ok).Error; err != nil {
+		return false
+	}
+	r.columns.Store(table, ok)
 	return ok
 }
 
