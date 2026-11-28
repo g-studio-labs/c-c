@@ -27,6 +27,9 @@ FILES = {
     "desktop/src/docs_tests.rs": "#[gpui_kit::test]\nfn the_index_opens(cx: &mut T) {}\n\n#[test]\nfn plain_one() {}\n",
     "desktop/src/platform/mod.rs": "",
     "desktop/src/platform/provision.rs": "",
+    "diagram/Cargo.toml": "",
+    "diagram/src/lib.rs": "mod cache;\n",
+    "diagram/src/cache.rs": "#[cfg(test)]\nmod tests {\n    #[test]\n    fn one() {}\n}\n",
 }
 
 
@@ -82,6 +85,12 @@ class Planner(unittest.TestCase):
         self.assertIn("--bins -- chat::", self.crate(plan, "desktop"))
         for dependent in ("mcp", "ops"):
             self.assertIn("cargo check --quiet --tests", self.crate(plan, dependent))
+
+    def test_the_diagrams_run_their_module_and_check_the_app_that_draws_them(self):
+        plan = self.plan("diagram/src/cache.rs")
+        self.assertIn("cargo test --quiet --lib -- cache::", self.crate(plan, "diagram"))
+        self.assertIn("cargo check --quiet --tests", self.crate(plan, "desktop"))
+        self.assertRegex(self.crate(self.plan("diagram/Cargo.toml"), "diagram"), r"cargo test --quiet 2>&1")
 
     def test_a_shared_file_runs_the_whole_crate(self):
         for shared in ("core/Cargo.toml", "desktop/src/testing.rs"):

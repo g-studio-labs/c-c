@@ -18,6 +18,8 @@ on:
       - "mcp/**"
       # El motor de llamadas: lo enlaza la app en Linux.
       - "voice/**"
+      # Los diagramas mermaid de los docs (command-and-control-573).
+      - "diagram/**"
       - ".github/workflows/desktop.yml"
   workflow_dispatch:
   # Para `desktop-release.yml`: las mismas pruebas, por delante de empaquetar.
@@ -49,10 +51,16 @@ jobs:
           workspaces: |
             ./desktop -> target
             ./voice -> target
+            ./diagram -> target
 
       # El motor de voz, aparte y antes: sus pruebas no necesitan audio ni red.
       - name: Test the voice engine
         working-directory: voice
+        run: cargo test --locked
+
+      # Los diagramas, aparte: sin pantalla ni red, con la Inter de la app.
+      - name: Test the diagrams
+        working-directory: diagram
         run: cargo test --locked
 
       - name: Test

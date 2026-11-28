@@ -11,13 +11,15 @@ import shlex
 import subprocess
 import sys
 
-CRATES = ["voice", "core", "mcp", "ops", "desktop"]
+CRATES = ["voice", "core", "mcp", "ops", "diagram", "desktop"]
 # Quién depende de quién por `path = "../…"` en cada Cargo.toml.
 DEPENDENTS = {
     "core": ["mcp", "ops", "desktop"],
     "mcp": ["ops", "desktop"],
     "ops": ["desktop"],
     "voice": ["desktop"],
+    # Los diagramas mermaid (command-and-control-573): los dibuja la nativa.
+    "diagram": ["desktop"],
     "desktop": [],
 }
 WHOLE = {"Cargo.toml", "build.rs", "src/testing.rs"}

@@ -1,0 +1,19 @@
+flowchart LR
+    subgraph Cliente["Cliente (TCG)"]
+        A["Portal de pedidos"]
+        B["Cotización · versión 2"]
+    end
+    subgraph Nucleo["Núcleo de integración"]
+        C(["Cola de eventos"])
+        D["Sincronización «Proteus»"]
+    end
+    subgraph Datos["Datos y reportes"]
+        E[("Base de datos")]
+        F["Panel de métricas"]
+    end
+    A --> C
+    B --> C
+    C <--> D
+    D --> E
+    E --> F
+    F <--> B

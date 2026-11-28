@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Corre sólo las pruebas de lo que cambió. La app nativa (`core/`, `desktop/`,
-# `mcp/`, `ops/`, `voice/`) en la caja de gstd, por módulo; la app de Tauri, el
+# `mcp/`, `ops/`, `voice/`, `diagram/`) en la caja de gstd, por módulo; la app de Tauri, el
 # backend y los hooks, aquí, por suite.
 #
 #   scripts/test-changed.sh               # lo no commiteado

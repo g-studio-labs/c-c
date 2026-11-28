@@ -1,0 +1,35 @@
+[package]
+name = "cac-diagram"
+version = "0.1.0"
+license = "AGPL-3.0-or-later"
+description = "Dibuja los diagramas mermaid de cac como PNG, sin navegador ni red"
+edition = "2021"
+publish = false
+
+[dependencies]
+# El port de Mermaid a Rust (command-and-control-573). Versión **exacta**: es
+# 0.x y la API cambia entre versiones; subirla es una tarea aparte, y su
+# versión entra en la clave de la caché (`MERMAN_VERSION`). Sólo las familias
+# que se escriben en cac: cada una suma peso al binario.
+merman = { version = "=0.11.0", default-features = false, features = [
+  "svg",
+  "diagram-flowchart",
+  "diagram-sequence",
+  "diagram-class",
+  "diagram-state",
+  "diagram-er",
+  "diagram-gantt",
+  "diagram-pie",
+  "native-fonts",
+] }
+# `native-fonts`: merman mide el texto con la Inter de verdad. Sin esto mide
+# con sus tablas fijas, más estrechas que la Inter, y cada etiqueta va en un
+# `<svg>` con `overflow:hidden` de ese ancho: el `classDiagram` cortaba
+# «Animal» en «Anima» (medido; capturas en command-and-control-573). Trae su
+# propio usvg 0.47, sólo para medir: pintar va con el resvg de abajo.
+merman-export = { version = "=0.11.0", default-features = false, features = ["native-fonts"] }
+# La misma que ya enlaza GPUI (desktop/Cargo.lock): otra versión duplicaría
+# usvg, tiny-skia y fontdb. Trae usvg y tiny-skia re-exportados.
+resvg = "=0.46.0"
+serde_json = "1"
+sha2 = "0.10"
