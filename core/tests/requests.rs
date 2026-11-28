@@ -549,3 +549,110 @@ async fn events_do_not_reload_everything() {
     assert!(!state.open.iter().any(|r| r.code == "req-a1"));
     assert_eq!(asked(&rig.server, "closed").await.len(), closeds, "los resueltos no se vuelven a pedir");
 }
+
+/// Un pedido nuevo que llega mientras la primera carga está en camino (al
+/// entrar, o tras cambiar de filtro) no la deja colgada: la respuesta vieja
+/// se tira y la carga se vuelve a pedir entera, con el pedido nuevo.
+///
+/// Roturas que atrapa: subir el turno con la carga en camino sin volver a
+/// pedir (se queda «Cargando…» para siempre, el fallo de la primera vuelta);
+/// pedir sólo el número en ese caso; poner la respuesta vieja, que no trae el
+/// pedido nuevo.
+#[tokio::test]
+async fn an_event_during_the_first_load_does_not_leave_it_loading() {
+    let rig = rig().await;
+    let gate = Gate::default();
+    let ana = ("u1", "Ana Ruiz");
+    list("mine", "open").respond_with(gate.hold(page(json!([request("req-a1", "t1", ana, true)]), ""))).up_to_n_times(1).with_priority(1).mount(&rig.server).await;
+    list("mine", "open").respond_with(page(json!([request("req-a1", "t1", ana, true), request("req-a9", "t1", ana, true)]), "")).with_priority(2).mount(&rig.server).await;
+
+    let first = rig.core.requests();
+    let first = tokio::spawn(async move { first.load().await });
+    until("la primera carga, retenida", || gate.held() == 1).await;
+    rig.core.stream().deliver(ServerEvent { event: "request:created".into(), data: json!({ "code": "req-a9", "status": "open" }).to_string() });
+    until("la carga, pedida otra vez", || rig.core.requests().state().loaded).await;
+    gate.open();
+    first.await.unwrap();
+
+    let state = rig.core.requests().state();
+    assert!(state.loaded && !state.open_paging.loading && state.open_paging.loaded, "{:?}", state.open_paging);
+    assert_eq!(state.open.iter().map(|r| r.code.as_str()).collect::<Vec<_>>(), ["req-a1", "req-a9"], "la vieja no vuelve");
+    assert_eq!(mine_open(&rig.server).await, 2);
+}
+
+/// Un pedido nuevo que llega mientras se pide la página siguiente de los
+/// abiertos: esa página se tira, y el «cargando más» no se queda puesto; el
+/// scroll vuelve a pedirla con el cursor que dio la recarga.
+///
+/// Roturas que atrapa: tirar la página sin bajar su «cargando» (se queda
+/// «Cargando más…» fijo y el scroll no vuelve a pedir, el fallo de la primera
+/// vuelta); que la recarga no lo baje; poner la página vieja sobre la recarga.
+#[tokio::test]
+async fn an_event_while_the_next_open_page_loads_lets_scrolling_ask_again() {
+    let rig = rig().await;
+    let gate = Gate::default();
+    let ana = ("u1", "Ana Ruiz");
+    let first_page = || page(json!([request("req-a1", "t1", ana, true), request("req-a2", "t2", ana, true)]), "OPEN-2");
+    list("mine", "open").and(query_param("cursor", "")).respond_with(first_page()).with_priority(1).mount(&rig.server).await;
+    list("mine", "open").and(query_param("cursor", "OPEN-2")).respond_with(gate.hold(page(json!([request("req-old", "t1", ana, true)]), ""))).up_to_n_times(1).with_priority(1).mount(&rig.server).await;
+    list("mine", "open").and(query_param("cursor", "OPEN-2")).respond_with(page(json!([request("req-a3", "t1", ana, true)]), "")).with_priority(2).mount(&rig.server).await;
+    rig.core.requests().load().await;
+    assert!(rig.core.requests().state().open_paging.more);
+
+    let scroll = rig.core.requests();
+    let scroll = tokio::spawn(async move { scroll.load_more().await });
+    until("la página siguiente, retenida", || gate.held() == 1).await;
+    rig.core.stream().deliver(ServerEvent { event: "request:created".into(), data: json!({ "code": "req-a9", "status": "open" }).to_string() });
+    until("la recarga de los abiertos, puesta", || !rig.core.requests().state().open_paging.loading).await;
+    gate.open();
+    scroll.await.unwrap();
+
+    let state = rig.core.requests().state();
+    assert!(!state.open_paging.loading && state.open_paging.more && !state.open_paging.failed, "{:?}", state.open_paging);
+    assert!(!state.open.iter().any(|r| r.code == "req-old"), "la página tirada no entra");
+
+    rig.core.requests().load_more().await;
+    let again = asked(&rig.server, "open").await.into_iter().filter(|q| q.get("cursor").map(String::as_str) == Some("OPEN-2")).count();
+    assert_eq!(again, 2, "el scroll vuelve a pedirla");
+    let state = rig.core.requests().state();
+    assert_eq!(state.open.iter().map(|r| r.code.as_str()).collect::<Vec<_>>(), ["req-a1", "req-a2", "req-a3"]);
+    assert!(!state.open_paging.loading && !state.open_paging.more);
+}
+
+/// Un enlace enseña su pedido aunque el filtro de ahora no lo deje pasar: es
+/// lo que se pidió ver. Cambiar de filtro lo suelta, también si cambia
+/// mientras el pedido llegaba.
+///
+/// Roturas que atrapa: esconder el pedido del enlace porque el filtro no lo
+/// admite; dejarlo pegado al cambiar de filtro; ponerlo cuando llega tarde,
+/// con otro filtro ya puesto.
+#[tokio::test]
+async fn a_link_shows_its_request_under_any_filter_until_the_filter_changes() {
+    let rig = rig().await;
+    let gate = Gate::default();
+    Mock::given(method("GET")).and(path("/api/v1/requests/req-old")).respond_with(gate.hold(ok(closed("req-old")))).up_to_n_times(1).with_priority(1).mount(&rig.server).await;
+    Mock::given(method("GET")).and(path("/api/v1/requests/req-old")).respond_with(ok(closed("req-old"))).with_priority(2).mount(&rig.server).await;
+    let only_open = cac_core::RequestFilter { status: cac_core::RequestStatusFilter::Open, ..Default::default() };
+    let other = cac_core::RequestFilter { text: "cac-1".into(), ..only_open.clone() };
+
+    // Llega tarde, con otro filtro ya puesto: no entra.
+    rig.core.requests().set_filter(only_open.clone()).await;
+    assert!(rig.core.requests().show(Some("req-old".into())));
+    let late = rig.core.requests();
+    let late = tokio::spawn(async move { late.load().await });
+    until("el pedido del enlace, retenido", || gate.held() == 1).await;
+    rig.core.requests().set_filter(other).await;
+    gate.open();
+    late.await.unwrap();
+    assert!(!rig.core.requests().state().closed.iter().any(|r| r.code == "req-old"), "no se pega a un filtro que no lo pidió");
+
+    // Un enlace nuevo con «sólo abiertos»: se enseña igual, aunque esté resuelto.
+    rig.core.requests().set_filter(only_open).await;
+    rig.core.requests().leave();
+    assert!(rig.core.requests().show(Some("req-old".into())));
+    rig.core.requests().load().await;
+    assert!(rig.core.requests().state().closed.iter().any(|r| r.code == "req-old"), "el enlace lo enseña");
+
+    rig.core.requests().set_filter(cac_core::RequestFilter::default()).await;
+    assert!(!rig.core.requests().state().closed.iter().any(|r| r.code == "req-old"), "cambiar de filtro lo suelta");
+}

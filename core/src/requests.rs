@@ -512,7 +512,13 @@ pub(crate) struct RequestsData {
     team_open: Vec<AgentRequest>,
     /// Cuál de las cargas de cada lista es la vigente: una que llega tarde (de
     /// otro filtro, o adelantada por un evento) no pisa a la de después.
+    /// Quien sube el turno deja huérfana la respuesta que estaba en camino, y
+    /// por eso se encarga de lo que ésta habría hecho: pedir otra vez y bajar
+    /// el «cargando» al llegar. Una respuesta tirada nunca deja nada puesto.
     list_turn: u64,
+    /// Hay una carga entera (`load`) en camino: un evento que llega mientras
+    /// no la adelanta con una lista a medias, la vuelve a pedir.
+    list_loading: bool,
     closed_turn: u64,
     marks_turn: u64,
     /// El resaltado que ya se buscó: se busca (y abre «Resueltos») una vez.
@@ -688,6 +694,7 @@ impl Requests {
 
     fn forget_lists(data: &mut RequestsData) {
         data.list_turn += 1;
+        data.list_loading = false;
         data.all_open.clear();
         data.open_next.clear();
         data.linked.clear();
@@ -727,6 +734,7 @@ impl Requests {
     pub async fn load(&self) {
         let (scope, filter, turn) = self.change_with(|data| {
             data.list_turn += 1;
+            data.list_loading = true;
             data.state.open_paging.loading = data.state.filter.status.shows_open();
             (data.state.scope, data.state.filter.clone(), data.list_turn)
         });
@@ -738,6 +746,7 @@ impl Requests {
             if data.list_turn != turn || data.state.scope != scope || data.state.filter != filter {
                 return false;
             }
+            data.list_loading = false;
             match open {
                 Some(Err(_)) => {
                     data.state.failed = true;
@@ -870,7 +879,7 @@ impl Requests {
     /// suelto por su código, y si está resuelto se despliega «Resueltos». Una
     /// vez por enlace: que luego se conteste no vuelve a abrir nada.
     async fn reveal(&self) {
-        let Some(code) = self.change_with(|data| {
+        let Some((code, scope, filter)) = self.change_with(|data| {
             let code = data.state.highlight.clone()?;
             if data.revealed.as_ref() == Some(&code) {
                 return None;
@@ -883,13 +892,20 @@ impl Requests {
                 data.state.resolved_open = true;
                 return None;
             }
-            Some(code)
+            Some((code, data.state.scope, data.state.filter.clone()))
         }) else {
             return;
         };
         let Ok(request) = self.core.get::<AgentRequest>(&format!("/api/v1/requests/{}", crate::chat::query_escaped(&code))).await else { return };
         let first = self.change_with(|data| {
             if data.state.highlight.as_deref() != Some(code.as_str()) {
+                return false;
+            }
+            // El enlace se enseña con el filtro con el que se abrió, aunque
+            // éste no lo deje pasar: es lo que se pidió ver. Cambiar de
+            // filtro lo suelta (`forget_lists`), también si cambia mientras
+            // llegaba: puesto ahora, se quedaría pegado a uno que no lo pidió.
+            if data.state.scope != scope || data.state.filter != filter {
                 return false;
             }
             let closed = request.status != RequestStatus::Open;
@@ -972,16 +988,33 @@ impl Requests {
 
     /// Un pedido nuevo o rehecho: se vuelven a pedir los abiertos, tantos
     /// como se tenían (no se pierde lo que el scroll ya trajo), sin tocar los
-    /// de abajo. Si la lista nunca se pidió, sólo el número.
+    /// de abajo. Si la carga entera aún está en camino, puede haber salido
+    /// antes del pedido: se vuelve a pedir entera. Si la lista no se enseña o
+    /// nunca se pidió, sólo el número: no se sube el turno de nadie.
     async fn open_changed(&self) {
-        let (loaded, scope, filter, turn, count) = self.change_with(|data| {
-            data.list_turn += 1;
-            (data.state.loaded && data.state.filter.status.shows_open(), data.state.scope, data.state.filter.clone(), data.list_turn, data.all_open.len())
-        });
-        if !loaded {
-            self.refresh_marks().await;
-            return;
+        enum Next {
+            Marks,
+            Load,
+            Open(RequestScope, RequestFilter, u64, usize, bool),
         }
+        let next = self.change_with(|data| {
+            if !data.state.filter.status.shows_open() {
+                return Next::Marks;
+            }
+            if data.list_loading {
+                return Next::Load;
+            }
+            if !data.state.loaded {
+                return Next::Marks;
+            }
+            data.list_turn += 1;
+            Next::Open(data.state.scope, data.state.filter.clone(), data.list_turn, data.all_open.len(), data.state.open_paging.loading)
+        });
+        let (scope, filter, turn, count, paging_was_loading) = match next {
+            Next::Marks => return self.refresh_marks().await,
+            Next::Load => return self.reload_with_list().await,
+            Next::Open(scope, filter, turn, count, loading) => (scope, filter, turn, count, loading),
+        };
         let limit = count.clamp(OPEN_PAGE, MAX_PAGE);
         let path = Self::list_path(scope, &filter, "open", limit, "", None);
         let (open, _) = tokio::join!(self.fetch(&path), self.refresh_marks());
@@ -989,10 +1022,20 @@ impl Requests {
             if data.list_turn != turn || data.state.scope != scope || data.state.filter != filter {
                 return;
             }
-            if let Ok((requests, next)) = open {
-                data.state.open_paging.more = !next.is_empty();
-                data.all_open = requests;
-                data.open_next = next;
+            // La página siguiente que estuviera en camino se tiró al subir el
+            // turno: lo suyo es esto, y el scroll puede volver a pedir.
+            let paging = &mut data.state.open_paging;
+            paging.loading = false;
+            match open {
+                Ok((requests, next)) => {
+                    paging.failed = false;
+                    paging.more = !next.is_empty();
+                    data.all_open = requests;
+                    data.open_next = next;
+                }
+                // Lo cargado sigue valiendo, y su cursor también. Si se tiró
+                // una página, se dice como su fallo: «Reintentar» la pide.
+                Err(_) => paging.failed |= paging_was_loading,
             }
         });
     }
