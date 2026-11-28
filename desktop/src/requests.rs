@@ -1941,5 +1941,41 @@ mod tests {
         assert!(opens >= 1);
         stop(cx);
     }
+
+    /// Cada tecla reinicia la espera: teclear, esperar menos que ella y teclear
+    /// otra vez no manda nada hasta que pasa la espera de la última tecla, y
+    /// entonces una sola petición, la del texto final.
+    ///
+    /// Roturas que atrapa: quitar la guarda del turno en `search_soon`, de modo
+    /// que cada espera vencida mande su petición.
+    #[gpui_kit::test]
+    fn each_key_restarts_the_search_wait(cx: &mut TestAppContext) {
+        let server = server();
+        let window = open(&server, cx);
+        show_requests(window, cx);
+
+        type_in(window, "requests-search", "req-a", cx);
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_millis(200));
+        type_in(window, "requests-search", "bc", cx);
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_millis(150));
+        cx.run_until_parked();
+        // El filtro llega al core por su propio hilo: se le da un rato de pared
+        // para que, si la espera vencida lo mandara, se vea. Por el lado seguro:
+        // un equipo lento sólo deja pasar la rotura, nunca falla de más.
+        cx.executor().allow_parking();
+        for _ in 0..30 {
+            cx.run_until_parked();
+            cx.update(|cx| assert_eq!(Backend::snapshot(cx).read(cx).requests.filter.text, "", "la espera de la primera tecla ya venció, pero la segunda la reinició"));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        cx.executor().advance_clock(std::time::Duration::from_millis(400));
+        wait_until(cx, "la búsqueda, en el servidor", |_| asked(&server, "open").iter().any(|query| query.contains_key("q")));
+        cx.run_until_parked();
+        let searches: Vec<String> = asked(&server, "open").iter().filter_map(|query| query.get("q").cloned()).collect();
+        assert_eq!(searches, vec!["req-abc".to_string()], "una sola petición, con el texto final");
+        stop(cx);
+    }
 }
 
