@@ -43,7 +43,7 @@ func (s *SearchService) SearchWith(query, orgID, userID string, limit int, opts 
 	if limit <= 0 || limit > 20 {
 		limit = 8
 	}
-	p := s.plan(query)
+	p := s.plan(query, opts)
 	out, err := s.searchWith(query, p, orgID, userID, limit, opts, true)
 	if err != nil || !out.NothingForAnAgent() || p.loose == "" {
 		return out, err
@@ -62,7 +62,7 @@ func (s *SearchService) SearchWith(query, orgID, userID string, limit int, opts 
 // (sólo con más de una palabra). Ver domain.SearchTSQueryWith.
 type searchPlan struct{ id, strict, loose string }
 
-func (s *SearchService) plan(query string) searchPlan {
+func (s *SearchService) plan(query string, opts domain.SearchOptions) searchPlan {
 	if len(strings.TrimSpace(query)) < 2 {
 		return searchPlan{}
 	}
@@ -70,9 +70,13 @@ func (s *SearchService) plan(query string) searchPlan {
 		return searchPlan{id: id}
 	}
 	stems := s.repo.Stems(domain.SearchStemWords(query))
-	p := searchPlan{strict: domain.SearchTSQueryWith(query, stems, false)}
+	tsq := domain.SearchTSQueryWith
+	if opts.WholeShortWords {
+		tsq = domain.SearchTSQueryWhole
+	}
+	p := searchPlan{strict: tsq(query, stems, false)}
 	if domain.SearchWordCount(query) > 1 {
-		p.loose = domain.SearchTSQueryWith(query, stems, true)
+		p.loose = tsq(query, stems, true)
 	}
 	return p
 }
@@ -204,7 +208,7 @@ func (s *SearchService) SearchOrgsWith(query string, orgIDs []string, userID str
 	for _, k := range []string{"tasks", "notes", "people", "messages", "dms", "docs"} {
 		seen[k] = map[string]bool{}
 	}
-	p := s.plan(query)
+	p := s.plan(query, opts)
 	if len(orgIDs) == 0 || len(strings.TrimSpace(query)) < 2 {
 		return out, nil
 	}

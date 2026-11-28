@@ -297,3 +297,28 @@ func TestTheSecondPassAlsoSearchesNotesOnce(t *testing.T) {
 		t.Errorf("con segunda vuelta, las notas se buscan dos veces (una por vuelta), no %d", n)
 	}
 }
+
+// «plan b» desde el MCP no casa con «Plan bordo»: la `b` va entera, y lo
+// que sale es sólo de la segunda vuelta (marcado parcial). Desde la app sigue
+// casando por prefijo, porque es lo que se está escribiendo. Es el caso «a b»
+// de producción, que casaba con casi todo por `b:*`.
+//
+// Rotura que atrapa: que el MCP no tome la consulta como completa.
+func TestAShortLastWordFromAnAgentDoesNotMatchEverything(t *testing.T) {
+	db, s := agentSearchDB(t)
+	id := task(t, db, "org-1", "l-back", "Plan bordo")
+	r, err := s.SearchOrgsWith("plan b", []string{"org-1"}, "u-1", 8, domain.SearchForAgent())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Partial {
+		t.Errorf("desde el MCP, «b» casó con «bordo» por prefijo: %+v", r)
+	}
+	r, err = s.SearchOrgsWith("plan b", []string{"org-1"}, "u-1", 8, domain.SearchForPeople())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has(r.Tasks, id) || r.Partial {
+		t.Errorf("desde la app, «plan b» tiene que seguir encontrando «Plan bordo» con todas las palabras: %+v", r)
+	}
+}

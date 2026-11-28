@@ -148,7 +148,18 @@ func SearchTSQuery(q string) string {
 //     aprobar briefing kyle» no daba nada y «kyle» solo, dieciséis. Ordenado
 //     por relevancia, lo que casa con más palabras sube.
 func SearchTSQueryWith(q string, stems map[string]string, anyWord bool) string {
-	terms := searchTerms(q)
+	return searchTSQuery(searchTerms(q), stems, anyWord)
+}
+
+// SearchTSQueryWhole: SearchTSQueryWith sin la excepción de la última
+// palabra: una de una o dos letras va entera también al final. Es para el
+// MCP (command-and-control-570): un agente no está escribiendo, la consulta
+// llega completa, y «a b» casaba por `b:*` con casi todo (3 s en producción).
+func SearchTSQueryWhole(q string, stems map[string]string, anyWord bool) string {
+	return searchTSQuery(searchTermsWith(q, true), stems, anyWord)
+}
+
+func searchTSQuery(terms []searchTerm, stems map[string]string, anyWord bool) string {
 	out := make([]string, len(terms))
 	for i, t := range terms {
 		out[i] = t.word
@@ -267,7 +278,11 @@ const ShortSearchWord = 2
 // searchTerms: las palabras de una consulta (como mucho ocho), con la regla
 // de `SearchTSQuery`. La comparte `SearchSection`, para que la sección de un
 // acierto se elija con las mismas palabras que lo encontraron.
-func searchTerms(q string) []searchTerm {
+func searchTerms(q string) []searchTerm { return searchTermsWith(q, false) }
+
+// searchTermsWith: searchTerms, y con `wholeLast` la última palabra corta
+// también va entera (ver SearchTSQueryWhole).
+func searchTermsWith(q string, wholeLast bool) []searchTerm {
 	var words []string
 	var cur []rune
 	flush := func() {
@@ -312,7 +327,7 @@ func searchTerms(q string) []searchTerm {
 			out[i] = searchTerm{word: w.text, ref: true}
 			continue
 		}
-		last := i == len(split)-1
+		last := i == len(split)-1 && !wholeLast
 		out[i] = searchTerm{word: w.text, prefix: last || len([]rune(w.text)) > ShortSearchWord}
 	}
 	return out

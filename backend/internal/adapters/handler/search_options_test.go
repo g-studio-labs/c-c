@@ -39,10 +39,10 @@ func TestTheSearchHandlerAsksOnlyForWhatReachesWhoSearches(t *testing.T) {
 		if got := ask(domain.ViaApp, org+"&kinds=tasks,notes,docs"); got != (domain.SearchOptions{}) {
 			t.Errorf("%q: con kinds=tasks,notes,docs la app pidió %+v", org, got)
 		}
-		if got := ask(domain.ViaMCP, org+"&kinds=docs,People"); got != (domain.SearchOptions{People: true}) {
+		if got := ask(domain.ViaMCP, org+"&kinds=docs,People"); got != (domain.SearchOptions{People: true, WholeShortWords: true}) {
 			t.Errorf("%q: con kinds=docs,People el MCP pidió %+v", org, got)
 		}
-		if got := ask(domain.ViaMCP, org+"&kinds=messages,%20dms"); got != (domain.SearchOptions{Messages: true, DMs: true}) {
+		if got := ask(domain.ViaMCP, org+"&kinds=messages,%20dms"); got != (domain.SearchOptions{Messages: true, DMs: true, WholeShortWords: true}) {
 			t.Errorf("%q: con kinds=messages,dms el MCP pidió %+v", org, got)
 		}
 	}
