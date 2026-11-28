@@ -98,6 +98,16 @@ func (r *SearchRepository) TasksTS(query, tsq, orgID string, limit int) ([]domai
 	// entero **por cada candidata** (medido: 365 × 1,8 ms). Sin él lee sólo
 	// los comentarios de esa tarea, y uno que no casa puntúa 0, que no cambia
 	// el máximo.
+	//
+	// La valla de la org es la de la tarea (`t.org_id` en el join), no sólo
+	// la del comentario: la del comentario la pone un disparador, y una
+	// restauración con los disparadores apagados la dejaría vieja. Mientras
+	// el relleno de los comentarios de antes no ha terminado, también entran
+	// los que aún no tienen org.
+	commentOrg := "c.org_id = ?"
+	if !commentOrgsBackfilled.Load() {
+		commentOrg = "(c.org_id = ? OR c.org_id IS NULL)"
+	}
 	err := r.db.Raw(`
 		WITH q AS (SELECT to_tsquery('cac_simple', ?) AS q),
 		own AS (
@@ -109,8 +119,8 @@ func (r *SearchRepository) TasksTS(query, tsq, orgID string, limit int) ([]domai
 		thread AS (
 			SELECT t.id FROM (
 				SELECT DISTINCT c.item_id FROM item_comments c, q
-				WHERE c.org_id = ? AND c.deleted_at IS NULL AND `+notServerChatter+` AND c.search @@ q.q
-			) x JOIN items t ON t.id = x.item_id
+				WHERE `+commentOrg+` AND c.deleted_at IS NULL AND `+notServerChatter+` AND c.search @@ q.q
+			) x JOIN items t ON t.id = x.item_id AND t.org_id = ?
 			WHERE t.deleted_at IS NULL AND t.archived_at IS NULL
 			ORDER BY t.updated_at DESC
 			LIMIT ?
@@ -134,7 +144,7 @@ func (r *SearchRepository) TasksTS(query, tsq, orgID string, limit int) ([]domai
 		            ELSE '' END AS snippet
 		FROM best b JOIN items t ON t.id = b.id JOIN task_lists l ON l.id = t.list_id CROSS JOIN q
 		ORDER BY b.in_title DESC, b.score DESC, b.updated_at DESC`,
-		tsq, orgID, searchCandidates, orgID, searchCandidates, limit).Scan(&rows).Error
+		tsq, orgID, searchCandidates, orgID, orgID, searchCandidates, limit).Scan(&rows).Error
 	if err != nil {
 		return r.tasksLike(query, orgID, limit)
 	}

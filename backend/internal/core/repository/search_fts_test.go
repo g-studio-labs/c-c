@@ -57,6 +57,9 @@ func searchFTSDB(t *testing.T) *gorm.DB {
 	if err := EnsureSearchIndexes(db); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := BackfillCommentOrgs(db, commentOrgBatch); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Exec(`INSERT INTO task_lists (id, space_id, name, created_at, updated_at) VALUES ('l','s','Lista',now(),now())`).Error; err != nil {
 		t.Fatal(err)
 	}

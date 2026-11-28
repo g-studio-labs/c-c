@@ -2,6 +2,7 @@ package repository
 
 import (
 	"database/sql"
+	"reflect"
 	"testing"
 
 	"gorm.io/gorm"
@@ -96,6 +97,9 @@ func TestACommentTakesTheOrganizationOfItsTask(t *testing.T) {
 		if err := EnsureSearchIndexes(db); err != nil {
 			t.Fatalf("la vez %d: %v", i+1, err)
 		}
+		if _, err := BackfillCommentOrgs(db, commentOrgBatch); err != nil {
+			t.Fatalf("el relleno, la vez %d: %v", i+1, err)
+		}
 	}
 	wantCommentOrg(t, db, "c-gorm", "org-3")
 	wantCommentOrg(t, db, "c-raw", "org-2")
@@ -117,5 +121,98 @@ func TestACommentTakesTheOrganizationOfItsTask(t *testing.T) {
 		WHERE c.relname IN ('idx_item_comments_org_search', 'idx_item_comments_live_search', 'idx_item_comments_search')`).Scan(&idx)
 	if len(idx) != 1 || !idx[0].Valid || idx[0].Name == "idx_item_comments_search" {
 		t.Errorf("tenía que quedar un solo GIN de comentarios, el parcial y válido: %+v", idx)
+	}
+}
+
+func withoutTriggers(t *testing.T, db *gorm.DB, stmt string) {
+	t.Helper()
+	// Como una restauración con `--disable-triggers`: el disparador no corre.
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`SET LOCAL session_replication_role = replica`).Error; err != nil {
+			return err
+		}
+		return tx.Exec(stmt).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// El relleno de los comentarios de antes de la columna va por tandas, hasta
+// que no queda ninguno, y se puede correr dos veces: en producción la tabla
+// entera en una sentencia podía pasar del healthcheck del arranque.
+//
+// Roturas que atrapa: parar tras la primera tanda, no contar lo rellenado,
+// tocar lo que ya tenía org, o parar antes de tiempo con una tanda de
+// comentarios sin tarea.
+func TestCommentOrgsAreBackfilledInBatchesUntilNoneIsLeft(t *testing.T) {
+	db := searchFTSDB(t)
+	// Los huérfanos, primero en la tabla: la primera tanda los encuentra a
+	// ellos antes que a nadie, y no tienen org que recibir.
+	for _, id := range []string{"c-orphan", "c-orphan-2"} {
+		withoutTriggers(t, db, `INSERT INTO item_comments (id, item_id, kind, body, created_at, updated_at)
+			VALUES ('`+id+`', 'no-existe', 'user', 'huérfano', now(), now())`)
+	}
+	ftsTask(t, db, "t1", "org-1", "Una", "")
+	ftsTask(t, db, "t2", "org-2", "Otra", "")
+	for _, c := range [][2]string{{"c1", "t1"}, {"c2", "t1"}, {"c3", "t2"}, {"c4", "t2"}, {"c5", "t1"}} {
+		ftsComment(t, db, c[0], c[1], "algo")
+	}
+	withoutTriggers(t, db, `UPDATE item_comments SET org_id = NULL WHERE id <> 'c5'`)
+	// Uno que ya tenía org (aunque fuera vieja) no es del relleno.
+	withoutTriggers(t, db, `UPDATE item_comments SET org_id = 'org-viejo' WHERE id = 'c5'`)
+
+	n, err := BackfillCommentOrgs(db, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 4 {
+		t.Errorf("con tandas de 2 tenía que rellenar los 4 sin org, y dice %d", n)
+	}
+	for id, want := range map[string]string{"c1": "org-1", "c2": "org-1", "c3": "org-2", "c4": "org-2", "c5": "org-viejo"} {
+		wantCommentOrg(t, db, id, want)
+	}
+	if got := commentOrg(t, db, "c-orphan"); got != nil {
+		t.Errorf("un comentario sin tarea salió con org %q", *got)
+	}
+	if n, err := BackfillCommentOrgs(db, 2); err != nil || n != 0 {
+		t.Errorf("la segunda vez no tenía nada que hacer: %d %v", n, err)
+	}
+}
+
+// La valla de la org en el hilo es la de la tarea, no sólo la que lleva el
+// comentario: ésa la pone un disparador, y con los disparadores apagados (una
+// restauración) se queda vieja. Y mientras el relleno no ha terminado, un
+// comentario que aún no tiene org sigue encontrando su tarea.
+//
+// Roturas que atrapa: quitar `t.org_id = ?` del join del hilo, y no aceptar
+// los comentarios sin org mientras el relleno no ha terminado.
+func TestAThreadIsFencedByItsTaskOrganization(t *testing.T) {
+	db := searchFTSDB(t)
+	ftsTask(t, db, "t-mine", "org-1", "Lunes", "")
+	ftsTask(t, db, "t-theirs", "org-2", "Martes", "")
+	ftsComment(t, db, "c-mine", "t-mine", "despliegue")
+	ftsComment(t, db, "c-theirs", "t-theirs", "despliegue")
+	// Se restauró con la org equivocada: el comentario ajeno dice ser de org-1.
+	withoutTriggers(t, db, `UPDATE item_comments SET org_id = 'org-1' WHERE id = 'c-theirs'`)
+	r := NewSearchRepository(db)
+
+	hits, err := r.Tasks("despliegue", "org-1", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hitIDs(hits); !reflect.DeepEqual(got, []string{"t-mine"}) {
+		t.Errorf("la tarea de otra org salió por un comentario con la org vieja: %v", got)
+	}
+
+	// A medias del relleno: el comentario aún no tiene org.
+	withoutTriggers(t, db, `UPDATE item_comments SET org_id = NULL WHERE id = 'c-mine'`)
+	commentOrgsBackfilled.Store(false)
+	t.Cleanup(func() { commentOrgsBackfilled.Store(true) })
+	hits, err = r.Tasks("despliegue", "org-1", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hitIDs(hits); !reflect.DeepEqual(got, []string{"t-mine"}) {
+		t.Errorf("con el relleno a medias, el hilo sin org tenía que seguir encontrando su tarea: %v", got)
 	}
 }

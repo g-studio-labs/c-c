@@ -233,6 +233,13 @@ func DBConnection() {
 	// La búsqueda de texto completo de la documentación. Ver search_index.go.
 	if err := EnsureSearchIndexes(db); err != nil {
 		lg.Error("search indexes: " + err.Error())
+	} else {
+		// Por tandas y sin esperarlo: ver BackfillCommentOrgs.
+		go func() {
+			if _, err := BackfillCommentOrgs(db, commentOrgBatch); err != nil {
+				lg.Error("comment organizations: " + err.Error())
+			}
+		}()
 	}
 
 	// Un commit o una PR comenta una tarea una sola vez. Ver github.go.

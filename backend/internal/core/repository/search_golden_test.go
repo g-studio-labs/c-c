@@ -28,8 +28,9 @@ func goldenAge(t *testing.T, db *gorm.DB, table, id string, daysAgo int) {
 
 // Roturas que atrapa: puntuar con otra cosa que ts_rank_cd, dejar de poner
 // primero lo que casa en el título, perder el desempate por fecha, contar un
-// comentario borrado, uno de la charla del servidor o el de otra org, o caer
-// sin decirlo a la búsqueda por LIKE (que no da fragmento ni este orden).
+// comentario borrado, uno de la charla del servidor o el de otra org (para
+// elegir la tarea y, en una que ya es candidata, para puntuarla), o caer sin
+// decirlo a la búsqueda por LIKE (que no da fragmento ni este orden).
 func TestTaskRankingStaysAsItWas(t *testing.T) {
 	db := searchFTSDB(t)
 	type task struct {
@@ -49,6 +50,10 @@ func TestTaskRankingStaysAsItWas(t *testing.T) {
 		{"t-deleted-comment", "org-1", "Jueves", "", 1},
 		{"t-other-org", "org-2", "Despliegue ajeno", "despliegue despliegue", 1},
 		{"t-host-other", "org-2", "Ajena con hilo", "", 1},
+		// Candidatas por la descripción, con un hilo que no cuenta y que las
+		// subiría de puesto si contara en la puntuación.
+		{"t-desc-deleted", "org-1", "Viernes", "Un despliegue más.", 8},
+		{"t-desc-chatter", "org-1", "Sábado", "Un despliegue más.", 9},
 	} {
 		ftsTask(t, db, x.id, x.org, x.title, x.desc)
 	}
@@ -68,12 +73,23 @@ func TestTaskRankingStaysAsItWas(t *testing.T) {
 		t.Fatal(err)
 	}
 	ftsComment(t, db, "c6", "t-host-other", "despliegue en el hilo de otra org")
+	loud := "despliegue despliegue despliegue despliegue despliegue despliegue despliegue"
+	ftsComment(t, db, "c7", "t-desc-deleted", loud)
+	if err := db.Delete(&domain.ItemComment{}, "id = ?", "c7").Error; err != nil {
+		t.Fatal(err)
+	}
+	loudChatter := &domain.ItemComment{ItemID: "t-desc-chatter", Kind: "system", Body: loud}
+	loudChatter.ID = "c8"
+	if err := db.Create(loudChatter).Error; err != nil {
+		t.Fatal(err)
+	}
 	for _, x := range []struct {
 		id   string
 		days int
 	}{
 		{"t-title-old", 10}, {"t-title-new", 1}, {"t-desc-many", 2}, {"t-desc-one", 3}, {"t-desc-one-b", 5},
 		{"t-comments", 4}, {"t-both", 6}, {"t-sub", 7}, {"t-chatter", 1}, {"t-deleted-comment", 1},
+		{"t-desc-deleted", 8}, {"t-desc-chatter", 9},
 	} {
 		goldenAge(t, db, "items", x.id, x.days)
 	}
@@ -87,6 +103,7 @@ func TestTaskRankingStaysAsItWas(t *testing.T) {
 		{"despliegue", 20, []string{
 			"t-title-new", "t-title-old",
 			"t-desc-many", "t-both", "t-comments", "t-desc-one", "t-desc-one-b", "t-sub",
+			"t-desc-deleted", "t-desc-chatter",
 		}},
 		{"despliegue", 3, []string{"t-title-new", "t-title-old", "t-desc-many"}},
 		{"despliegue nocturno", 20, []string{"t-title-new", "t-sub"}},
