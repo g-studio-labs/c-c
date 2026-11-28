@@ -2820,7 +2820,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "install_listener",
-            "description": "Install the cac listener on this machine: a systemd user service (`cac-listen.service`, running `cac-mcp listen run`) that keeps everything cac would tell this person (bell notices, messages, answered requests, Basecamp activity) in a file, so a session can catch up from the last event it confirmed even after it was closed. Writes one unit file in the user's systemd folder, with no token in it, and runs `systemctl --user daemon-reload` and `enable --now`; it does not enable linger. Linux and the standalone `cac-mcp` binary only: from the desktop app (`cac --mcp`) it answers that `cac-mcp` has to be installed first. ASK THE USER FIRST; call it only when they agreed (check `cac-mcp listen status` before). The token needs the `events:read` permission for it to listen. Needs no scope; it never touches cac. The cac-listen skill says how to read it.",
+            "description": "Install the cac listener on this machine: a user service (on Linux a systemd unit, `cac-listen.service`; on macOS a launchd LaunchAgent, `dev.guz-studio.cac-listen`; either one runs `cac-mcp listen run`) that keeps everything cac would tell this person (bell notices, messages, answered requests, Basecamp activity) in a file, so a session can catch up from the last event it confirmed even after it was closed. Writes one file in the user's own folder, with no token in it: on Linux a unit in the systemd user folder, then `systemctl --user daemon-reload` and `enable --now` (no linger); on macOS a plist in `~/Library/LaunchAgents`, then `launchctl bootstrap gui/<uid>` (it starts at login and launchd restarts it). Linux, macOS and the standalone `cac-mcp` binary only: from the desktop app (`cac --mcp`) it answers that `cac-mcp` has to be installed first. ASK THE USER FIRST; call it only when they agreed (check `cac-mcp listen status` before). The token needs the `events:read` permission for it to listen. Needs no scope; it never touches cac. The cac-listen skill says how to read it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -11348,6 +11348,7 @@ mod tests {
             "aunque `external` sea `false`",
             "`data.sourceKey` empieza por `bc:`",
             "`data.kind`\nempieza por `basecamp:`",
+            "un LaunchAgent de launchd en macOS",
         ] {
             assert!(LISTEN_SKILL.contains(needle), "la skill de escuchar ya no dice {needle}");
         }
@@ -11369,6 +11370,8 @@ mod tests {
         let defs = annotate(tool_defs());
         let t = tool(&defs, "install_listener");
         assert!(t["description"].as_str().unwrap().contains("ASK THE USER FIRST"));
+        let description = t["description"].as_str().unwrap();
+        assert!(description.contains("macOS") && description.contains("launchd") && description.contains("Linux"), "{description}");
         assert_eq!(t["annotations"]["readOnlyHint"], json!(false));
 
         let rep = |code: i32, out: &str, err: &str| crate::listen_service::Report { code, out: out.into(), err: err.into() };

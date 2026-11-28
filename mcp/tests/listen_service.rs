@@ -190,3 +190,156 @@ fn an_update_restarts_the_service_only_when_it_is_installed() {
     assert_eq!(out.status.code(), Some(1), "{}", said(&out));
     assert!(calls(&dir).is_empty(), "{:?}", calls(&dir));
 }
+
+const LABEL: &str = "dev.guz-studio.cac-listen";
+
+/// Un `launchctl` con estado (el marcador `loaded`) y un `id` que contesta
+/// 501, ambos de mentira: el `PATH` de la prueba no tiene los de verdad.
+fn fake_launchctl(dir: &Path) {
+    let bin = dir.join("fakebin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = format!(
+        "#!/bin/sh\nprintf '%s | LD=[%s]\\n' \"$*\" \"$LD_LIBRARY_PATH\" >> '{log}'\ncase \"$1\" in\n  print) [ -f '{mark}' ] && printf 'state = running\\npid = 7\\n' || exit 113;;\n  bootstrap|load) : > '{mark}';;\n  bootout) rm -f '{mark}';;\nesac\nexit 0\n",
+        log = dir.join("launchctl.log").display(),
+        mark = dir.join("loaded").display()
+    );
+    std::fs::write(bin.join("launchctl"), script).unwrap();
+    std::fs::write(bin.join("id"), "#!/bin/sh\necho 501\n").unwrap();
+    for name in ["launchctl", "id"] {
+        std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+fn launchctl_calls(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("launchctl.log")).unwrap_or_default().lines().map(String::from).collect()
+}
+
+fn plist_file(dir: &Path) -> PathBuf {
+    dir.join("Library").join("LaunchAgents").join(format!("{LABEL}.plist"))
+}
+
+/// En macOS (forzado, esto corre en Linux) el binario de verdad escribe el
+/// LaunchAgent, lo carga en `gui/<uid>`, dice su estado y lo descarga
+/// dejando los eventos.
+///
+/// Roturas que atrapa: un plist con el token; apuntar a un enlace en vez de
+/// al binario; cargar en otro dominio que `gui/501`; lanzar `launchctl` sin
+/// pasar por `host::command` (heredaría el `LD_LIBRARY_PATH` de la imagen);
+/// no descargar al quitar; borrar los eventos; escribir una unidad de
+/// systemd en macOS; y soltar el token en la salida.
+#[test]
+fn on_macos_install_status_and_uninstall_go_through_launchctl() {
+    let _one = serial();
+    let dir = scratch("mac-flow");
+    fake_launchctl(&dir);
+    let real = dir.join("real").join("cac-mcp");
+    copy_binary(&real);
+    let link = dir.join("bin").join("cac-mcp");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    std::fs::create_dir_all(dir.join("claude")).unwrap();
+    std::fs::write(dir.join("claude").join(".claude.json"), json!({ "mcpServers": { "cac": { "env": { "CAC_TOKEN": TOKEN } } } }).to_string()).unwrap();
+    let mac = |args: &[&str]| {
+        let mut cmd = binary(&link, &dir);
+        cmd.env("CAC_MCP_SERVICE_OS", "macos").args(args);
+        cmd.output().unwrap()
+    };
+
+    let out = mac(&["listen", "install"]);
+    assert_eq!(out.status.code(), Some(0), "{}", said(&out));
+    let plist = std::fs::read_to_string(plist_file(&dir)).unwrap();
+    let real = real.canonicalize().unwrap();
+    assert!(plist.contains(&format!("<string>{}</string>\n    <string>listen</string>\n    <string>run</string>", real.display())), "{plist}");
+    assert!(!plist.contains("EnvironmentVariables") && !plist.contains(TOKEN), "{plist}");
+    assert_eq!(
+        launchctl_calls(&dir),
+        [format!("print gui/501/{LABEL} | LD=[]"), format!("bootstrap gui/501 {} | LD=[]", plist_file(&dir).display())]
+    );
+    assert!(!said(&out).contains(TOKEN));
+    assert!(!unit_file(&dir).exists(), "en macOS no se escribe una unidad de systemd");
+
+    std::fs::create_dir_all(dir.join("state")).unwrap();
+    std::fs::write(dir.join("state").join("listen.json"), r#"{"cursor":42}"#).unwrap();
+    let out = mac(&["listen", "status"]);
+    assert_eq!(out.status.code(), Some(0), "{}", said(&out));
+    assert!(said(&out).contains("loaded, running") && said(&out).contains("cursor: 42"), "{}", said(&out));
+
+    let events = dir.join("cache").join("cac").join("events.jsonl");
+    std::fs::create_dir_all(events.parent().unwrap()).unwrap();
+    std::fs::write(&events, "{\"seq\":42}\n").unwrap();
+    let out = mac(&["listen", "uninstall"]);
+    assert_eq!(out.status.code(), Some(0), "{}", said(&out));
+    assert!(!plist_file(&dir).exists());
+    assert_eq!(std::fs::read_to_string(&events).unwrap(), "{\"seq\":42}\n", "uninstall borró los eventos");
+    assert!(launchctl_calls(&dir).iter().any(|c| c.starts_with(&format!("bootout gui/501/{LABEL}"))), "{:?}", launchctl_calls(&dir));
+    for call in launchctl_calls(&dir) {
+        assert!(call.ends_with("LD=[]"), "{call}");
+    }
+}
+
+/// `--dryRun` de `install_listener` en macOS enseña el plist y no escribe ni
+/// carga nada. Habla con el binario por stdio.
+///
+/// Roturas que atrapa: que el dryRun escriba el plist o llame a `launchctl`,
+/// o que enseñe la unidad de systemd en vez del plist.
+#[test]
+fn the_dry_run_shows_the_plist_and_writes_nothing() {
+    use std::io::Write;
+    let _one = serial();
+    let dir = scratch("mac-dry");
+    fake_launchctl(&dir);
+    let at = dir.join("bin").join("cac-mcp");
+    copy_binary(&at);
+    let mut child = binary(&at, &dir).env("CAC_MCP_SERVICE_OS", "macos").stdout(Stdio::piped()).stderr(Stdio::null()).stdin(Stdio::piped()).spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "t", "version": "0" } } });
+    let call = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "install_listener", "arguments": { "dryRun": true } } });
+    writeln!(stdin, "{init}").unwrap();
+    writeln!(stdin, "{call}").unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains(".plist") && text.contains("ProgramArguments") && !text.contains(TOKEN), "{text}");
+    assert!(!plist_file(&dir).exists() && launchctl_calls(&dir).is_empty() && !unit_file(&dir).exists());
+}
+
+/// `cac-mcp update` reinicia el agente de macOS si existe, con
+/// `kickstart -k`, y no toca launchd si no.
+///
+/// Roturas que atrapa: no reiniciar tras actualizar; llamar a `launchctl`
+/// sin que haya agente; usar `systemctl` en macOS.
+#[test]
+fn on_macos_an_update_restarts_the_agent_only_when_it_is_installed() {
+    let _one = serial();
+    let releases = FakeReleases::start();
+    releases.announce("999.0.0");
+    releases.publish("999.0.0", b"#!/bin/sh\necho 'cac-mcp 999.0.0'\n");
+    let source = releases.source();
+    let run = |dir: &Path, program: &Path| {
+        binary(program, dir)
+            .env("CAC_MCP_SERVICE_OS", "macos")
+            .env("CAC_MCP_VERSION_URL", &source.version_url)
+            .env("CAC_MCP_DOWNLOAD_BASE", &source.download_base)
+            .arg("update")
+            .output()
+            .unwrap()
+    };
+
+    let dir = scratch("mac-update-none");
+    fake_launchctl(&dir);
+    let at = dir.join("bin").join("cac-mcp");
+    copy_binary(&at);
+    assert_eq!(run(&dir, &at).status.code(), Some(0));
+    assert!(launchctl_calls(&dir).is_empty(), "{:?}", launchctl_calls(&dir));
+
+    let dir = scratch("mac-update-some");
+    fake_launchctl(&dir);
+    let at = dir.join("bin").join("cac-mcp");
+    copy_binary(&at);
+    std::fs::create_dir_all(plist_file(&dir).parent().unwrap()).unwrap();
+    std::fs::write(plist_file(&dir), "<plist/>").unwrap();
+    let out = run(&dir, &at);
+    assert_eq!(out.status.code(), Some(0), "{}", said(&out));
+    assert_eq!(launchctl_calls(&dir), [format!("kickstart -k gui/501/{LABEL} | LD=[]")]);
+    assert!(said(&out).contains("restarted"), "{}", said(&out));
+}

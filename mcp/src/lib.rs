@@ -29,6 +29,7 @@ pub mod hooks_install;
 pub mod host;
 pub mod image;
 pub mod listen;
+pub mod listen_launchd;
 pub mod listen_service;
 pub mod op;
 pub mod pdf;

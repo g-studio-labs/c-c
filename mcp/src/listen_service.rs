@@ -11,10 +11,11 @@
 //! Sólo para el binario suelto. La ruta de una AppImage cambia en cada
 //! actualización (se monta en `/tmp/.mount_…`), y una unidad que apunte a ella
 //! se rompe sola; por eso `install` se niega ahí y dice que se instale
-//! `cac-mcp`. En macOS y Windows `install` contesta que aún no se puede (launchd
-//! y el Programador de tareas van en otra tarea) y cómo correrlo a mano.
+//! `cac-mcp`. En macOS es un LaunchAgent (`listen_launchd`), con la misma forma
+//! (command-and-control-568). En Windows `install` contesta que aún no se puede
+//! (el Programador de tareas va en otra tarea) y cómo correrlo a mano.
 //!
-//! Todo `systemctl` pasa por `host::command`, como cualquier programa del
+//! Todo `systemctl` y `launchctl` pasa por `host::command`, como cualquier programa del
 //! sistema: dentro de una AppImage el entorno apunta a las bibliotecas de la
 //! imagen y el programa del sistema moriría con ellas.
 
@@ -30,14 +31,15 @@ use crate::{host, listen, update};
 pub const UNIT: &str = "cac-listen.service";
 const NOT_SUPPORTED: &str = "not supported on this system yet";
 
-/// Lo que dijo un `systemctl`.
+/// Lo que dijo un `systemctl` o un `launchctl`.
 pub struct Ran {
     pub ok: bool,
     pub stdout: String,
     pub stderr: String,
 }
 
-pub type Systemctl<'a> = &'a dyn Fn(&[&str]) -> io::Result<Ran>;
+pub type Control<'a> = &'a dyn Fn(&[&str]) -> io::Result<Ran>;
+pub type Systemctl<'a> = Control<'a>;
 
 /// El `systemctl --user` de verdad.
 pub fn systemctl(args: &[&str]) -> io::Result<Ran> {
@@ -45,10 +47,36 @@ pub fn systemctl(args: &[&str]) -> io::Result<Ran> {
     Ok(Ran { ok: out.status.success(), stdout: String::from_utf8_lossy(&out.stdout).trim().into(), stderr: String::from_utf8_lossy(&out.stderr).trim().into() })
 }
 
+/// El `launchctl` de verdad.
+pub fn launchctl(args: &[&str]) -> io::Result<Ran> {
+    let out = host::command("launchctl").args(args).stdin(Stdio::null()).output()?;
+    Ok(Ran { ok: out.status.success(), stdout: String::from_utf8_lossy(&out.stdout).trim().into(), stderr: String::from_utf8_lossy(&out.stderr).trim().into() })
+}
+
+/// El programa que gestiona el servicio en este sistema.
+pub fn control_for(os: &str) -> fn(&[&str]) -> io::Result<Ran> {
+    if os == "macos" { launchctl } else { systemctl }
+}
+
+/// El sistema para el que se instala. `CAC_MCP_SERVICE_OS` sólo existe para
+/// que una prueba en Linux ejerza el camino de macOS con un `launchctl` de
+/// mentira; nadie lo pone de verdad.
+pub fn service_os() -> String {
+    std::env::var("CAC_MCP_SERVICE_OS").ok().filter(|os| !os.is_empty()).unwrap_or_else(|| std::env::consts::OS.to_string())
+}
+
+pub fn supports_service(os: &str) -> bool {
+    matches!(os, "linux" | "macos")
+}
+
 /// Dónde está cada cosa y quién corre esto.
 pub struct Setup {
     pub os: &'static str,
     pub unit_dir: PathBuf,
+    /// `~/Library/LaunchAgents` (sólo macOS).
+    pub agents_dir: PathBuf,
+    pub log: PathBuf,
+    pub uid: String,
     pub exe: PathBuf,
     pub appdir: Option<PathBuf>,
     pub appimage: Option<PathBuf>,
@@ -60,6 +88,19 @@ impl Setup {
     fn unit_path(&self) -> PathBuf {
         self.unit_dir.join(UNIT)
     }
+    pub fn plist_path(&self) -> PathBuf {
+        self.agents_dir.join(format!("{}.plist", crate::listen_launchd::LABEL))
+    }
+}
+
+fn agents_dir_from(env: &dyn Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
+    Some(env("HOME")?.join("Library").join("LaunchAgents"))
+}
+
+fn user_id() -> Result<String, String> {
+    let out = host::command("id").arg("-u").stdin(Stdio::null()).output().map_err(|e| format!("could not run `id -u`: {e}"))?;
+    let uid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() && !uid.is_empty() { Ok(uid) } else { Err("could not find the user id (`id -u`)".into()) }
 }
 
 /// `$XDG_CONFIG_HOME/systemd/user`, o `~/.config/systemd/user`.
@@ -68,21 +109,22 @@ fn unit_dir_from(env: &dyn Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
     Some(base.join("systemd").join("user"))
 }
 
-fn unit_path_here() -> Option<PathBuf> {
-    let env = |name: &str| std::env::var_os(name).map(PathBuf::from).filter(|p| !p.as_os_str().is_empty());
-    unit_dir_from(&env).map(|dir| dir.join(UNIT))
-}
-
 fn setup_here() -> Result<Setup, String> {
     let env = |name: &str| std::env::var_os(name).map(PathBuf::from).filter(|p| !p.as_os_str().is_empty());
+    let os = service_os();
+    let home = env("HOME").ok_or("no home folder to keep the unit in")?;
     let unit_dir = unit_dir_from(&env).ok_or("no home folder to keep the unit in")?;
+    let agents_dir = agents_dir_from(&env).ok_or("no home folder to keep the unit in")?;
     // El fichero de verdad, no un enlace: la actualización reemplaza el
     // binario por renombrado y el enlace sigue valiendo, pero un enlace
     // dentro de una carpeta de la que se borra la dejaría colgando.
     let exe = std::env::current_exe().and_then(|exe| exe.canonicalize()).map_err(|e| format!("could not find its own file: {e}"))?;
     Ok(Setup {
-        os: std::env::consts::OS,
+        os: if os == "macos" { "macos" } else { std::env::consts::OS },
         unit_dir,
+        agents_dir,
+        log: home.join("Library").join("Logs").join("cac-listen.log"),
+        uid: if os == "macos" { user_id()? } else { String::new() },
         exe,
         appdir: env("APPDIR"),
         appimage: env("APPIMAGE"),
@@ -123,10 +165,10 @@ pub struct Report {
 }
 
 impl Report {
-    fn ok(out: impl Into<String>) -> Self {
+    pub(crate) fn ok(out: impl Into<String>) -> Self {
         Report { code: 0, out: out.into(), err: String::new() }
     }
-    fn fail(code: i32, err: impl Into<String>) -> Self {
+    pub(crate) fn fail(code: i32, err: impl Into<String>) -> Self {
         Report { code, out: String::new(), err: err.into() }
     }
 }
@@ -137,8 +179,8 @@ fn by_hand(os: &str) -> String {
     )
 }
 
-pub fn install(setup: &Setup, sys: Systemctl) -> Report {
-    if setup.os != "linux" {
+pub fn install(setup: &Setup, sys: Control) -> Report {
+    if !supports_service(setup.os) {
         return Report::fail(2, by_hand(setup.os));
     }
     if lives_in_an_appimage(&setup.exe, setup.appdir.as_deref(), setup.appimage.as_deref()) {
@@ -149,6 +191,9 @@ pub fn install(setup: &Setup, sys: Systemctl) -> Report {
                 setup.exe.display()
             ),
         );
+    }
+    if setup.os == "macos" {
+        return crate::listen_launchd::install(setup, sys);
     }
     let unit = setup.unit_path();
     let text = unit_text(&setup.exe);
@@ -175,9 +220,12 @@ pub fn install(setup: &Setup, sys: Systemctl) -> Report {
     Report::ok(out)
 }
 
-pub fn uninstall(setup: &Setup, sys: Systemctl) -> Report {
-    if setup.os != "linux" {
+pub fn uninstall(setup: &Setup, sys: Control) -> Report {
+    if !supports_service(setup.os) {
         return Report::fail(2, by_hand(setup.os));
+    }
+    if setup.os == "macos" {
+        return crate::listen_launchd::uninstall(setup, sys);
     }
     let unit = setup.unit_path();
     if !unit.exists() {
@@ -200,7 +248,10 @@ fn read_json(path: &Path) -> Value {
     fs::read_to_string(path).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or(Value::Null)
 }
 
-pub fn status(setup: &Setup, sys: Systemctl) -> Report {
+pub fn status(setup: &Setup, sys: Control) -> Report {
+    if setup.os == "macos" {
+        return crate::listen_launchd::status(setup, sys);
+    }
     let mut out = String::new();
     let mut running = false;
     if setup.os != "linux" {
@@ -217,6 +268,12 @@ pub fn status(setup: &Setup, sys: Systemctl) -> Report {
             out.push_str(&format!("stopped: the unit is `{}`; see `journalctl --user -u {UNIT}`\n", if active.is_empty() { "unknown" } else { &active }));
         }
     }
+    listener_report(setup, out, running)
+}
+
+/// Lo que dice el propio oyente (su fichero de estado) detrás de lo que dice
+/// el gestor del servicio. Sale con 0 sólo si el servicio corre.
+pub(crate) fn listener_report(setup: &Setup, mut out: String, running: bool) -> Report {
     let listener = read_json(&listen::status_file(&setup.state));
     let field = |name: &str| listener[name].as_str().map(String::from);
     if let Some(state) = field("state") {
@@ -239,7 +296,7 @@ pub fn status(setup: &Setup, sys: Systemctl) -> Report {
 /// `cac-mcp update` acabó bien: si el servicio está instalado, lo reinicia
 /// para que corra la versión nueva (lo pidió quien actualiza). Devuelve lo que
 /// hay que decir, o nada si no hay servicio.
-pub fn restart_after_update(unit_path: Option<&Path>, sys: Systemctl) -> Option<String> {
+pub fn restart_after_update(unit_path: Option<&Path>, sys: Control) -> Option<String> {
     if !unit_path?.exists() {
         return None;
     }
@@ -252,13 +309,23 @@ pub fn restart_after_update(unit_path: Option<&Path>, sys: Systemctl) -> Option<
 
 /// Lo que `cac-mcp update` llama al terminar.
 pub fn restart_after_update_here() -> Option<String> {
+    if service_os() == "macos" {
+        let env = |name: &str| std::env::var_os(name).map(PathBuf::from).filter(|p| !p.as_os_str().is_empty());
+        let plist = agents_dir_from(&env)?.join(format!("{}.plist", crate::listen_launchd::LABEL));
+        return crate::listen_launchd::restart_after_update(&plist, &user_id().ok()?, &launchctl);
+    }
     restart_after_update(unit_path_here().as_deref(), &systemctl)
+}
+
+fn unit_path_here() -> Option<PathBuf> {
+    let env = |name: &str| std::env::var_os(name).map(PathBuf::from).filter(|p| !p.as_os_str().is_empty());
+    unit_dir_from(&env).map(|dir| dir.join(UNIT))
 }
 
 /// El camino de `main` sin tocar el sistema: el sistema operativo se decide
 /// **antes** de buscar la carpeta de usuario, que en Windows no existe.
-pub fn run_cli(os: &str, args: &[&str], setup: &dyn Fn() -> Result<Setup, String>, sys: Systemctl) -> Report {
-    if os != "linux" && matches!(args, ["install"] | ["uninstall"] | ["status"]) {
+pub fn run_cli(os: &str, args: &[&str], setup: &dyn Fn() -> Result<Setup, String>, sys: Control) -> Report {
+    if !supports_service(os) && matches!(args, ["install"] | ["uninstall"] | ["status"]) {
         return Report::fail(2, by_hand(os));
     }
     let setup = match setup() {
@@ -276,24 +343,30 @@ pub fn run_cli(os: &str, args: &[&str], setup: &dyn Fn() -> Result<Setup, String
 /// `install` para quien no puede imprimir (el servidor MCP habla JSON-RPC por
 /// la salida): el mismo camino que `cac-mcp listen install`, con su informe.
 pub fn install_here() -> Report {
-    run_cli(std::env::consts::OS, &["install"], &setup_here, &systemctl)
+    let os = service_os();
+    run_cli(&os, &["install"], &setup_here, &control_for(&os))
 }
 
 /// Lo que `install` escribiría, sin escribir ni arrancar nada.
 pub fn preview_here() -> Result<Value, String> {
-    if std::env::consts::OS != "linux" {
-        return Err(by_hand(std::env::consts::OS));
+    let os = service_os();
+    if !supports_service(&os) {
+        return Err(by_hand(&os));
     }
     let setup = setup_here()?;
     if lives_in_an_appimage(&setup.exe, setup.appdir.as_deref(), setup.appimage.as_deref()) {
         return Err(format!("{} is inside an AppImage; install the standalone `cac-mcp`.", setup.exe.display()));
+    }
+    if setup.os == "macos" {
+        return Ok(serde_json::json!({ "unit": setup.plist_path().display().to_string(), "text": crate::listen_launchd::plist_text(&setup.exe, &setup.log) }));
     }
     Ok(serde_json::json!({ "unit": setup.unit_path().display().to_string(), "text": unit_text(&setup.exe) }))
 }
 
 /// `cac-mcp listen install|uninstall|status`.
 pub fn main(args: &[&str]) -> i32 {
-    let report = run_cli(std::env::consts::OS, args, &setup_here, &systemctl);
+    let os = service_os();
+    let report = run_cli(&os, args, &setup_here, &control_for(&os));
     print!("{}", report.out);
     if !report.err.is_empty() {
         eprintln!("{}", report.err);
@@ -317,6 +390,9 @@ mod tests {
         Setup {
             os: "linux",
             unit_dir: dir.join("config").join("systemd").join("user"),
+            agents_dir: dir.join("home").join("Library").join("LaunchAgents"),
+            log: dir.join("home").join("Library").join("Logs").join("cac-listen.log"),
+            uid: "501".into(),
             exe: dir.join("bin").join("cac-mcp"),
             appdir: None,
             appimage: None,
@@ -419,12 +495,12 @@ mod tests {
         assert_eq!(install(&inherited, &|args| sys.run(args)).code, 0);
     }
 
-    /// Roturas que atrapa: instalar en macOS o Windows, otro código que 2, o
-    /// no decir cómo correrlo a mano.
+    /// Roturas que atrapa: instalar en Windows, otro código que 2, o no decir
+    /// cómo correrlo a mano.
     #[test]
-    fn on_macos_and_windows_install_says_no_with_code_two() {
+    fn on_windows_install_says_no_with_code_two() {
         let dir = scratch("other-os");
-        for os in ["macos", "windows"] {
+        for os in ["windows"] {
             let s = Setup { os, ..setup(&dir) };
             let sys = Fake::new(vec![]);
             for report in [install(&s, &|a| sys.run(a)), uninstall(&s, &|a| sys.run(a))] {
@@ -437,10 +513,10 @@ mod tests {
 
     /// Roturas que atrapa: buscar la carpeta de usuario antes de decidir el
     /// sistema (en Windows no hay `HOME` y salía código 1 sin el texto), o que
-    /// `status` conteste otro código que 2 fuera de Linux.
+    /// `status` conteste otro código que 2 donde no hay servicio.
     #[test]
-    fn outside_linux_the_cli_says_no_without_needing_a_home_folder() {
-        for os in ["macos", "windows"] {
+    fn outside_linux_and_macos_the_cli_says_no_without_needing_a_home_folder() {
+        for os in ["windows"] {
             for args in [&["install"][..], &["uninstall"], &["status"]] {
                 let sys = Fake::new(vec![]);
                 let report = run_cli(os, args, &|| Err("no home folder to keep the unit in".into()), &|a| sys.run(a));

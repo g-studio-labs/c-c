@@ -22,7 +22,9 @@ en cac, en Basecamp ni en ningún canal por su cuenta.
    cursor, la última conexión y, si está parada, el motivo (un token sin el
    scope `events:read`, revocado, caducado…).
 2. **Si el servicio no está instalado, pregunta al usuario** antes de llamar a
-   `install_listener`: instala un servicio de usuario de systemd en su máquina.
+   `install_listener`: instala un servicio de usuario en su máquina (una unidad
+   de systemd en Linux, un LaunchAgent de launchd en macOS; en Windows aún no se
+   puede).
    Nada se instala solo. Si dice que no, no lo vuelvas a ofrecer en la sesión
    (puede correr `cac-mcp listen run` a mano en una terminal; `follow` lee lo
    mismo).
