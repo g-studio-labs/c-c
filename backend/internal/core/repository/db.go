@@ -225,6 +225,10 @@ func DBConnection() {
 	if err := EnsureUserIndexes(db); err != nil {
 		lg.Error("user indexes: " + err.Error())
 	}
+	// Los resueltos de «Por atender» se paginan por fecha de cierre. Ver request.go.
+	if err := EnsureRequestIndexes(db); err != nil {
+		lg.Error("request indexes: " + err.Error())
+	}
 	// Un solo backup vivo por base. Ver backup.go.
 	if err := EnsureBackupIndexes(db); err != nil {
 		lg.Error("backup indexes: " + err.Error())

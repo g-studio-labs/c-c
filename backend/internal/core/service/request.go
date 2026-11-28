@@ -375,17 +375,49 @@ func (s *RequestService) Publish(q *domain.Request, callerID, url string) (*doma
 
 // List: la bandeja.
 func (s *RequestService) List(f repository.RequestFilter, viewerID string) ([]domain.RequestView, error) {
-	rows, err := s.repo.List(f)
+	rows, err := s.repo.List(s.withTextTasks(f))
 	if err != nil {
 		return nil, err
 	}
+	return s.views(rows, viewerID), nil
+}
+
+// Page: una página de la bandeja y el cursor de la siguiente.
+func (s *RequestService) Page(f repository.RequestFilter, cursor, viewerID string) (domain.RequestPage, error) {
+	rows, next, err := s.repo.Page(s.withTextTasks(f), cursor)
+	if err != nil {
+		return domain.RequestPage{}, err
+	}
+	return domain.RequestPage{Requests: s.views(rows, viewerID), Next: next}, nil
+}
+
+// withTextTasks: un texto que es la ref de una tarea («cac-12») encuentra sus
+// pedidos aunque ni el resumen ni el título la digan: la ref no se guarda en
+// ninguna columna, se calcula.
+func (s *RequestService) withTextTasks(f repository.RequestFilter) repository.RequestFilter {
+	text := strings.ToLower(strings.TrimSpace(f.Text))
+	if text == "" {
+		return f
+	}
+	for _, ref := range domain.ExtractTaskRefs(text, false) {
+		if ref.Slug == "" {
+			continue
+		}
+		if t, err := s.tasks.FindByRef(f.OrgIDs, ref); err == nil {
+			f.TextTaskIDs = append(f.TextTaskIDs, t.ID)
+		}
+	}
+	return f
+}
+
+func (s *RequestService) views(rows []domain.Request, viewerID string) []domain.RequestView {
 	out := make([]domain.RequestView, 0, len(rows))
 	refs := map[string]domain.RequestTaskRef{}
 	names := map[string]string{}
 	for i := range rows {
 		out = append(out, s.view(&rows[i], viewerID, false, refs, names))
 	}
-	return out, nil
+	return out
 }
 
 // View: el pedido para leer; con `detail`, también su historial y el handoff

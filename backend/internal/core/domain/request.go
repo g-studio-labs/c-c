@@ -437,6 +437,13 @@ type MyOpenRequestLine struct {
 	Link    string      `json:"link"`
 }
 
+// RequestPage: una página de la bandeja, cuando se pide con cursor. `Next`
+// vacío: no hay más.
+type RequestPage struct {
+	Requests []RequestView `json:"requests"`
+	Next     string        `json:"next,omitempty"`
+}
+
 // RequestWait: lo que contesta la espera larga.
 type RequestWait struct {
 	Settled bool         `json:"settled"`

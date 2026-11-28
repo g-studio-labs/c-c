@@ -109,10 +109,16 @@ func (h *RequestHandler) Create(w http.ResponseWriter, r *http.Request) {
 	sendRequest(w, http.StatusCreated, v)
 }
 
-// List: GET /api/v1/requests?scope=mine|team&status=open|answered|withdrawn|closed|all&taskId=&orgId=
+// List: GET /api/v1/requests?scope=mine|team&status=open|answered|withdrawn|closed|all&taskId=&orgId=&kind=&q=&cursor=
 //
 // Por defecto lo pedido a quien mira y abierto, en todas sus organizaciones.
 // `closed` junta contestados y retirados, que es «Resueltos» en la bandeja.
+// `kind` (uno o varios, con comas) y `q` (código, resumen, título o ref de la
+// tarea) filtran.
+//
+// Con `cursor` (vacío para la primera) contesta por páginas, `{requests,
+// next}`, con un tope de MaxRequestPage. Sin él, la lista de siempre: la web y
+// el MCP no lo mandan.
 func (h *RequestHandler) List(w http.ResponseWriter, r *http.Request) {
 	user, ok := currentUser(r)
 	if !ok {
@@ -161,8 +167,32 @@ func (h *RequestHandler) List(w http.ResponseWriter, r *http.Request) {
 		f.TaskID = task.ID
 		f.OrgIDs = []string{task.OrgID}
 	}
+	if raw := strings.TrimSpace(q.Get("kind")); raw != "" {
+		for _, k := range strings.Split(raw, ",") {
+			kind := domain.RequestKind(strings.TrimSpace(k))
+			if !domain.ValidRequestKind(kind) {
+				SendErrorResponse(w, http.StatusBadRequest, "kind is approve_message, test, decide, run or obtain", "request-kind")
+				return
+			}
+			f.Kinds = append(f.Kinds, kind)
+		}
+	}
+	f.Text = strings.TrimSpace(q.Get("q"))
 	if n, err := strconv.Atoi(q.Get("limit")); err == nil {
 		f.Limit = n
+	}
+	if q.Has("cursor") {
+		page, err := h.svc.Page(f, q.Get("cursor"), user.UserID)
+		if errors.Is(err, repository.ErrBadCursor) {
+			SendErrorResponse(w, http.StatusBadRequest, "Invalid cursor", "bad-cursor")
+			return
+		}
+		if err != nil {
+			agentRequestError(w, err)
+			return
+		}
+		SendResult(w, http.StatusOK, domain.APIResponse[domain.RequestPage]{Success: true, Data: page})
+		return
 	}
 	out, err := h.svc.List(f, user.UserID)
 	if err != nil {
