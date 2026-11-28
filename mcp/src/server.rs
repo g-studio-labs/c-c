@@ -123,10 +123,24 @@ pub(crate) fn api_get(cfg: &Cfg, path: &str) -> Result<Value, String> {
                 .and_then(|v| v.as_str())
                 .or_else(|| body.get("message").and_then(|v| v.as_str()))
                 .unwrap_or("request failed");
+            if let Some(scope) = msg.strip_prefix("missing-scope:") {
+                return Err(missing_scope_remedy(scope));
+            }
             return Err(format!("cac returned {status}: {msg}"));
         }
         Ok(body.get("data").cloned().unwrap_or(Value::Null))
     })
+}
+
+/// Qué hacer cuando al token le falta un permiso: el camino exacto, no sólo
+/// el código. Lo usan las lecturas y las escrituras, para que un `missing-scope`
+/// se explique igual venga de donde venga (command-and-control-571).
+fn missing_scope_remedy(scope: &str) -> String {
+    format!(
+        "This token is valid but lacks the `{scope}` scope. Add `{scope}` to your token: native app → \
+         Connect Claude Code → the pencil on the token (no new token or CAC_TOKEN change needed). \
+         Or mint a new token with that permission checked and replace CAC_TOKEN."
+    )
 }
 
 /// La ruta de cac de un adjunto, o un error. `get_attachment` manda el token,
@@ -519,10 +533,7 @@ fn explain_write_failure(status: reqwest::StatusCode, body: &Value) -> String {
     // The backend answers `missing-scope:<name>`; turn that into the exact
     // remedy instead of making the caller guess.
     if let Some(scope) = msg.strip_prefix("missing-scope:") {
-        return format!(
-            "This token is valid but lacks the `{scope}` scope. In cac open Connect Claude Code, \
-             mint a token with that permission checked, and replace CAC_TOKEN."
-        );
+        return missing_scope_remedy(scope);
     }
     match status.as_u16() {
         403 => format!("cac refused the write: {msg}"),
@@ -576,7 +587,7 @@ fn dry_run(cfg: &Cfg, scope: &str, target: Result<Value, String>) -> Result<Valu
         "note": if permitted && target_ok {
             "Nothing was written. Re-send without dryRun to apply it."
         } else if !permitted {
-            "The token lacks the required scope; mint one in cac → Connect Claude Code."
+            "The token lacks the required scope: add it with the pencil on the token (native app → Connect Claude Code), or mint a new one."
         } else {
             "The target could not be read; check the id."
         }
@@ -1451,7 +1462,14 @@ fn page_outline(view: &Value, kind: &str, owner: &str) -> Value {
         "updatedAt": page.get("updatedAt"),
         "updatedByName": page.get("updatedByName"),
         "note": "Read one section with get_doc_page + section, or the whole body with full=true. Rewrite one heading with write_doc_page_section and its sectionHash.",
+        "shareWith": share_hint(kind, owner, id),
     })
+}
+
+/// La pista de cómo compartir una página, con los tres ids ya puestos: quien
+/// lee una página y luego le piden «compártelo» no tiene que buscarlos.
+fn share_hint(kind: &str, owner: &str, page: &str) -> String {
+    format!("share_doc_page {{kind: \"{kind}\", ownerId: \"{owner}\", pageId: \"{page}\"}} — a public link, only when the user asked to send it outside")
 }
 
 /// Lo que devuelve una escritura en una página: con qué seguir.
@@ -3622,7 +3640,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "share_doc_page",
-            "description": "Create a public link to a page. Anyone who has it, without an account, can read the page AND all its subpages, including ones added later, and the attachments they cite, until it expires or is revoked. Only share when the user asked to send it outside. Returns the web `url` to send, `expiresAt` and the share `id` (to revoke it). Needs a token with `docs:share`.",
+            "description": "Share a document or a page with a public link (compartir un documento, guide or doc, enlace público). A document is shared from its top page: the link carries all its subpages. The home with its tabs (overview, runbook…) is not a page and cannot be shared; share a page from list_doc_pages. Anyone who has the link, without an account, can read the page AND all its subpages, including ones added later, and the attachments they cite, until it expires or is revoked. Only share when the user asked to send it outside. Returns the web `url` to send, `expiresAt` and the share `id` (to revoke it). Needs a token with `docs:share`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3637,7 +3655,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "list_doc_page_shares",
-            "description": "The live public links of a page: each one's web `url`, `expiresAt`, who created it and its `id`.",
+            "description": "The live public links (enlaces) of a shared document or page: each one's web `url`, `expiresAt`, who created it and its `id`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3650,7 +3668,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "revoke_doc_share",
-            "description": "Revoke a public page link by its `id` (from share_doc_page or list_doc_page_shares). It stops working right away, also for whoever already has it; it cannot be undone. Needs a token with `docs:share`.",
+            "description": "Stop sharing a document or page: revoke its public link (enlace) by its `id` (from share_doc_page or list_doc_page_shares). It stops working right away, also for whoever already has it; it cannot be undone. Needs a token with `docs:share`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -5993,7 +6011,10 @@ fn run_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
         "list_doc_pages" => {
             let (kind, id) = doc_target(cfg, args)?;
             let flat = api_get(cfg, &format!("/api/v1/docs/{kind}/{id}/pages"))?;
-            Ok(json!({ "pages": build_page_tree(&flat, &kind, &id) }))
+            Ok(json!({
+                "pages": build_page_tree(&flat, &kind, &id),
+                "shareWith": "To share a document with a link, share its top page: share_doc_page {kind, ownerId, pageId} (the link carries its subpages).",
+            }))
         }
 
         "get_context" => {
@@ -8113,7 +8134,9 @@ fn instructions(state: Option<SkillState>) -> String {
          next session knows what to check. Once a week, or when asked to consolidate, the cac-consolidar skill (the \
          weekly pass) proposes what to promote to the pitfalls, which decision is missing and what went stale; and \
          when a space has outside sources (get_space_sources), the cac-catch-up skill (the catch-up) proposes what \
-         happened in Jira and Notion since the last time, before writing any of it.",
+         happened in Jira and Notion since the last time, before writing any of it.\n\
+         To share a document or a page outside cac with a public link: share_doc_page (list_doc_page_shares and \
+         revoke_doc_share to see and stop the links), only when the user asked.",
     );
     match state {
         Some(SkillState::Missing) => s.push_str(
@@ -8997,6 +9020,72 @@ mod tests {
         assert_eq!(answer["url"], format!("{base}/app/shared#s1.firma"));
         assert_eq!((answer["id"].as_str(), answer["expiresAt"].as_str()), (Some("s1"), Some("2026-12-24T15:00:00Z")));
         assert_eq!(*seen.lock().unwrap(), [("POST".to_string(), "/api/v1/docs/list/l1/pages/p1/shares".to_string(), json!({ "ttlHours": 720 }))]);
+    }
+
+    /// Lo que hace que un agente encuentre cómo compartir: la herramienta se
+    /// llama por lo que la gente dice («documento», «enlace»), la portada con
+    /// pestañas se dice que no se comparte, las instrucciones del servidor la
+    /// nombran y la skill también.
+    ///
+    /// Roturas que atrapa: volver a «a page» sin decir «document»; quitar la
+    /// palabra «link»/«enlace»/«compartir» de la descripción; callar que se
+    /// comparte desde la página de arriba o que la portada no se comparte;
+    /// que las otras dos herramientas de enlaces no digan «document»; sacar
+    /// `share_doc_page` de las instrucciones o de la skill.
+    #[test]
+    fn sharing_a_document_is_discoverable() {
+        let defs = annotate(tool_defs());
+        let said = tool(&defs, "share_doc_page")["description"].as_str().unwrap().to_lowercase();
+        assert!(said.starts_with("share a document or a page with a public link"), "{said}");
+        for word in ["document", "link", "enlace", "compartir", "top page", "not a page", "list_doc_pages"] {
+            assert!(said.contains(word), "{word}: {said}");
+        }
+        for name in ["list_doc_page_shares", "revoke_doc_share"] {
+            let said = tool(&defs, name)["description"].as_str().unwrap().to_lowercase();
+            assert!(said.contains("document") && said.contains("link"), "{name}: {said}");
+        }
+        assert!(instructions(None).contains("share_doc_page"));
+        assert!(WORK_SKILL.contains("share_doc_page") && WORK_SKILL.contains("docs:share"));
+    }
+
+    /// Leer una página (y el árbol) trae la pista con los ids que se leyeron,
+    /// para que «compártelo» no obligue a buscarlos.
+    ///
+    /// Roturas que atrapa: no poner la pista; ponerla con el id del nodo o de
+    /// la página cambiados o con otro `kind`; ponerla sólo en la lectura de una
+    /// sección pero no en el índice; quitarla del árbol.
+    #[test]
+    fn reading_a_page_says_how_to_share_it() {
+        let (cfg, _) = fake_cac(|_, path, _| {
+            if path.ends_with("/pages") {
+                return json!([{ "id": "pg9", "title": "Guía", "hasBody": true, "parentId": null }]);
+            }
+            json!({ "page": { "id": "pg9", "title": "Guía", "body": "# Guía\n\nHola" }, "breadcrumb": [], "children": [] })
+        });
+        let page = call_tool(&cfg, "get_doc_page", &json!({ "kind": "folder", "ownerId": "own7", "pageId": "pg9" })).unwrap();
+        assert_eq!(
+            page["shareWith"],
+            "share_doc_page {kind: \"folder\", ownerId: \"own7\", pageId: \"pg9\"} — a public link, only when the user asked to send it outside"
+        );
+        let tree = call_tool(&cfg, "list_doc_pages", &json!({ "kind": "folder", "ownerId": "own7" })).unwrap();
+        assert!(tree["shareWith"].as_str().unwrap().contains("share_doc_page {kind, ownerId, pageId}"), "{tree}");
+    }
+
+    /// Un token sin `docs:share` recibe el camino para conseguirlo, tanto al
+    /// crear el enlace (una escritura) como al listarlos (una lectura).
+    ///
+    /// Roturas que atrapa: contestar sólo `missing-scope`; que las lecturas
+    /// no lo expliquen; nombrar otro permiso; no decir dónde está el lápiz.
+    #[test]
+    fn a_token_without_docs_share_is_told_how_to_get_it() {
+        let (cfg, _) = fake_cac(|_, _, _| json!({ "__status": 403, "error": "missing-scope:docs:share" }));
+        let target = json!({ "kind": "list", "ownerId": "l1", "pageId": "p1" });
+        for tool in ["share_doc_page", "list_doc_page_shares"] {
+            let err = call_tool(&cfg, tool, &target).unwrap_err();
+            for part in ["`docs:share`", "Connect Claude Code", "pencil on the token"] {
+                assert!(err.contains(part), "{tool}: {part}: {err}");
+            }
+        }
     }
 
     // ── Pedidos a una persona (command-and-control-500) ─────────────────────
