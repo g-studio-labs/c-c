@@ -72,8 +72,21 @@ describe("la barra «Abrir en la app»", () => {
 
   it("el router ya quitó /app: una ruta que empieza por /app no pierde nada", () => {
     mount("/app/notes");
+    expect(screen.queryByRole("region")).toBeNull();
+    cleanup();
+    mount("/notes/n1");
     fireEvent.click(screen.getByRole("button", { name: /Open in the app|Abrir en la app/ }));
-    expect(clicks).toEqual(["cac://app/notes"]);
+    expect(clicks).toEqual(["cac://notes/n1"]);
+  });
+
+  it("sólo sale donde la nativa abre algo: en un servidor o en /tasks a secas, no", () => {
+    for (const path of ["/servers/x/backups", "/tasks", "/my-work", "/call/abc"]) {
+      mount(path);
+      expect(screen.queryByRole("region"), path).toBeNull();
+      cleanup();
+    }
+    mount("/tasks?doc=space:s1&tab=runbook");
+    expect(screen.getByRole("region")).toBeTruthy();
   });
 
   it("no sale en móvil ni dentro de Tauri", () => {

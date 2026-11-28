@@ -25,6 +25,23 @@ export function toAppUrl(pathname: string, search: string, base = "/app"): strin
   return `cac://${path.replace(/^\/+/, "")}${search}`;
 }
 
+/**
+ * Si la app nativa abre esta ruta de la web en su pantalla. Es la lista de
+ * `core/src/app_link.rs` (`app_link`): con otra ruta la nativa no tiene
+ * pantalla y no hay nada que abrir allí, así que la barra no sale
+ * (command-and-control-576). `open-in-app.test.ts` la compara con el core.
+ */
+export function nativeOpens(pathname: string, search: string): boolean {
+  const path = pathname.replace(/\/+$/, "");
+  const q = new URLSearchParams(search);
+  const has = (...names: string[]) => names.some((n) => (q.get(n) ?? "").trim() !== "");
+  if (path === "/tasks") return has("task", "doc");
+  if (path === "/chat") return has("space");
+  if (path === "/dm") return has("c", "u");
+  if (path === "/notes" || path.startsWith("/notes/")) return true;
+  return ["/requests", "/feedback", "/organization"].includes(path);
+}
+
 export function readChoice(): OpenInAppChoice | null {
   try {
     const v = localStorage.getItem(CHOICE_KEY);

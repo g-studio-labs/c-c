@@ -82,6 +82,9 @@ export default function DocTabs({
   const enterPages = useDocPages((s) => s.enter);
 
   const [activeTab, setActiveTab] = useState<DocTabKey>("overview");
+  useEffect(() => {
+    useDocPages.setState({ shownTab: activeTab });
+  }, [activeTab]);
   const tabBar = useSlidingIndicator<HTMLElement>(activeTab);
   const [editing, setEditing] = useState(false);
   // El PDF adjunto que se está viendo, en el visor de la app.

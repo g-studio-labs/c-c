@@ -109,6 +109,8 @@ interface DocPagesState {
    * portada, así que cierra la página abierta.
    */
   requestedTab: DocTabKey | null;
+  /** La pestaña de la portada que se está viendo: la URL la refleja (`lib/view-url.ts`). */
+  shownTab: DocTabKey;
   requestTab: (tab: string | undefined) => void;
   takeRequestedTab: () => DocTabKey | null;
   /**
@@ -130,6 +132,7 @@ export const useDocPages = create<DocPagesState>()((set, get) => ({
   trash: [],
   loadingTrash: false,
   requestedTab: null,
+  shownTab: "overview",
 
   requestTab: (tab) => {
     if (!tab || !isDocTabKey(tab)) return;

@@ -6,8 +6,9 @@ import { cuando, dueClass, dueTitle } from "@/components/tasks/TaskCardMini";
 import { fecha } from "@/lib/fechas";
 import { enterOrg } from "@/lib/ir-en-org";
 import { dueDay } from "@/lib/month";
+import { viewSearch } from "@/lib/view-url";
 import { useT } from "@/lib/i18n";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ListChecks,
@@ -70,7 +71,11 @@ export default function Tasks() {
   // would lose the place the user was actually working in.
   const openTask = useTasksStore((s) => s.openTask);
   const [params, setParams] = useSearchParams();
+  // Lo que esta pantalla escribió en la URL (`viewSearch`): leerlo de vuelta
+  // reabriría lo que ya se está viendo.
+  const mirrored = useRef<string | null>(null);
   useEffect(() => {
+    if (params.toString() === mirrored.current) return;
     const id = params.get("task");
     if (!id) return;
     // Consumed once, or closing the drawer here would reopen it immediately.
@@ -88,6 +93,7 @@ export default function Tasks() {
   // el documento lo reabriría en el mismo instante.
   const openDoc = useTasksStore((s) => s.openDoc);
   useEffect(() => {
+    if (params.toString() === mirrored.current) return;
     const ref = params.get("doc");
     if (!ref) return;
     const [kind, id] = ref.split(":");
@@ -113,6 +119,20 @@ export default function Tasks() {
   // Sólo si es de la org en pantalla: está persistido y sobrevivía a cambiar
   // de org. Ver `store/org-switch.ts`.
   const activeDoc = useTasksStore((s) => (s.activeDoc?.orgId === currentOrgId ? s.activeDoc : null));
+
+  // La URL dice lo que se ve —un documento con su pestaña o página, o una
+  // tarea— para que recargar, copiarla o «Abrir en la app» lleven a lo mismo.
+  // `replace`: cada pestaña no llena el historial. Sólo cuando lo visto
+  // cambia, no con cada cambio de la URL (ver `mirrored`).
+  const openTaskId = useTasksStore((s) => s.openTaskId);
+  const activePageId = useDocPages((s) => s.activePageId);
+  const shownTab = useDocPages((s) => s.shownTab);
+  useEffect(() => {
+    const next = viewSearch({ taskId: openTaskId, doc: activeDoc, tab: shownTab, pageId: activePageId });
+    mirrored.current = next;
+    setParams(new URLSearchParams(next), { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openTaskId, activeDoc?.kind, activeDoc?.id, activePageId, shownTab]);
 
   // La vista vive en el store y no aquí por dos razones que se juntan.
   //

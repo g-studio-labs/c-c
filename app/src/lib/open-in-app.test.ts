@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { decideMode, isDesktopBrowser, readChoice, resetTried, alreadyTried, markTried, toAppUrl, writeChoice } from "./open-in-app";
+import { decideMode, isDesktopBrowser, readChoice, resetTried, alreadyTried, markTried, nativeOpens, toAppUrl, writeChoice } from "./open-in-app";
 
 const LINUX = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36";
 const MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15";
@@ -84,5 +86,28 @@ describe("si la app no está, no hay bucle", () => {
     expect(decideMode({ ...base, alreadyTried: alreadyTried() })).toBe("bar");
     markTried();
     expect(decideMode({ ...base, alreadyTried: alreadyTried() })).toBe("none");
+  });
+});
+
+describe("las rutas que la nativa abre", () => {
+  it("son las que lee `app_link` en el core, con sus parámetros", () => {
+    const rust = readFileSync(resolve(process.cwd(), "../core/src/app_link.rs"), "utf8");
+    for (const arm of ['"/tasks" =>', '"/chat" =>', '"/dm" =>', '"/requests" =>', '"/feedback" =>', '"/notes" =>', '"/organization" =>', 'strip_prefix("/notes/")']) {
+      expect(rust, arm).toContain(arm);
+    }
+    expect(nativeOpens("/tasks", "?task=X")).toBe(true);
+    expect(nativeOpens("/tasks", "?doc=list:l1&page=p")).toBe(true);
+    expect(nativeOpens("/chat", "?space=s1")).toBe(true);
+    expect(nativeOpens("/dm", "?u=u1")).toBe(true);
+    expect(nativeOpens("/notes/n1", "")).toBe(true);
+    for (const p of ["/requests", "/feedback", "/organization/", "/notes"]) expect(nativeOpens(p, ""), p).toBe(true);
+  });
+
+  it("lo demás no: el core lo mandaría a «al frente»", () => {
+    expect(nativeOpens("/tasks", "")).toBe(false);
+    expect(nativeOpens("/tasks", "?task=")).toBe(false);
+    expect(nativeOpens("/chat", "")).toBe(false);
+    expect(nativeOpens("/dm", "")).toBe(false);
+    for (const p of ["/servers", "/my-work", "/servers/x/backups", "/call/abc", "/overview", "/profile"]) expect(nativeOpens(p, ""), p).toBe(false);
   });
 });

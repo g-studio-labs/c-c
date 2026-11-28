@@ -65,7 +65,7 @@ describe("la elección de «Abrir en la app» en el menú de cuenta", () => {
   it("al abrirse relee lo que la barra recordó después de montarse", async () => {
     const { default: OpenInAppBar } = await import("@/components/OpenInAppBar");
     render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={["/tasks?task=X"]}>
         <OpenInAppBar />
         <AccountMenu onChangePassword={() => {}} onNotificationPrefs={() => {}} />
       </MemoryRouter>,

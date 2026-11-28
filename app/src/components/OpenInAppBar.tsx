@@ -3,7 +3,7 @@ import { useLocation } from "react-router-dom";
 import { ExternalLink, X } from "lucide-react";
 import { useT } from "@/lib/i18n";
 import { Button } from "@/components/ui/button";
-import { readChoice, NATIVE_RELEASES_URL, currentMode, launchApp, markTried, toAppUrl, writeChoice } from "@/lib/open-in-app";
+import { readChoice, NATIVE_RELEASES_URL, currentMode, launchApp, markTried, nativeOpens, toAppUrl, writeChoice } from "@/lib/open-in-app";
 
 /**
  * «Abrir en la app» en la versión web, como el de Slack o Linear. Nunca en
@@ -24,7 +24,7 @@ export default function OpenInAppBar() {
     if (readChoice() === "app") markTried();
   }, []);
 
-  if (mode !== "bar") return null;
+  if (mode !== "bar" || !nativeOpens(pathname, search)) return null;
 
   return (
     <div role="region" aria-label={t("common:openInApp.title")} className="flex items-center gap-3 border-b bg-muted/50 px-4 py-1.5 text-sm">
