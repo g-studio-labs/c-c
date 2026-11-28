@@ -1508,6 +1508,27 @@ fn short_share(base: &str, share: &Value) -> Value {
     })
 }
 
+/// Un enlace de la lista de la organización, como lo necesita quien los
+/// controla: la dirección web, cuándo caduca, de qué página y de qué espacio.
+fn short_org_share(base: &str, org: &str, share: &Value) -> Value {
+    let token = share.get("link").and_then(|v| v.as_str()).unwrap_or("");
+    json!({
+        "id": share.get("id"),
+        "orgId": org,
+        "url": cac_core::shared_doc_link(base, token),
+        "expiresAt": share.get("expiresAt"),
+        "createdBy": share.get("createdByName"),
+        "pageId": share.get("pageId"),
+        "pageTitle": share.get("pageTitle"),
+        "kind": share.get("docKind"),
+        "ownerId": share.get("ownerId"),
+        "ownerName": share.get("ownerName"),
+        "space": { "id": share.get("spaceId"), "name": share.get("spaceName") },
+        "mode": share.get("mode"),
+        "answers": share.get("responseCount"),
+    })
+}
+
 /// Un conflicto al guardar una página, con su texto actual para fundir.
 fn short_page_conflict(result: &Value) -> Option<Value> {
     if result.get("conflict").and_then(|c| c.as_bool()) != Some(true) {
@@ -3664,6 +3685,17 @@ fn tool_defs() -> Value {
                     "pageId": { "type": "string" }
                 },
                 "required": ["kind", "ownerId", "pageId"]
+            }
+        },
+        {
+            "name": "list_doc_shares",
+            "description": "Every live public link (enlace compartido) of an organization, in one call: what is open to the outside right now. Each row has the web `url`, `expiresAt` (the ones that expire first come first), who created it, the page (`pageId`, `pageTitle`) and the document it hangs from (`kind`, `ownerId`, `ownerName`), its `space`, the `mode` and how many `answers` it has, and its `id` (to revoke it with revoke_doc_share). Without `orgId` it lists every organization you belong to (each row carries its `orgId`); `space` narrows to one space (its id). Revoked, expired and trashed-page links are not listed. Read-only, and any member of the organization can call it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "orgId": { "type": "string", "description": "Optional. Only this organization." },
+                    "space": { "type": "string", "description": "Optional. Only the links of this space (its id)." }
+                }
             }
         },
         {
@@ -6198,6 +6230,31 @@ fn run_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
             Ok(json!({ "shares": shares }))
         }
 
+        "list_doc_shares" => {
+            let orgs = match arg_str(args, "orgId") {
+                Some(o) => vec![o],
+                None => org_ids(&api_get(cfg, "/api/v1/task-spaces/")?),
+            };
+            let query = arg_str(args, "space").map(|space| format!("?space={}", urlencode(&space))).unwrap_or_default();
+            let several = orgs.len() > 1;
+            let mut rows: Vec<Value> = vec![];
+            let mut errors: Vec<Value> = vec![];
+            for org in &orgs {
+                match api_get(cfg, &format!("/api/v1/organizations/{}/doc-shares{query}", urlencode(org))) {
+                    Ok(data) => rows.extend(list_or_empty(data).as_array().map(|a| a.iter().map(|s| short_org_share(&cfg.base, org, s)).collect::<Vec<_>>()).unwrap_or_default()),
+                    // Con varias organizaciones, una sin permiso no tapa el resto.
+                    Err(e) if several => errors.push(json!({ "orgId": org, "error": e })),
+                    Err(e) => return Err(e),
+                }
+            }
+            rows.sort_by_key(|r| r["expiresAt"].as_str().unwrap_or("").to_string());
+            let mut out = json!({ "shares": rows });
+            if !errors.is_empty() {
+                out["errors"] = json!(errors);
+            }
+            Ok(out)
+        }
+
         "revoke_doc_share" => {
             let share = arg_str(args, "id").ok_or("id is required: use list_doc_page_shares")?;
             api_delete(cfg, &format!("/api/v1/doc-shares/{}", urlencode(&share)))?;
@@ -8136,7 +8193,7 @@ fn instructions(state: Option<SkillState>) -> String {
          when a space has outside sources (get_space_sources), the cac-catch-up skill (the catch-up) proposes what \
          happened in Jira and Notion since the last time, before writing any of it.\n\
          To share a document or a page outside cac with a public link: share_doc_page (list_doc_page_shares and \
-         revoke_doc_share to see and stop the links), only when the user asked.",
+         revoke_doc_share to see and stop the links; list_doc_shares for every live link of the organization), only when the user asked.",
     );
     match state {
         Some(SkillState::Missing) => s.push_str(
@@ -11522,6 +11579,133 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "con orgId no se pregunta por las demás");
         assert_eq!(seen[0].1, "/api/v1/organizations/org-9/basecamp/awaiting");
+    }
+
+    /// `list_doc_shares` lee los enlaces vivos de la organización sin escribir:
+    /// pide `GET …/organizations/{org}/doc-shares` (con `?space=` si se lo
+    /// dicen), pone el `orgId` y la dirección web con el token tras el `#`,
+    /// junta las organizaciones del token sin que una caída tape a las otras y
+    /// deja delante los que caducan antes.
+    ///
+    /// Roturas que atrapa: no ser de lectura; la ruta `/orgs/`; perder el
+    /// filtro de espacio; con `orgId`, preguntar también por las demás; el
+    /// token suelto o en la ruta en vez de la URL; perder el `orgId`; que el
+    /// error de una organización tire el resto; no ordenar por caducidad.
+    #[test]
+    fn list_doc_shares_reads_the_live_links_of_every_org_soonest_first() {
+        let defs = annotate(tool_defs());
+        assert_eq!(tool(&defs, "list_doc_shares")["annotations"]["readOnlyHint"], json!(true));
+        assert!(!LOCAL_TOOLS.contains(&"list_doc_shares"));
+        let share = |id: &str, expires: &str| {
+            json!({ "id": id, "pageId": "p1", "pageTitle": "Guía", "docKind": "list", "ownerId": "l1", "ownerName": "Sitio", "spaceId": "sp1", "spaceName": "Galena",
+                    "expiresAt": expires, "createdByName": "Ana Ruiz", "mode": "read", "responseCount": 0, "link": format!("{id}.firma") })
+        };
+        let (cfg, seen) = fake_cac(move |_, path, _| match path {
+            "/api/v1/task-spaces/" => json!([{ "orgId": "org-1" }, { "orgId": "org-2" }, { "orgId": "org-3" }]),
+            "/api/v1/organizations/org-1/doc-shares" => json!([share("a", "2026-12-28T00:00:00Z"), share("c", "2026-12-30T00:00:00Z")]),
+            "/api/v1/organizations/org-2/doc-shares" => json!([share("b", "2026-12-29T00:00:00Z")]),
+            _ => json!({ "__status": 403, "error": "not-a-member" }),
+        });
+        let base = cfg.base.clone();
+        let out = call_tool(&cfg, "list_doc_shares", &json!({})).unwrap();
+        let rows = out["shares"].as_array().unwrap();
+        let ids: Vec<(&str, &str)> = rows.iter().map(|r| (r["id"].as_str().unwrap(), r["orgId"].as_str().unwrap())).collect();
+        assert_eq!(ids, [("a", "org-1"), ("b", "org-2"), ("c", "org-1")], "{out}");
+        assert_eq!(rows[0]["url"], format!("{base}/app/shared#a.firma"));
+        assert_eq!((&rows[0]["pageTitle"], &rows[0]["space"]["name"], &rows[0]["createdBy"]), (&json!("Guía"), &json!("Galena"), &json!("Ana Ruiz")));
+        assert_eq!(out["errors"][0]["orgId"], "org-3", "{out}");
+        assert!(seen.lock().unwrap().iter().all(|(m, _, _)| m == "GET"), "una lectura no escribe");
+
+        let (cfg, seen) = fake_cac(|_, _, _| json!([]));
+        let one = call_tool(&cfg, "list_doc_shares", &json!({ "orgId": "org-9", "space": "sp 1" })).unwrap();
+        assert_eq!(one["shares"], json!([]));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "con orgId no se pregunta por las demás");
+        assert_eq!(seen[0].1, "/api/v1/organizations/org-9/doc-shares?space=sp%201");
+    }
+
+    /// Lo que la nativa y la web hacen con los enlaces es lo que el core sabe
+    /// hacer (`core/src/doc_share.rs`); cada acción del core tiene que tener
+    /// su herramienta aquí, y dicha en esta tabla. Es el guardián de que un
+    /// agente no se quede sin algo que una persona sí puede.
+    const SHARE_ACTIONS: &[(&str, &str)] = &[
+        ("create_share", "share_doc_page"),
+        ("list_shares", "list_doc_page_shares"),
+        ("list_org_shares", "list_doc_shares"),
+        ("revoke_share", "revoke_doc_share"),
+    ];
+
+    /// Las acciones del core: cada `pub async fn`, que es lo que llama al
+    /// servidor. Se lee el fichero **entero**: cortar en el primer
+    /// `#[cfg(test)]` (como hacían otros guardianes) esconde lo que se
+    /// escriba debajo de las pruebas.
+    fn core_share_actions(source: &str) -> Vec<String> {
+        source
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix("pub async fn "))
+            .filter_map(|rest| rest.split(['(', '<']).next())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Lo que está mal entre las acciones del core, la tabla y el catálogo:
+    /// una acción sin herramienta, una fila de una acción que ya no existe y
+    /// una herramienta de la tabla que no está en el catálogo.
+    fn share_action_problems(source: &str, table: &[(&str, &str)], tools: &[String]) -> Vec<String> {
+        let actions = core_share_actions(source);
+        let mut problems = vec![];
+        for action in &actions {
+            if !table.iter().any(|(name, _)| name == action) {
+                problems.push(format!("core action `{action}` has no tool in the table"));
+            }
+        }
+        for (action, tool) in table {
+            if !actions.iter().any(|name| name == action) {
+                problems.push(format!("table row `{action}` is not an action of the core any more"));
+            }
+            if !tools.iter().any(|name| name == tool) {
+                problems.push(format!("tool `{tool}` (for `{action}`) is not in tool_defs()"));
+            }
+        }
+        problems
+    }
+
+    fn catalog_names() -> Vec<String> {
+        tool_defs().as_array().unwrap().iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()
+    }
+
+    /// Cada acción de compartir del core tiene su herramienta en el catálogo.
+    ///
+    /// Roturas que atrapa: una `pub async fn` nueva en `core/src/doc_share.rs`
+    /// sin fila ni herramienta (también si se escribe debajo de las
+    /// pruebas); que se borre `list_doc_shares` (o cualquier otra) del
+    /// catálogo; una fila que apunta a una acción que ya no existe.
+    #[test]
+    fn every_share_action_has_its_tool() {
+        let core = include_str!("../../core/src/doc_share.rs");
+        assert_eq!(share_action_problems(core, SHARE_ACTIONS, &catalog_names()), Vec::<String>::new());
+    }
+
+    /// El comprobador se queja de verdad: sobre fuentes y catálogos de
+    /// mentira, ve la acción nueva (incluida la que está tras el bloque de
+    /// pruebas), la herramienta que falta y la fila vieja.
+    #[test]
+    fn the_share_guardian_sees_what_it_guards() {
+        let tools: Vec<String> = SHARE_ACTIONS.iter().map(|(_, tool)| tool.to_string()).collect();
+        let source: String = SHARE_ACTIONS.iter().map(|(action, _)| format!("    pub async fn {action}(&self) {{}}\n")).collect();
+        assert_eq!(share_action_problems(&source, SHARE_ACTIONS, &tools), Vec::<String>::new());
+
+        let after_tests = format!("{source}#[cfg(test)]\nmod tests {{}}\n    pub async fn answer_share<T>(&self) {{}}\n");
+        let problems = share_action_problems(&after_tests, SHARE_ACTIONS, &tools);
+        assert_eq!(problems, ["core action `answer_share` has no tool in the table"]);
+
+        let without_list: Vec<String> = tools.iter().filter(|name| *name != "list_doc_shares").cloned().collect();
+        let problems = share_action_problems(&source, SHARE_ACTIONS, &without_list);
+        assert_eq!(problems, ["tool `list_doc_shares` (for `list_org_shares`) is not in tool_defs()"]);
+
+        let fewer = source.replace("revoke_share", "gone");
+        let problems = share_action_problems(&fewer, SHARE_ACTIONS, &tools);
+        assert_eq!(problems.len(), 2, "{problems:?}");
     }
 
     /// Rotura que detecta: que instalar los hooks pida token, que no se

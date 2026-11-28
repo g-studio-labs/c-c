@@ -91,7 +91,7 @@ Lo demás, por su título en el mapa:
   son **por qué** dice lo que dice: antes de cambiarla, léelas
   (`get_decision`);
 - una subpágina: `get_doc_page`;
-- **compartir un documento o una página fuera** (enlace público, sin cuenta): `share_doc_page` desde la página de arriba del documento (el enlace lleva sus subpáginas; la portada con pestañas no se comparte). Sólo si el usuario lo pidió; `list_doc_page_shares` y `revoke_doc_share` para verlos y quitarlos. Pide `docs:share` en el token;
+- **compartir un documento o una página fuera** (enlace público, sin cuenta): `share_doc_page` desde la página de arriba del documento (el enlace lleva sus subpáginas; la portada con pestañas no se comparte). Sólo si el usuario lo pidió; `list_doc_page_shares` (los de una página), `list_doc_shares` (todos los vivos de la organización) y `revoke_doc_share` para verlos y quitarlos. Pide `docs:share` en el token;
 - un `.md` del repo: `get_repo_doc` (el mapa dice su tamaño en `chars`).
 
 Las tareas se piden y se escriben por su referencia (`get_task`,
