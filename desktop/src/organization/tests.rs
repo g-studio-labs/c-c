@@ -1150,3 +1150,82 @@ fn a_failed_renewal_connects_again_without_disconnecting(cx: &mut TestAppContext
     assert_eq!(count_of(&server, "DELETE", BASECAMP), 0, "reconectar desconectó");
     stop_stream(cx);
 }
+
+const SHARES: &str = "/api/v1/organizations/o1/doc-shares";
+
+fn a_share(id: &str, title: &str, space: &str, space_name: &str) -> serde_json::Value {
+    json!({
+        "id": id, "pageId": format!("p-{id}"), "pageTitle": title, "docKind": "list", "ownerId": "l1", "ownerName": "Sitio",
+        "spaceId": space, "spaceName": space_name, "expiresAt": "2026-12-28T15:00:00Z", "createdBy": "u1", "createdByName": "Ana Ruiz",
+        "mode": "read", "responseCount": 0, "link": format!("{id}.firma"),
+    })
+}
+
+fn shares_server(role: &str) -> FakeServer {
+    let server = org_server(role);
+    server.mount(Mock::given(method("GET")).and(path(SHARES)).respond_with(ok(json!([
+        a_share("s1", "Guía de Galena", "a", "Galena"),
+        a_share("s2", "Propuesta SEO", "b", "Doctor Iñigo"),
+        a_share("s3", "Otra guía", "a", "Galena"),
+    ]))));
+    server.mount(Mock::given(method("DELETE")).and(path("/api/v1/doc-shares/s1")).respond_with(ok(json!(null))));
+    server
+}
+
+/// La pestaña lista los enlaces vivos con su página, su espacio y quién lo
+/// creó; los chips de espacio dejan sólo los de ese espacio; copiar pone en
+/// el portapapeles la URL de la web con el token detrás del `#`; un miembro
+/// que no administra también la ve.
+///
+/// Roturas que atrapa: la pestaña escondida a un miembro; un enlace que sale
+/// sin su espacio o sin quién lo creó; el filtro que no filtra (o que deja
+/// los de otro espacio); copiar el token a secas o con otra ruta que
+/// `/app/shared#`.
+#[gpui_kit::test]
+fn the_shared_links_tab_lists_filters_by_space_and_copies_the_web_link(cx: &mut TestAppContext) {
+    let (server, window) = open_org_with(shares_server("member"), cx);
+    click(window, "org-tab-shares", cx);
+    wait_until(cx, "salen los enlaces", |cx| on_screen(window, "org-share-s1", cx));
+    assert_eq!(label(window, "org-share-page-s1", cx), "Guía de Galena");
+    assert_eq!(label(window, "org-share-place-s1", cx), "Galena · Sitio");
+    assert!(label(window, "org-share-line-s1", cx).contains("Ana Ruiz"), "{}", label(window, "org-share-line-s1", cx));
+    assert_eq!(label(window, "org-share-mode-s1", cx), "Leer · Respuestas: 0");
+
+    click(window, "org-shares-space-b", cx);
+    cx.run_until_parked();
+    assert!(on_screen(window, "org-share-s2", cx));
+    assert!(!on_screen(window, "org-share-s1", cx) && !on_screen(window, "org-share-s3", cx), "dejó pasar otro espacio");
+    click(window, "org-shares-space-all", cx);
+    cx.run_until_parked();
+    assert!(on_screen(window, "org-share-s1", cx) && on_screen(window, "org-share-s2", cx));
+
+    click(window, "org-share-copy-s2", cx);
+    let copied = cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
+    assert_eq!(copied, format!("http://127.0.0.1:{}/app/shared#s2.firma", server.port()));
+    stop_stream(cx);
+}
+
+/// Revocar pregunta nombrando la página y no toca al servidor sin el sí;
+/// con el sí manda el DELETE de ese enlace y vuelve a leer la lista.
+///
+/// Roturas que atrapa: revocar sin preguntar o al cancelar; el diálogo que no
+/// dice qué página; revocar otro enlace; no releer la lista después.
+#[gpui_kit::test]
+fn revoking_a_shared_link_asks_first_and_then_reloads(cx: &mut TestAppContext) {
+    let (server, window) = open_org_with(shares_server("admin"), cx);
+    click(window, "org-tab-shares", cx);
+    wait_until(cx, "salen los enlaces", |cx| on_screen(window, "org-share-s1", cx));
+
+    click(window, "org-share-revoke-s1", cx);
+    let (title, _) = cx.pending_prompt().expect("revocó sin preguntar");
+    assert_eq!(title, "¿Revocar el enlace a Guía de Galena?");
+    cx.simulate_prompt_answer("Cancelar");
+    cx.run_until_parked();
+    assert_eq!(count_of(&server, "DELETE", "/api/v1/doc-shares/s1"), 0, "revocó al cancelar");
+
+    let reads = server.hits(SHARES);
+    click(window, "org-share-revoke-s1", cx);
+    cx.simulate_prompt_answer("Revocar enlace");
+    wait_until(cx, "revoca y relee", |_| count_of(&server, "DELETE", "/api/v1/doc-shares/s1") == 1 && server.hits(SHARES) > reads);
+    stop_stream(cx);
+}

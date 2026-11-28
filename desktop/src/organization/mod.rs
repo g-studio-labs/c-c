@@ -15,6 +15,7 @@ mod meetings;
 mod members;
 mod pickers;
 pub mod received;
+mod shares;
 mod spaces;
 
 pub use spaces::ManageSpace;
@@ -88,6 +89,7 @@ pub struct OrgView {
     _on_new_space: Option<Subscription>,
     // Reuniones, GitHub e Integraciones: lo de cada pestaña.
     meetings: meetings::MeetingsTab,
+    shares: shares::SharesTab,
     github: github::GitHubTab,
     basecamp: basecamp::BasecampTab,
     integrations: integrations::IntegrationsTab,
@@ -196,6 +198,7 @@ impl OrgView {
             _on_deleting: None,
             _on_new_space: None,
             meetings: Default::default(),
+            shares: Default::default(),
             github: Default::default(),
             basecamp: Default::default(),
             integrations: Default::default(),
@@ -258,6 +261,7 @@ impl OrgView {
         self.new_space = None;
         // Lo de las demás pestañas es de la organización anterior.
         self.meetings = Default::default();
+        self.shares = Default::default();
         self.github = Default::default();
         self.basecamp = Default::default();
         self.integrations = Default::default();
@@ -426,9 +430,10 @@ impl OrgView {
             OrgTab::Members => self.members.as_ref().map(|members| members.len()),
             OrgTab::Invites => Some(self.invites.len()),
             OrgTab::Spaces => spaces,
+            OrgTab::Shares => self.shares.list.as_ref().map(|shares| shares.len()),
             _ => None,
         };
-        div().flex().flex_none().gap_4().border_b_1().border_color(border).children(org_tabs(manage).into_iter().map(|tab| {
+        div().flex().flex_none().flex_wrap().gap_x_4().gap_y_1().border_b_1().border_color(border).children(org_tabs(manage).into_iter().map(|tab| {
             let active = tab == self.tab;
             let label = tr(cx, tab.label_key());
             div()
@@ -496,6 +501,7 @@ impl Render for OrgView {
             OrgTab::GitHub => self.render_github(manage, cx),
             OrgTab::Basecamp => self.render_basecamp(manage, cx),
             OrgTab::Meetings => self.render_meetings(manage, cx),
+            OrgTab::Shares => self.render_shares(cx),
         };
         let dialog = self.render_delete_dialog(&org, window, cx);
         let account_link = self.render_account_link(window, cx);

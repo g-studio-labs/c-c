@@ -93,7 +93,7 @@ pub use dates::{date_and_time, due_day, due_state, short_date, today_in, zone_hi
 pub use doc_edit::{close_window_question, doc_editor_side_by_side, DocAsk, DocConflict, DocEdit, DocEditError, DocEditWhat, DocLeave, SIDE_BY_SIDE_FROM};
 pub use doc_header::{DocHeader, DocInfo};
 pub use notes::{note_link_target, note_rows, Note, NoteAsk, NoteAttachment, NoteConflict, NoteDetail, NoteEdit, NoteLeave, NoteLink, NoteProblem, NoteRow, NoteSearch, NoteTrash, NoteTrashItem, NoteTreeItem, Notes, NotesState};
-pub use doc_share::{shared_doc_link, DocShare, DocShares, DOC_SHARE_TTLS};
+pub use doc_share::{share_spaces, shared_doc_link, shares_in_space, DocShare, DocShares, OrgDocShare, DOC_SHARE_TTLS};
 pub use app_link::{app_link, app_route, launch_landing, web_url, AppLink, Landing, LinkOpened};
 pub use doc_links::{doc_link, heading_slug, DocJump, DocLink, DocLinkFailure};
 pub use doc_pages::{DocBacklink, DocBacklinkRow, DocPage, DocPageCrumb, DocPageItem, DocPageLink, DocPageRow, DocPageView};

@@ -7,7 +7,8 @@
     "meetings": "Reuniones",
     "general": "General",
     "github": "GitHub",
-    "basecamp": "Basecamp"
+    "basecamp": "Basecamp",
+    "shares": "Enlaces compartidos"
   },
   "errLoad": "No se pudo cargar la organización",
   "none": "ninguno",
@@ -252,5 +253,19 @@
   "badZone": "Eso no es una zona horaria. Escríbela como America/Mexico_City, o déjala vacía.",
   "saved": "Guardado",
   "joinedRenew": "Ya estás en {{name}}. Cierra sesión y vuelve a entrar para terminar de tener acceso.",
-  "memberRemoved": "{{who}} quitado"
+  "memberRemoved": "{{who}} quitado",
+  "shares": {
+    "lead": "Los enlaces públicos que siguen abiertos en esta organización. Quien tenga uno puede leer su página sin cuenta, hasta que caduque o lo revoques.",
+    "all": "Todos",
+    "none": "No hay enlaces abiertos",
+    "noSpace": "Sin espacio",
+    "answers": "Respuestas: {{n}}",
+    "modeRead": "Leer",
+    "modeRespond": "Responder",
+    "open": "Abrir la página",
+    "copied": "Enlace copiado.",
+    "revokeTitle": "¿Revocar el enlace a {{page}}?",
+    "revokeBody": "Deja de abrir la página al momento, para todos, también para quien ya lo tenga. No se puede deshacer: para volver a compartirla, crea otro.",
+    "errRevoke": "No se pudo revocar el enlace."
+  }
 }

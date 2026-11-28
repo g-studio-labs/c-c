@@ -7,7 +7,8 @@
     "meetings": "Meetings",
     "general": "General",
     "github": "GitHub",
-    "basecamp": "Basecamp"
+    "basecamp": "Basecamp",
+    "shares": "Shared links"
   },
   "errLoad": "Failed to load organization",
   "none": "none",
@@ -252,5 +253,19 @@
   "badZone": "That is not a time zone. Write it like America/Mexico_City, or leave it empty.",
   "saved": "Saved",
   "joinedRenew": "Joined {{name}}. Sign out and back in to finish getting access.",
-  "memberRemoved": "Removed {{who}}"
+  "memberRemoved": "Removed {{who}}",
+  "shares": {
+    "lead": "The public links still open in this organization. Anyone who has one can read its page without an account, until it expires or you revoke it.",
+    "all": "All",
+    "none": "No open links",
+    "noSpace": "No space",
+    "answers": "Answers: {{n}}",
+    "modeRead": "Read",
+    "modeRespond": "Respond",
+    "open": "Open the page",
+    "copied": "Link copied.",
+    "revokeTitle": "Revoke the link to {{page}}?",
+    "revokeBody": "It stops opening the page right away, for everyone, including whoever already has it. It cannot be undone: to share the page again, create another link.",
+    "errRevoke": "Could not revoke the link."
+  }
 }

@@ -178,6 +178,7 @@ pub enum OrgTab {
     GitHub,
     Basecamp,
     Meetings,
+    Shares,
     General,
 }
 
@@ -191,6 +192,7 @@ impl OrgTab {
             OrgTab::GitHub => "org:tab.github",
             OrgTab::Basecamp => "org:tab.basecamp",
             OrgTab::Meetings => "org:tab.meetings",
+            OrgTab::Shares => "org:tab.shares",
             OrgTab::General => "org:tab.general",
         }
     }
@@ -204,6 +206,7 @@ impl OrgTab {
             OrgTab::GitHub => "github",
             OrgTab::Basecamp => "basecamp",
             OrgTab::Meetings => "meetings",
+            OrgTab::Shares => "shares",
             OrgTab::General => "general",
         }
     }
@@ -219,7 +222,7 @@ pub fn can_manage_org(org: &Organization, superadmin: bool) -> bool {
 /// administra: a los demás el servidor no les da la primera, y Basecamp es de
 /// quien conecta la cuenta y asigna a la gente.
 pub fn org_tabs(can_manage: bool) -> Vec<OrgTab> {
-    [OrgTab::Members, OrgTab::Invites, OrgTab::Spaces, OrgTab::Integrations, OrgTab::GitHub, OrgTab::Basecamp, OrgTab::Meetings, OrgTab::General]
+    [OrgTab::Members, OrgTab::Invites, OrgTab::Spaces, OrgTab::Integrations, OrgTab::GitHub, OrgTab::Basecamp, OrgTab::Meetings, OrgTab::Shares, OrgTab::General]
         .into_iter()
         .filter(|tab| !matches!(tab, OrgTab::Invites | OrgTab::Basecamp) || can_manage)
         .collect()
@@ -673,6 +676,19 @@ mod tests {
 
     fn member(username: &str, email: &str, role: &str) -> OrgMember {
         OrgMember { user_id: username.into(), username: username.into(), name: None, email: Some(email.into()), role: role.into(), last_seen_at: None, setup_pending: false }
+    }
+
+    /// Los enlaces compartidos los ve cualquier miembro: el servidor deja
+    /// listarlos a quien lee los docs de la organización, que es todo
+    /// miembro, y ahí se ve qué está abierto hacia fuera.
+    ///
+    /// Roturas que atrapa: esconder la pestaña a quien no administra (como las
+    /// invitaciones); quitarla del todo.
+    #[test]
+    fn every_member_sees_the_shared_links_tab() {
+        assert!(org_tabs(false).contains(&OrgTab::Shares));
+        assert!(org_tabs(true).contains(&OrgTab::Shares));
+        assert_eq!(OrgTab::Shares.label_key(), "org:tab.shares");
     }
 
     /// Roturas que atrapa: enseñar la pestaña de invitaciones o la de

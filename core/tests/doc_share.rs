@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use cac_core::{Config, Core, NodeKind, Session, Storage};
 use serde_json::{json, Value};
-use wiremock::matchers::{body_json, method, path};
+use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[derive(Default)]
@@ -73,4 +73,30 @@ async fn a_page_share_is_created_listed_and_revoked() {
     assert_eq!(shares.link(&created), format!("{}/app/shared#s1.firma", server.uri()));
     assert_eq!(shares.list_shares(NodeKind::List, "l1", "p1").await.unwrap(), [created]);
     shares.revoke_share("s1").await.unwrap();
+}
+
+/// La lista de la organización lee los campos que contesta el servidor, pide
+/// sólo un espacio cuando se le dice, y su enlace es el de la web.
+///
+/// Roturas que atrapa: pedir a `/orgs/` en vez de `/organizations/`; no mandar
+/// `space` al filtrar; mandarlo cuando no se filtra; leer la clase del nodo o
+/// el espacio con otro nombre de campo; el enlace sin el token tras el `#`.
+#[tokio::test]
+async fn the_org_shares_are_listed_whole_or_by_space() {
+    let (server, core) = rig().await;
+    let share = json!({
+        "id": "s1", "pageId": "p1", "pageTitle": "Propuesta SEO", "docKind": "list", "ownerId": "l1", "ownerName": "Sitio",
+        "spaceId": "sp1", "spaceName": "Galena", "expiresAt": "2026-12-28T15:00:00Z", "createdBy": "u1", "createdByName": "Ana Ruiz",
+        "mode": "read", "responseCount": 0, "link": "s1.firma",
+    });
+    Mock::given(method("GET")).and(path("/api/v1/organizations/o1/doc-shares")).and(query_param("space", "sp1")).respond_with(ok(json!([share.clone()]))).expect(1).mount(&server).await;
+    Mock::given(method("GET")).and(path("/api/v1/organizations/o1/doc-shares")).respond_with(ok(json!([share]))).expect(1).mount(&server).await;
+
+    let shares = core.doc_shares();
+    let all = shares.list_org_shares("o1", None).await.unwrap();
+    let galena = shares.list_org_shares("o1", Some("sp1")).await.unwrap();
+    assert_eq!(all, galena);
+    let first = &all[0];
+    assert_eq!((first.page_title.as_str(), first.doc_kind.as_str(), first.owner_id.as_str(), first.space_name.as_str(), first.mode.as_str()), ("Propuesta SEO", "list", "l1", "Galena", "read"));
+    assert_eq!(shares.org_link(first), format!("{}/app/shared#s1.firma", server.uri()));
 }
