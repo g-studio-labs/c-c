@@ -90,24 +90,24 @@ describe("si la app no está, no hay bucle", () => {
 });
 
 describe("las rutas que la nativa abre", () => {
-  it("son las que lee `app_link` en el core, con sus parámetros", () => {
-    const rust = readFileSync(resolve(process.cwd(), "../core/src/app_link.rs"), "utf8");
-    for (const arm of ['"/tasks" =>', '"/chat" =>', '"/dm" =>', '"/requests" =>', '"/feedback" =>', '"/notes" =>', '"/organization" =>', 'strip_prefix("/notes/")']) {
-      expect(rust, arm).toContain(arm);
+  // La tabla es del core (`app_link` y `launch_landing` la cumplen en
+  // `core/tests/app_link.rs`): si la web y la nativa se separan, falla una de
+  // las dos pruebas.
+  const table = JSON.parse(readFileSync(resolve(process.cwd(), "../core/tests/fixtures/native_routes.json"), "utf8")) as {
+    routes: { route: string; screen: string; landing?: string }[];
+  };
+
+  it("la web ofrece abrir donde la nativa tiene pantalla, y sólo ahí", () => {
+    expect(table.routes.length).toBeGreaterThan(20);
+    for (const { route, screen, landing } of table.routes) {
+      const url = new URL(route, "http://x");
+      const opens = screen !== "Browser" || landing === "my_work";
+      expect(nativeOpens(url.pathname, url.search), route).toBe(opens);
     }
-    expect(nativeOpens("/tasks", "?task=X")).toBe(true);
-    expect(nativeOpens("/tasks", "?doc=list:l1&page=p")).toBe(true);
-    expect(nativeOpens("/chat", "?space=s1")).toBe(true);
-    expect(nativeOpens("/dm", "?u=u1")).toBe(true);
-    expect(nativeOpens("/notes/n1", "")).toBe(true);
-    for (const p of ["/requests", "/feedback", "/organization/", "/notes"]) expect(nativeOpens(p, ""), p).toBe(true);
   });
 
-  it("lo demás no: el core lo mandaría a «al frente»", () => {
-    expect(nativeOpens("/tasks", "")).toBe(false);
-    expect(nativeOpens("/tasks", "?task=")).toBe(false);
-    expect(nativeOpens("/chat", "")).toBe(false);
-    expect(nativeOpens("/dm", "")).toBe(false);
-    for (const p of ["/servers", "/my-work", "/servers/x/backups", "/call/abc", "/overview", "/profile"]) expect(nativeOpens(p, ""), p).toBe(false);
+  it("una barra final no cambia la respuesta", () => {
+    expect(nativeOpens("/organization/", "")).toBe(true);
+    expect(nativeOpens("/servers/", "")).toBe(false);
   });
 });

@@ -73,4 +73,33 @@ describe("la URL refleja lo que se ve", () => {
     // Lo escrito no se lee de vuelta como un enlace nuevo: la página sigue.
     expect(useDocPages.getState().activePageId).toBe("p-1");
   });
+
+  it("la sección a la que se saltó entra en la URL y sale al cambiar de pestaña", async () => {
+    render(
+      <ConfirmProvider>
+        <PromptProvider>
+          <MemoryRouter initialEntries={["/tasks"]}>
+            <Spy />
+            <Tasks />
+          </MemoryRouter>
+        </PromptProvider>
+      </ConfirmProvider>,
+    );
+    await act(async () => {
+      useTasksStore.setState({ activeDoc: { kind: "space", id: "sp-a", name: "", orgId: "org-a" } });
+      useDocPages.setState({ requestedSection: "s9" });
+    });
+    await act(async () => {
+      useDocPages.getState().sectionShown({ ref: "space:sp-a", tab: "overview", pageId: null });
+    });
+    await waitFor(() => expect(where.search).toContain("section=s9"));
+    expect(decodeURIComponent(toAppUrl(where.pathname, where.search, ""))).toBe("cac://tasks?doc=space:sp-a&section=s9");
+    expect(useDocPages.getState().requestedSection, "la petición se da por atendida").toBeNull();
+
+    await act(async () => {
+      useDocPages.setState({ shownTab: "decisions" });
+    });
+    await waitFor(() => expect(where.search).not.toContain("section="));
+    expect(where.search).toContain("tab=decisions");
+  });
 });

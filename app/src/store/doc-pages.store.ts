@@ -120,6 +120,13 @@ interface DocPagesState {
   requestedSection: string | null;
   requestSection: (id: string | undefined) => void;
   takeRequestedSection: () => string | null;
+  /**
+   * La sección a la que se saltó, y dónde (documento, pestaña o página): la
+   * URL la refleja (`lib/view-url.ts`). Sólo vale mientras se mira ese mismo sitio.
+   */
+  shownSection: { id: string; ref: string; tab: string | null; pageId: string | null } | null;
+  /** Da por atendida la sección pedida: ya se vio, y queda como la que se muestra. */
+  sectionShown: (at: { ref: string; tab: string | null; pageId: string | null }) => void;
 }
 
 export const useDocPages = create<DocPagesState>()((set, get) => ({
@@ -146,6 +153,11 @@ export const useDocPages = create<DocPagesState>()((set, get) => ({
 
   requestedSection: null,
   requestSection: (id) => set({ requestedSection: id || null }),
+  shownSection: null,
+  sectionShown: (at) => {
+    const id = get().requestedSection;
+    if (id) set({ requestedSection: null, shownSection: { id, ...at } });
+  },
   takeRequestedSection: () => {
     const id = get().requestedSection;
     if (id) set({ requestedSection: null });

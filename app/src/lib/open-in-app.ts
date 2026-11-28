@@ -29,7 +29,9 @@ export function toAppUrl(pathname: string, search: string, base = "/app"): strin
  * Si la app nativa abre esta ruta de la web en su pantalla. Es la lista de
  * `core/src/app_link.rs` (`app_link`): con otra ruta la nativa no tiene
  * pantalla y no hay nada que abrir allí, así que la barra no sale
- * (command-and-control-576). `open-in-app.test.ts` la compara con el core.
+ * (command-and-control-576). La tabla `core/tests/fixtures/native_routes.json`
+ * es de las dos: el core la comprueba contra `app_link` y la web, contra esto.
+ * «Mi trabajo» cuenta: un `cac://my-work` lleva allí.
  */
 export function nativeOpens(pathname: string, search: string): boolean {
   const path = pathname.replace(/\/+$/, "");
@@ -38,6 +40,7 @@ export function nativeOpens(pathname: string, search: string): boolean {
   if (path === "/tasks") return has("task", "doc");
   if (path === "/chat") return has("space");
   if (path === "/dm") return has("c", "u");
+  if (path === "/my-work" || path === "/mywork") return true;
   if (path === "/notes" || path.startsWith("/notes/")) return true;
   return ["/requests", "/feedback", "/organization"].includes(path);
 }

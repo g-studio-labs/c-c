@@ -24,7 +24,7 @@ vi.mock("@/components/markdown/MarkdownEditor", () => ({
   ),
 }));
 vi.mock("@/components/markdown/Markdown", () => ({
-  default: ({ children }: { children: string }) => <div>{children}</div>,
+  default: ({ children }: { children: string }) => <div data-section-id="s9">{children}</div>,
 }));
 vi.mock("@/components/docs/DocToc", () => ({ default: () => null }));
 vi.mock("@/store/tasks.store", () => ({
@@ -188,5 +188,17 @@ describe("lo que hace scroll en una página", () => {
     const scroller = document.querySelector("[data-doc-scroll]");
     expect(scroller?.classList.contains("overflow-auto")).toBe(true);
     expect(scroller?.textContent).toContain("lo que había");
+  });
+});
+
+describe("saltar a una sección de una página", () => {
+  // Roturas que atrapa: no dejar rastro de la sección (la URL no la diría), o
+  // dejarla sin la página en la que se vio.
+  it("la deja como la sección que se ve, en su documento y página", () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    useDocPages.setState({ requestedSection: "s9", shownSection: null });
+    montar();
+    expect(useDocPages.getState().shownSection).toEqual({ id: "s9", ref: "list:l1", tab: null, pageId: "p2" });
+    expect(useDocPages.getState().requestedSection).toBeNull();
   });
 });

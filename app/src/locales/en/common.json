@@ -1565,6 +1565,7 @@
     "open": "Open in the app",
     "stay": "No, stay on the web",
     "notOpened": "If it didn't open,",
+    "alwaysAllow": "To stop being asked every time, tick “Always allow … cac links” in the browser dialog.",
     "install": "install the app",
     "remember": "Remember my choice",
     "setting": "Open links in",

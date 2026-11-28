@@ -64,4 +64,28 @@ describe("de la documentación a las tareas", () => {
     // Y el tablero de la lista no se pide: no lo va a ver nadie.
     expect(api.get.mock.calls.map((c) => String(c[0])).filter((p) => p.includes("/board"))).toEqual([]);
   });
+
+  // Roturas que atrapa: quitar el `clearTimeout` del espejo de la URL
+  // (`Tasks.tsx`). El temporizador pendiente desde el montaje escribía
+  // `?doc=…` al salir a «Mi trabajo» y devolvía a la persona a Tareas. Hay que
+  // esperar el turno: con aserciones síncronas el temporizador salta después.
+  it("salir a Mi trabajo no vuelve a Tareas cuando salta el turno siguiente", async () => {
+    render(
+      <ConfirmProvider>
+        <PromptProvider>
+          <MemoryRouter initialEntries={["/tasks"]}>
+            <Routes>
+              <Route path="/tasks" element={<Tasks />} />
+              <Route path="/my-work" element={<p>mi trabajo</p>} />
+            </Routes>
+          </MemoryRouter>
+        </PromptProvider>
+      </ConfirmProvider>,
+    );
+    act(() => onView.fn!("board"));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(screen.getByText("mi trabajo")).toBeTruthy();
+  });
 });

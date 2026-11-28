@@ -50,6 +50,7 @@ export default function OpenInAppBar() {
           <a href={NATIVE_RELEASES_URL} target="_blank" rel="noopener noreferrer" className="underline">
             {t("common:openInApp.install")}
           </a>
+          . {t("common:openInApp.alwaysAllow")}
         </span>
       )}
       <Button

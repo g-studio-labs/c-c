@@ -1565,6 +1565,7 @@
     "open": "Abrir en la app",
     "stay": "No, seguir en la web",
     "notOpened": "Si no se abrió,",
+    "alwaysAllow": "Para que no pregunte cada vez, marca «Always allow … cac links» en el diálogo del navegador.",
     "install": "instala la app",
     "remember": "Recordar mi elección",
     "setting": "Abrir enlaces en",

@@ -59,6 +59,22 @@ export default function Channels() {
   const conversationOnMobile = mobile && !!requested && !!space;
   const listOnMobile = mobile && !conversationOnMobile;
 
+  // El canal que se ve es el que dice la dirección, también cuando salió del
+  // recordado o del general: así se copia o se abre en la app
+  // (command-and-control-576). En el teléfono no: sin `?space=` es la lista.
+  const shownId = space?.id;
+  useEffect(() => {
+    if (mobile || !shownId || requested === shownId) return;
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set("space", shownId);
+        return next;
+      },
+      { replace: true },
+    );
+  }, [shownId, requested, mobile, setParams]);
+
   // Says which channel is on screen, so the event handler can keep quiet about
   // messages you are watching arrive. It used to read "is the panel open on
   // this space", and with the panel gone that would have been false forever —

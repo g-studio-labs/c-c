@@ -80,13 +80,19 @@ describe("la barra «Abrir en la app»", () => {
   });
 
   it("sólo sale donde la nativa abre algo: en un servidor o en /tasks a secas, no", () => {
-    for (const path of ["/servers/x/backups", "/tasks", "/my-work", "/call/abc"]) {
+    for (const path of ["/servers/x/backups", "/tasks", "/call/abc"]) {
       mount(path);
       expect(screen.queryByRole("region"), path).toBeNull();
       cleanup();
     }
     mount("/tasks?doc=space:s1&tab=runbook");
     expect(screen.getByRole("region")).toBeTruthy();
+  });
+
+  it("en Mi trabajo sí: un cac://my-work lleva allí", () => {
+    mount("/my-work");
+    fireEvent.click(screen.getByRole("button", { name: /Open in the app|Abrir en la app/ }));
+    expect(clicks).toEqual(["cac://my-work"]);
   });
 
   it("no sale en móvil ni dentro de Tauri", () => {
@@ -142,6 +148,13 @@ describe("la barra «Abrir en la app»", () => {
     expect(screen.getByRole("region")).toBeTruthy();
     const link = screen.getByRole("link", { name: /install the app|instala la app/ });
     expect(link.getAttribute("href")).toBe("https://github.com/g-studio-labs/c-c/releases?q=desktop-v");
+  });
+
+  it("tras pulsar, dice cómo no preguntar cada vez en el diálogo del navegador", () => {
+    mount();
+    expect(screen.queryByText(/Always allow/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Open in the app|Abrir en la app/ }));
+    expect(screen.getByText(/Always allow … cac links/)).toBeTruthy();
   });
 
   it("deshacer la elección: la barra vuelve a salir", () => {

@@ -81,6 +81,23 @@ export default function DirectMessages() {
       .catch((e) => toast.error(String(e)));
   }, [c, u, orgId, open, openWith, setParams]);
 
+  // Lo abierto lo dice la dirección (`?c=`), para poder copiarla o abrirla en
+  // la app (command-and-control-576). Sólo con la dirección vacía o escrita
+  // por aquí: con otro directo pedido (`?c=`, `?u=`) que aún se está abriendo,
+  // escribir el abierto pisaría el pedido.
+  const mirrored = useRef<string | null>(null);
+  useEffect(() => {
+    if (isOpen && conversationId) {
+      if (c === conversationId || u || (c && mirrored.current !== c)) return;
+      mirrored.current = conversationId;
+      handled.current = `c:${conversationId}`;
+      setParams({ c: conversationId }, { replace: true });
+    } else if (c && mirrored.current === c) {
+      mirrored.current = null;
+      setParams({}, { replace: true });
+    }
+  }, [isOpen, conversationId, c, u, setParams]);
+
   // En el teléfono, la lista o la conversación, no las dos: aplastada al lado
   // de la lista, la conversación se leía palabra a palabra. La flecha del hilo
   // (`onBack`) ya vuelve a la lista.

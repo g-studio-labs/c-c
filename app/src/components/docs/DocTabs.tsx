@@ -106,7 +106,10 @@ export default function DocTabs({
   const requestedSection = useDocPages((s) => s.requestedSection);
   useEffect(() => {
     if (!requestedSection || editing) return;
-    if (scrollToSection(document, requestedSection)) useDocPages.getState().takeRequestedSection();
+    if (scrollToSection(document, requestedSection) && target) {
+      useDocPages.getState().sectionShown({ ref: `${target.kind}:${target.id}`, tab: activeTab, pageId: null });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestedSection, body, activeTab, editing]);
 
   /**

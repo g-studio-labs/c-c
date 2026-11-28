@@ -127,18 +127,19 @@ export default function Tasks() {
   const openTaskId = useTasksStore((s) => s.openTaskId);
   const activePageId = useDocPages((s) => s.activePageId);
   const shownTab = useDocPages((s) => s.shownTab);
+  const shownSection = useDocPages((s) => s.shownSection);
   // En el turno siguiente, y cancelado si la pantalla se desmonta: al salir a
   // otra ruta (`navigate`) el estado cambia antes de que ésta se vaya, y
   // escribir entonces devolvería a la persona aquí.
   useEffect(() => {
     const timer = setTimeout(() => {
-      const next = viewSearch({ taskId: openTaskId, doc: activeDoc, tab: shownTab, pageId: activePageId });
+      const next = viewSearch({ taskId: openTaskId, doc: activeDoc, tab: shownTab, pageId: activePageId, section: shownSection });
       mirrored.current = next;
       setParams(new URLSearchParams(next), { replace: true });
     }, 0);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openTaskId, activeDoc?.kind, activeDoc?.id, activePageId, shownTab]);
+  }, [openTaskId, activeDoc?.kind, activeDoc?.id, activePageId, shownTab, shownSection]);
 
   // La vista vive en el store y no aquí por dos razones que se juntan.
   //

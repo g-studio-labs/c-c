@@ -12,6 +12,8 @@ export function viewSearch(view: {
   doc: { kind: DocOwnerKind; id: string } | null;
   tab: string;
   pageId: string | null;
+  /** La sección a la que se saltó, si es de este documento y de esta pestaña o página. */
+  section?: { id: string; ref: string; tab: string | null; pageId: string | null } | null;
 }): string {
   const params = new URLSearchParams();
   if (view.taskId) {
@@ -20,6 +22,9 @@ export function viewSearch(view: {
     params.set("doc", `${view.doc.kind}:${view.doc.id}`);
     if (view.tab !== "overview") params.set("tab", view.tab);
     if (view.pageId) params.set("page", view.pageId);
+    const at = view.section;
+    const here = at && at.ref === `${view.doc.kind}:${view.doc.id}` && (view.pageId ? at.pageId === view.pageId : !at.pageId && at.tab === view.tab);
+    if (at && here) params.set("section", at.id);
   }
   return params.toString();
 }

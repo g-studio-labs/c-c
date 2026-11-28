@@ -76,7 +76,10 @@ export default function DocPageView({
   const requestedSection = useDocPages((s) => s.requestedSection);
   useEffect(() => {
     if (!requestedSection || editando) return;
-    if (scrollToSection(document, requestedSection)) useDocPages.getState().takeRequestedSection();
+    if (scrollToSection(document, requestedSection)) {
+      useDocPages.getState().sectionShown({ ref: `${kind}:${ownerId}`, tab: null, pageId: page?.id ?? null });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestedSection, page?.body, editando]);
 
   const { estado, adoptar } = useAutoguardado(
