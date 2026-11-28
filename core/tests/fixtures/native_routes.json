@@ -1,0 +1,29 @@
+{
+  "about": "Las rutas de la web que la app nativa abre y adónde. Lo lee core/tests/app_link.rs (contra app_link y launch_landing) y app/src/lib/open-in-app.test.ts (contra nativeOpens, que decide si la web ofrece «Abrir en la app»): si una de las dos cambia sin la otra, una prueba falla. screen: la variante de AppLink; landing: adónde lleva un cac:// de fuera que no es una pantalla (sólo si screen es Browser).",
+  "routes": [
+    { "route": "/tasks?task=X", "screen": "Task" },
+    { "route": "/tasks?doc=list:l1&tab=runbook&page=p1", "screen": "Doc" },
+    { "route": "/tasks", "screen": "Browser", "landing": "home" },
+    { "route": "/tasks?task=", "screen": "Browser", "landing": "home" },
+    { "route": "/chat?space=s1", "screen": "Channel" },
+    { "route": "/chat?space=s1&message=m1", "screen": "Channel" },
+    { "route": "/chat", "screen": "Browser", "landing": "front" },
+    { "route": "/chat?channel=s1", "screen": "Browser", "landing": "front" },
+    { "route": "/dm?c=c1", "screen": "Direct" },
+    { "route": "/dm?u=u1", "screen": "DirectWith" },
+    { "route": "/dm", "screen": "Browser", "landing": "front" },
+    { "route": "/notes", "screen": "Notes" },
+    { "route": "/notes/n1", "screen": "Notes" },
+    { "route": "/requests", "screen": "Requests" },
+    { "route": "/requests?open=req-1", "screen": "Requests" },
+    { "route": "/feedback", "screen": "Wall" },
+    { "route": "/organization", "screen": "Organization" },
+    { "route": "/my-work", "screen": "Browser", "landing": "my_work" },
+    { "route": "/mywork", "screen": "Browser", "landing": "my_work" },
+    { "route": "/overview", "screen": "Browser", "landing": "home" },
+    { "route": "/servers", "screen": "Browser", "landing": "front" },
+    { "route": "/servers/x/backups", "screen": "Browser", "landing": "front" },
+    { "route": "/call/abc", "screen": "Browser", "landing": "front" },
+    { "route": "/profile", "screen": "Browser", "landing": "front" }
+  ]
+}

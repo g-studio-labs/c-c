@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use cac_core::{Config, Conversation, Core, LinkOpened, NoListener, Storage};
+use cac_core::{app_link, app_route, launch_landing, Config, Conversation, Core, Landing, LinkOpened, NoListener, Storage};
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -141,5 +141,76 @@ async fn an_id_from_a_link_never_reaches_another_route() {
     }
     let asked: Vec<String> = server.received_requests().await.unwrap_or_default().iter().map(|request| request.url.path().to_string()).collect();
     assert!(asked.iter().all(|path| !path.ends_with("/x") && !path.contains("..")), "{asked:?}");
+    core.stream().stop();
+}
+
+/// La tabla de rutas que la app nativa abre (`fixtures/native_routes.json`) es
+/// la verdad de `app_link` y `launch_landing`; la web la lee para decidir
+/// dónde ofrece «Abrir en la app» (`open-in-app.test.ts`).
+///
+/// Roturas que atrapa: dejar de abrir `/dm?u=`; leer el canal de `?channel=`
+/// en vez de `?space=`; añadir una pantalla (o quitarla) sin tocar la tabla,
+/// con lo que la web ofrecería abrir donde no hay nada o callaría donde sí;
+/// mandar `/my-work` al inicio o al frente; perder `/mywork`.
+#[test]
+fn the_routes_the_native_app_opens_are_the_shared_table() {
+    const BASE: &str = "https://cac.guz-studio.dev";
+    let table: Value = serde_json::from_str(include_str!("fixtures/native_routes.json")).unwrap();
+    let routes = table["routes"].as_array().unwrap();
+    assert!(routes.len() > 20, "la tabla no puede vaciarse en silencio");
+    for case in routes {
+        let route = case["route"].as_str().unwrap();
+        let screen = case["screen"].as_str().unwrap();
+        for href in [route.to_string(), format!("cac://{}", route.trim_start_matches('/')), format!("{BASE}/app{route}")] {
+            let found = format!("{:?}", app_link(&href, BASE));
+            let name: String = found.chars().take_while(|c| c.is_alphanumeric()).collect();
+            assert_eq!(name, screen, "{href}");
+            if screen == "Browser" {
+                let landing = match launch_landing(&app_route(&href, BASE).unwrap()) {
+                    Landing::Home => "home",
+                    Landing::MyWork => "my_work",
+                    Landing::Front => "front",
+                };
+                assert_eq!(Some(landing), case["landing"].as_str(), "{href}");
+            }
+        }
+    }
+}
+
+/// Un `cac://` que llega de fuera y no es una pantalla nunca vuelve al
+/// navegador: `/tasks` sin tarea y `cac:///` llevan al inicio, `/my-work` y
+/// `/mywork` a «Mi trabajo» (lo que cierra el resumen y la documentación), y
+/// lo demás deja todo como estaba. Lo pulsado dentro sigue yendo a la web.
+///
+/// Roturas que atrapa: quitar `overview().show()` (la persona se queda donde
+/// estaba); dejar `/my-work` en «al frente» o en el resumen; dejar la
+/// documentación abierta al ir a «Mi trabajo»; cambiar de pantalla con los
+/// servidores; devolver el navegador (`Browser`) por el esquema.
+#[tokio::test]
+async fn a_scheme_link_that_is_no_screen_lands_on_home_my_work_or_stays() {
+    let (_server, core) = rig().await;
+
+    for home in ["cac://tasks", "cac://", "cac:///", "cac://overview"] {
+        core.overview().leave();
+        assert_eq!(core.open_launched_link(home).await, LinkOpened::Opened, "{home}");
+        assert!(core.overview().state().on_screen, "{home} lleva al inicio");
+    }
+
+    for my_work in ["cac://my-work", "cac://mywork", "cac:///my-work"] {
+        assert_eq!(core.open_link("/tasks?doc=folder:f2").await, LinkOpened::Opened);
+        assert!(core.docs().state().target.is_some());
+        assert_eq!(core.open_launched_link(my_work).await, LinkOpened::Opened, "{my_work}");
+        assert!(!core.overview().state().on_screen, "{my_work}: no el resumen");
+        assert!(core.docs().state().target.is_none(), "{my_work}: no la documentación");
+    }
+
+    core.overview().show();
+    for front in ["cac://servers/x/backups", "cac://call/abc"] {
+        assert_eq!(core.open_launched_link(front).await, LinkOpened::Opened, "{front}");
+        assert!(core.overview().state().on_screen, "{front} no cambia de pantalla");
+    }
+
+    assert_eq!(core.open_link("https://ejemplo.com/a").await, LinkOpened::Browser { url: "https://ejemplo.com/a".into() });
+    assert_eq!(core.open_launched_link("cac://tasks?task=a%2Fb").await, LinkOpened::Failed, "un id que no es un id sigue sin abrir nada");
     core.stream().stop();
 }
