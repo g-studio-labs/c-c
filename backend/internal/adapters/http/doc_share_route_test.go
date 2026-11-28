@@ -26,11 +26,13 @@ type stubShares struct{}
 
 func (stubShares) Create(w http.ResponseWriter, r *http.Request)           { ok(w, r) }
 func (stubShares) List(w http.ResponseWriter, r *http.Request)             { ok(w, r) }
+func (stubShares) ListForOrg(w http.ResponseWriter, r *http.Request)       { ok(w, r) }
 func (stubShares) Revoke(w http.ResponseWriter, r *http.Request)           { ok(w, r) }
 func (stubShares) PublicDoc(w http.ResponseWriter, r *http.Request)        { ok(w, r) }
 func (stubShares) PublicAttachment(w http.ResponseWriter, r *http.Request) { ok(w, r) }
 
-// Sin JWT sólo entran las dos rutas públicas; revocar pide sesión.
+// Sin JWT sólo entran las dos rutas públicas; revocar y la lista de la
+// organización piden sesión.
 func TestOnlyTheTwoPublicDocShareRoutesSkipAuth(t *testing.T) {
 	r := chi.NewRouter()
 	mountDocShareRoutes(r, stubShares{})
@@ -41,7 +43,7 @@ func TestOnlyTheTwoPublicDocShareRoutesSkipAuth(t *testing.T) {
 	seen, open := 0, 0
 	err := chi.Walk(r, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
 		seen++
-		path := strings.NewReplacer("{id}", "x", "{attachmentId}", "a").Replace(route)
+		path := strings.NewReplacer("{id}", "x", "{attachmentId}", "a", "{orgId}", "o").Replace(route)
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
 		key := method + " " + route
@@ -60,7 +62,7 @@ func TestOnlyTheTwoPublicDocShareRoutesSkipAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if seen != 3 || open != len(public) {
+	if seen != 4 || open != len(public) {
 		t.Fatalf("the walk saw %d routes and %d public ones", seen, open)
 	}
 }
@@ -227,5 +229,44 @@ func TestSharingAPageNeedsItsOwnScopeAndReadAccess(t *testing.T) {
 	db.First(&row, "id = ?", created.Data.ID)
 	if row.RevokedAt == nil || time.Since(*row.RevokedAt) > time.Minute {
 		t.Errorf("the row was not revoked: %+v", row.RevokedAt)
+	}
+}
+
+// La lista de toda la organización: un miembro la lee con un token sin
+// permisos (es leer, como la lista por página), y sale el enlace que abrió;
+// quien no es de la organización recibe 404, no 403 ni una lista vacía.
+func TestANonMemberGets404ForTheOrgList(t *testing.T) {
+	db := docShareDB(t)
+	r := shareRouter(t, db)
+	sp := &domain.TaskSpace{OrgID: "org1", Name: "Proteus"}
+	db.Create(sp)
+	l := &domain.TaskList{SpaceID: sp.ID, Name: "Apps"}
+	db.Create(l)
+	p, err := repository.NewDocRepository(db).CreatePage("org1", domain.DocOwnerList, l.ID,
+		domain.CreateDocPageRequest{Title: "Guide"}, "u-org1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := call(r, http.MethodPost, "/api/v1/docs/list/"+l.ID+"/pages/"+p.ID+"/shares", "org1_docs:share", `{"ttlHours":720}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("creating the share: %d %s", rec.Code, rec.Body)
+	}
+
+	list := "/api/v1/organizations/org1/doc-shares"
+	if rec := call(r, http.MethodGet, list, "org2_docs:share", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("an outsider gets the org list: %d %s", rec.Code, rec.Body)
+	}
+	rec = call(r, http.MethodGet, list+"?space="+sp.ID, "org1_", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a member with a read-only token: %d %s", rec.Code, rec.Body)
+	}
+	var got struct {
+		Data []domain.OrgDocShareResponse `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Data) != 1 || got.Data[0].PageTitle != "Guide" || got.Data[0].SpaceID != sp.ID || got.Data[0].Link == "" {
+		t.Fatalf("the org list: %+v", got.Data)
 	}
 }

@@ -60,6 +60,33 @@ type DocShareResponse struct {
 	Link string `json:"link"`
 }
 
+// OrgDocShareResponse: un enlace vivo en la lista de toda la organización
+// (command-and-control-577), para tenerlos controlados desde un sitio. Lleva
+// lo de la lista por página y, además, de dónde cuelga.
+//
+// `Mode` y `ResponseCount` existen antes que las respuestas a propósito: hasta
+// que lleguen salen `read` y `0`, y así la app nativa no cambia de contrato
+// después.
+type OrgDocShareResponse struct {
+	ID            string       `json:"id"`
+	PageID        string       `json:"pageId"`
+	PageTitle     string       `json:"pageTitle"`
+	DocKind       DocOwnerKind `json:"docKind"`
+	OwnerID       string       `json:"ownerId"`
+	OwnerName     string       `json:"ownerName"`
+	SpaceID       string       `json:"spaceId"`
+	SpaceName     string       `json:"spaceName"`
+	ExpiresAt     time.Time    `json:"expiresAt"`
+	CreatedBy     string       `json:"createdBy"`
+	CreatedByName string       `json:"createdByName"`
+	Mode          string       `json:"mode"`
+	ResponseCount int          `json:"responseCount"`
+	Link          string       `json:"link"`
+}
+
+// DocShareModeRead: el enlace sólo deja leer, que hoy es lo único que hay.
+const DocShareModeRead = "read"
+
 // PublicSharedDoc es lo que ve alguien de fuera.
 //
 // **Sin un solo id de organización, de doc ni de persona**, como

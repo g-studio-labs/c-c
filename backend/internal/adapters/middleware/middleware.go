@@ -541,7 +541,10 @@ var patWritable = []struct {
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/organizations/[^/]+/server-templates/?$`), domain.ScopeServersManage},
 	{http.MethodPut, regexp.MustCompile(`^/api/v1/organizations/[^/]+/server-templates/[^/]+$`), domain.ScopeServersManage},
 	// Compartir una página fuera de la organización, y cerrar el enlace. Con su
-	// propio permiso: ver ScopeDocsShare. Listar es un GET y no lo necesita.
+	// propio permiso: ver ScopeDocsShare. Listar —los de una página o los de
+	// toda la organización (`GET /organizations/{id}/doc-shares`,
+	// command-and-control-577)— es un GET y no lo necesita: lo lee quien ya
+	// puede leer los documentos.
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/docs/[^/]+/[^/]+/pages/[^/]+/shares/?$`), domain.ScopeDocsShare},
 	{http.MethodDelete, regexp.MustCompile(`^/api/v1/doc-shares/[^/]+$`), domain.ScopeDocsShare},
 }

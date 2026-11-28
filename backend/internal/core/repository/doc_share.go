@@ -110,3 +110,57 @@ func (r *DocShareRepository) CitedInTree(docID, rootID, attachmentID string) (bo
 		WHERE p.body LIKE ?`, rootID, docID, docID, "%"+attachmentID+"%").Scan(&n).Error
 	return n > 0, err
 }
+
+// OrgShareRow: un enlace vivo de la organización con lo que hace falta para
+// pintarlo sin otra consulta: la página, el nodo del que cuelga su documento,
+// el espacio de ese nodo y quién lo abrió.
+type OrgShareRow struct {
+	domain.DocShare
+	PageTitle     string
+	DocKind       domain.DocOwnerKind
+	OwnerID       string
+	OwnerName     string
+	SpaceID       string
+	SpaceName     string
+	CreatedByName string
+}
+
+// ListLiveForOrg: los enlaces que todavía abren algo en toda la organización,
+// los que caducan antes primero. Con spaceID, sólo los de ese espacio.
+//
+// El espacio sale del dueño del documento en la misma consulta: una carpeta y
+// una lista guardan su `space_id` aunque estén anidadas, así que basta un join
+// por clase y no hay que subir el árbol. LEFT JOIN a propósito: un enlace cuyo
+// nodo ya no está sigue abriendo la página (Public no mira el nodo), y una
+// pantalla para tener los enlaces controlados no puede esconderlo; sale sin
+// espacio. La página en la papelera sí lo saca: no abre nada, y la lista por
+// página tampoco lo enseña.
+func (r *DocShareRepository) ListLiveForOrg(orgID, spaceID string, now time.Time) ([]OrgShareRow, error) {
+	q := `
+		SELECT s.*,
+			p.title AS page_title,
+			d.owner_kind AS doc_kind,
+			d.owner_id AS owner_id,
+			COALESCE(sp.name, f.name, l.name, '') AS owner_name,
+			COALESCE(sp.id, f.space_id, l.space_id, '') AS space_id,
+			COALESCE(sp.name, fs.name, ls.name, '') AS space_name,
+			(SELECT ` + nombreVisible + ` FROM users WHERE users.id = s.created_by) AS created_by_name
+		FROM doc_shares s
+		JOIN docs d ON d.id = s.doc_id
+		JOIN doc_pages p ON p.id = s.page_id AND p.doc_id = s.doc_id AND p.deleted_at IS NULL
+		LEFT JOIN task_spaces sp ON d.owner_kind = 'space' AND sp.id = d.owner_id
+		LEFT JOIN task_folders f ON d.owner_kind = 'folder' AND f.id = d.owner_id
+		LEFT JOIN task_spaces fs ON fs.id = f.space_id
+		LEFT JOIN task_lists l ON d.owner_kind = 'list' AND l.id = d.owner_id
+		LEFT JOIN task_spaces ls ON ls.id = l.space_id
+		WHERE s.org_id = ? AND s.revoked_at IS NULL AND s.expires_at > ?`
+	args := []any{orgID, now}
+	if spaceID != "" {
+		q += ` AND COALESCE(sp.id, f.space_id, l.space_id) = ?`
+		args = append(args, spaceID)
+	}
+	q += ` ORDER BY s.expires_at ASC, s.created_at ASC`
+	out := []OrgShareRow{}
+	err := r.db.Raw(q, args...).Scan(&out).Error
+	return out, err
+}

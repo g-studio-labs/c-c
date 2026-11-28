@@ -18,6 +18,8 @@ func mountDocShareMemberRoutes(r chi.Router, h handler.DocShareHandler) {
 // de las puertas recorra **este** enrutado y no una copia.
 func mountDocShareRoutes(r chi.Router, h handler.DocShareHandler) {
 	r.With(middleware.AuthMiddleware).Delete("/api/v1/doc-shares/{id}", h.Revoke)
+	// Todos los enlaces vivos de la organización (command-and-control-577).
+	r.With(middleware.AuthMiddleware).Get("/api/v1/organizations/{orgId}/doc-shares", h.ListForOrg)
 
 	// La puerta de quien no tiene cuenta. **Sin JWT, a propósito, y sólo estas
 	// dos**: las abre el token de `X-Doc-Share`, y sólo para leer.

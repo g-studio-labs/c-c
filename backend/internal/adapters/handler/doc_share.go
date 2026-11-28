@@ -24,6 +24,7 @@ import (
 type DocShareHandler interface {
 	Create(http.ResponseWriter, *http.Request)
 	List(http.ResponseWriter, *http.Request)
+	ListForOrg(http.ResponseWriter, *http.Request)
 	Revoke(http.ResponseWriter, *http.Request)
 	PublicDoc(http.ResponseWriter, *http.Request)
 	PublicAttachment(http.ResponseWriter, *http.Request)
@@ -143,6 +144,23 @@ func (h *docShareHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	SendResult(w, http.StatusOK, domain.APIResponse[[]domain.DocShareResponse]{Success: true, Data: out})
+}
+
+// ListForOrg: los enlaces vivos de toda la organización (?space= para uno).
+// Cualquier miembro, como leer los documentos de la org; quien no es miembro
+// recibe 404 y no 403. Es un GET: un token personal lo hace sin permiso aparte,
+// igual que la lista por página.
+func (h *docShareHandler) ListForOrg(w http.ResponseWriter, r *http.Request) {
+	orgID := chi.URLParam(r, "orgId")
+	if _, ok := h.readableDoc(w, r, func() (string, bool) { return orgID, true }); !ok {
+		return
+	}
+	out, err := h.svc.ListForOrg(orgID, r.URL.Query().Get("space"))
+	if err != nil {
+		shareError(w, err)
+		return
+	}
+	SendResult(w, http.StatusOK, domain.APIResponse[[]domain.OrgDocShareResponse]{Success: true, Data: out})
 }
 
 // Revoke: cualquiera que pueda leer el documento, no sólo quien lo compartió.

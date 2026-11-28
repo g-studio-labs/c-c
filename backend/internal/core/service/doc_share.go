@@ -68,6 +68,27 @@ func (s *DocShareService) List(doc *domain.Doc, pageID string) ([]domain.DocShar
 	return out, nil
 }
 
+// ListForOrg: los enlaces vivos de toda la organización, opcionalmente de un
+// espacio. Quien llama ya comprobó que es de la organización.
+func (s *DocShareService) ListForOrg(orgID, spaceID string) ([]domain.OrgDocShareResponse, error) {
+	rows, err := s.repo.ListLiveForOrg(orgID, spaceID, s.now())
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.OrgDocShareResponse, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, domain.OrgDocShareResponse{
+			ID: r.ID, PageID: r.PageID, PageTitle: r.PageTitle,
+			DocKind: r.DocKind, OwnerID: r.OwnerID, OwnerName: r.OwnerName,
+			SpaceID: r.SpaceID, SpaceName: r.SpaceName,
+			ExpiresAt: r.ExpiresAt, CreatedBy: r.CreatedBy, CreatedByName: r.CreatedByName,
+			Mode: domain.DocShareModeRead, ResponseCount: 0,
+			Link: repository.SignDocShareLink(r.ID),
+		})
+	}
+	return out, nil
+}
+
 func (s *DocShareService) Find(id string) (*domain.DocShare, error) {
 	return s.repo.FindByID(id)
 }
