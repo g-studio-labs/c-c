@@ -124,7 +124,8 @@ fn main() {
     // De quién viene este arranque, si es un relanzado tras actualizar. Se
     // quita del entorno para que no lo hereden los programas que lance.
     #[cfg(unix)]
-    let replaced = single_instance::relaunched_from(std::env::var(cac_mcp::desktop_update::RELAUNCH_OF_VAR).ok(), std::process::id());
+    let replaced = single_instance::take_relaunch_mark(cac_mcp::desktop_update::RELAUNCH_OF_VAR);
+    #[cfg(not(unix))]
     std::env::remove_var(cac_mcp::desktop_update::RELAUNCH_OF_VAR);
 
     let var = |name: &str| std::env::var(name).ok();

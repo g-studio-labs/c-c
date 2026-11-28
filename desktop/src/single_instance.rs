@@ -66,6 +66,15 @@ pub(crate) const RELAUNCH_PATIENCE: Duration = Duration::from_secs(10);
 /// Cada cuánto se mira si la vieja ya salió.
 const RELAUNCH_POLL: Duration = Duration::from_millis(50);
 
+/// La marca de relanzado que dejó `relaunch` en `var`, ya validada, y
+/// quitada del entorno para que no la hereden los programas que lance ésta.
+/// Se llama al arrancar, antes de que haya más hilos.
+pub(crate) fn take_relaunch_mark(var: &str) -> Option<u32> {
+    let mark = relaunched_from(std::env::var(var).ok(), std::process::id());
+    std::env::remove_var(var);
+    mark
+}
+
 /// El pid de la app a la que ésta reemplaza, si la lanzó `relaunch`. Ni el
 /// 0 (para `kill` es el grupo entero) ni el propio (se esperaría a sí misma)
 /// ni lo que no cabe en un `pid_t`.
@@ -522,8 +531,8 @@ mod tests {
     /// prueba no la cierra hasta que la nueva pregunta si sigue viva, así
     /// que no se cronometra nada: sin la espera, la nueva reclama con la
     /// vieja escuchando y le entrega «al frente» (lo que vio jose, 27-nov).
-    /// Roturas que atrapa: reclamar sin esperar; esperar a otro pid; dejar
-    /// de mirar si sigue viva. Un `process_alive` que no ve viva a la vieja
+    /// Roturas que atrapa: reclamar sin esperar; esperar a otro pid; seguir
+    /// esperando tras verla muerta. Un `process_alive` que no ve viva a la vieja
     /// aquí es una carrera; lo atrapa sin carrera la prueba de la marca.
     #[test]
     fn a_relaunch_takes_the_socket_once_the_app_it_replaces_exits() {
@@ -535,7 +544,8 @@ mod tests {
         let old_pid = old.id();
 
         enum Event {
-            Asked(u32),
+            /// Preguntó por ese pid, y lo que le contestaron.
+            Asked(u32, bool),
             Claimed(&'static str),
         }
         let (events, seen) = mpsc::channel();
@@ -544,8 +554,9 @@ mod tests {
             std::thread::spawn(move || {
                 let asked = events.clone();
                 let still_running = move |pid| {
-                    let _ = asked.send(Event::Asked(pid));
-                    process_alive(pid)
+                    let alive = process_alive(pid);
+                    let _ = asked.send(Event::Asked(pid, alive));
+                    alive
                 };
                 // Un error también se cuenta: si no, un hilo en pánico deja
                 // a la prueba esperando para siempre.
@@ -558,18 +569,30 @@ mod tests {
             })
         };
         match seen.recv().unwrap() {
-            Event::Asked(pid) => assert_eq!(pid, old_pid, "pregunta por la que reemplaza"),
+            Event::Asked(pid, alive) => {
+                assert_eq!(pid, old_pid, "pregunta por la que reemplaza");
+                assert!(alive, "la vieja sigue viva cuando pregunta por primera vez");
+            }
             Event::Claimed(outcome) => panic!("reclamó sin esperar a la vieja: {outcome}"),
         }
         // La vieja se cierra: primero su socket, después el proceso.
         quit.store(true, Ordering::SeqCst);
         assert_eq!(serving.join().unwrap(), 0, "a la vieja no le llegó nada");
         old.stop();
-        let outcome = loop {
+        // En cuanto la ve muerta, reclama: lo siguiente es el reclamo, no
+        // otra pregunta. Sin esto, esperar el tope entero sin hacer caso de
+        // la respuesta pasaba (con 600 s de tope, en verde a los diez
+        // minutos), y en la app es cada «Reiniciar» con 10 s sin ventana.
+        loop {
             match seen.recv().unwrap() {
-                Event::Asked(_) => continue,
-                Event::Claimed(outcome) => break outcome,
+                Event::Asked(_, true) => continue,
+                Event::Asked(_, false) => break,
+                Event::Claimed(outcome) => panic!("reclamó con la vieja aún viva: {outcome}"),
             }
+        }
+        let outcome = match seen.recv().unwrap() {
+            Event::Claimed(outcome) => outcome,
+            Event::Asked(..) => panic!("la vio muerta y siguió esperando en vez de reclamar"),
         };
         launch.join().unwrap();
         assert_eq!(outcome, "first", "la nueva se queda con la ventana");
@@ -605,6 +628,24 @@ mod tests {
             assert_eq!(relaunched_from(junk.map(String::from), own), None, "{junk:?}");
         }
         assert_eq!(relaunched_from(Some(own.to_string()), own), None, "no se espera a sí misma");
+    }
+
+    /// La marca que deja `relaunch` llega a la espera y no a los hijos: se
+    /// lee validada y se quita del entorno. Una variable propia de la
+    /// prueba, para no tocar la de verdad.
+    ///
+    /// Roturas que atrapa: no leerla (el arranque no esperaría a nadie);
+    /// dejarla en el entorno; tomar el pid propio.
+    #[test]
+    fn the_relaunch_mark_is_read_once_and_not_inherited() {
+        let var = "CAC_TEST_RELAUNCH_MARK";
+        std::env::set_var(var, "4242");
+        assert_eq!(take_relaunch_mark(var), Some(4242));
+        assert_eq!(std::env::var_os(var), None, "los hijos no la heredan");
+        std::env::set_var(var, std::process::id().to_string());
+        assert_eq!(take_relaunch_mark(var), None, "no se espera a sí misma");
+        assert_eq!(std::env::var_os(var), None);
+        assert_eq!(take_relaunch_mark(var), None, "sin marca no espera");
     }
 
     /// Un enlace demasiado largo no se manda, y una línea enorme por el
