@@ -58,9 +58,16 @@ fn settle(opened: LinkOpened, href: &str, cx: &mut App) {
 }
 
 /// Abre un enlace de cac donde lleva, sin preguntar qué es.
-fn follow(href: String, cx: &mut App) {
+fn follow(href: String, launched: bool, cx: &mut App) {
     let asked = href.clone();
-    let answer = Backend::ask(cx, move |core| async move { core.open_link(&asked).await });
+    // Lo que llega por el esquema nunca rebota al navegador (command-and-control-576).
+    let answer = Backend::ask(cx, move |core| async move {
+        if launched {
+            core.open_launched_link(&asked).await
+        } else {
+            core.open_link(&asked).await
+        }
+    });
     cx.spawn(async move |cx| {
         let Ok(opened) = answer.await else { return };
         cx.update(|cx| settle(opened, &href, cx));
@@ -77,7 +84,7 @@ pub(crate) fn open(href: &str, cx: &mut App) {
     match core.app_link(href) {
         AppLink::Browser { url } => cx.open_url(&url),
         AppLink::Unopenable if core.app_route(href).is_none() => {}
-        _ => follow(href.to_string(), cx),
+        _ => follow(href.to_string(), false, cx),
     }
 }
 
@@ -102,7 +109,7 @@ pub(crate) fn open_from_outside(href: String, cx: &mut App) {
         snapshot.session.is_some() && snapshot.orgs.current_org_id.is_some()
     };
     if ready(cx) {
-        follow(href, cx);
+        follow(href, true, cx);
         return;
     }
     let pending = Rc::new(RefCell::new(Some(href)));
@@ -112,7 +119,7 @@ pub(crate) fn open_from_outside(href: String, cx: &mut App) {
             return;
         }
         if let Some(href) = pending.borrow_mut().take() {
-            follow(href, cx);
+            follow(href, true, cx);
         }
     })
     .detach();
@@ -298,6 +305,18 @@ mod tests {
         wait_until(cx, "dice que no se pudo abrir", |cx| cx.shown_system_notifications().iter().any(|shown| shown.tag.as_ref() == FAILED_TAG));
         let shown = cx.shown_system_notifications();
         assert_eq!(shown.last().unwrap().body.as_ref(), "No se pudo abrir el enlace\n/tasks?task=no-existe-1");
+
+        // Lo que llega por el esquema y la app no tiene no rebota al navegador:
+        // abría otra pestaña de la web, que volvía a ofrecer «abrir en la app».
+        for unknown in ["cac://tasks", "cac://my-work", "cac://servers/x/backups"] {
+            cx.update(|cx| open_from_outside(unknown.into(), cx));
+            cx.executor().allow_parking();
+            for _ in 0..30 {
+                cx.run_until_parked();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(cx.opened_url(), None, "{unknown} no va al navegador");
+        }
 
         let asked = Rc::new(std::cell::Cell::new(0));
         let counted = asked.clone();

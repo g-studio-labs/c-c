@@ -236,6 +236,14 @@ fn only_plain_ids(screen: &AppLink) -> bool {
     ids.into_iter().flatten().all(|id| plain_id(id))
 }
 
+/// Si una ruta que la app no reconoce lleva al inicio (el resumen de
+/// Trabajo): el inicio mismo y `/tasks` sin tarea ni documento. Lo demás
+/// (`/my-work`, los servidores…) sólo trae la ventana al frente.
+fn lands_on_home(route: &str) -> bool {
+    let path = route.split(['?', '#']).next().unwrap_or_default().trim_end_matches('/');
+    matches!(path, "" | "/overview" | "/tasks")
+}
+
 impl Core {
     /// [`app_link`] con el servidor de esta sesión.
     pub fn app_link(&self, href: &str) -> AppLink {
@@ -298,6 +306,26 @@ impl Core {
             LinkOpened::Opened
         } else {
             LinkOpened::Failed
+        }
+    }
+
+    /// Abre un enlace que llegó por el esquema `cac://` (lo lanzó el sistema u
+    /// otra instancia). A diferencia de [`Core::open_link`], **nunca** vuelve
+    /// al navegador: esa dirección era de la web, que ofrece abrirla en la
+    /// app, y rebotarla abría otra pestaña con la barra otra vez. Una ruta
+    /// que no se reconoce lleva a la pantalla más cercana: el inicio
+    /// (`/`, `/overview`, `/tasks` sin tarea ni documento), o, para el resto,
+    /// sólo traer la ventana al frente, que ya hizo quien llama.
+    pub async fn open_launched_link(&self, href: &str) -> LinkOpened {
+        match self.app_link(href) {
+            AppLink::Browser { .. } => {
+                let route = self.app_route(href).unwrap_or_default();
+                if lands_on_home(&route) {
+                    self.overview().show();
+                }
+                LinkOpened::Opened
+            }
+            _ => self.open_link(href).await,
         }
     }
 
@@ -467,6 +495,22 @@ mod tests {
             assert_eq!(link(nothing), AppLink::Unopenable, "{nothing:?}");
         }
     }
+    /// Un `cac://` que la app no reconoce no va al navegador: lleva al inicio
+    /// o se queda en «al frente».
+    ///
+    /// Roturas que atrapa: mandar `/tasks` sin tarea a «al frente» (la
+    /// persona se queda donde estaba), o `/my-work` y los servidores al
+    /// inicio (le cambia la pantalla por nada).
+    #[test]
+    fn an_unknown_scheme_route_lands_on_home_or_just_fronts() {
+        for home in ["/", "/overview", "/tasks", "/tasks/", "/tasks?x=1"] {
+            assert!(lands_on_home(home), "{home}");
+        }
+        for front in ["/my-work", "/servers/x/backups", "/call/abc", "/chat"] {
+            assert!(!lands_on_home(front), "{front}");
+        }
+    }
+
     /// Un id de un enlace es un id: lo que, descodificado, lleva una barra,
     /// puntos u otra cosa no se abre, porque iría a una ruta de la API.
     ///
