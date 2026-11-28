@@ -268,8 +268,10 @@ fn label_of(item: &InboxItem) -> String {
 pub enum InboxTarget {
     Conversation { conversation: Conversation },
     Task { task_id: String },
-    /// La documentación de un nodo (`/tasks?doc=<clase>:<id>`).
-    Doc { node_id: String },
+    /// La documentación de un nodo (`/tasks?doc=<clase>:<id>`). Lleva el
+    /// enlace entero, porque la página, la pestaña y la sección las lee quien
+    /// lo sigue (`Docs::follow_link`), no un segundo parser.
+    Doc { node_id: String, route: String },
     /// Un pedido de un agente, en «Por atender» (`/requests?open=req-…`).
     Request { code: String },
     /// Una publicación del muro (`/feedback?post=<id>`).
@@ -287,7 +289,7 @@ pub fn link_target(link: &str) -> InboxTarget {
         "/dm" => query_param(link, "c").map(|id| InboxTarget::Conversation { conversation: Conversation::Direct { conversation_id: id.into() } }),
         "/tasks" => query_param(link, "task")
             .map(|id| InboxTarget::Task { task_id: id.into() })
-            .or_else(|| query_param(link, "doc").and_then(|doc| doc.split_once(':')).map(|(_, id)| InboxTarget::Doc { node_id: id.into() })),
+            .or_else(|| query_param(link, "doc").and_then(|doc| doc.split_once(':')).map(|(_, id)| InboxTarget::Doc { node_id: id.into(), route: link.into() })),
         "/requests" => query_param(link, "open").map(|code| InboxTarget::Request { code: code.into() }),
         "/feedback" => query_param(link, "post").map(|id| InboxTarget::Post { post_id: id.into() }),
         _ => None,
@@ -650,9 +652,10 @@ impl Inbox {
         }
         match target {
             InboxTarget::Task { task_id } => self.core.tasks().open(&task_id).await,
-            InboxTarget::Doc { node_id } => {
+            InboxTarget::Doc { node_id, route } => {
                 self.core.comms().leave();
-                self.core.docs().open(&node_id).await;
+                self.core.docs().follow_link(&route).await;
+                return self.core.docs().state().target.is_some_and(|target| target.id == node_id);
             }
             _ => {}
         }
@@ -837,7 +840,7 @@ mod tests {
         assert_eq!(link_target("/chat?space=s1"), InboxTarget::Conversation { conversation: Conversation::Channel { space_id: "s1".into() } });
         assert_eq!(link_target("/dm?c=c1"), InboxTarget::Conversation { conversation: Conversation::Direct { conversation_id: "c1".into() } });
         assert_eq!(link_target("/tasks?task=t1"), InboxTarget::Task { task_id: "t1".into() });
-        assert_eq!(link_target("/tasks?doc=list:l1"), InboxTarget::Doc { node_id: "l1".into() });
+        assert_eq!(link_target("/tasks?doc=list:l1"), InboxTarget::Doc { node_id: "l1".into(), route: "/tasks?doc=list:l1".into() });
         assert_eq!(link_target("/requests?open=req-ab12"), InboxTarget::Request { code: "req-ab12".into() });
         assert_eq!(link_target("/feedback?post=p1"), InboxTarget::Post { post_id: "p1".into() });
         for elsewhere in ["/feedback", "/servers/x/backups?target=b", "/call/abc", "", "/chat"] {

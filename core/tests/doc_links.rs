@@ -364,3 +364,28 @@ async fn opening_a_doc_leaves_platform() {
     assert_eq!(rig.target().as_deref(), Some("b"));
     assert!(!rig.core.platform().state().on_screen);
 }
+
+/// Un enlace a una página o pestaña de un documento, dado por la bandeja («Por
+/// atender», la campana), abre esa página o esa pestaña y no la portada.
+///
+/// Roturas que atrapa: la bandeja tirando `page`, `tab` o `section` y abriendo
+/// la portada en «Resumen» (lo que pasaba); callar cuando la página ya no
+/// existe.
+#[tokio::test]
+async fn an_inbox_link_to_a_doc_page_opens_the_page() {
+    let rig = rig().await;
+    let inbox = rig.core.inbox();
+
+    assert!(inbox.open("/tasks?doc=space:b&page=q1", "o1").await);
+    let state = rig.core.docs().state();
+    assert_eq!((rig.target().as_deref(), state.page_id.as_deref()), (Some("b"), Some("q1")));
+
+    assert!(inbox.open("/tasks?doc=space:a&tab=runbook&section=s1", "o1").await);
+    let state = rig.core.docs().state();
+    assert_eq!((rig.target().as_deref(), state.page_id, state.tab.as_str()), (Some("a"), None, "runbook"));
+    assert_eq!(state.jump, Some(DocJump::Section { id: "s1".into() }));
+
+    // La página borrada se dice, en vez de dejar la portada sin explicación.
+    inbox.open("/tasks?doc=space:b&page=no-existe", "o1").await;
+    assert_eq!(rig.failed().as_deref(), Some("/tasks?doc=space:b&page=no-existe"));
+}
