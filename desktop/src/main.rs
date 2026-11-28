@@ -121,6 +121,12 @@ fn main() {
         None => std::env::remove_var(GPUI_DEVICE_VAR),
     }
 
+    // De quién viene este arranque, si es un relanzado tras actualizar. Se
+    // quita del entorno para que no lo hereden los programas que lance.
+    #[cfg(unix)]
+    let replaced = single_instance::relaunched_from(std::env::var(cac_mcp::desktop_update::RELAUNCH_OF_VAR).ok(), std::process::id());
+    std::env::remove_var(cac_mcp::desktop_update::RELAUNCH_OF_VAR);
+
     let var = |name: &str| std::env::var(name).ok();
     let spike = std::env::var_os("CAC_SPIKE").is_some();
     let Some(data_dir) = system::data_dir(system::Os::current(), var) else {
@@ -139,7 +145,8 @@ fn main() {
     } else {
         let dir = single_instance::socket_dir(var, &data_dir);
         let me = single_instance::my_uid();
-        match single_instance::claim(&dir, me, &single_instance::Message::for_launch(link.clone())) {
+        let message = single_instance::Message::for_launch(link.clone());
+        match single_instance::claim_replacing(&dir, me, &message, replaced, single_instance::process_alive, single_instance::RELAUNCH_PATIENCE) {
             Ok(single_instance::Claim::Delivered) => std::process::exit(0),
             Ok(single_instance::Claim::First(listener)) => Some((listener, me)),
             Err(error) => {

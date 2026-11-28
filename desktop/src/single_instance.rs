@@ -22,6 +22,18 @@
 //!   (`flock`) de la carpeta: sin él, la segunda borraba el socket recién
 //!   creado por la primera y quedaban dos ventanas (un doble clic en el
 //!   lanzador bastaba).
+//! - **Una app relanzada tras actualizar espera a la que reemplaza.** La
+//!   vieja lanza la nueva y después se cierra; la nueva llegaba antes, le
+//!   entregaba «al frente» a la que se iba y salía, y no quedaba ninguna
+//!   (command-and-control-566). Ahora `relaunch` le pasa el pid de la vieja
+//!   ([`cac_mcp::desktop_update::RELAUNCH_OF_VAR`]) y la nueva no reclama hasta que
+//!   ese proceso sale, con un tope ([`RELAUNCH_PATIENCE`]). Se eligió esperar
+//!   y no que la vieja suelte el socket antes de lanzar porque así, si el
+//!   relanzado falla, la vieja sigue siendo la única y «Reintentar» no deja
+//!   una ventana sin puerta. Y no abre ninguna: la marca sólo retrasa el
+//!   reclamo, que se hace igual. Quien la ponga a mano con el pid de la app
+//!   abierta consigue una ventana cuando ésa ya se cerró, o, pasado el tope,
+//!   le entrega su enlace como cualquiera.
 //! - **Lo que entra se lee poco y con desconfianza**: una línea, como mucho
 //!   [`MAX_LINE`] bytes, y sólo `focus` u `open <enlace>`. El enlace pasa por
 //!   el traductor del core como cualquier otro: lo que no es de cac va al
@@ -45,6 +57,45 @@ const MAX_LINE: usize = 8 * 1024;
 /// Cuánto se espera a la otra punta. No mide nada: está para que una
 /// instancia colgada no deje colgada a la que arranca.
 const PATIENCE: Duration = Duration::from_secs(5);
+
+/// Cuánto espera una app relanzada a que salga la que reemplaza. Cerrarse
+/// es parar los servicios y soltar la ventana: segundos, no más. Pasado el
+/// tope se reclama igual, y si la vieja sigue viva se le entrega el mensaje.
+pub(crate) const RELAUNCH_PATIENCE: Duration = Duration::from_secs(10);
+
+/// Cada cuánto se mira si la vieja ya salió.
+const RELAUNCH_POLL: Duration = Duration::from_millis(50);
+
+/// El pid de la app a la que ésta reemplaza, si la lanzó `relaunch`. Ni el
+/// 0 (para `kill` es el grupo entero) ni el propio (se esperaría a sí misma)
+/// ni lo que no cabe en un `pid_t`.
+pub(crate) fn relaunched_from(value: Option<String>, own: u32) -> Option<u32> {
+    let pid: u32 = value?.trim().parse().ok()?;
+    (pid != 0 && pid != own && i32::try_from(pid).is_ok()).then_some(pid)
+}
+
+/// Si el proceso sigue vivo. `EPERM` es que existe y es de otro: vivo.
+pub(crate) fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
+    // SAFETY: la señal 0 no manda nada; sólo pregunta si el proceso existe.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// [`claim`], pero si ésta viene de un relanzado espera antes a que salga
+/// la app a la que reemplaza (`still_running` de su pid), como mucho
+/// `patience`. Sin la espera, la nueva se entregaba a la que se cerraba.
+pub(crate) fn claim_replacing(dir: &Path, me: u32, message: &Message, replaced: Option<u32>, still_running: impl Fn(u32) -> bool, patience: Duration) -> io::Result<Claim> {
+    if let Some(pid) = replaced {
+        let deadline = std::time::Instant::now() + patience;
+        while still_running(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(RELAUNCH_POLL);
+        }
+    }
+    claim(dir, me, message)
+}
 
 /// Lo que la segunda instancia le pide a la primera.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -411,6 +462,149 @@ mod tests {
             assert_eq!(seen, ["delivered", "first"], "ronda {round}");
         }
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// Una instancia abierta, como en la app: escucha hasta que se le dice
+    /// que salga, y entonces suelta el socket (lo deja en disco, como una
+    /// app que se cierra). Cuenta lo que le llega.
+    fn running(dir: &Path, me: u32) -> (std::sync::Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<usize>) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let listener = first(dir, me);
+        listener.set_nonblocking(true).unwrap();
+        let quit = std::sync::Arc::new(AtomicBool::new(false));
+        let stop = quit.clone();
+        let serving = std::thread::spawn(move || {
+            let mut received = 0;
+            while !stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        received += usize::from(answer(stream, me).is_some());
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            received
+        });
+        (quit, serving)
+    }
+
+    /// Un proceso de verdad que no sale solo; se mata al soltarlo, también
+    /// si la prueba falla a medias.
+    struct Sleeper(std::process::Child);
+
+    impl Sleeper {
+        fn start() -> Sleeper {
+            use std::process::Stdio;
+            Sleeper(std::process::Command::new("sleep").arg("600").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap())
+        }
+
+        fn id(&self) -> u32 {
+            self.0.id()
+        }
+
+        fn stop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    impl Drop for Sleeper {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+
+    /// Lo que pasa al pulsar «Reiniciar»: la vieja escucha, lanza la nueva
+    /// marcada con su pid, y sale. La nueva se queda con el socket.
+    ///
+    /// La vieja es un proceso de verdad (un `sleep`) más su socket; la
+    /// prueba no la cierra hasta que la nueva pregunta si sigue viva, así
+    /// que no se cronometra nada: sin la espera, la nueva reclama con la
+    /// vieja escuchando y le entrega «al frente» (lo que vio jose, 27-nov).
+    /// Roturas que atrapa: reclamar sin esperar; esperar a otro pid; dejar
+    /// de mirar si sigue viva. Un `process_alive` que no ve viva a la vieja
+    /// aquí es una carrera; lo atrapa sin carrera la prueba de la marca.
+    #[test]
+    fn a_relaunch_takes_the_socket_once_the_app_it_replaces_exits() {
+        use std::sync::atomic::Ordering;
+        let dir = scratch("relaunch");
+        let me = my_uid();
+        let (quit, serving) = running(&dir, me);
+        let mut old = Sleeper::start();
+        let old_pid = old.id();
+
+        enum Event {
+            Asked(u32),
+            Claimed(&'static str),
+        }
+        let (events, seen) = mpsc::channel();
+        let launch = {
+            let (dir, events) = (dir.clone(), events.clone());
+            std::thread::spawn(move || {
+                let asked = events.clone();
+                let still_running = move |pid| {
+                    let _ = asked.send(Event::Asked(pid));
+                    process_alive(pid)
+                };
+                // Un error también se cuenta: si no, un hilo en pánico deja
+                // a la prueba esperando para siempre.
+                let outcome = match claim_replacing(&dir, me, &Message::Focus, Some(old_pid), still_running, Duration::from_secs(600)) {
+                    Ok(Claim::First(_)) => "first",
+                    Ok(Claim::Delivered) => "delivered",
+                    Err(_) => "error",
+                };
+                events.send(Event::Claimed(outcome)).unwrap();
+            })
+        };
+        match seen.recv().unwrap() {
+            Event::Asked(pid) => assert_eq!(pid, old_pid, "pregunta por la que reemplaza"),
+            Event::Claimed(outcome) => panic!("reclamó sin esperar a la vieja: {outcome}"),
+        }
+        // La vieja se cierra: primero su socket, después el proceso.
+        quit.store(true, Ordering::SeqCst);
+        assert_eq!(serving.join().unwrap(), 0, "a la vieja no le llegó nada");
+        old.stop();
+        let outcome = loop {
+            match seen.recv().unwrap() {
+                Event::Asked(_) => continue,
+                Event::Claimed(outcome) => break outcome,
+            }
+        };
+        launch.join().unwrap();
+        assert_eq!(outcome, "first", "la nueva se queda con la ventana");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// La marca no abre una segunda ventana: con el pid de algo que no sale
+    /// nunca, pasado el tope se reclama igual y la abierta recibe el enlace.
+    /// Y una marca que no es un pid propio de otro proceso no se toma.
+    ///
+    /// Roturas que atrapa: tras el tope, arrancar sin reclamar; tomar el 0
+    /// (para `kill` es el grupo, siempre vivo) o el propio pid; no ver vivo
+    /// un proceso que lo está.
+    #[test]
+    fn a_relaunch_mark_does_not_open_a_second_window() {
+        use std::sync::atomic::Ordering;
+        let dir = scratch("mark");
+        let me = my_uid();
+        let (quit, serving) = running(&dir, me);
+        let mut immortal = Sleeper::start();
+        assert!(process_alive(immortal.id()));
+        let outcome = claim_replacing(&dir, me, &Message::Open("cac://tasks?task=1".into()), Some(immortal.id()), process_alive, Duration::from_millis(200)).unwrap();
+        assert!(matches!(outcome, Claim::Delivered), "se le entrega a la abierta");
+        quit.store(true, Ordering::SeqCst);
+        assert_eq!(serving.join().unwrap(), 1);
+        immortal.stop();
+        assert!(!process_alive(immortal.id()), "uno que salió ya no cuenta");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+
+        let own = std::process::id();
+        assert_eq!(relaunched_from(Some("4242".into()), own), Some(4242));
+        for junk in [None, Some(""), Some("0"), Some("-5"), Some("abc"), Some("4294967295")] {
+            assert_eq!(relaunched_from(junk.map(String::from), own), None, "{junk:?}");
+        }
+        assert_eq!(relaunched_from(Some(own.to_string()), own), None, "no se espera a sí misma");
     }
 
     /// Un enlace demasiado largo no se manda, y una línea enorme por el

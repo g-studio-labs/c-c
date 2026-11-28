@@ -296,9 +296,15 @@ impl Updater {
     }
 }
 
+/// Con qué se le dice a la app relanzada de quién viene: el pid de la que
+/// se cierra. La app nueva espera a que ése salga antes de reclamar su
+/// instancia única; si no, se la entregaba a la que se iba y no quedaba
+/// ninguna ventana (command-and-control-566).
+pub const RELAUNCH_OF_VAR: &str = "CAC_RELAUNCH_OF";
+
 /// Arranca otra vez la app, con los mismos argumentos, por `host`.
 pub fn relaunch(exe: &Path) -> Result<(), String> {
-    crate::host::command(exe).args(std::env::args_os().skip(1)).stdin(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|e| format!("could not start {}: {e}", exe.display()))
+    crate::host::command(exe).args(std::env::args_os().skip(1)).env(RELAUNCH_OF_VAR, std::process::id().to_string()).stdin(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|e| format!("could not start {}: {e}", exe.display()))
 }
 
 #[cfg(test)]
@@ -625,6 +631,33 @@ mod tests {
         assert!(!dir.join(format!("{DOWNLOAD_DIR_PREFIX}100")).exists(), "left an old download folder");
         assert!(dir.join(format!("{DOWNLOAD_DIR_PREFIX}200")).exists(), "removed this run's own folder");
         assert!(dir.join("somebody-elses").exists(), "removed a folder that is not the app's");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// La app relanzada sabe de quién viene: el pid de ésta, por
+    /// [`RELAUNCH_OF_VAR`]. Con eso espera a que ésta salga antes de
+    /// reclamar la ventana (command-and-control-566).
+    ///
+    /// Rotura que atrapa: relanzar sin la marca, o con otro pid; la nueva
+    /// se entregaría a la que se está cerrando y no quedaría ninguna.
+    #[cfg(unix)]
+    #[test]
+    fn a_relaunched_app_is_told_which_one_it_replaces() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("relaunch");
+        let (out, exe) = (dir.join("of"), dir.join("cac-desktop"));
+        std::fs::write(&exe, format!("#!/bin/sh\nprintf %s \"${RELAUNCH_OF_VAR}\" > {0}.tmp && mv {0}.tmp {0}\n", out.display())).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        relaunch(&exe).unwrap();
+        // Lo escribe el proceso lanzado, que no se espera: se mira hasta que
+        // esté, y el `mv` hace que se vea entero o nada.
+        let told = loop {
+            match std::fs::read_to_string(&out) {
+                Ok(told) => break told,
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        assert_eq!(told, std::process::id().to_string());
         let _ = std::fs::remove_dir_all(dir);
     }
 }
