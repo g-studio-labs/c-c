@@ -80,6 +80,10 @@ func (r *SearchRepository) TasksTS(query, tsq, orgID string, limit int) ([]domai
 	// recientes; sólo a ésas se les calcula `ts_rank_cd`. Por debajo del tope
 	// el resultado es el mismo que puntuándolo todo (search_golden_test.go).
 	//
+	// La org de un comentario se mira en el propio comentario
+	// (`item_comments.org_id`, ver comment_org.go): el índice devuelve sólo los
+	// de esta org, en vez de los de todas para tirarlos después del join.
+	//
 	// `in_title` sale de la columna guardada, quedándose con el peso A (el
 	// título): recalcular `to_tsvector` del título con `unaccent` por cada fila
 	// era la otra mitad del coste.
@@ -100,9 +104,9 @@ func (r *SearchRepository) TasksTS(query, tsq, orgID string, limit int) ([]domai
 		thread AS (
 			SELECT t.id FROM (
 				SELECT DISTINCT c.item_id FROM item_comments c, q
-				WHERE c.deleted_at IS NULL AND `+notServerChatter+` AND c.search @@ q.q
+				WHERE c.org_id = ? AND c.deleted_at IS NULL AND `+notServerChatter+` AND c.search @@ q.q
 			) x JOIN items t ON t.id = x.item_id
-			WHERE t.org_id = ? AND t.deleted_at IS NULL AND t.archived_at IS NULL
+			WHERE t.deleted_at IS NULL AND t.archived_at IS NULL
 			ORDER BY t.updated_at DESC
 			LIMIT ?
 		),

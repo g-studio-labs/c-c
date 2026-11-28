@@ -113,7 +113,7 @@ func EnsureSearchIndexes(db *gorm.DB) error {
 			// hace un año no puede tapar a la tarea que se llama así (#89).
 			`ALTER TABLE item_comments ADD COLUMN IF NOT EXISTS search tsvector GENERATED ALWAYS AS
 				(setweight(to_tsvector('cac_simple'::regconfig, coalesce(body, '')), 'C')) STORED`,
-			`CREATE INDEX IF NOT EXISTS idx_item_comments_search ON item_comments USING GIN (search)`,
+			// Su índice va con la org: ver ensureCommentOrgs, abajo.
 		}},
 		{"notes", []string{
 			`ALTER TABLE notes ADD COLUMN IF NOT EXISTS search tsvector GENERATED ALWAYS AS
@@ -135,6 +135,13 @@ func EnsureSearchIndexes(db *gorm.DB) error {
 				return err
 			}
 		}
+	}
+	var both bool
+	if err := db.Raw(`SELECT to_regclass('items') IS NOT NULL AND to_regclass('item_comments') IS NOT NULL`).Scan(&both).Error; err != nil {
+		return err
+	}
+	if both {
+		return ensureCommentOrgs(db)
 	}
 	return nil
 }
