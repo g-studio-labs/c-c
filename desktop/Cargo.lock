@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "cac-mcp"
-version = "1.35.0"
+version = "1.36.0"
 dependencies = [
  "cac-core",
  "image",

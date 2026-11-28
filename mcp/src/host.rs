@@ -208,6 +208,64 @@ pub fn reveal_path(path: &str, open_dir: &dyn Fn(&Path) -> Result<(), String>) -
     }
 }
 
+/// Lo que se abre con su programa al pulsar su ruta en un pedido
+/// (command-and-control-567: jose quiere el `apply.sql` en su editor, no en
+/// Thunar). Sólo documentos: texto, PDF, imágenes. Lo demás (un `.jar`, un
+/// `.sh`, un `.desktop`, algo sin extensión) se sigue mostrando, porque para el
+/// sistema abrirlo es ejecutarlo; y un `.html` tampoco, que corre su código.
+const OPENS_WITH_ITS_PROGRAM: &[&str] = &[
+    "sql", "txt", "md", "markdown", "json", "yaml", "yml", "toml", "csv", "tsv", "log", "xml", "ini", "conf", "diff",
+    "patch", "pdf", "png", "jpg", "jpeg", "gif", "webp",
+];
+
+/// Si un fichero (ya resuelto) se abre con su programa: un documento por su
+/// extensión, y que no se pueda ejecutar (un `notas.txt` con permiso de
+/// ejecución lo correría un gestor que lo trate como script).
+pub fn opens_with_its_program(real: &Path) -> bool {
+    let document = real.extension().and_then(|e| e.to_str()).is_some_and(|e| OPENS_WITH_ITS_PROGRAM.contains(&e.to_ascii_lowercase().as_str()));
+    #[cfg(unix)]
+    let runnable = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(real).map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(true)
+    };
+    #[cfg(not(unix))]
+    let runnable = false;
+    document && real.is_file() && !runnable
+}
+
+/// El programa que abre `target` con lo que el sistema le asocia.
+pub fn open_command(os: Os, target: &Path) -> (&'static str, Vec<String>) {
+    let target = target.to_string_lossy().into_owned();
+    match os {
+        Os::Linux => ("xdg-open", vec![target]),
+        Os::Mac => ("open", vec![target]),
+        Os::Windows => ("explorer", vec![target]),
+    }
+}
+
+/// Pulsar una ruta de un pedido: un documento se abre con su programa (el
+/// destino real, no el enlace); una carpeta, como carpeta; lo demás se muestra
+/// en la carpeta (`reveal_path`), nunca se abre.
+pub fn open_path_with(path: &str, open_dir: &dyn Fn(&Path) -> Result<(), String>) -> Result<(), RevealError> {
+    if is_network_path(path.trim()) {
+        return Err(RevealError::Refused);
+    }
+    let canonical = std::fs::canonicalize(expand_home(path.trim())).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => RevealError::NotFound,
+        _ => RevealError::Failed(e.to_string()),
+    })?;
+    if !opens_with_its_program(&canonical) {
+        return reveal_path(path, open_dir);
+    }
+    let (program, args) = open_command(THIS_OS, &canonical);
+    run(program, &args, false).map_err(RevealError::Failed)
+}
+
+/// `open_path_with` con el gestor de esta máquina.
+pub fn open_path(path: &str) -> Result<(), RevealError> {
+    open_path_with(path, &open_dir)
+}
+
 /// Si una carpeta se puede abrir ella misma. En macOS no: una `.app` es una
 /// carpeta y `open` la lanzaría, así que allí también se muestra con `-R`.
 pub fn opens_folders(os: Os) -> bool {
@@ -326,6 +384,49 @@ mod tests {
         assert_eq!(launched(), vec![(expected.to_string(), args)]);
         assert!(opened.borrow().is_empty(), "el gestor sí supo mostrarlo: no se abre nada más");
         assert!(!launched().iter().any(|(_, args)| args.iter().any(|a| a.contains("innocent.txt"))), "el enlace no se muestra: se muestra su destino");
+    }
+
+    /// Pulsar la ruta de un `.sql` lo abre con su programa (el destino real);
+    /// un ejecutable, aunque se llame `.sql` o lo apunte un enlace con nombre
+    /// de documento, se sigue mostrando.
+    ///
+    /// Roturas que detecta: revelar el documento en vez de abrirlo; abrir el
+    /// enlace en vez de su destino; abrir un `.sh`, uno sin extensión o un
+    /// `.sql` ejecutable.
+    #[test]
+    #[cfg(unix)]
+    fn a_document_is_opened_with_its_program_and_anything_runnable_is_only_revealed() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        reset();
+        let dir = scratch("open");
+        let sql = dir.join("apply.sql");
+        std::fs::write(&sql, "select 1;").unwrap();
+        let alias = dir.join("alias.sql");
+        symlink(&sql, &alias).unwrap();
+        open_path_with(&alias.to_string_lossy(), &|_| Ok(())).unwrap();
+        let real = std::fs::canonicalize(&sql).unwrap();
+        let (program, args) = open_command(THIS_OS, &real);
+        assert_eq!(launched(), vec![(program.to_string(), args)]);
+
+        let script = dir.join("run.sh");
+        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+        let bare = dir.join("Makefile");
+        std::fs::write(&bare, "all:\n").unwrap();
+        let runnable_sql = dir.join("tricky.sql");
+        std::fs::write(&runnable_sql, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&runnable_sql, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let doc_link = dir.join("notes.txt");
+        symlink(&script, &doc_link).unwrap();
+        for target in [&script, &bare, &runnable_sql, &doc_link] {
+            reset();
+            open_path_with(&target.to_string_lossy(), &|_| Ok(())).unwrap();
+            let real = std::fs::canonicalize(target).unwrap();
+            assert_eq!(launched(), vec![{
+                let (p, a) = reveal_command(THIS_OS, &real);
+                (p.to_string(), a)
+            }], "{} se muestra, no se abre", target.display());
+        }
+        assert_eq!(open_path_with("//srv/x.sql", &|_| Ok(())), Err(RevealError::Refused));
     }
 
     /// Una `.app` de macOS es una carpeta, y abrirla la lanza: allí ninguna

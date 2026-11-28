@@ -35,6 +35,7 @@ pub mod pdf;
 pub mod provision_cli;
 mod server;
 pub mod ssh_agent;
+pub mod text_file;
 pub mod update;
 
 pub use server::{serve, tool_catalog, Host};

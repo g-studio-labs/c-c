@@ -116,6 +116,41 @@ pub struct RequestBody {
     pub undo: String,
     pub what: String,
     pub from: String,
+    /// Ficheros de texto con su contenido, en cualquier tipo
+    /// (command-and-control-567). Un pedido viejo no los trae.
+    pub files: Vec<RequestFile>,
+}
+
+/// Un fichero adjunto a un pedido (`domain.RequestFile`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase", default)]
+pub struct RequestFile {
+    pub name: String,
+    pub content: String,
+    /// `apply` (junto al comando), `undo` (bajo «Para deshacer») o vacío.
+    pub role: String,
+}
+
+/// Dónde va un fichero en la tarjeta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum RequestFileSlot {
+    Apply,
+    Undo,
+    Other,
+}
+
+impl RequestFile {
+    /// Un papel que esta versión no conoce va aparte, no junto al comando:
+    /// copiar como «lo que se corre» algo que no lo es sería peor.
+    pub fn slot(&self) -> RequestFileSlot {
+        match self.role.as_str() {
+            "apply" => RequestFileSlot::Apply,
+            "undo" => RequestFileSlot::Undo,
+            _ => RequestFileSlot::Other,
+        }
+    }
 }
 
 /// Lo que se contesta (`domain.RequestAnswer`). Lo que no va, no se manda:
@@ -1169,6 +1204,30 @@ mod tests {
         let done = build_answer(&AnswerDraft::Done { note: "".into(), output: "  ok\n  hecho\n\n".into() }).unwrap();
         assert_eq!(done.output, "  ok\n  hecho");
         assert_eq!(serde_json::to_value(&done).unwrap(), serde_json::json!({ "output": "  ok\n  hecho" }), "sólo lo que va");
+    }
+
+    /// Los ficheros de un pedido llegan con su contenido exacto y cada uno va
+    /// a su sitio; uno viejo sin `files` se lee igual (command-and-control-567).
+    ///
+    /// Roturas que atrapa: perder `files` al leer el cable; poner un `undo`
+    /// junto al comando; poner junto al comando un papel desconocido.
+    #[test]
+    fn the_files_of_a_request_arrive_whole_and_each_goes_to_its_place() {
+        let body: RequestBody = serde_json::from_value(serde_json::json!({
+            "command": "pegar", "where": "Supabase",
+            "files": [
+                { "name": "apply.sql", "content": "update t set x = 1;\n", "role": "apply" },
+                { "name": "restore.sql", "content": "update t set x = 0;\n", "role": "undo" },
+                { "name": "notes.md", "content": "# n" },
+                { "name": "later.sql", "content": "x", "role": "verify" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(body.files[0], RequestFile { name: "apply.sql".into(), content: "update t set x = 1;\n".into(), role: "apply".into() });
+        let slots: Vec<RequestFileSlot> = body.files.iter().map(RequestFile::slot).collect();
+        assert_eq!(slots, [RequestFileSlot::Apply, RequestFileSlot::Undo, RequestFileSlot::Other, RequestFileSlot::Other]);
+        let old: RequestBody = serde_json::from_value(serde_json::json!({ "command": "make", "where": "gstd" })).unwrap();
+        assert!(old.files.is_empty());
     }
 
     /// La marca de cada tarea. Roturas que atrapa: repetir a la misma persona

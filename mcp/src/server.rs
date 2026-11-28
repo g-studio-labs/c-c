@@ -3520,7 +3520,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "create_request",
-            "description": "Leave a request for a person on a task, when you need them and cannot go on alone: it waits in their «Por atender» inbox in the app (with a notification) and survives this session. Returns its short `code` (req-…): tell the user, who can answer with a button or here. Kinds and their `body`: approve_message {draft: the exact text, destination, destinationUrl?} — you may only publish the approved `finalText`; test {url?, steps[], expected}; decide {question?, options: 2-4 of {label, consequence, recommended?}} — the recommended one goes first; run {command, where, expected, undo?}; obtain {what, from}. One request goes to ONE person; for two people, make two. Links are clickable in the app: write full URLs (https://…), ABSOLUTE file paths (/home/…, ~/…, C:\\…) and cac links (/app/tasks?task=…) in any text field; never relative paths, one path per mention, no wrapping quotes needed. Then park the task and follow it with wait_request or get_request. Needs `tasks:write`.",
+            "description": "Leave a request for a person on a task, when you need them and cannot go on alone: it waits in their «Por atender» inbox in the app (with a notification) and survives this session. Returns its short `code` (req-…): tell the user, who can answer with a button or here. Kinds and their `body`: approve_message {draft: the exact text, destination, destinationUrl?} — you may only publish the approved `finalText`; test {url?, steps[], expected}; decide {question?, options: 2-4 of {label, consequence, recommended?}} — the recommended one goes first; run {command, where, expected, undo?}; obtain {what, from}. One request goes to ONE person; for two people, make two. FILES: when the person has to paste or run a file you wrote (apply.sql, restore.sql), ATTACH it with `files` instead of writing «paste all of /path/apply.sql»: its content travels with the request and the app shows it with a «Copy apply.sql» button next to the command (role apply) or under undo (role undo). Never name a file by its bare name (apply.sql): write its ABSOLUTE path or attach it. Links are clickable in the app: write full URLs (https://…), ABSOLUTE file paths (/home/…, ~/…, C:\\…) and cac links (/app/tasks?task=…) in any text field; never relative paths, one path per mention, no wrapping quotes needed. Then park the task and follow it with wait_request or get_request. Needs `tasks:write`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3528,6 +3528,7 @@ fn tool_defs() -> Value {
                     "kind": { "type": "string", "enum": ["approve_message", "test", "decide", "run", "obtain"] },
                     "summary": { "type": "string", "description": "2-3 lines: what you need and why." },
                     "body": { "type": "object", "description": "The kind's fields, as above." },
+                    "files": { "type": "array", "description": "Text files to attach, read from THIS machine: absolute paths (\"/home/…/apply.sql\" or \"~/…\") or {path, role} with role apply (shown next to the command) or undo (shown under undo). Up to 5, 256 KB each, UTF-8 text; symbolic links that leave their folder and secrets (.env, keys, credentials) are refused with the reason.", "items": { "anyOf": [ { "type": "string" }, { "type": "object", "properties": { "path": { "type": "string" }, "role": { "type": "string", "enum": ["apply", "undo"] } }, "required": ["path"] } ] } },
                     "requestedOf": { "type": "string", "description": "Username or name of a member. Default: the token's owner." }
                 },
                 "required": ["taskId", "kind", "summary", "body"]
@@ -3556,7 +3557,7 @@ fn tool_defs() -> Value {
         },
         {
             "name": "update_request",
-            "description": "Re-issue an open request after talking it over with the user: new summary, body, kind or person; the previous version stays in its history and the person is notified again. Also, once you published an approved message, `publishedUrl` records where it went. Needs `tasks:write`. In the new text, links are clickable in the app: write full URLs (https://…), ABSOLUTE file paths (/home/…, ~/…, C:\\…) and cac links (/app/tasks?task=…) in any text field; never relative paths, one path per mention, no wrapping quotes needed.",
+            "description": "Re-issue an open request after talking it over with the user: new summary, body, kind or person; the previous version stays in its history and the person is notified again. Also, once you published an approved message, `publishedUrl` records where it went. Needs `tasks:write`. Files go attached with `files` (absolute paths, read from this machine) and replace the ones it had; never name a file by its bare name. In the new text, links are clickable in the app: write full URLs (https://…), ABSOLUTE file paths (/home/…, ~/…, C:\\…) and cac links (/app/tasks?task=…) in any text field; never relative paths, one path per mention, no wrapping quotes needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3564,6 +3565,7 @@ fn tool_defs() -> Value {
                     "summary": { "type": "string" },
                     "kind": { "type": "string", "enum": ["approve_message", "test", "decide", "run", "obtain"] },
                     "body": { "type": "object", "description": "The whole new body of its kind (needed when the kind changes)." },
+                    "files": { "type": "array", "description": "Text files to attach, read from THIS machine: absolute paths (\"/home/…/apply.sql\" or \"~/…\") or {path, role} with role apply (shown next to the command) or undo (shown under undo). Up to 5, 256 KB each, UTF-8 text; symbolic links that leave their folder and secrets (.env, keys, credentials) are refused with the reason.", "items": { "anyOf": [ { "type": "string" }, { "type": "object", "properties": { "path": { "type": "string" }, "role": { "type": "string", "enum": ["apply", "undo"] } }, "required": ["path"] } ] } },
                     "requestedOf": { "type": "string" },
                     "publishedUrl": { "type": "string", "description": "Only this, on an approved message: where you published it." }
                 },
@@ -3696,6 +3698,57 @@ fn request_view(v: &Value) -> Value {
             if let Some(name) = v.get(key).and_then(|p| p.get("name")).cloned() {
                 m.insert(key.to_string(), name);
             }
+        }
+    }
+    out
+}
+
+/// Lee los ficheros de `files` en esta máquina y los añade al cuerpo
+/// (command-and-control-567): el contenido viaja con el pedido porque la ruta
+/// es de aquí, no de quien lo contesta. Un fichero que no se puede leer para
+/// el pedido entero, con su motivo: un «Ejecutar» sin su `restore.sql` es peor
+/// que ninguno.
+fn attach_request_files(args: &Value, body: &mut Value) -> Result<(), String> {
+    let Some(list) = args.get("files") else { return Ok(()) };
+    let list = list.as_array().ok_or("files is a list of absolute paths or {path, role}")?;
+    let mut out = body.get("files").and_then(|f| f.as_array()).cloned().unwrap_or_default();
+    for (i, item) in list.iter().enumerate() {
+        let (path, role) = match item {
+            Value::String(p) => (p.clone(), None),
+            Value::Object(o) => (
+                o.get("path").and_then(|p| p.as_str()).ok_or(format!("files[{i}] needs its path"))?.to_string(),
+                o.get("role").and_then(|r| r.as_str()).map(str::to_string),
+            ),
+            _ => return Err(format!("files[{i}] is a path or {{path, role}}")),
+        };
+        if let Some(role) = role.as_deref() {
+            if role != "apply" && role != "undo" {
+                return Err(format!("files[{i}] {path}: role is apply or undo"));
+            }
+        }
+        let file = crate::text_file::read(&path).map_err(|why| format!("files[{i}] {path}: {why}"))?;
+        let mut entry = json!({ "name": file.name, "content": file.content });
+        if let Some(role) = role {
+            entry["role"] = json!(role);
+        }
+        out.push(entry);
+    }
+    if !body.is_object() {
+        *body = json!({});
+    }
+    body["files"] = Value::Array(out);
+    Ok(())
+}
+
+/// Lo que se contesta al crear o rehacer un pedido: el agente ya tiene los
+/// ficheros, así que se devuelve cuánto ocupa cada uno y no su contenido.
+fn request_written(v: &Value) -> Value {
+    let mut out = request_view(v);
+    if let Some(files) = out.get_mut("body").and_then(|b| b.get_mut("files")).and_then(|f| f.as_array_mut()) {
+        for f in files.iter_mut() {
+            let content = f.get("content").and_then(|c| c.as_str()).unwrap_or_default();
+            let summary = json!({ "name": f.get("name"), "role": f.get("role"), "bytes": content.len(), "lines": content.lines().count() });
+            *f = summary;
         }
     }
     out
@@ -6139,8 +6192,9 @@ fn run_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
                 }
             }
             body["body"] = args.get("body").cloned().unwrap_or(json!({}));
+            attach_request_files(args, &mut body["body"])?;
             let out = api_post(cfg, "/api/v1/requests", body)?;
-            Ok(request_view(&out))
+            Ok(request_written(&out))
         }
 
         "list_requests" => {
@@ -6174,8 +6228,21 @@ fn run_tool(cfg: &Cfg, name: &str, args: &Value) -> Result<Value, String> {
             if let Some(b) = args.get("body") {
                 body["body"] = b.clone();
             }
+            if args.get("files").is_some() {
+                if body.get("body").is_none() {
+                    // El servidor sustituye el cuerpo entero: sin el de ahora,
+                    // adjuntar borraría el comando.
+                    let current = api_get(cfg, &format!("/api/v1/requests/{}", urlencode(&id)))?;
+                    let mut kept = current.get("body").cloned().unwrap_or(json!({}));
+                    if let Some(m) = kept.as_object_mut() {
+                        m.remove("files");
+                    }
+                    body["body"] = kept;
+                }
+                attach_request_files(args, &mut body["body"])?;
+            }
             let out = api_patch(cfg, &format!("/api/v1/requests/{}", urlencode(&id)), body)?;
-            Ok(request_view(&out))
+            Ok(request_written(&out))
         }
 
         "answer_request" => {
@@ -8958,9 +9025,10 @@ mod tests {
         // queda sin enlace en la app: la herramienta tiene que decirlo.
         for name in ["create_request", "update_request"] {
             let said = tool(&defs, name)["description"].as_str().unwrap();
-            for hint in ["clickable", "ABSOLUTE file paths", "never relative", "one path per mention", "/app/tasks?task="] {
-                assert!(said.contains(hint), "{name} {hint}: {said}");
+            for hint in ["clickable", "ABSOLUTE file paths", "never relative", "one path per mention", "/app/tasks?task=", "`files`", "never name a file by its bare name"] {
+                assert!(said.to_lowercase().contains(&hint.to_lowercase()), "{name} {hint}: {said}");
             }
+            assert!(tool(&defs, name)["inputSchema"]["properties"]["files"].is_object(), "{name}");
         }
         assert!(tool(&defs, "list_requests").is_object());
         assert_eq!(tool(&defs, "wait_request")["annotations"]["readOnlyHint"], true);
@@ -9036,6 +9104,108 @@ mod tests {
         assert_eq!((m.as_str(), p.as_str()), ("POST", "/api/v1/requests"));
         assert_eq!(*b, json!({ "taskId": "t1", "kind": "test", "summary": "Mira", "requestedOf": "jose",
             "body": { "steps": ["abrir"], "expected": "07:30" } }));
+    }
+
+    /// Un pedido adjunta el contenido de los ficheros que nombra por su ruta
+    /// absoluta (command-and-control-567), con su papel, y al agente le
+    /// contesta cuánto ocupa cada uno, no el contenido otra vez.
+    ///
+    /// Roturas que atrapa: mandar la ruta en vez del contenido; perder el
+    /// papel `undo`; mandar los ficheros fuera del cuerpo; devolverle al
+    /// agente el contenido entero.
+    #[test]
+    fn a_request_attaches_the_content_of_the_files_it_names() {
+        let dir = std::env::temp_dir().join(format!("cac-req-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (apply, restore) = ("update pagos set moneda = 'USD';\n", "update pagos set moneda = 'MXN';\n");
+        std::fs::write(dir.join("apply.sql"), apply).unwrap();
+        std::fs::write(dir.join("restore.sql"), restore).unwrap();
+        let (cfg, seen) = fake_cac(|m, p, b| {
+            if m == "GET" && p.starts_with("/api/v1/tasks/by-ref/") {
+                json!({ "task": { "id": "t1" } })
+            } else {
+                let mut r = a_request("open");
+                r["body"] = b["body"].clone();
+                r
+            }
+        });
+        let out = call(&cfg, "create_request", json!({ "taskId": "cac-10", "kind": "run", "summary": "Pega el SQL",
+            "body": { "command": "Pegar apply.sql en el SQL Editor", "where": "Supabase", "expected": "UPDATE 3" },
+            "files": [dir.join("apply.sql").to_string_lossy(), { "path": dir.join("restore.sql").to_string_lossy(), "role": "undo" }] }));
+        let log = seen.lock().unwrap();
+        let (_, p, b) = log.last().unwrap();
+        assert_eq!(p, "/api/v1/requests");
+        assert_eq!(b["body"]["files"], json!([
+            { "name": "apply.sql", "content": apply },
+            { "name": "restore.sql", "content": restore, "role": "undo" },
+        ]));
+        assert_eq!(b["body"]["command"], "Pegar apply.sql en el SQL Editor");
+        assert_eq!(out["body"]["files"][0], json!({ "name": "apply.sql", "role": null, "bytes": apply.len(), "lines": 1 }), "{out}");
+        assert!(!out.to_string().contains("moneda"), "{out}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Un fichero que no se puede adjuntar para el pedido entero, con su
+    /// motivo, y no sale nada hacia cac.
+    ///
+    /// Roturas que atrapa: seguir sin el fichero (un «Ejecutar» sin su
+    /// `restore.sql`); subir un `.env`, lo que apunta un enlace que sale de su
+    /// carpeta o uno demasiado grande; aceptar sólo el nombre del fichero.
+    #[test]
+    fn a_file_that_cannot_be_attached_stops_the_request_with_its_reason() {
+        let dir = std::env::temp_dir().join(format!("cac-req-refused-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("cac-req-outside-{}", std::process::id()));
+        for d in [&dir, &outside] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(dir.join(".env"), "DATABASE_URL=x").unwrap();
+        std::fs::write(outside.join("notes.txt"), "fuera").unwrap();
+        std::os::unix::fs::symlink(outside.join("notes.txt"), dir.join("apply.sql")).unwrap();
+        std::fs::File::create(dir.join("big.sql")).unwrap().set_len(crate::text_file::MAX_BYTES + 1).unwrap();
+        let (cfg, seen) = fake_cac(|_, _, _| json!({ "task": { "id": "t1" } }));
+        let cases = [
+            (dir.join(".env").to_string_lossy().into_owned(), "secret"),
+            (dir.join("apply.sql").to_string_lossy().into_owned(), "outside its folder"),
+            (dir.join("big.sql").to_string_lossy().into_owned(), "256 KB"),
+            ("apply.sql".to_string(), "absolute"),
+        ];
+        for (path, why) in cases {
+            let out = call(&cfg, "create_request", json!({ "taskId": "t1", "kind": "run", "summary": "x",
+                "body": { "command": "c", "where": "w", "expected": "e" }, "files": [path] }));
+            let said = out["error"].as_str().unwrap_or_default();
+            assert!(said.contains(why) && said.contains(&path), "{path}: {out}");
+        }
+        assert!(!seen.lock().unwrap().iter().any(|(m, p, _)| m == "POST" && p == "/api/v1/requests"), "no sale ningún pedido");
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
+    }
+
+    /// Rehacer un pedido con `files` sin mandar el cuerpo conserva el comando
+    /// que tenía y cambia sus ficheros.
+    ///
+    /// Rotura que atrapa: adjuntar en un `update_request` y borrar el cuerpo
+    /// (el servidor sustituye el cuerpo entero).
+    #[test]
+    fn re_attaching_files_keeps_the_rest_of_the_body() {
+        let dir = std::env::temp_dir().join(format!("cac-req-reattach-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("apply.sql"), "select 2;").unwrap();
+        let (cfg, seen) = fake_cac(|m, _, _| {
+            let mut r = a_request("open");
+            if m == "GET" {
+                r["body"] = json!({ "command": "c", "where": "w", "expected": "e", "files": [{ "name": "old.sql", "content": "select 1;" }] });
+            }
+            r
+        });
+        call(&cfg, "update_request", json!({ "id": "req-7k2m9x", "files": [dir.join("apply.sql").to_string_lossy()] }));
+        let log = seen.lock().unwrap();
+        let (m, _, b) = log.last().unwrap();
+        assert_eq!(m, "PATCH");
+        assert_eq!(b["body"], json!({ "command": "c", "where": "w", "expected": "e", "files": [{ "name": "apply.sql", "content": "select 2;" }] }));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Contestar desde la terminal manda sólo lo que la persona dijo, al

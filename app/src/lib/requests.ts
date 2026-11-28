@@ -31,6 +31,14 @@ export interface RequestBody {
   undo?: string;
   what?: string;
   from?: string;
+  // La app de Tauri no los pinta: sólo la nativa (command-and-control-567).
+  files?: RequestFile[];
+}
+
+export interface RequestFile {
+  name: string;
+  content: string;
+  role?: "apply" | "undo" | string;
 }
 
 export interface RequestAnswer {
