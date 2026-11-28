@@ -96,3 +96,67 @@ func TestARequestCodeCanBeDictated(t *testing.T) {
 		}
 	}
 }
+
+// Un pedido lleva ficheros de texto con su contenido (command-and-control-567),
+// en cualquier tipo, y el backend pone los límites con su motivo.
+//
+// Roturas que atrapa: perder los ficheros al normalizar; aceptar uno de más,
+// uno demasiado grande, uno que no es texto o un nombre con ruta; aceptar un
+// role inventado; tocar el contenido.
+func TestARequestCarriesTextFilesWithinLimits(t *testing.T) {
+	run := RequestBody{Command: "pegar apply.sql en el SQL Editor", Where: "Supabase", Expected: "UPDATE 3"}
+	run.Files = []RequestFile{
+		{Name: " apply.sql ", Content: "update t set x = 1;\n", Role: "apply"},
+		{Name: "restore.sql", Content: "update t set x = 0;\n", Role: "UNDO"},
+	}
+	got, err := run.Normalize(RequestRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []RequestFile{
+		{Name: "apply.sql", Content: "update t set x = 1;\n", Role: "apply"},
+		{Name: "restore.sql", Content: "update t set x = 0;\n", Role: "undo"},
+	}
+	if len(got.Files) != 2 || got.Files[0] != want[0] || got.Files[1] != want[1] {
+		t.Fatalf("los ficheros se guardan con su contenido intacto: %+v", got.Files)
+	}
+	if got, err := (RequestBody{What: "la llave", From: "Ana", Files: want[:1]}).Normalize(RequestObtain); err != nil || len(got.Files) != 1 {
+		t.Fatalf("vale para cualquier tipo: %+v %v", got.Files, err)
+	}
+	if got, err := (RequestBody{What: "x", From: "y"}).Normalize(RequestObtain); err != nil || got.Files != nil {
+		t.Fatalf("un pedido sin ficheros sigue igual: %+v %v", got.Files, err)
+	}
+
+	many := make([]RequestFile, MaxRequestFiles+1)
+	for i := range many {
+		many[i] = RequestFile{Name: string(rune('a'+i)) + ".sql", Content: "select 1;"}
+	}
+	bad := map[string][]RequestFile{
+		"one too many":  many,
+		"too big":       {{Name: "big.sql", Content: strings.Repeat("x", MaxRequestFileBytes+1)}},
+		"not text":      {{Name: "blob.sql", Content: "abc\xff\xfe"}},
+		"nul byte":      {{Name: "blob.sql", Content: "abc\x00def"}},
+		"path":          {{Name: "/home/rv/apply.sql", Content: "select 1;"}},
+		"windows path":  {{Name: `C:\tmp\apply.sql`, Content: "select 1;"}},
+		"dot dot":       {{Name: "..", Content: "select 1;"}},
+		"no name":       {{Name: " ", Content: "select 1;"}},
+		"unknown role":  {{Name: "a.sql", Content: "select 1;", Role: "run"}},
+		"empty":         {{Name: "a.sql", Content: ""}},
+		"same name":     {{Name: "a.sql", Content: "1"}, {Name: "a.sql", Content: "2"}},
+		"total too big": {{Name: "a", Content: strings.Repeat("x", MaxRequestFileBytes)}, {Name: "b", Content: strings.Repeat("x", MaxRequestFileBytes)}, {Name: "c", Content: strings.Repeat("x", MaxRequestFileBytes)}, {Name: "d", Content: strings.Repeat("x", MaxRequestFileBytes)}, {Name: "e", Content: "x"}},
+	}
+	for why, files := range bad {
+		b := run
+		b.Files = files
+		_, err := b.Normalize(RequestRun)
+		var be *RequestBodyError
+		if !errors.As(err, &be) || be.Msg == "" {
+			t.Errorf("%s: tenía que rechazarse con motivo, salió %v", why, err)
+		}
+	}
+	exact := run
+	exact.Files = []RequestFile{{Name: "a.sql", Content: strings.Repeat("x", MaxRequestFileBytes)}}
+	if _, err := exact.Normalize(RequestRun); err != nil {
+		t.Errorf("justo en el límite pasa: %v", err)
+	}
+}

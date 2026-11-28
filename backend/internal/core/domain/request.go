@@ -4,9 +4,11 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Un pedido es lo que un agente deja para una persona y no puede hacer solo:
@@ -149,7 +151,29 @@ type RequestBody struct {
 	// obtain: qué falta y quién lo tiene.
 	What string `json:"what,omitempty"`
 	From string `json:"from,omitempty"`
+	// Files vale para cualquier tipo (command-and-control-567): el contenido
+	// viaja con el pedido porque la ruta que escribía el agente («pega todo
+	// /home/…/apply.sql») es de su máquina, y la persona no la tiene.
+	Files []RequestFile `json:"files,omitempty"`
 }
+
+// RequestFile: un fichero de texto adjunto. Role lo coloca: junto al comando
+// («apply») o bajo «Para deshacer» («undo»); sin role, aparte.
+type RequestFile struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
+	Role    string `json:"role,omitempty"`
+}
+
+const (
+	RequestFileApply = "apply"
+	RequestFileUndo  = "undo"
+
+	MaxRequestFiles      = 5
+	MaxRequestFileBytes  = 256 << 10
+	MaxRequestFilesBytes = 1 << 20
+	maxRequestFileName   = 255
+)
 
 type RequestOption struct {
 	Label       string `json:"label"`
@@ -235,7 +259,78 @@ func (b RequestBody) Normalize(kind RequestKind) (RequestBody, error) {
 	default:
 		return out, bodyErr("unknown kind: use approve_message, test, decide, run or obtain")
 	}
+	files, err := normalizeRequestFiles(b.Files)
+	if err != nil {
+		return out, err
+	}
+	out.Files = files
 	return out, nil
+}
+
+// normalizeRequestFiles: pocos, de texto y con un nombre que es sólo un
+// nombre. El contenido no se toca: un espacio de más en un SQL es del SQL.
+func normalizeRequestFiles(in []RequestFile) ([]RequestFile, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	if len(in) > MaxRequestFiles {
+		return nil, bodyErr(fmt.Sprintf("at most %d files per request, got %d", MaxRequestFiles, len(in)))
+	}
+	out := make([]RequestFile, 0, len(in))
+	seen := map[string]bool{}
+	total := 0
+	for _, f := range in {
+		name := strings.TrimSpace(f.Name)
+		if err := checkRequestFileName(name); err != nil {
+			return nil, err
+		}
+		if seen[name] {
+			return nil, bodyErr("two files are named " + name)
+		}
+		seen[name] = true
+		role := strings.ToLower(strings.TrimSpace(f.Role))
+		if role != "" && role != RequestFileApply && role != RequestFileUndo {
+			return nil, bodyErr("file " + name + ": role is apply, undo or nothing")
+		}
+		if f.Content == "" {
+			return nil, bodyErr("file " + name + " is empty")
+		}
+		if len(f.Content) > MaxRequestFileBytes {
+			return nil, bodyErr(fmt.Sprintf("file %s is %d bytes; the limit is %d", name, len(f.Content), MaxRequestFileBytes))
+		}
+		if !utf8.ValidString(f.Content) || strings.ContainsRune(f.Content, 0) {
+			return nil, bodyErr("file " + name + " is not UTF-8 text")
+		}
+		total += len(f.Content)
+		if total > MaxRequestFilesBytes {
+			return nil, bodyErr(fmt.Sprintf("the files add up to more than %d bytes", MaxRequestFilesBytes))
+		}
+		out = append(out, RequestFile{Name: name, Content: f.Content, Role: role})
+	}
+	return out, nil
+}
+
+// Un nombre con ruta diría de qué máquina viene y cómo es por dentro, y no le
+// sirve a nadie: la persona copia el contenido, no abre la ruta.
+func checkRequestFileName(name string) error {
+	switch {
+	case name == "":
+		return bodyErr("every file needs its name")
+	case strings.ContainsAny(name, "/\\"):
+		return bodyErr("file name " + name + " is a path; send only the name (apply.sql)")
+	case name == "." || name == "..":
+		return bodyErr("file name " + name + " is not a name")
+	case len(name) > maxRequestFileName:
+		return bodyErr("file name is longer than 255 bytes")
+	case !utf8.ValidString(name):
+		return bodyErr("file name is not UTF-8")
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return bodyErr("file name has control characters")
+		}
+	}
+	return nil
 }
 
 // ─── La respuesta ────────────────────────────────────────────────────────────
