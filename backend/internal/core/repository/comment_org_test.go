@@ -161,9 +161,14 @@ func TestCommentOrgsAreBackfilledInBatchesUntilNoneIsLeft(t *testing.T) {
 	// Uno que ya tenía org (aunque fuera vieja) no es del relleno.
 	withoutTriggers(t, db, `UPDATE item_comments SET org_id = 'org-viejo' WHERE id = 'c5'`)
 
+	commentOrgsBackfilled.Store(false)
+	t.Cleanup(func() { commentOrgsBackfilled.Store(true) })
 	n, err := BackfillCommentOrgs(db, 2)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !commentOrgsBackfilled.Load() {
+		t.Error("al terminar el relleno la marca tenía que quedar en true; sin ella la búsqueda se queda en modo lento para siempre")
 	}
 	if n != 4 {
 		t.Errorf("con tandas de 2 tenía que rellenar los 4 sin org, y dice %d", n)
