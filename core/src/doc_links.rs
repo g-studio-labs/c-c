@@ -19,6 +19,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::app_link::plain_id;
 use crate::doc_edit::DocLeave;
 use crate::docs::{kind_segment, Docs, DocsState, DOC_TABS};
 use crate::nav::NodeKind;
@@ -213,6 +214,15 @@ impl Docs {
                 }
             }
             DocLink::Doc { kind, id, tab, page, section } => {
+                // Lo que trae un enlace va descodificado, y el id y la página
+                // acaban en una ruta de `/api/v1`: `page=..%2F..%2Fx` pediría
+                // otra cosa con la sesión de quien pulsó. Todo enlace a un
+                // documento pasa por aquí (los del cuerpo, la bandeja, los
+                // avisos), así que el filtro va aquí y no en cada puerta.
+                if ![Some(&id), tab.as_ref(), page.as_ref(), section.as_ref()].into_iter().flatten().all(|value| plain_id(value)) {
+                    self.say_link_failed(href);
+                    return;
+                }
                 // Un nodo que no está en el árbol de esta organización (se
                 // borró, o es de otra) no se abre: se dice antes de
                 // preguntar nada.

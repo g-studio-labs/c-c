@@ -389,3 +389,63 @@ async fn an_inbox_link_to_a_doc_page_opens_the_page() {
     inbox.open("/tasks?doc=space:b&page=no-existe", "o1").await;
     assert_eq!(rig.failed().as_deref(), Some("/tasks?doc=space:b&page=no-existe"));
 }
+
+/// Un enlace a un documento con una página (o una sección) que no es un id
+/// simple no se sigue: ni por el cuerpo de un documento ni por la bandeja.
+/// `doc_link` descodifica, y la página acaba pegada a una ruta de la API:
+/// `page=..%2F..%2Fx` pediría otra cosa con la sesión de quien pulsa.
+///
+/// Rotura que atrapa: quitar el filtro de `Docs::follow_link` (hace un GET a
+/// `/api/v1/docs/space/b/pages/../../x`, o abre `b` por una sección
+/// imposible) o que la bandeja lo siga por otro camino sin filtro.
+#[tokio::test]
+async fn a_doc_link_with_something_that_is_not_an_id_asks_the_server_nothing() {
+    let rig = rig().await;
+    let docs = rig.core.docs();
+    let inbox = rig.core.inbox();
+    let before = rig.requests().await;
+
+    for href in [
+        "/tasks?doc=space:b&page=..%2F..%2Fx",
+        "/tasks?doc=space:b&page=a/b",
+        "/tasks?doc=space:b&page=%2e%2e",
+        "/tasks?doc=space:b&section=..%2Fx",
+    ] {
+        docs.follow_link(href).await;
+        assert_eq!(rig.failed().as_deref(), Some(href), "{href} no se dijo desde un documento");
+        assert_eq!(rig.target().as_deref(), Some("a"), "{href} movió algo desde un documento");
+
+        docs.dismiss_link_failure();
+        assert!(!inbox.open(href, "o1").await, "{href}: la bandeja dice que lo abrió");
+        assert_eq!(rig.failed().as_deref(), Some(href), "{href} no se dijo desde la bandeja");
+        assert_eq!(rig.target().as_deref(), Some("a"), "{href} movió algo desde la bandeja");
+    }
+    assert_eq!(rig.requests().await, before, "pidió algo al servidor por un enlace con algo que no es un id");
+}
+
+/// La bandeja lee el nodo con el mismo traductor que el resto: descodificado
+/// y sin el ancla, así que lo que abre es lo que dice que abrió.
+///
+/// Rotura que atrapa: un segundo parser en la bandeja que compara `b#x` con
+/// `b` y contesta `false` tras abrir el documento, o un `open` que contesta
+/// `true` sin haber llegado (a otro nodo, o al mismo con una página que no
+/// se pudo abrir).
+#[tokio::test]
+async fn the_inbox_says_truly_whether_it_opened_a_doc() {
+    let rig = rig().await;
+    let inbox = rig.core.inbox();
+
+    assert!(inbox.open("/tasks?doc=space:b#x", "o1").await);
+    assert_eq!(rig.target().as_deref(), Some("b"));
+
+    assert!(!inbox.open("/tasks?doc=space:zz", "o1").await, "un nodo que no existe no se abrió");
+    assert_eq!(rig.target().as_deref(), Some("b"));
+
+    // Ya en `b`: una página que no es un id no se abrió, aunque se siga en `b`.
+    assert!(!inbox.open("/tasks?doc=space:b&page=..%2Fx", "o1").await);
+    assert_eq!(rig.target().as_deref(), Some("b"));
+
+    // Ni una que ya no está: se llega al documento, pero no a lo que se pidió.
+    assert!(!inbox.open("/tasks?doc=space:a&page=ya-no-esta", "o1").await);
+    assert_eq!(rig.target().as_deref(), Some("a"));
+}

@@ -210,6 +210,30 @@ async fn opening_a_notice_goes_where_it_says() {
     rig.core.stream().stop();
 }
 
+/// Un aviso de un documento de otra organización cambia a ella y abre la
+/// página que dice, por el mismo camino que el resto de enlaces.
+///
+/// Roturas que atrapa: abrir el documento sin cambiar de organización (el
+/// árbol de `o1` no tiene `z`, y se diría que no existe); tirar la página.
+#[tokio::test]
+async fn a_doc_notice_from_another_organization_switches_to_it() {
+    let rig = rig().await;
+    get("/api/v1/chat/latest").respond_with(ok(json!([]))).mount(&rig.server).await;
+    get("/api/v1/dm/").respond_with(ok(json!([]))).mount(&rig.server).await;
+    let doc = json!({ "doc": null, "orgId": "o2", "decisions": [], "attachments": [], "tabs": [{ "key": "overview", "body": "El espacio z.", "bodyHash": "h1" }] });
+    get("/api/v1/docs/space/z").respond_with(ok(doc)).mount(&rig.server).await;
+    get("/api/v1/docs/space/z/pages").respond_with(ok(json!([{ "id": "w1", "title": "Red", "hasBody": true }]))).mount(&rig.server).await;
+    let page = json!({ "page": { "id": "w1", "title": "Red", "body": "Tres.", "bodyHash": "h1" }, "breadcrumb": [], "children": [], "referencedFrom": [] });
+    get("/api/v1/docs/space/z/pages/w1").respond_with(ok(page)).mount(&rig.server).await;
+    rig.core.open_workspace().await;
+
+    assert!(rig.core.inbox().open("/tasks?doc=space:z&page=w1", "o2").await);
+    assert_eq!(rig.core.orgs().state().current_org_id.as_deref(), Some("o2"));
+    let docs = rig.core.docs().state();
+    assert_eq!((docs.target.map(|target| target.id).as_deref(), docs.page_id.as_deref()), (Some("z"), Some("w1")));
+    rig.core.stream().stop();
+}
+
 /// Con la bandeja abierta alguna vez, un evento que deja fila la vuelve a
 /// pedir; sin abrirla, no.
 ///

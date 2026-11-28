@@ -215,7 +215,7 @@ pub fn app_link(href: &str, base_url: &str) -> AppLink {
 /// Uno vacío no llega aquí: `param` y la ruta de notas ya lo descartan.
 /// Se mira **descodificado**: `a%2F..%2Fx` es `a/../x`, y metido en una ruta
 /// de `/api/v1` pediría otra cosa con la sesión de quien pulsó.
-fn plain_id(id: &str) -> bool {
+pub(crate) fn plain_id(id: &str) -> bool {
     id.len() <= 128 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 

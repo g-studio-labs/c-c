@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::comms::Conversation;
 use crate::counters::{count_badge, rings_bell};
+use crate::doc_links::{doc_link, DocLink};
 use crate::error::ApiError;
 use crate::notice::NoticeTarget;
 use crate::stream::ServerEvent;
@@ -287,9 +288,13 @@ pub fn link_target(link: &str) -> InboxTarget {
     match path {
         "/chat" => query_param(link, "space").map(|id| InboxTarget::Conversation { conversation: Conversation::Channel { space_id: id.into() } }),
         "/dm" => query_param(link, "c").map(|id| InboxTarget::Conversation { conversation: Conversation::Direct { conversation_id: id.into() } }),
-        "/tasks" => query_param(link, "task")
-            .map(|id| InboxTarget::Task { task_id: id.into() })
-            .or_else(|| query_param(link, "doc").and_then(|doc| doc.split_once(':')).map(|(_, id)| InboxTarget::Doc { node_id: id.into(), route: link.into() })),
+        // El mismo traductor que el resto de enlaces de la app: descodifica,
+        // quita el ancla y sólo acepta las clases de nodo que existen.
+        "/tasks" => match doc_link(link) {
+            DocLink::Task { id } => Some(InboxTarget::Task { task_id: id }),
+            DocLink::Doc { id, .. } => Some(InboxTarget::Doc { node_id: id, route: link.into() }),
+            _ => None,
+        },
         "/requests" => query_param(link, "open").map(|code| InboxTarget::Request { code: code.into() }),
         "/feedback" => query_param(link, "post").map(|id| InboxTarget::Post { post_id: id.into() }),
         _ => None,
@@ -655,7 +660,8 @@ impl Inbox {
             InboxTarget::Doc { node_id, route } => {
                 self.core.comms().leave();
                 self.core.docs().follow_link(&route).await;
-                return self.core.docs().state().target.is_some_and(|target| target.id == node_id);
+                let docs = self.core.docs().state();
+                return docs.link_failed.is_none() && docs.target.is_some_and(|target| target.id == node_id);
             }
             _ => {}
         }
