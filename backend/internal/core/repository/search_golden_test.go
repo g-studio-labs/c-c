@@ -201,3 +201,56 @@ func TestDocRankingStaysAsItWas(t *testing.T) {
 	}
 }
 
+// Con más coincidencias que candidatas, lo que casa en el título sigue
+// entrando aunque sea lo más viejo: es la primera clave del orden de las
+// tareas y lo que más pesa en el de los docs. Elegir las candidatas sólo por
+// fecha lo tiraba.
+//
+// Roturas que atrapa: elegir las candidatas sin mirar el título, o puntuar
+// sólo las más recientes.
+func TestBeyondTheCandidateCapATitleMatchStillComesFirst(t *testing.T) {
+	db := searchFTSDB(t)
+	old := searchCandidates
+	searchCandidates = 2
+	t.Cleanup(func() { searchCandidates = old })
+
+	ftsTask(t, db, "t-title", "org-1", "Despliegue", "")
+	goldenAge(t, db, "items", "t-title", 30)
+	for i, id := range []string{"t-a", "t-b", "t-c", "t-d"} {
+		ftsTask(t, db, id, "org-1", "Otra", "Un despliegue más.")
+		goldenAge(t, db, "items", id, i)
+	}
+	hits, err := NewSearchRepository(db).Tasks("despliegue", "org-1", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hitIDs(hits); len(got) != 2 || got[0] != "t-title" {
+		t.Errorf("con dos candidatas, la que se llama así primero y sólo dos: %v", got)
+	}
+
+	doc := &domain.Doc{OrgID: "org-1", OwnerKind: domain.DocOwnerList, OwnerID: "l"}
+	doc.ID = "doc-l"
+	if err := db.Create(doc).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&domain.DocPage{BaseModel: domain.BaseModel{ID: "p-title"}, DocID: "doc-l", OrgID: "org-1", Title: "Despliegue", Rank: "0.5", Body: "Lo que hay que saber."}).Error; err != nil {
+		t.Fatal(err)
+	}
+	goldenAge(t, db, "doc_pages", "p-title", 30)
+	for i, id := range []string{"p-a", "p-b", "p-c", "p-d"} {
+		if err := db.Create(&domain.DocPage{BaseModel: domain.BaseModel{ID: id}, DocID: "doc-l", OrgID: "org-1", Title: "Otra", Rank: "0.5", Body: "Un despliegue más."}).Error; err != nil {
+			t.Fatal(err)
+		}
+		goldenAge(t, db, "doc_pages", id, i)
+	}
+	docs, err := NewSearchRepository(db).Docs("despliegue", "org-1", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hitIDs(docs); len(got) == 0 || got[0] != "p-title" {
+		t.Errorf("la página que se llama así se quedó fuera de las candidatas: %v", got)
+	}
+	if len(docs) != 2 {
+		t.Errorf("el tope no acota: %d aciertos con dos candidatas por fuente", len(docs))
+	}
+}

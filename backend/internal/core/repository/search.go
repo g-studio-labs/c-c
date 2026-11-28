@@ -19,6 +19,11 @@ type SearchRepository struct{ db *gorm.DB }
 
 func NewSearchRepository(db *gorm.DB) *SearchRepository { return &SearchRepository{db: db} }
 
+// searchCandidates: cuántas candidatas aporta cada fuente antes de puntuar
+// (ver TasksTS). Variable y no constante para que la prueba lo baje y vea qué
+// pasa al rebasarlo.
+var searchCandidates = 200
+
 func like(q string) string { return "%" + strings.ToLower(strings.TrimSpace(q)) + "%" }
 
 // notServerChatter deja fuera de la búsqueda lo que el servidor anota por su
@@ -68,22 +73,49 @@ func (r *SearchRepository) TasksTS(query, tsq, orgID string, limit int) ([]domai
 		ID, Title, ListName, Snippet string
 	}
 	var rows []row
+	// Acotar antes de puntuar (command-and-control-570): una palabra común casa
+	// con miles de tareas, y puntuarlas todas era lo que costaba 1,5 s. Cada
+	// fuente aporta como mucho `searchCandidates` candidatas, las que casan en
+	// el título primero —es la primera clave del orden— y luego las más
+	// recientes; sólo a ésas se les calcula `ts_rank_cd`. Por debajo del tope
+	// el resultado es el mismo que puntuándolo todo (search_golden_test.go).
+	//
+	// `in_title` sale de la columna guardada, quedándose con el peso A (el
+	// título): recalcular `to_tsvector` del título con `unaccent` por cada fila
+	// era la otra mitad del coste.
+	//
+	// La puntuación del hilo no lleva `c.search @@ q.q` en el `WHERE` a
+	// propósito: con él, Postgres cruza el índice de la tarea con el GIN
+	// entero **por cada candidata** (medido: 365 × 1,8 ms). Sin él lee sólo
+	// los comentarios de esa tarea, y uno que no casa puntúa 0, que no cambia
+	// el máximo.
 	err := r.db.Raw(`
 		WITH q AS (SELECT to_tsquery('cac_simple', ?) AS q),
-		hits AS (
-			SELECT t.id, ts_rank_cd(t.search, q.q) AS score FROM items t, q
+		own AS (
+			SELECT t.id FROM items t, q
 			WHERE t.org_id = ? AND t.deleted_at IS NULL AND t.archived_at IS NULL AND t.search @@ q.q
-			UNION ALL
-			SELECT t.id, ts_rank_cd(c.search, q.q) FROM item_comments c JOIN items t ON t.id = c.item_id, q
-			WHERE t.org_id = ? AND t.deleted_at IS NULL AND t.archived_at IS NULL
-			  AND c.deleted_at IS NULL AND `+notServerChatter+` AND c.search @@ q.q
+			ORDER BY ts_filter(t.search, '{a}') @@ q.q DESC, t.updated_at DESC
+			LIMIT ?
 		),
+		thread AS (
+			SELECT t.id FROM (
+				SELECT DISTINCT c.item_id FROM item_comments c, q
+				WHERE c.deleted_at IS NULL AND `+notServerChatter+` AND c.search @@ q.q
+			) x JOIN items t ON t.id = x.item_id
+			WHERE t.org_id = ? AND t.deleted_at IS NULL AND t.archived_at IS NULL
+			ORDER BY t.updated_at DESC
+			LIMIT ?
+		),
+		cand AS (SELECT id FROM own UNION SELECT id FROM thread),
 		best AS (
-			SELECT h.id, max(h.score) AS score,
-			       bool_or(to_tsvector('cac_simple', t.title) @@ q.q) AS in_title, max(t.updated_at) AS updated_at
-			FROM hits h JOIN items t ON t.id = h.id, q
-			GROUP BY h.id
-			ORDER BY in_title DESC, score DESC, updated_at DESC
+			SELECT t.id, ts_filter(t.search, '{a}') @@ q.q AS in_title, t.updated_at,
+			       greatest(
+			         CASE WHEN t.search @@ q.q THEN ts_rank_cd(t.search, q.q) END,
+			         (SELECT max(ts_rank_cd(c.search, q.q)) FROM item_comments c
+			          WHERE c.item_id = t.id AND c.deleted_at IS NULL AND `+notServerChatter+`)
+			       ) AS score
+			FROM cand JOIN items t ON t.id = cand.id, q
+			ORDER BY in_title DESC, score DESC, t.updated_at DESC
 			LIMIT ?
 		)
 		SELECT t.id, t.title, l.name AS list_name,
@@ -93,7 +125,7 @@ func (r *SearchRepository) TasksTS(query, tsq, orgID string, limit int) ([]domai
 		            ELSE '' END AS snippet
 		FROM best b JOIN items t ON t.id = b.id JOIN task_lists l ON l.id = t.list_id CROSS JOIN q
 		ORDER BY b.in_title DESC, b.score DESC, b.updated_at DESC`,
-		tsq, orgID, orgID, limit).Scan(&rows).Error
+		tsq, orgID, searchCandidates, orgID, searchCandidates, limit).Scan(&rows).Error
 	if err != nil {
 		return r.tasksLike(query, orgID, limit)
 	}
@@ -310,28 +342,42 @@ func (r *SearchRepository) DocsTS(query, tsq, orgID string, limit int) ([]domain
 	// páginas, por una tabla que no busca.
 	// Y una página que es copia de un `.md` atado (mismo texto) no sale: manda
 	// el repo, y devolver cada cosa dos veces dejaba la mitad de aciertos.
-	repoPart, mirrorPart, args := "", "", []any{tsq, orgID, orgID}
+	//
+	// Como en las tareas, cada fuente aporta como mucho `searchCandidates`
+	// candidatas —las que casan en el título primero, luego las más
+	// recientes— y sólo a ésas se les calcula `ts_rank_cd` (ver TasksTS).
+	//
+	// Las sumas de los .md se calculan una vez (`mirrors`), no una vez por
+	// cada página que casa: era un `md5` de cada .md de la org por página.
+	mirrorCTE, mirrorPart, repoPart := "", "", ""
+	args := []any{tsq}
 	if r.hasSearchColumn("repo_docs") {
-		mirrorPart = `AND NOT EXISTS (SELECT 1 FROM repo_docs rd JOIN git_hub_repos gr ON gr.repo_id = rd.repo_id AND gr.org_id = rd.org_id
-				          WHERE rd.org_id = p.org_id AND gr.show_docs AND gr.space_id <> '' AND rd.body <> '' AND md5(rd.body) = md5(p.body))`
-		repoPart = `UNION ALL
-				SELECT 'repo', '', '', gr.full_name || '/' || rd.path, rd.id, rd.title, rd.body,
-				       ts_rank_cd(rd.search, q.q), rd.updated_at
-				FROM repo_docs rd JOIN git_hub_repos gr ON gr.repo_id = rd.repo_id AND gr.org_id = rd.org_id, q
-				WHERE rd.org_id = ? AND gr.show_docs AND gr.space_id <> '' AND rd.search @@ q.q`
+		mirrorCTE = `mirrors AS (
+				SELECT DISTINCT md5(rd.body) AS h FROM repo_docs rd JOIN git_hub_repos gr ON gr.repo_id = rd.repo_id AND gr.org_id = rd.org_id
+				WHERE rd.org_id = ? AND gr.show_docs AND gr.space_id <> '' AND rd.body <> ''),`
+		mirrorPart = `AND NOT EXISTS (SELECT 1 FROM mirrors m WHERE m.h = md5(p.body))`
 		args = append(args, orgID)
+	}
+	args = append(args, orgID, searchCandidates, orgID, searchCandidates)
+	if mirrorCTE != "" {
+		repoPart = `UNION ALL
+				(SELECT 'repo', '', '', gr.full_name || '/' || rd.path, rd.id, rd.title, rd.body, rd.search, rd.updated_at
+				FROM repo_docs rd JOIN git_hub_repos gr ON gr.repo_id = rd.repo_id AND gr.org_id = rd.org_id, q
+				WHERE rd.org_id = ? AND gr.show_docs AND gr.space_id <> '' AND rd.search @@ q.q
+				ORDER BY ts_filter(rd.search, '{a}') @@ q.q DESC, rd.updated_at DESC LIMIT ?)`
+		args = append(args, orgID, searchCandidates)
 	}
 	// Las decisiones vigentes del registro de cada documento; el «dónde» es el
 	// nodo. Una sustituida no sale: lo que se busca es lo que vale hoy.
 	decisionPart := ""
 	if r.hasSearchColumn("decisions") {
 		decisionPart = `UNION ALL
-				SELECT 'decision', d.owner_kind, d.owner_id, '', dec.id, dec.title, dec.body,
-				       ts_rank_cd(dec.search, q.q), dec.decided_at
+				(SELECT 'decision', d.owner_kind, d.owner_id, '', dec.id, dec.title, dec.body, dec.search, dec.decided_at
 				FROM decisions dec JOIN docs d ON d.id = dec.doc_id, q
 				WHERE d.org_id = ? AND dec.search @@ q.q
-				  AND NOT EXISTS (SELECT 1 FROM decisions n WHERE n.supersedes_id = dec.id)`
-		args = append(args, orgID)
+				  AND NOT EXISTS (SELECT 1 FROM decisions n WHERE n.supersedes_id = dec.id)
+				ORDER BY ts_filter(dec.search, '{a}') @@ q.q DESC, dec.decided_at DESC LIMIT ?)`
+		args = append(args, orgID, searchCandidates)
 	}
 	// Lo que mordió (domain.Incident): sus servidores y sus áreas van en el
 	// índice, así que «gstd» lo trae aunque el cuerpo no lo diga. Uno
@@ -339,34 +385,38 @@ func (r *SearchRepository) DocsTS(query, tsq, orgID string, limit int) ([]domain
 	incidentPart := ""
 	if r.hasSearchColumn("incidents") {
 		incidentPart = `UNION ALL
-				SELECT 'incident', d.owner_kind, d.owner_id, '', inc.id, inc.title, inc.body,
-				       ts_rank_cd(inc.search, q.q), inc.updated_at
+				(SELECT 'incident', d.owner_kind, d.owner_id, '', inc.id, inc.title, inc.body, inc.search, inc.updated_at
 				FROM incidents inc JOIN docs d ON d.id = inc.doc_id, q
 				WHERE inc.org_id = ? AND inc.search @@ q.q
-				  AND NOT EXISTS (SELECT 1 FROM incidents n WHERE n.supersedes_id = inc.id)`
-		args = append(args, orgID)
+				  AND NOT EXISTS (SELECT 1 FROM incidents n WHERE n.supersedes_id = inc.id)
+				ORDER BY ts_filter(inc.search, '{a}') @@ q.q DESC, inc.updated_at DESC LIMIT ?)`
+		args = append(args, orgID, searchCandidates)
 	}
 	args = append(args, limit)
 	var rows []row
 	err := r.db.Raw(`
 		WITH q AS (SELECT to_tsquery('cac_simple', ?) AS q),
+		`+mirrorCTE+`
 		best AS (
-			SELECT * FROM (
-				SELECT 'tab' AS src, d.owner_kind, d.owner_id, t.key AS tab, '' AS page_id,
-				       '' AS page_title, t.body, ts_rank_cd(t.search, q.q) AS score, t.updated_at
+			SELECT x.src, x.owner_kind, x.owner_id, x.tab, x.page_id, x.page_title, x.body,
+			       ts_rank_cd(x.search, q.q) AS score, x.updated_at
+			FROM (
+				(SELECT 'tab' AS src, d.owner_kind, d.owner_id, t.key AS tab, '' AS page_id,
+				       '' AS page_title, t.body, t.search, t.updated_at
 				FROM doc_tabs t JOIN docs d ON d.id = t.doc_id, q
 				WHERE d.org_id = ? AND t.search @@ q.q
+				ORDER BY t.updated_at DESC LIMIT ?)
 				UNION ALL
-				SELECT 'page', d.owner_kind, d.owner_id, '', p.id, p.title, p.body,
-				       ts_rank_cd(p.search, q.q), p.updated_at
+				(SELECT 'page', d.owner_kind, d.owner_id, '', p.id, p.title, p.body, p.search, p.updated_at
 				FROM doc_pages p JOIN docs d ON d.id = p.doc_id, q
 				WHERE p.org_id = ? AND p.deleted_at IS NULL AND p.search @@ q.q
 				`+mirrorPart+`
+				ORDER BY ts_filter(p.search, '{a}') @@ q.q DESC, p.updated_at DESC LIMIT ?)
 				`+repoPart+`
 				`+decisionPart+`
 				`+incidentPart+`
-			) x
-			ORDER BY score DESC, updated_at DESC
+			) x, q
+			ORDER BY score DESC, x.updated_at DESC
 			LIMIT ?
 		)
 		SELECT b.src, b.owner_kind, b.owner_id, b.tab, b.page_id, b.page_title,
