@@ -138,6 +138,9 @@ thread_local! {
     /// Lo que se habría lanzado, y qué programas fallan, sin lanzar nada.
     pub(crate) static LAUNCHED: std::cell::RefCell<Vec<(String, Vec<String>)>> = const { std::cell::RefCell::new(Vec::new()) };
     pub(crate) static FAILING: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// El `PATH` con el que se busca `xdg-mime` (uno de mentira). Sin él, uno
+    /// vacío: ninguna prueba depende del `xdg-mime` de la máquina.
+    pub(crate) static MIME_PATH: std::cell::RefCell<Option<std::ffi::OsString>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Lanza `program`. `check`: esperar su salida y fallar si no fue buena (el
@@ -250,10 +253,92 @@ pub fn open_command(os: Os, target: &Path) -> (&'static str, Vec<String>) {
     }
 }
 
+/// Qué hizo pulsar una ruta.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Opened {
+    WithItsProgram,
+    /// Se mostró en la carpeta. Con motivo cuando era un documento por su
+    /// extensión pero no se pudo fiar de su contenido; sin él, cuando no era
+    /// un documento (un ejecutable, un `.html`), que es lo de siempre.
+    Revealed(Option<NotOpened>),
+}
+
+/// Por qué un documento por su extensión se mostró en vez de abrirse.
+#[derive(Debug, PartialEq, Eq)]
+pub enum NotOpened {
+    /// Por su contenido es de otro tipo (`text/html` en un `.sql`).
+    ContentType(String),
+    /// No se pudo preguntar el tipo (sin `xdg-mime`, o falló).
+    TypeUnknown,
+}
+
+/// Los tipos de texto que se abren con su programa: los de un editor. Nada
+/// de `text/html`, `application/xhtml+xml`, `image/svg+xml` ni XML, que van
+/// al navegador y corren su `<script>`, ni de scripts.
+const TEXT_TYPES: &[&str] = &[
+    "text/plain", "text/markdown", "text/x-markdown", "text/csv", "text/x-csv", "text/tab-separated-values", "text/x-log",
+    "text/x-patch", "text/x-diff", "text/x-sql", "application/sql", "application/x-sql", "application/json",
+    "application/yaml", "application/x-yaml", "application/toml", "application/x-toml",
+];
+
+/// Si el tipo que da el contenido es el de un documento de esa extensión.
+pub fn content_matches_extension(ext: &str, mime: &str) -> bool {
+    match ext.to_ascii_lowercase().as_str() {
+        "pdf" => mime == "application/pdf",
+        "png" => mime == "image/png",
+        "jpg" | "jpeg" => mime == "image/jpeg",
+        "gif" => mime == "image/gif",
+        "webp" => mime == "image/webp",
+        _ => TEXT_TYPES.contains(&mime),
+    }
+}
+
+/// El tipo que le da `xdg-mime` a un fichero. Mira el contenido, igual que
+/// `xdg-open` al abrir (en un escritorio sin GNOME ni KDE, como el bspwm de
+/// jose, va por esa rama): un `.sql` que empieza con `<html…>` es
+/// `text/html`, y `xdg-open` se lo da a Firefox. `None` si no se pudo
+/// preguntar.
+fn mime_by_content(target: &Path) -> Option<String> {
+    let mut cmd = command("xdg-mime");
+    #[cfg(test)]
+    cmd.env("PATH", MIME_PATH.with(|m| m.borrow().clone()).unwrap_or_default());
+    let out = cmd
+        .args(["query", "filetype"])
+        .arg(target)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mime = String::from_utf8(out.stdout).ok()?.trim().to_ascii_lowercase();
+    (!mime.is_empty() && !mime.contains(char::is_whitespace)).then_some(mime)
+}
+
+/// Si un documento (por su extensión) se puede abrir. Sólo en Linux se
+/// pregunta por el contenido: `open` (macOS) y `explorer` (Windows) eligen
+/// el programa por la extensión, así que un `.sql` va al editor del `.sql`
+/// aunque dentro lleve HTML. Sin respuesta, no se abre: cerrado por defecto.
+fn content_refusal(os: Os, real: &Path) -> Option<NotOpened> {
+    if os != Os::Linux {
+        return None;
+    }
+    let ext = real.extension().and_then(|e| e.to_str()).unwrap_or_default();
+    match mime_by_content(real) {
+        Some(mime) if content_matches_extension(ext, &mime) => None,
+        Some(mime) => Some(NotOpened::ContentType(mime)),
+        None => Some(NotOpened::TypeUnknown),
+    }
+}
+
 /// Pulsar una ruta de un pedido: un documento se abre con su programa (el
 /// destino real, no el enlace); una carpeta, como carpeta; lo demás se muestra
-/// en la carpeta (`reveal_path`), nunca se abre.
-pub fn open_path_with(path: &str, open_dir: &dyn Fn(&Path) -> Result<(), String>) -> Result<(), RevealError> {
+/// en la carpeta (`reveal_path`), nunca se abre. En Linux, un documento cuyo
+/// contenido es de otro tipo también se muestra, con el motivo. Queda el
+/// hueco entre mirar y abrir (alguien que reescriba el fichero en ese
+/// instante): para eso ya tiene que poder escribir en el disco de quien pulsa.
+pub fn open_path_with(path: &str, open_dir: &dyn Fn(&Path) -> Result<(), String>) -> Result<Opened, RevealError> {
     if is_network_path(path.trim()) {
         return Err(RevealError::Refused);
     }
@@ -262,14 +347,18 @@ pub fn open_path_with(path: &str, open_dir: &dyn Fn(&Path) -> Result<(), String>
         _ => RevealError::Failed(e.to_string()),
     })?;
     if !opens_with_its_program(&canonical) {
-        return reveal_path(path, open_dir);
+        return reveal_path(path, open_dir).map(|()| Opened::Revealed(None));
+    }
+    if let Some(why) = content_refusal(THIS_OS, &canonical) {
+        return reveal_path(path, open_dir).map(|()| Opened::Revealed(Some(why)));
     }
     let (program, args) = open_command(THIS_OS, &canonical);
-    run(program, &args, false).map_err(RevealError::Failed)
+    run(program, &args, false).map_err(RevealError::Failed)?;
+    Ok(Opened::WithItsProgram)
 }
 
 /// `open_path_with` con el gestor de esta máquina.
-pub fn open_path(path: &str) -> Result<(), RevealError> {
+pub fn open_path(path: &str) -> Result<Opened, RevealError> {
     open_path_with(path, &open_dir)
 }
 
@@ -410,7 +499,8 @@ mod tests {
         std::fs::write(&sql, "select 1;").unwrap();
         let alias = dir.join("alias.sql");
         symlink(&sql, &alias).unwrap();
-        open_path_with(&alias.to_string_lossy(), &|_| Ok(())).unwrap();
+        fake_xdg_mime(&dir, FAKE_XDG_MIME);
+        assert_eq!(open_path_with(&alias.to_string_lossy(), &|_| Ok(())), Ok(Opened::WithItsProgram));
         let real = std::fs::canonicalize(&sql).unwrap();
         let (program, args) = open_command(THIS_OS, &real);
         assert_eq!(launched(), vec![(program.to_string(), args)]);
@@ -433,7 +523,7 @@ mod tests {
         }
         for target in [&script, &bare, &runnable_sql, &doc_link].into_iter().chain(browser.iter()) {
             reset();
-            open_path_with(&target.to_string_lossy(), &|_| Ok(())).unwrap();
+            assert_eq!(open_path_with(&target.to_string_lossy(), &|_| Ok(())), Ok(Opened::Revealed(None)), "{}", target.display());
             let real = std::fs::canonicalize(target).unwrap();
             assert_eq!(launched(), vec![{
                 let (p, a) = reveal_command(THIS_OS, &real);
@@ -441,6 +531,112 @@ mod tests {
             }], "{} se muestra, no se abre", target.display());
         }
         assert_eq!(open_path_with("//srv/x.sql", &|_| Ok(())), Err(RevealError::Refused));
+    }
+
+    /// Un `xdg-mime` de mentira, que decide por el contenido como el de
+    /// verdad: HTML, SVG o XHTML por lo que lleva dentro, aunque se llame
+    /// `.sql`; un `.sql` es `application/sql`, y lo demás, `text/plain`.
+    const FAKE_XDG_MIME: &str = r#"#!/bin/sh
+[ "$1 $2" = "query filetype" ] || exit 2
+if grep -q '<svg' "$3"; then echo image/svg+xml
+elif grep -q 'xhtml' "$3"; then echo application/xhtml+xml
+elif grep -q '<html' "$3"; then echo text/html
+elif [ "${3##*.}" = sql ]; then echo application/sql
+else echo text/plain; fi
+"#;
+
+    /// Pone `script` como `xdg-mime` en una carpeta propia y lo deja primero
+    /// en el `PATH` con el que se busca (`MIME_PATH`, de este hilo).
+    #[cfg(unix)]
+    fn fake_xdg_mime(dir: &Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("fake-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let program = bin.join("xdg-mime");
+        std::fs::write(&program, script).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        MIME_PATH.with(|m| *m.borrow_mut() = Some(format!("{}:/usr/bin:/bin", bin.display()).into()));
+    }
+
+    /// En Linux, `xdg-open` elige el programa por el contenido: un `.sql`,
+    /// `.txt` o `.md` que lleva `<html…><script>` lo abre el navegador. Antes
+    /// de abrir se pregunta a `xdg-mime`, y lo que no es un documento de su
+    /// extensión sólo se muestra, con el tipo que dio. Sin `xdg-mime`, o si
+    /// falla, también se muestra.
+    ///
+    /// Roturas que detecta: abrir sin preguntar el tipo; abrir un HTML, un
+    /// XHTML o un SVG disfrazado; aceptar cualquier `text/*` (`text/html`
+    /// lo es); abrir una imagen cuyo contenido es texto; abrir cuando
+    /// `xdg-mime` no está o falla (aunque escriba un tipo); y, al revés,
+    /// mostrar un `.sql` o un `.txt` de verdad.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_document_whose_content_is_a_web_page_is_only_revealed() {
+        reset();
+        let dir = scratch("mime");
+        fake_xdg_mime(&dir, FAKE_XDG_MIME);
+        let write = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, body).unwrap();
+            p
+        };
+        let page = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><script>x()</script></html>";
+        for (file, mime) in [
+            (write("apply.sql", "<html><script>x()</script></html>"), "text/html"),
+            (write("notes.txt", "<!doctype html><html><script>x()</script>"), "text/html"),
+            (write("README.md", page), "application/xhtml+xml"),
+            (write("data.csv", "<svg onload=\"x()\"></svg>"), "image/svg+xml"),
+            (write("photo.png", "hola"), "text/plain"),
+        ] {
+            reset();
+            assert_eq!(
+                open_path_with(&file.to_string_lossy(), &|_| Ok(())),
+                Ok(Opened::Revealed(Some(NotOpened::ContentType(mime.into())))),
+                "{}",
+                file.display()
+            );
+            let real = std::fs::canonicalize(&file).unwrap();
+            let (p, a) = reveal_command(THIS_OS, &real);
+            assert_eq!(launched(), vec![(p.to_string(), a)], "{} se muestra", file.display());
+        }
+
+        for file in [write("restore.sql", "update t set x = 1;"), write("todo.txt", "comprar pan")] {
+            reset();
+            assert_eq!(open_path_with(&file.to_string_lossy(), &|_| Ok(())), Ok(Opened::WithItsProgram), "{}", file.display());
+            let real = std::fs::canonicalize(&file).unwrap();
+            let (p, a) = open_command(THIS_OS, &real);
+            assert_eq!(launched(), vec![(p.to_string(), a)]);
+        }
+
+        let sql = write("plain.sql", "select 1;");
+        // Uno que falla aunque escriba algo: no se le cree.
+        fake_xdg_mime(&dir, "#!/bin/sh\necho text/plain\nexit 1\n");
+        reset();
+        assert_eq!(open_path_with(&sql.to_string_lossy(), &|_| Ok(())), Ok(Opened::Revealed(Some(NotOpened::TypeUnknown))));
+        let empty = dir.join("no-bin");
+        std::fs::create_dir_all(&empty).unwrap();
+        MIME_PATH.with(|m| *m.borrow_mut() = Some(empty.into_os_string()));
+        reset();
+        assert_eq!(open_path_with(&sql.to_string_lossy(), &|_| Ok(())), Ok(Opened::Revealed(Some(NotOpened::TypeUnknown))));
+        assert!(!launched().iter().any(|(p, _)| p == "xdg-open"), "sin tipo no se abre");
+    }
+
+    /// macOS y Windows eligen el programa por la extensión: allí no se
+    /// pregunta el contenido. Y un tipo de documento casa con su extensión.
+    ///
+    /// Roturas que detecta: tomar por buenos `text/html`, `application/xml`
+    /// o `image/svg+xml`; una imagen que no casa con su extensión; dejar de
+    /// abrir un `.sql` (`application/sql`) o un `.md` (`text/markdown`).
+    #[test]
+    fn a_document_type_matches_its_extension() {
+        assert!(content_refusal(Os::Mac, Path::new("/x/a.sql")).is_none());
+        assert!(content_refusal(Os::Windows, Path::new("/x/a.sql")).is_none());
+        for (ext, mime) in [("sql", "application/sql"), ("md", "text/markdown"), ("txt", "text/plain"), ("json", "application/json"), ("pdf", "application/pdf"), ("PNG", "image/png"), ("jpg", "image/jpeg")] {
+            assert!(content_matches_extension(ext, mime), "{ext} {mime}");
+        }
+        for (ext, mime) in [("sql", "text/html"), ("txt", "application/xhtml+xml"), ("md", "image/svg+xml"), ("txt", "application/xml"), ("txt", "text/xml"), ("png", "image/jpeg"), ("pdf", "text/plain"), ("txt", "application/x-shellscript")] {
+            assert!(!content_matches_extension(ext, mime), "{ext} {mime}");
+        }
     }
 
     /// Una `.app` de macOS es una carpeta, y abrirla la lanza: allí ninguna

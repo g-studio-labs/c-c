@@ -147,7 +147,12 @@ pub fn looks_secret(path: &Path) -> bool {
         || key_file
         || name.starts_with("credentials")
         || name.starts_with("secret")
-        || matches!(name.as_str(), ".netrc" | "_netrc" | ".pgpass" | ".npmrc" | ".pypirc" | ".git-credentials")
+        || matches!(name.as_str(), ".netrc" | "_netrc" | ".pgpass" | ".npmrc" | ".pypirc" | ".git-credentials" | ".htpasswd" | "kubeconfig" | "k3s.yaml")
+        // El estado de terraform lleva las contraseñas en claro, y un
+        // `.tfvars`, las variables que se le pasan.
+        || name.starts_with("terraform.tfstate")
+        || ext == Some("tfvars")
+        || name.ends_with(".tfvars.json")
 }
 
 #[cfg(test)]
@@ -238,9 +243,11 @@ mod tests {
     ///
     /// Roturas que detecta: dejar pasar una copia de una llave (`id_rsa.bak`),
     /// una llave de PuTTY, un almacén de certificados o de contraseñas, el
-    /// token de `gh`, el de Docker o los ficheros de credenciales de npm, pip,
-    /// git y Postgres. Y, al revés, tomar por llave un `id_mapping.sql` o
-    /// cualquier `hosts.yml` que no es el de `gh`.
+    /// token de `gh`, el de Docker, los ficheros de credenciales de npm, pip,
+    /// git y Postgres (y el `_netrc` de Windows), el estado y las variables de
+    /// terraform, un kubeconfig fuera de `.kube` o un `.htpasswd`. Y, al
+    /// revés, tomar por llave un `id_mapping.sql` o cualquier `hosts.yml` que
+    /// no es el de `gh`.
     #[test]
     fn keys_tokens_and_their_copies_are_secrets() {
         for path in [
@@ -252,6 +259,14 @@ mod tests {
             "/home/ana/certs/client.pfx",
             "/home/ana/vault.kdbx",
             "/home/ana/.netrc",
+            "C:/Users/ana/_netrc",
+            "/home/ana/infra/terraform.tfstate",
+            "/home/ana/infra/terraform.tfstate.backup",
+            "/home/ana/infra/prod.tfvars",
+            "/home/ana/infra/prod.tfvars.json",
+            "/home/ana/infra/kubeconfig",
+            "/home/ana/infra/k3s.yaml",
+            "/etc/nginx/.htpasswd",
             "/home/ana/.pgpass",
             "/home/ana/.npmrc",
             "/home/ana/.pypirc",
@@ -261,7 +276,7 @@ mod tests {
         ] {
             assert!(looks_secret(Path::new(path)), "{path}");
         }
-        for fine in ["/home/ana/tcg/id_mapping.sql", "/home/ana/tcg/id_rsvp.csv", "/home/ana/ansible/hosts.yml", "/home/ana/tcg/apply.sql"] {
+        for fine in ["/home/ana/tcg/id_mapping.sql", "/home/ana/tcg/id_rsvp.csv", "/home/ana/ansible/hosts.yml", "/home/ana/tcg/apply.sql", "/home/ana/infra/main.tf", "/home/ana/infra/k3s.md"] {
             assert!(!looks_secret(Path::new(fine)), "{fine}");
         }
     }
