@@ -1564,6 +1564,8 @@
     "title": "¿Abrir esto en la app de escritorio?",
     "open": "Abrir en la app",
     "stay": "No, seguir en la web",
+    "notOpened": "Si no se abrió,",
+    "install": "instala la app",
     "remember": "Recordar mi elección",
     "setting": "Abrir enlaces en",
     "choice": { "ask": "Preguntar", "app": "App", "web": "Web" }

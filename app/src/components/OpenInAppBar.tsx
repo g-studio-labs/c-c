@@ -3,7 +3,7 @@ import { useLocation } from "react-router-dom";
 import { ExternalLink, X } from "lucide-react";
 import { useT } from "@/lib/i18n";
 import { Button } from "@/components/ui/button";
-import { currentMode, launchApp, toAppUrl, writeChoice } from "@/lib/open-in-app";
+import { readChoice, NATIVE_RELEASES_URL, currentMode, launchApp, markTried, toAppUrl, writeChoice } from "@/lib/open-in-app";
 
 /**
  * «Abrir en la app» en la versión web, como el de Slack o Linear. Nunca en
@@ -17,13 +17,11 @@ export default function OpenInAppBar() {
   // El router ya quitó la base (`/app`) de `pathname`: no se quita dos veces.
   const url = toAppUrl(pathname, search, "");
 
-  // «Siempre en la app»: se intenta una vez y la web sigue donde está.
+  const [launched, setLaunched] = useState(false);
+
+  // «Siempre en la app» no puede lanzar nada sin gesto: la barra sale una vez.
   useEffect(() => {
-    if (mode !== "auto") return;
-    launchApp(url);
-    setMode("none");
-    // Sólo el primer intento: cambiar de ruta no lo repite.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (readChoice() === "app") markTried();
   }, []);
 
   if (mode !== "bar") return null;
@@ -40,12 +38,20 @@ export default function OpenInAppBar() {
         onClick={() => {
           if (remember) writeChoice("app");
           launchApp(url);
-          setMode("none");
+          setLaunched(true);
         }}
       >
         <ExternalLink className="size-3.5" />
         {t("common:openInApp.open")}
       </Button>
+      {launched && (
+        <span className="text-xs text-muted-foreground">
+          {t("common:openInApp.notOpened")}{" "}
+          <a href={NATIVE_RELEASES_URL} target="_blank" rel="noopener noreferrer" className="underline">
+            {t("common:openInApp.install")}
+          </a>
+        </span>
+      )}
       <Button
         size="sm"
         variant="ghost"

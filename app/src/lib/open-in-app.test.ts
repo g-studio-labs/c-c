@@ -50,10 +50,10 @@ describe("recordar la elección", () => {
     resetTried();
   });
   const base = { tauri: false, desktop: true, choice: null, alreadyTried: false } as const;
-  it("«siempre en la app» se guarda y lleva a intentar la app", () => {
+  it("«siempre en la app» se guarda y enseña la barra, sin lanzar nada", () => {
     writeChoice("app");
     expect(readChoice()).toBe("app");
-    expect(decideMode({ ...base, choice: readChoice() })).toBe("auto");
+    expect(decideMode({ ...base, choice: readChoice() })).toBe("bar");
   });
   it("«seguir en la web» se guarda y no vuelve a salir nada", () => {
     writeChoice("web");
@@ -81,7 +81,7 @@ describe("si la app no está, no hay bucle", () => {
   beforeEach(() => resetTried());
   it("el intento se hace una vez y el siguiente enlace se queda en la web", () => {
     const base = { tauri: false, desktop: true, choice: "app", alreadyTried: false } as const;
-    expect(decideMode({ ...base, alreadyTried: alreadyTried() })).toBe("auto");
+    expect(decideMode({ ...base, alreadyTried: alreadyTried() })).toBe("bar");
     markTried();
     expect(decideMode({ ...base, alreadyTried: alreadyTried() })).toBe("none");
   });

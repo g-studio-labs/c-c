@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 /**
- * La barra «Abrir en la app» de la web. Mutantes: mostrarla en Tauri o en
+ * La barra «Abrir en la app» de la web. Mutantes: volver al iframe oculto; lanzar el cac:// sin gesto en «siempre»; mostrarla en Tauri o en
  * móvil; no guardar la elección; repetir el intento de «siempre en la app» en
  * cada ruta; dejar el `/app` en el enlace.
  */
@@ -16,7 +16,7 @@ vi.mock("@/lib/platform", () => ({
 
 const { MemoryRouter, useNavigate } = await import("react-router-dom");
 const { default: OpenInAppBar } = await import("@/components/OpenInAppBar");
-const { resetTried, readChoice, writeChoice } = await import("@/lib/open-in-app");
+const { resetTried, readChoice, writeChoice, windowNav } = await import("@/lib/open-in-app");
 
 const DESKTOP = "Mozilla/5.0 (X11; Linux x86_64) Chrome/120";
 const PHONE = "Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/120 Mobile";
@@ -47,11 +47,9 @@ beforeEach(() => {
   clicks.length = 0;
   document.querySelectorAll("iframe").forEach((f) => f.remove());
   setUA(DESKTOP);
-  const append = document.body.appendChild.bind(document.body);
-  vi.spyOn(document.body, "appendChild").mockImplementation(((node: Node) => {
-    if (node instanceof HTMLIFrameElement) clicks.push(node.src);
-    return append(node);
-  }) as typeof document.body.appendChild);
+  vi.spyOn(windowNav, "to").mockImplementation((url) => {
+    clicks.push(url);
+  });
 });
 afterEach(() => {
   cleanup();
@@ -63,7 +61,6 @@ describe("la barra «Abrir en la app»", () => {
     mount();
     fireEvent.click(screen.getByRole("button", { name: /Open in the app|Abrir en la app/ }));
     expect(clicks).toEqual(["cac://tasks?task=X"]);
-    expect(screen.queryByRole("region")).toBeNull();
   });
 
   it("recordar «abrir en la app» se guarda", () => {
@@ -117,31 +114,21 @@ describe("la barra «Abrir en la app»", () => {
     expect(clicks).toEqual(["cac://tasks?task=X"]);
   });
 
-  it("el marco del intento se quita al segundo", () => {
-    vi.useFakeTimers();
-    try {
-      mount();
-      fireEvent.click(screen.getByRole("button", { name: /Open in the app|Abrir en la app/ }));
-      expect(document.querySelectorAll("iframe")).toHaveLength(1);
-      vi.advanceTimersByTime(1000);
-      expect(document.querySelectorAll("iframe")).toHaveLength(0);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("el intento no navega la página: ni location ni historial", () => {
-    const before = [location.href, history.length];
-    // jsdom avisa por la consola de «navegación no implementada» si la página
-    // se mueve: es lo único que delata un `location.href = "cac://…"`.
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  it("navega la ventana principal y no crea ningún iframe ni ancla", () => {
     mount();
     fireEvent.click(screen.getByRole("button", { name: /Open in the app|Abrir en la app/ }));
-    expect([location.href, history.length]).toEqual(before);
-    expect(errors).not.toHaveBeenCalled();
-    const frame = document.querySelector("iframe");
-    expect(frame?.style.display).toBe("none");
+    expect(clicks).toEqual(["cac://tasks?task=X"]);
+    expect(document.querySelector("iframe")).toBeNull();
     expect(document.querySelector("a[href^='cac:']")).toBeNull();
+  });
+
+  it("tras pulsar, la barra sigue y ofrece instalar la app", () => {
+    mount();
+    expect(screen.queryByRole("link")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Open in the app|Abrir en la app/ }));
+    expect(screen.getByRole("region")).toBeTruthy();
+    const link = screen.getByRole("link", { name: /install the app|instala la app/ });
+    expect(link.getAttribute("href")).toBe("https://github.com/g-studio-labs/c-c/releases?q=desktop-v");
   });
 
   it("deshacer la elección: la barra vuelve a salir", () => {
@@ -160,14 +147,14 @@ describe("la barra «Abrir en la app»", () => {
     expect(readChoice()).toBeNull();
   });
 
-  it("«siempre en la app» intenta una vez y no repite al cambiar de ruta", () => {
+  it("«siempre en la app» no lanza nada sin gesto: enseña la barra una vez", () => {
     localStorage.setItem("cac.openInApp", "app");
     mount();
-    expect(clicks).toEqual(["cac://tasks?task=X"]);
-    expect(screen.queryByRole("region")).toBeNull();
-    fireEvent.click(screen.getByText("hop"));
+    expect(clicks).toEqual([]);
+    expect(screen.getByRole("region")).toBeTruthy();
     cleanup();
     mount("/chat");
-    expect(clicks).toHaveLength(1);
+    expect(clicks).toEqual([]);
+    expect(screen.queryByRole("region")).toBeNull();
   });
 });

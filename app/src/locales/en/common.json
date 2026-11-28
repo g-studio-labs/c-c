@@ -1564,6 +1564,8 @@
     "title": "Open this in the desktop app?",
     "open": "Open in the app",
     "stay": "No, stay on the web",
+    "notOpened": "If it didn't open,",
+    "install": "install the app",
     "remember": "Remember my choice",
     "setting": "Open links in",
     "choice": { "ask": "Ask", "app": "App", "web": "Web" }

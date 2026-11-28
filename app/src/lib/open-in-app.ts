@@ -43,12 +43,13 @@ export function writeChoice(choice: OpenInAppChoice | null): void {
   }
 }
 
-export type OpenInAppMode = "none" | "bar" | "auto";
+export type OpenInAppMode = "none" | "bar";
 
 /**
- * Qué hacer al abrir un enlace de la web. «Siempre en la app» intenta el
- * `cac://` **una vez** por pestaña (`alreadyTried`): si la app no está el
- * navegador no hace nada, y repetirlo en cada ruta sería un bucle de intentos.
+ * Qué hacer al abrir un enlace de la web. Nunca se lanza el `cac://` sin un
+ * gesto: el navegador no lo permite sin él (command-and-control-574), así que
+ * «siempre en la app» enseña la barra **una vez** por pestaña (`alreadyTried`)
+ * en vez de intentarlo en silencio, y la persona lo abre de un clic.
  */
 export function decideMode(input: {
   tauri: boolean;
@@ -57,7 +58,7 @@ export function decideMode(input: {
   alreadyTried: boolean;
 }): OpenInAppMode {
   if (input.tauri || !input.desktop || input.choice === "web") return "none";
-  if (input.choice === "app") return input.alreadyTried ? "none" : "auto";
+  if (input.choice === "app" && input.alreadyTried) return "none";
   return "bar";
 }
 
@@ -100,22 +101,24 @@ export function currentMode(): OpenInAppMode {
   });
 }
 
+/** Aparte para que las pruebas vean adónde navega la ventana (jsdom no deja espiar `location`). */
+export const windowNav = {
+  to(url: string): void {
+    window.location.href = url;
+  },
+};
+
 /**
- * Lanza el `cac://` en un `<iframe>` oculto y no con `location.href` ni con un
- * enlace: sin manejador registrado Firefox lleva la pestaña a su página de
- * «protocolo desconocido» (con un `<a>` también), y la persona pierde la web.
- * Navegar un marco que no se ve falla en silencio y la página se queda donde
- * está; con la app instalada el sistema la abre igual. Chrome y Safari ya no
- * navegaban, así que no pierden nada.
+ * Lanza el `cac://` navegando la **ventana principal**, y tiene que llamarse
+ * desde un gesto (un clic). Firefox y Chrome no lanzan un protocolo externo
+ * desde un `<iframe>` oculto —que es lo que había—, así que el botón no hacía
+ * nada. Con un manejador registrado el navegador pregunta y abre la app, y la
+ * página se queda donde está; sin él no hace nada, y por eso la barra enseña
+ * después el enlace para instalarla.
  */
 export function launchApp(url: string): void {
   markTried();
-  const frame = document.createElement("iframe");
-  frame.style.display = "none";
-  frame.setAttribute("aria-hidden", "true");
-  frame.tabIndex = -1;
-  frame.src = url;
-  document.body.appendChild(frame);
-  // Se quita después: el intento ya salió y un marco que se queda es basura.
-  setTimeout(() => frame.remove(), 1000);
+  windowNav.to(url);
 }
+
+export const NATIVE_RELEASES_URL = "https://github.com/g-studio-labs/c-c/releases?q=desktop-v";
