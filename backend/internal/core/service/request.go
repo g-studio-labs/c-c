@@ -415,7 +415,9 @@ func (s *RequestService) views(rows []domain.Request, viewerID string) []domain.
 	refs := map[string]domain.RequestTaskRef{}
 	names := map[string]string{}
 	for i := range rows {
-		out = append(out, s.view(&rows[i], viewerID, false, refs, names))
+		v := s.view(&rows[i], viewerID, false, refs, names)
+		v.Body.WithoutFileContents()
+		out = append(out, v)
 	}
 	return out
 }
@@ -441,6 +443,7 @@ func (s *RequestService) view(q *domain.Request, viewerID string, detail bool,
 	}
 	var body domain.RequestBody
 	_ = json.Unmarshal(q.Body, &body)
+	body.WithFileSizes()
 	v := domain.RequestView{
 		ID: q.ID, Code: q.Code, OrgID: q.OrgID, Kind: q.Kind, Summary: q.Summary, Body: body,
 		Version: q.Version, Status: q.Status, Via: q.Via, CreatedAt: q.CreatedAt, UpdatedAt: q.UpdatedAt,

@@ -159,10 +159,35 @@ type RequestBody struct {
 
 // RequestFile: un fichero de texto adjunto. Role lo coloca: junto al comando
 // («apply») o bajo «Para deshacer» («undo»); sin role, aparte.
+//
+// En la lista de pedidos Content va vacío (WithoutFileContents) y Size dice
+// cuánto pesa: el contenido sólo viaja en el detalle.
 type RequestFile struct {
 	Name    string `json:"name"`
-	Content string `json:"content"`
+	Content string `json:"content,omitempty"`
 	Role    string `json:"role,omitempty"`
+	Size    int    `json:"size,omitempty"`
+}
+
+// WithFileSizes pone a cada fichero los bytes de su contenido.
+func (b *RequestBody) WithFileSizes() {
+	for i := range b.Files {
+		b.Files[i].Size = len(b.Files[i].Content)
+	}
+}
+
+// WithoutFileContents: los ficheros sin su contenido, para la lista (hasta
+// 1 MB por pedido, y la app la vuelve a pedir con cada evento). Copia el
+// slice: no toca el del pedido.
+func (b *RequestBody) WithoutFileContents() {
+	if len(b.Files) == 0 {
+		return
+	}
+	files := make([]RequestFile, len(b.Files))
+	for i, f := range b.Files {
+		files[i] = RequestFile{Name: f.Name, Role: f.Role, Size: len(f.Content)}
+	}
+	b.Files = files
 }
 
 const (
