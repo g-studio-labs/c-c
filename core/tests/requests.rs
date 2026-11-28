@@ -137,7 +137,8 @@ async fn the_count_is_yours_and_each_task_says_who_it_waits_on() {
 /// lo que el tipo exige y falta no se manda.
 ///
 /// Roturas que atrapa: mandar un rechazo sin motivo; dejarlo en abiertos
-/// hasta el evento; no bajar el número o la marca de su tarea.
+/// hasta el evento; no bajar el número o la marca de su tarea; que desplegar
+/// «Resueltos» después lo pierda.
 #[tokio::test]
 async fn answering_moves_it_to_resolved_and_lowers_the_count() {
     let rig = rig().await;
@@ -158,6 +159,11 @@ async fn answering_moves_it_to_resolved_and_lowers_the_count() {
     assert_eq!(state.closed.iter().map(|r| r.code.as_str()).collect::<Vec<_>>(), ["req-a1"]);
     assert_eq!(state.mine_count, 1);
     assert_eq!(state.waiting_on.get("t1"), Some(&vec!["Luis".to_string()]), "Ana ya no espera en t1; Luis sí");
+
+    // Desplegar «Resueltos» después no se lo lleva, aunque la primera página
+    // (aquí, vacía) no lo traiga.
+    rig.core.requests().set_resolved_open(true).await;
+    assert_eq!(rig.core.requests().state().closed.iter().map(|r| r.code.as_str()).collect::<Vec<_>>(), ["req-a1"]);
 }
 
 /// Una lista que llega tarde no pisa a la de después: un evento pide otra
@@ -220,8 +226,9 @@ async fn an_agent_asking_to_open_brings_it_and_says_it_was_shown() {
 
 /// «Por atender» es de la organización que se mira: ni la lista, ni «Resueltos»
 /// ni el número llevan pedidos de otra, y de los tuyos en las otras se avisa
-/// por organización. Al cambiar de organización se reparte lo mismo, sin
-/// volver a pedirlo (command-and-control-527).
+/// por organización. Al cambiar de organización los abiertos se reparten sin
+/// volver a pedirlos (command-and-control-527); los resueltos, que van por
+/// páginas, se piden de la nueva (command-and-control-569).
 ///
 /// Roturas que atrapa: pintar o contar los de otra organización (en la lista,
 /// en «Resueltos» o en el número); no avisar de ellos; contar en el aviso los
@@ -235,10 +242,14 @@ async fn only_the_organization_being_looked_at_is_listed_and_the_others_are_anno
     let team = json!([request("req-a1", "t1", ana, true), g("req-g1", true), g("req-g2", true), g("req-g3", false)]);
     list("team", "open").respond_with(ok(team)).with_priority(1).mount(&rig.server).await;
     list("mine", "open").respond_with(ok(json!([request("req-a1", "t1", ana, true), g("req-g1", true), g("req-g2", true)]))).with_priority(1).mount(&rig.server).await;
-    list("mine", "closed").respond_with(ok(json!([in_org("o2", request("req-g9", "t9", ana, false)), request("req-a9", "t1", ana, false)]))).with_priority(1).mount(&rig.server).await;
+
+    // Los de abajo son de una organización: se piden con la suya.
+    list("mine", "closed").and(query_param("orgId", "o1")).respond_with(ok(json!({ "requests": [request("req-a9", "t1", ana, false)] }))).with_priority(1).mount(&rig.server).await;
+    list("mine", "closed").and(query_param("orgId", "o2")).respond_with(ok(json!({ "requests": [in_org("o2", request("req-g9", "t9", ana, false))] }))).with_priority(1).mount(&rig.server).await;
 
     rig.core.requests().refresh_marks().await;
     rig.core.requests().load().await;
+    rig.core.requests().set_resolved_open(true).await;
     let state = rig.core.requests().state();
     let codes = |list: &[cac_core::AgentRequest]| list.iter().map(|r| r.code.clone()).collect::<Vec<_>>();
     assert_eq!(codes(&state.open), ["req-a1"]);
@@ -251,9 +262,9 @@ async fn only_the_organization_being_looked_at_is_listed_and_the_others_are_anno
 
     let loads = team_loads(&rig.server).await;
     assert!(rig.core.switch_org("o2").await);
+    until("los de abajo de G Studio", || codes(&rig.core.requests().state().closed) == ["req-g9"]).await;
     let state = rig.core.requests().state();
     assert_eq!(codes(&state.open), ["req-g1", "req-g2"]);
-    assert_eq!(codes(&state.closed), ["req-g9"]);
     assert_eq!(state.mine_count, 2);
     assert_eq!((state.elsewhere.len(), state.elsewhere[0].org_name.as_str(), state.elsewhere[0].count), (1, "DWIT", 1));
     assert_eq!(team_loads(&rig.server).await, loads, "cambiar de organización reparte, no vuelve a pedir");
@@ -326,4 +337,215 @@ async fn an_organization_without_a_known_name_is_not_announced() {
     let state = rig.core.requests().state();
     assert_eq!(state.mine_count, 1);
     assert!(state.elsewhere.is_empty(), "sin nombre no se avisa: {:?}", state.elsewhere);
+}
+
+fn closed(code: &str) -> Value {
+    let mut done = request(code, "t1", ("u1", "Ana Ruiz"), false);
+    done["status"] = json!("answered");
+    done["answer"] = json!({ "approved": true });
+    done
+}
+
+/// Lo que se pidió a `/api/v1/requests` con ese estado, por su query.
+async fn asked(server: &MockServer, status: &str) -> Vec<HashMap<String, String>> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| request.url.path() == "/api/v1/requests")
+        .map(|request| request.url.query_pairs().into_owned().collect::<HashMap<String, String>>())
+        .filter(|query| query.get("status").map(String::as_str) == Some(status))
+        .collect()
+}
+
+async fn mine_open(server: &MockServer) -> usize {
+    asked(server, "open").await.into_iter().filter(|q| q.get("scope").map(String::as_str) == Some("mine")).count()
+}
+
+fn page(requests: Value, next: &str) -> ResponseTemplate {
+    ok(json!({ "requests": requests, "next": next }))
+}
+
+/// «Resueltos» plegado no pide nada; desplegarlo pide la primera página de
+/// veinte, de la organización que se mira, y la siguiente se pide con su
+/// cursor. Cuando no hay más, no se pide más.
+///
+/// Roturas que atrapa: pedir los resueltos al abrir; pedirlos sin cursor (la
+/// lista entera, como antes); pedir la siguiente sin el cursor que dio la
+/// anterior; seguir pidiendo cuando el servidor dijo que no hay más; perder
+/// la primera página al añadir la segunda; pedirlos de todas las
+/// organizaciones.
+#[tokio::test]
+async fn resolved_are_asked_only_when_unfolded_and_page_by_page() {
+    let rig = rig().await;
+    list("mine", "closed").and(query_param("cursor", "")).respond_with(page(json!([closed("req-c1"), closed("req-c2")]), "CUR-1")).with_priority(1).mount(&rig.server).await;
+    list("mine", "closed").and(query_param("cursor", "CUR-1")).respond_with(page(json!([closed("req-c3")]), "")).with_priority(1).mount(&rig.server).await;
+
+    rig.core.requests().load().await;
+    assert!(rig.core.requests().state().loaded);
+    assert!(asked(&rig.server, "closed").await.is_empty(), "plegado no se pide");
+    let open = asked(&rig.server, "open").await;
+    assert_eq!((open[0].get("limit").map(String::as_str), open[0].get("cursor").map(String::as_str)), (Some("50"), Some("")), "los abiertos, de cincuenta en cincuenta");
+
+    rig.core.requests().set_resolved_open(true).await;
+    let first = asked(&rig.server, "closed").await;
+    assert_eq!(first.len(), 1);
+    assert_eq!((first[0]["limit"].as_str(), first[0]["cursor"].as_str(), first[0]["orgId"].as_str()), ("20", "", "o1"));
+    let state = rig.core.requests().state();
+    assert_eq!(state.closed.iter().map(|r| r.code.as_str()).collect::<Vec<_>>(), ["req-c1", "req-c2"]);
+    assert!(state.closed_paging.more && state.closed_paging.loaded && !state.closed_paging.loading);
+
+    rig.core.requests().load_more().await;
+    let pages = asked(&rig.server, "closed").await;
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages[1]["cursor"], "CUR-1");
+    let state = rig.core.requests().state();
+    assert_eq!(state.closed.iter().map(|r| r.code.as_str()).collect::<Vec<_>>(), ["req-c1", "req-c2", "req-c3"]);
+    assert!(!state.closed_paging.more);
+
+    rig.core.requests().load_more().await;
+    assert_eq!(asked(&rig.server, "closed").await.len(), 2, "sin más, no se pide más");
+
+    // Plegar y desplegar no vuelve a pedir lo que ya está.
+    rig.core.requests().set_resolved_open(false).await;
+    rig.core.requests().set_resolved_open(true).await;
+    assert_eq!(asked(&rig.server, "closed").await.len(), 2);
+}
+
+/// El scroll pide la siguiente muchas veces seguidas: sale una sola petición
+/// mientras la primera no vuelve, y si falla se dice y se reintenta a mano.
+///
+/// Roturas que atrapa: pedir dos veces la misma página; no decir que está
+/// cargando; dar la lista por terminada cuando la página falló (no se podría
+/// reintentar).
+#[tokio::test]
+async fn the_next_page_is_asked_once_at_a_time_and_a_failure_can_be_retried() {
+    let rig = rig().await;
+    let gate = Gate::default();
+    list("mine", "closed").and(query_param("cursor", "")).respond_with(page(json!([closed("req-c1")]), "CUR-1")).with_priority(1).mount(&rig.server).await;
+    list("mine", "closed").and(query_param("cursor", "CUR-1")).respond_with(gate.hold(ResponseTemplate::new(500))).up_to_n_times(1).with_priority(1).mount(&rig.server).await;
+    list("mine", "closed").and(query_param("cursor", "CUR-1")).respond_with(page(json!([closed("req-c2")]), "")).with_priority(2).mount(&rig.server).await;
+    rig.core.requests().load().await;
+    rig.core.requests().set_resolved_open(true).await;
+
+    let (a, b) = (rig.core.requests(), rig.core.requests());
+    let first = tokio::spawn(async move { a.load_more().await });
+    until("la página, retenida", || gate.held() == 1).await;
+    assert!(rig.core.requests().state().closed_paging.loading, "se dice que está cargando");
+    b.load_more().await;
+    rig.core.requests().load_more().await;
+    gate.open();
+    first.await.unwrap();
+    assert_eq!(asked(&rig.server, "closed").await.iter().filter(|q| q["cursor"] == "CUR-1").count(), 1, "una sola petición");
+    let state = rig.core.requests().state();
+    assert!(state.closed_paging.failed && state.closed_paging.more && !state.closed_paging.loading);
+
+    rig.core.requests().load_more().await;
+    let state = rig.core.requests().state();
+    assert_eq!(state.closed.iter().map(|r| r.code.as_str()).collect::<Vec<_>>(), ["req-c1", "req-c2"]);
+    assert!(!state.closed_paging.failed && !state.closed_paging.more);
+}
+
+/// Un enlace a un pedido resuelto que no está en lo cargado lo encuentra
+/// igual: se pide ése por su código y se despliega «Resueltos» con él.
+///
+/// Roturas que atrapa: no pedirlo suelto (el enlace no llevaría a nada);
+/// pedirlo pero no enseñarlo; no desplegar «Resueltos»; volver a pedirlo con
+/// cada carga; volver a desplegar «Resueltos» con cada carga después de que
+/// la persona lo plegó.
+#[tokio::test]
+async fn a_link_to_a_resolved_request_outside_the_page_opens_it() {
+    let rig = rig().await;
+    list("mine", "closed").respond_with(page(json!([closed("req-c1")]), "CUR-1")).with_priority(1).mount(&rig.server).await;
+    Mock::given(method("GET")).and(path("/api/v1/requests/req-old")).respond_with(ok(closed("req-old"))).mount(&rig.server).await;
+
+    assert!(rig.core.requests().show(Some("REQ-OLD".into())));
+    rig.core.requests().load().await;
+    let state = rig.core.requests().state();
+    assert!(state.resolved_open, "«Resueltos» se despliega");
+    assert!(state.closed.iter().any(|r| r.code == "req-old"), "{:?}", state.closed.iter().map(|r| &r.code).collect::<Vec<_>>());
+    assert!(state.closed.iter().any(|r| r.code == "req-c1"), "con la primera página");
+
+    // Si la persona lo pliega, una carga después (un evento, volver de una
+    // caída) no se lo vuelve a abrir.
+    rig.core.requests().set_resolved_open(false).await;
+    rig.core.requests().load().await;
+    let singles = rig.server.received_requests().await.unwrap().iter().filter(|r| r.url.path() == "/api/v1/requests/req-old").count();
+    assert_eq!(singles, 1, "se busca una vez por enlace");
+    assert!(!rig.core.requests().state().resolved_open, "plegado se queda plegado");
+}
+
+/// Los filtros van al servidor en la misma consulta que el cursor: la página
+/// siguiente es de lo filtrado. Filtrar por un estado cerrado pide esa lista
+/// sin pliegue, y no los abiertos.
+///
+/// Roturas que atrapa: filtrar en local (la página dos traería lo no
+/// filtrado); perder el filtro al pedir la siguiente; no reiniciar desde la
+/// primera página al cambiarlo; pedir los abiertos filtrando por resueltos.
+#[tokio::test]
+async fn filters_travel_with_the_cursor() {
+    let rig = rig().await;
+    let ana = ("u1", "Ana Ruiz");
+    list("mine", "open").and(query_param("q", "cac-12")).and(query_param("cursor", "")).respond_with(page(json!([request("req-a1", "t1", ana, true)]), "OPEN-2")).with_priority(1).mount(&rig.server).await;
+    list("mine", "open").and(query_param("q", "cac-12")).and(query_param("cursor", "OPEN-2")).respond_with(page(json!([request("req-a3", "t1", ana, true)]), "")).with_priority(1).mount(&rig.server).await;
+    list("mine", "closed").respond_with(page(json!([closed("req-c1")]), "")).with_priority(1).mount(&rig.server).await;
+    rig.core.requests().load().await;
+
+    let filter = cac_core::RequestFilter { text: " cac-12 ".into(), kinds: vec![cac_core::RequestKind::Decide, cac_core::RequestKind::Run], ..Default::default() };
+    rig.core.requests().set_filter(filter.clone()).await;
+    rig.core.requests().load_more().await;
+    let open = asked(&rig.server, "open").await;
+    let filtered: Vec<_> = open.iter().filter(|q| q.contains_key("q")).collect();
+    assert_eq!(filtered.len(), 2, "{open:?}");
+    for q in &filtered {
+        assert_eq!((q["q"].as_str(), q["kind"].as_str()), ("cac-12", "decide,run"));
+    }
+    assert_eq!((filtered[0]["cursor"].as_str(), filtered[1]["cursor"].as_str()), ("", "OPEN-2"));
+    assert_eq!(rig.core.requests().state().open.iter().map(|r| r.code.as_str()).collect::<Vec<_>>(), ["req-a1", "req-a3"]);
+
+    let before = asked(&rig.server, "open").await.len();
+    rig.core.requests().set_filter(cac_core::RequestFilter { status: cac_core::RequestStatusFilter::Resolved, ..Default::default() }).await;
+    assert_eq!(asked(&rig.server, "open").await.len(), before, "filtrando por resueltos no se piden abiertos");
+    let state = rig.core.requests().state();
+    assert!(state.open.is_empty() && state.loaded);
+    assert_eq!(state.closed.iter().map(|r| r.code.as_str()).collect::<Vec<_>>(), ["req-c1"], "sin desplegar nada");
+}
+
+/// Lo que llega por eventos no lo recarga todo: un pedido nuevo vuelve a pedir
+/// los abiertos y no los resueltos; uno contestado en otro sitio se pide
+/// suelto y entra arriba en «Resueltos», sin perder las páginas ya traídas.
+///
+/// Roturas que atrapa: recargar los resueltos desde la primera página con
+/// cada evento (se pierde lo que el scroll trajo); no pedir los abiertos con
+/// un pedido nuevo; dejar el contestado en abiertos; no ponerlo en
+/// «Resueltos».
+#[tokio::test]
+async fn events_do_not_reload_everything() {
+    let rig = rig().await;
+    list("mine", "closed").and(query_param("cursor", "")).respond_with(page(json!([closed("req-c1")]), "CUR-1")).with_priority(1).mount(&rig.server).await;
+    list("mine", "closed").and(query_param("cursor", "CUR-1")).respond_with(page(json!([closed("req-c2")]), "")).with_priority(1).mount(&rig.server).await;
+    Mock::given(method("GET")).and(path("/api/v1/requests/req-a1")).respond_with(ok(closed("req-a1"))).mount(&rig.server).await;
+    rig.core.requests().load().await;
+    rig.core.requests().set_resolved_open(true).await;
+    rig.core.requests().load_more().await;
+    // Los abiertos de la lista; los de «Equipo» son los del número, que se
+    // piden con cualquier evento.
+    let (opens, closeds) = (mine_open(&rig.server).await, asked(&rig.server, "closed").await.len());
+
+    rig.core.stream().deliver(ServerEvent { event: "request:created".into(), data: json!({ "code": "req-a9", "status": "open" }).to_string() });
+    for _ in 0..300 {
+        if mine_open(&rig.server).await > opens {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(mine_open(&rig.server).await > opens, "un pedido nuevo vuelve a pedir los abiertos");
+
+    rig.core.stream().deliver(ServerEvent { event: "request:answered".into(), data: json!({ "code": "req-a1", "status": "answered" }).to_string() });
+    until("el contestado, arriba", || rig.core.requests().state().closed.first().map(|r| r.code.as_str()) == Some("req-a1")).await;
+    let state = rig.core.requests().state();
+    assert_eq!(state.closed.iter().map(|r| r.code.as_str()).collect::<Vec<_>>(), ["req-a1", "req-c1", "req-c2"]);
+    assert!(!state.open.iter().any(|r| r.code == "req-a1"));
+    assert_eq!(asked(&rig.server, "closed").await.len(), closeds, "los resueltos no se vuelven a pedir");
 }
