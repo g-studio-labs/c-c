@@ -709,6 +709,8 @@
     "cannotCopy": "{{name}}: {{why}}",
     "files": "Ficheros",
     "unfold": "Ver todo · {{count}} líneas",
+    "showFile": "Ver el contenido",
+    "fileFailed": "No se pudo traer {{name}}",
     "fold": "Plegar",
     "fileRefused": {
       "not-absolute": "no es una ruta completa",

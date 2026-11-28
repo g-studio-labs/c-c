@@ -37,8 +37,10 @@ export interface RequestBody {
 
 export interface RequestFile {
   name: string;
-  content: string;
+  // Sólo en el detalle (GET /api/v1/requests/{id}); la lista lo trae vacío.
+  content?: string;
   role?: "apply" | "undo" | string;
+  size?: number;
 }
 
 export interface RequestAnswer {

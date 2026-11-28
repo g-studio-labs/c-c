@@ -75,6 +75,18 @@ const FOLDED_LINES: usize = 12;
 
 /// Lo escrito en una tarjeta. Vive mientras el pedido siga abierto: la lista
 /// se vuelve a pedir con cada evento, y lo escrito no se pierde por eso.
+/// Qué se pulsó en un adjunto cuyo contenido hubo que pedir.
+enum FileWanted {
+    Copy,
+    /// Desplegarlo: el id del bloque en pantalla.
+    Show(String),
+}
+
+/// La clave del contenido de un adjunto: el pedido, su versión y el índice.
+fn file_key(request: &AgentRequest, n: usize) -> String {
+    format!("{}#{}#{n}", request.code, request.version)
+}
+
 struct Card {
     mode: Mode,
     text: Entity<TextareaState>,
@@ -94,6 +106,10 @@ pub struct RequestsView {
     local_files: HashMap<String, LocalFile>,
     /// Los ficheros adjuntos desplegados (por su id en pantalla).
     unfolded: HashSet<String>,
+    /// El contenido de los adjuntos, que la lista no trae: se pide al detalle
+    /// la primera vez que hace falta, por `file_key` (rehacer el pedido sube
+    /// la versión y lo vuelve a pedir).
+    file_contents: HashMap<String, String>,
     /// Lo que se dice tras pulsar algo que esta app todavía no tiene.
     said: Option<String>,
     /// La búsqueda: se manda un rato después de dejar de escribir, no con
@@ -135,6 +151,7 @@ impl RequestsView {
             copied: None,
             local_files: HashMap::new(),
             unfolded: HashSet::new(),
+            file_contents: HashMap::new(),
             said: None,
             search,
             search_turn: 0,
@@ -608,22 +625,41 @@ impl RequestsView {
 
     /// Un fichero adjunto: «Copiar <nombre>» a la vista y su contenido en mono,
     /// plegado si es largo. El contenido es texto: ni enlaces ni nada que se
-    /// pulse (lo escribió un agente).
-    fn file_block(&mut self, code: &str, n: usize, file: &RequestFile, cx: &mut Context<Self>) -> AnyElement {
+    /// pulse (lo escribió un agente). La lista no trae el contenido: copiar o
+    /// desplegar lo pide al detalle del pedido.
+    fn file_block(&mut self, request: &AgentRequest, n: usize, file: &RequestFile, cx: &mut Context<Self>) -> AnyElement {
+        let code = request.code.clone();
         let id = format!("request-file-{code}-{n}");
-        let total = file.content.lines().count();
+        let key = file_key(request, n);
+        let content = if file.has_content() { Some(file.content.clone()) } else { self.file_contents.get(&key).cloned() };
         let unfolded = self.unfolded.contains(&id);
-        let shown = if total > FOLDED_LINES && !unfolded { file.content.lines().take(FOLDED_LINES).collect::<Vec<_>>().join("\n") } else { file.content.clone() };
-        let (content, name) = (file.content.clone(), file.name.clone());
-        let copy = Button::new(SharedString::from(format!("{id}-copy")))
-            .outline()
-            .small()
-            .icon(Icon::new(Lucide::Copy))
-            .label(cac_core::text_with(locale(cx), "work:requests.copyFile", &[("name", &file.name)]))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.copy(content.clone(), None, cx);
-                this.said = Some(cac_core::text_with(locale(cx), "work:requests.fileCopied", &[("name", &name)]));
-            }));
+        let name = file.name.clone();
+        let copy = {
+            let (content, name, code, key) = (content.clone(), name.clone(), code.clone(), key.clone());
+            Button::new(SharedString::from(format!("{id}-copy")))
+                .outline()
+                .small()
+                .icon(Icon::new(Lucide::Copy))
+                .label(cac_core::text_with(locale(cx), "work:requests.copyFile", &[("name", &file.name)]))
+                .on_click(cx.listener(move |this, _, _, cx| match &content {
+                    Some(content) => this.copy_file(content.clone(), &name, cx),
+                    None => this.fetch_file(code.clone(), key.clone(), name.clone(), FileWanted::Copy, cx),
+                }))
+        };
+        let Some(content) = content else {
+            // Sin contenido todavía: «Ver el contenido» lo trae y lo despliega.
+            let show = {
+                let (code, key, name, id) = (code.clone(), key.clone(), name.clone(), id.clone());
+                Button::new(SharedString::from(format!("{id}-fold")))
+                    .ghost()
+                    .small()
+                    .label(tr(cx, "work:requests.showFile"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.fetch_file(code.clone(), key.clone(), name.clone(), FileWanted::Show(id.clone()), cx)))
+            };
+            return div().flex().flex_wrap().items_center().gap_2().child(copy).child(show).into_any_element();
+        };
+        let total = content.lines().count();
+        let shown = if total > FOLDED_LINES && !unfolded { content.lines().take(FOLDED_LINES).collect::<Vec<_>>().join("\n") } else { content.clone() };
         let toggle = (total > FOLDED_LINES).then(|| {
             let key = id.clone();
             let label = if unfolded { tr(cx, "work:requests.fold") } else { cac_core::text_with(locale(cx), "work:requests.unfold", &[("count", &total.to_string())]) };
@@ -647,10 +683,48 @@ impl RequestsView {
             .into_any_element()
     }
 
+    fn copy_file(&mut self, content: String, name: &str, cx: &mut Context<Self>) {
+        self.copy(content, None, cx);
+        self.said = Some(cac_core::text_with(locale(cx), "work:requests.fileCopied", &[("name", name)]));
+    }
+
+    /// Pide al detalle del pedido el contenido de sus ficheros, lo guarda y
+    /// hace lo que se pulsó: copiar el que se pidió o desplegarlo.
+    fn fetch_file(&mut self, code: String, key: String, name: String, wanted: FileWanted, cx: &mut Context<Self>) {
+        let asked = code.clone();
+        let files = Backend::ask(cx, move |core| async move { core.requests().files_of(&asked).await });
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = files.await else { return };
+            this.update(cx, |this, cx| {
+                // El detalle trae los ficheros en el mismo orden que la lista:
+                // se guardan todos, y el nombre confirma el que se pulsó.
+                let (prefix, n) = key.rsplit_once('#').map(|(prefix, n)| (prefix.to_string(), n.parse::<usize>().ok())).unwrap_or_default();
+                let files = result.unwrap_or_default();
+                for (i, file) in files.iter().enumerate().filter(|(_, file)| file.has_content()) {
+                    this.file_contents.insert(format!("{prefix}#{i}"), file.content.clone());
+                }
+                let found = n.and_then(|n| files.into_iter().nth(n)).filter(|file| file.name == name && file.has_content());
+                match found {
+                    Some(file) => {
+                        match wanted {
+                            FileWanted::Copy => this.copy_file(file.content, &name, cx),
+                            FileWanted::Show(id) => {
+                                this.unfolded.insert(id);
+                            }
+                        }
+                    }
+                    None => this.said = Some(cac_core::text_with(locale(cx), "work:requests.fileFailed", &[("name", &name)])),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Los adjuntos de un sitio de la tarjeta, o nada.
     fn files_in(&mut self, request: &AgentRequest, slot: RequestFileSlot, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let code = request.code.clone();
-        request.body.files.iter().enumerate().filter(|(_, file)| file.slot() == slot).map(|(n, file)| self.file_block(&code, n, file, cx)).collect()
+        request.body.files.iter().enumerate().filter(|(_, file)| file.slot() == slot).map(|(n, file)| self.file_block(request, n, file, cx)).collect()
     }
 
     fn render_card(&mut self, request: &AgentRequest, highlighted: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1873,6 +1947,60 @@ mod tests {
 
         click(window, "request-file-req-f1-0-fold", cx);
         assert!(on_screen(window, "request-file-req-f1-0-content-line-19", cx), "desplegado se ve entero");
+        stop(cx);
+    }
+
+    /// La lista de pedidos trae los adjuntos sin contenido (sólo nombre,
+    /// papel y tamaño): «Copiar apply.sql» lo pide al detalle del pedido por
+    /// su código y deja en el portapapeles el contenido exacto; «Ver el
+    /// contenido» lo trae y lo enseña. Lo traído se guarda: otro copiar no
+    /// vuelve a pedirlo (command-and-control-567).
+    ///
+    /// Roturas que atrapa: copiar lo que trae la lista (vacío) en vez de
+    /// pedirlo; pedir otro pedido o copiar el otro fichero; no enseñar lo
+    /// traído al desplegar; volver a pedir el detalle en cada clic.
+    #[gpui_kit::test]
+    fn a_file_listed_without_its_content_is_fetched_from_the_request_when_copied(cx: &mut TestAppContext) {
+        let apply = "update pagos set moneda = 'USD' where id = 7;\n".to_string();
+        let restore: String = (1..=20).map(|n| format!("update pagos set moneda = 'MXN' where id = {n};\n")).collect();
+        let run = |code: &str| {
+            let listed = request(code, "run", "t1", ("u1", "Ana Ruiz"), true, json!({
+                "command": "Pegar apply.sql", "where": "Supabase", "expected": "UPDATE 1", "undo": "Pegar restore.sql",
+                "files": [{ "name": "apply.sql", "role": "apply", "size": apply.len() }, { "name": "restore.sql", "role": "undo", "size": restore.len() }],
+            }));
+            let mut detail = listed.clone();
+            detail["body"]["files"] = json!([{ "name": "apply.sql", "content": apply, "role": "apply", "size": apply.len() }, { "name": "restore.sql", "content": restore, "role": "undo", "size": restore.len() }]);
+            (listed, detail)
+        };
+        let ((copied, copied_detail), (shown, shown_detail)) = (run("req-l1"), run("req-l2"));
+        let server = live_server(&Arc::new(Mutex::new(vec![copied, shown])), &Arc::new(Mutex::new(Vec::new())));
+        for (code, detail) in [("req-l1", copied_detail), ("req-l2", shown_detail)] {
+            server.mount(
+                Mock::given(method("GET"))
+                    .and(path(format!("/api/v1/requests/{code}")))
+                    .respond_with(move |_: &wiremock::Request| ResponseTemplate::new(200).set_body_json(json!({ "success": true, "data": detail.clone() }))),
+            );
+        }
+        let fetched = |code: &str| server.requests().iter().filter(|r| r.method.as_str() == "GET" && r.url.path() == format!("/api/v1/requests/{code}")).count();
+        let window = open_sized(&server, 2400., cx);
+        show_list(window, "req-l1", cx);
+        wait_until(cx, "los ficheros", |cx| on_screen(window, "request-file-req-l2-1-copy", cx));
+        assert!(!on_screen(window, "request-file-req-l1-1-content-line-0", cx), "sin contenido no hay bloque");
+        assert_eq!(fetched("req-l1") + fetched("req-l2"), 0, "la lista basta para pintar los botones");
+
+        // Copiar sin haberlo visto: lo pide y copia el suyo, no el otro.
+        click(window, "request-file-req-l1-0-copy", cx);
+        wait_until(cx, "lo copiado", |cx| label(window, "requests-said", cx) == "Copiado apply.sql");
+        assert_eq!(clipboard(cx).as_deref(), Some(apply.as_str()));
+        click(window, "request-file-req-l1-1-copy", cx);
+        wait_until(cx, "lo copiado", |cx| label(window, "requests-said", cx) == "Copiado restore.sql");
+        assert_eq!(clipboard(cx).as_deref(), Some(restore.as_str()));
+        assert_eq!(fetched("req-l1"), 1, "lo traído se guarda");
+
+        // «Ver el contenido» lo trae y lo enseña entero.
+        click(window, "request-file-req-l2-1-fold", cx);
+        wait_until(cx, "el contenido traído", |cx| on_screen(window, "request-file-req-l2-1-content-line-0", cx));
+        assert!(on_screen(window, "request-file-req-l2-1-content-line-19", cx), "lo que se pidió ver se ve entero");
         stop(cx);
     }
 

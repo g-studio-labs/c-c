@@ -127,9 +127,13 @@ pub struct RequestBody {
 #[serde(rename_all = "camelCase", default)]
 pub struct RequestFile {
     pub name: String,
+    /// Vacío en la lista de pedidos: el contenido sólo viaja en el detalle
+    /// (`files_of`), para no bajar hasta 1 MB por pedido con cada evento.
     pub content: String,
     /// `apply` (junto al comando), `undo` (bajo «Para deshacer») o vacío.
     pub role: String,
+    /// Bytes del contenido, también en la lista.
+    pub size: i64,
 }
 
 /// Dónde va un fichero en la tarjeta.
@@ -150,6 +154,12 @@ impl RequestFile {
             "undo" => RequestFileSlot::Undo,
             _ => RequestFileSlot::Other,
         }
+    }
+
+    /// Si su contenido está aquí o hay que pedirlo (`Requests::files_of`).
+    /// Un fichero vacío no existe: el servidor lo rechaza.
+    pub fn has_content(&self) -> bool {
+        !self.content.is_empty()
     }
 }
 
@@ -1016,6 +1026,13 @@ impl Requests {
         });
     }
 
+    /// Los ficheros de un pedido con su contenido, que la lista no trae: se
+    /// piden al detalle por su código.
+    pub async fn files_of(&self, code: &str) -> Result<Vec<RequestFile>, ApiError> {
+        let request: AgentRequest = self.core.get(&format!("/api/v1/requests/{code}")).await?;
+        Ok(request.body.files)
+    }
+
     /// Abre la tarea del pedido, en su organización.
     pub async fn open_task(&self, request: &AgentRequest) -> bool {
         self.core.inbox().open(&format!("/tasks?task={}", request.task.id), &request.org_id).await
@@ -1223,7 +1240,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        assert_eq!(body.files[0], RequestFile { name: "apply.sql".into(), content: "update t set x = 1;\n".into(), role: "apply".into() });
+        assert_eq!(body.files[0], RequestFile { name: "apply.sql".into(), content: "update t set x = 1;\n".into(), role: "apply".into(), size: 0 });
         let slots: Vec<RequestFileSlot> = body.files.iter().map(RequestFile::slot).collect();
         assert_eq!(slots, [RequestFileSlot::Apply, RequestFileSlot::Undo, RequestFileSlot::Other, RequestFileSlot::Other]);
         let old: RequestBody = serde_json::from_value(serde_json::json!({ "command": "make", "where": "gstd" })).unwrap();

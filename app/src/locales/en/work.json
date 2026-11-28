@@ -709,6 +709,8 @@
     "cannotCopy": "{{name}}: {{why}}",
     "files": "Files",
     "unfold": "Show all · {{count}} lines",
+    "showFile": "Show the content",
+    "fileFailed": "Couldn't fetch {{name}}",
     "fold": "Fold",
     "fileRefused": {
       "not-absolute": "not a full path",
