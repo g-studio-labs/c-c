@@ -24,6 +24,7 @@ mod chat;
 mod composer;
 mod comms;
 mod connect;
+mod diagrams;
 mod doc_share;
 mod drop_wake;
 mod docs;
@@ -184,6 +185,9 @@ fn main() {
             std::process::exit(1);
         }
         sound::install(Arc::new(sound::Speaker::new()), cx);
+        // Los diagramas mermaid ya dibujados se guardan en la caché del
+        // sistema: se ven sin red y no se vuelven a dibujar.
+        diagrams::Diagrams::install(system::cache_dir(system::Os::current(), var), cx);
         // La voz, donde ya hay motor (Linux). En los demás, el core dice que
         // esta app todavía no tiene llamadas.
         #[cfg(target_os = "linux")]

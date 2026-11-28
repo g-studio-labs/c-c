@@ -219,7 +219,7 @@ pub fn painted_prose_with_links(
     gpui_kit::div().min_w_0().max_w_full().leading_sm().line_height(gpui_kit::relative(1.625)).child(
         // Un título de tercer nivel, como etiqueta de sección (`.md-body
         // h3`: pequeño, en mayúsculas y apagado).
-        gpui_kit::component::text::TextView::markdown(id.into(), painted.into())
+        crate::diagrams::markdown(id.into(), painted.into())
             .style(md_body_style(cx))
             .on_link_click(move |url, _, window, cx| follow(url, window, cx)),
     )
@@ -364,6 +364,16 @@ pub fn text_font() -> gpui_kit::Font {
 struct FontsInstalled;
 impl gpui_kit::Global for FontsInstalled {}
 
+/// La Inter de la app, sus cinco caras. Con ellas mide y pinta también quien
+/// dibuja los diagramas (`diagrams.rs`): la misma letra que el texto.
+pub(crate) const INTER_FACES: [&[u8]; 5] = [
+    include_bytes!("../assets/fonts/Inter-Regular.ttf"),
+    include_bytes!("../assets/fonts/Inter-Medium.ttf"),
+    include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/Inter-Bold.ttf"),
+    include_bytes!("../assets/fonts/Inter-Italic.ttf"),
+];
+
 /// Carga Inter en la app, una vez. Va dentro del binario y no se le pide al
 /// sistema: con la del sistema, en una máquina sin Inter el texto salía en
 /// otra letra y sin negritas (jose, 17-nov-2026: el título de una tarea y lo
@@ -381,12 +391,13 @@ fn install_fonts(cx: &mut App) {
         return;
     }
     cx.set_global(FontsInstalled);
+    let [regular, medium, semibold, bold, italic] = INTER_FACES;
     let faces: [&'static [u8]; 8] = [
-        include_bytes!("../assets/fonts/Inter-Regular.ttf"),
-        include_bytes!("../assets/fonts/Inter-Medium.ttf"),
-        include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
-        include_bytes!("../assets/fonts/Inter-Bold.ttf"),
-        include_bytes!("../assets/fonts/Inter-Italic.ttf"),
+        regular,
+        medium,
+        semibold,
+        bold,
+        italic,
         include_bytes!("../assets/fonts/IosevkaTermSlab-Regular.ttf"),
         include_bytes!("../assets/fonts/IosevkaTermSlab-Bold.ttf"),
         include_bytes!("../assets/fonts/CacEmoji.ttf"),

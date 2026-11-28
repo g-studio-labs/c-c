@@ -17,6 +17,9 @@ cac-mcp = { path = "../mcp" }
 # Lo que Plataforma hace en esta máquina (el agente SSH, el llavero), el
 # mismo código que usa la app de Tauri.
 cac-ops = { path = "../ops" }
+# Los diagramas mermaid de los docs, dibujados aquí dentro como PNG
+# (command-and-control-573).
+cac-diagram = { path = "../diagram" }
 # GPUI y sus componentes. Versión **exacta**: cada release puede cambiar la API
 # de GPUI por debajo (su propio manifiesto lo avisa), así que subirla es una
 # tarea aparte, no algo que pasa con un `cargo update`.

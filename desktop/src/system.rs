@@ -56,6 +56,21 @@ pub fn data_dir(os: Os, var: impl Fn(&str) -> Option<String>) -> Option<PathBuf>
     Some(base.join(APP_DIR))
 }
 
+/// Dónde guarda lo que se puede volver a calcular (los diagramas ya
+/// dibujados, `diagrams.rs`): lo que el sistema puede borrar sin perder nada.
+/// `None` si la máquina no dice dónde vive su usuario.
+pub fn cache_dir(os: Os, var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    let base = match os {
+        Os::Linux => match set(&var, "XDG_CACHE_HOME") {
+            Some(cache) => PathBuf::from(cache),
+            None => PathBuf::from(set(&var, "HOME")?).join(".cache"),
+        },
+        Os::MacOs => PathBuf::from(set(&var, "HOME")?).join("Library").join("Caches"),
+        Os::Windows => PathBuf::from(set(&var, "LOCALAPPDATA")?),
+    };
+    Some(base.join(APP_DIR))
+}
+
 /// Con qué servidor habla.
 pub fn server_url(var: impl Fn(&str) -> Option<String>) -> String {
     set(&var, SERVER_VAR).unwrap_or_else(|| DEFAULT_SERVER.to_string())
@@ -100,7 +115,7 @@ pub fn preferred_languages() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{data_dir, server_url, system_language, Os, DEFAULT_SERVER};
+    use super::{cache_dir, data_dir, server_url, system_language, Os, DEFAULT_SERVER};
     use std::path::PathBuf;
 
     fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
@@ -136,6 +151,32 @@ mod tests {
             serde_json::from_str(include_str!("../../app/src-tauri/tauri.conf.json")).unwrap();
         let tauri_dir = tauri["identifier"].as_str().expect("la app de Tauri tiene identificador");
         assert_ne!(tauri_dir, super::APP_DIR);
+    }
+
+    /// Lo que se vuelve a calcular va a la caché de cada sistema, no junto a
+    /// la sesión.
+    ///
+    /// Roturas que atrapa: guardar los diagramas en la carpeta de datos (la
+    /// copia de seguridad de la máquina se los lleva, y el sistema no los
+    /// puede limpiar); en Windows, en `APPDATA`, que viaja con el perfil.
+    #[test]
+    fn the_cache_lives_where_each_system_keeps_caches() {
+        let home = [("HOME", "/home/ana")];
+        assert_eq!(cache_dir(Os::Linux, env(&home)), Some(PathBuf::from("/home/ana/.cache/cac-desktop")));
+        assert_eq!(
+            cache_dir(Os::Linux, env(&[("HOME", "/home/ana"), ("XDG_CACHE_HOME", "/rapido")])),
+            Some(PathBuf::from("/rapido/cac-desktop"))
+        );
+        assert_eq!(cache_dir(Os::MacOs, env(&home)), Some(PathBuf::from("/home/ana/Library/Caches/cac-desktop")));
+        assert_eq!(
+            cache_dir(
+                Os::Windows,
+                env(&[("APPDATA", "C:/Users/ana/AppData/Roaming"), ("LOCALAPPDATA", "C:/Users/ana/AppData/Local")])
+            ),
+            Some(PathBuf::from("C:/Users/ana/AppData/Local").join("cac-desktop"))
+        );
+        assert_eq!(cache_dir(Os::Linux, env(&[("HOME", " ")])), None);
+        assert_eq!(cache_dir(Os::Windows, env(&home)), None);
     }
 
     /// Habla con el servidor de cac, salvo que se le diga otro.

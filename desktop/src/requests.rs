@@ -493,7 +493,7 @@ impl RequestsView {
                 view.update(cx, |this, cx| this.follow(target, org_id, cx)).ok();
             }
         };
-        let view_text = gpui_kit::component::text::TextView::markdown(SharedString::from(format!("{id}-text")), painted)
+        let view_text = crate::diagrams::markdown(SharedString::from(format!("{id}-text")), painted)
             .style(crate::theme::md_body_style(cx))
             .on_link_click(follow)
             .link_tooltip(move |url, window, cx| {

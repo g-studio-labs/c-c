@@ -751,6 +751,8 @@
     "noiseSuppressionHint": "Quita el ventilador y el teclado. Apágala para música o un instrumento.",
     "mermaidError": "El diagrama tiene un error:",
     "mermaidDiagram": "Diagrama",
+    "mermaidTooLong": "es demasiado largo para dibujarlo aquí.",
+    "mermaidUnsupported": "este tipo de diagrama no se dibuja en la app de escritorio.",
     "openLinkFailed": "No se pudo abrir el enlace",
     "speaker": "Altavoz",
     "noSpeaker": "No se encontró ningún altavoz",

@@ -129,7 +129,7 @@ fn follow_link(url: &str, cx: &mut App) {
 }
 
 fn markdown(id: impl Into<ElementId>, text: &str, cx: &App) -> TextView {
-    TextView::markdown(id, cac_core::prose_for_painting(text)).style(crate::docs::reading_style(cx)).on_link_click(|url, _, _, cx| follow_link(url, cx))
+    crate::diagrams::markdown(id, cac_core::prose_for_painting(text)).style(crate::docs::reading_style(cx)).on_link_click(|url, _, _, cx| follow_link(url, cx))
 }
 
 impl NotesView {

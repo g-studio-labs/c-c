@@ -751,6 +751,8 @@
     "noiseSuppressionHint": "Removes fans and typing. Turn it off for music or an instrument.",
     "mermaidError": "The diagram has an error:",
     "mermaidDiagram": "Diagram",
+    "mermaidTooLong": "it is too long to draw here.",
+    "mermaidUnsupported": "this kind of diagram is not drawn in the desktop app.",
     "openLinkFailed": "Couldn't open the link",
     "speaker": "Speaker",
     "noSpeaker": "No speaker found",

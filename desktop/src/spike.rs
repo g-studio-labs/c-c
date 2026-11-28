@@ -4,7 +4,6 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
-use gpui_kit::component::text::TextView;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::{
     v_virtual_list, ActiveTheme, Icon, IconName, VirtualListScrollHandle,
@@ -176,7 +175,7 @@ impl Render for Spike {
                         section("MARKDOWN", cx)
                             .flex_1()
                             .overflow_hidden()
-                            .child(TextView::markdown("markdown", MARKDOWN)),
+                            .child(crate::diagrams::markdown("markdown", MARKDOWN)),
                     ),
             )
     }

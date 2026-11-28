@@ -1268,7 +1268,7 @@ impl DocsView {
     /// [`Self::follow_link`].
     fn doc_text(id: SharedString, markdown: String, style: TextViewStyle) -> TextView {
         // Un título de tercer nivel, como etiqueta de sección (`.md-body h3`).
-        TextView::markdown(id, cac_core::prose_for_painting(&markdown)).style(style).on_link_click(|url, _, _, cx| Self::follow_link(url, cx))
+        crate::diagrams::markdown(id, cac_core::prose_for_painting(&markdown)).style(style).on_link_click(|url, _, _, cx| Self::follow_link(url, cx))
     }
 
     /// El aviso de que un enlace no se pudo abrir: el de la app de siempre
