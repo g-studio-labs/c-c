@@ -11,10 +11,10 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use cac_core::{AgentRequest, AnswerDraft, InboxTarget, LinkSegment, RequestKind, RequestScope, RequestStatus};
+use cac_core::{AgentRequest, AnswerDraft, InboxTarget, LinkSegment, RequestFilter, RequestKind, RequestScope, RequestStatus, RequestStatusFilter};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -22,6 +22,11 @@ use gpui_kit::*;
 use crate::backend::Backend;
 use crate::lang::{error_text, locale, tr};
 use crate::theme::Leading as _;
+
+/// Cuánto se espera tras la última tecla antes de buscar.
+const SEARCH_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
+/// A cuántos píxeles del final visible se pide ya la página siguiente.
+const LOAD_BEFORE: f32 = 240.;
 
 /// El texto de un pedido es texto, no markdown: lo que parezca marcado
 /// (`*`, `_`, `#`, una lista) se pinta tal cual, y un salto de línea es un
@@ -73,7 +78,10 @@ pub struct RequestsView {
     copied: Option<String>,
     /// Lo que se dice tras pulsar algo que esta app todavía no tiene.
     said: Option<String>,
-    resolved_open: bool,
+    /// La búsqueda: se manda un rato después de dejar de escribir, no con
+    /// cada tecla (`search_turn` dice cuál es la última).
+    search: Entity<InputState>,
+    search_turn: u64,
     scroll: ScrollHandle,
     /// El pedido resaltado al que todavía no se ha llevado la vista.
     scroll_to: Option<String>,
@@ -95,22 +103,164 @@ pub struct RequestsView {
 }
 
 impl RequestsView {
-    pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(tr(cx, "work:requests.searchPlaceholder")));
+        let typing = cx.subscribe(&search, |view: &mut Self, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                view.search_soon(cx);
+            }
+        });
         Self {
             cards: HashMap::new(),
             busy: HashSet::new(),
             problems: HashMap::new(),
             copied: None,
             said: None,
-            resolved_open: false,
+            search,
+            search_turn: 0,
             scroll: ScrollHandle::new(),
             scroll_to: None,
             shown_highlight: None,
             order: Vec::new(),
             tops: Rc::default(),
             anchor: Rc::default(),
-            _subscriptions: Vec::new(),
+            _subscriptions: vec![typing],
         }
+    }
+
+    /// Lo escrito en la búsqueda va al servidor cuando se deja de escribir.
+    fn search_soon(&mut self, cx: &mut Context<Self>) {
+        self.search_turn += 1;
+        let turn = self.search_turn;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SEARCH_AFTER).await;
+            this.update(cx, |view, cx| {
+                if view.search_turn != turn {
+                    return;
+                }
+                let text = view.search.read(cx).value().to_string();
+                let filter = RequestFilter { text, ..Backend::snapshot(cx).read(cx).requests.filter.clone() };
+                Self::filter(filter, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Cambiar un filtro vuelve a la primera página de lo filtrado.
+    fn filter(filter: RequestFilter, cx: &mut Context<Self>) {
+        Backend::run(cx, move |core| async move { core.requests().set_filter(filter).await });
+    }
+
+    fn render_filters(&self, filter: &RequestFilter, cx: &mut Context<Self>) -> impl IntoElement {
+        let border = cx.theme().border;
+        let kinds: Vec<AnyElement> = RequestKind::ALL
+            .iter()
+            .filter_map(|&kind| {
+                let wire = kind.wire()?;
+                let on = filter.kinds.contains(&kind);
+                let current = filter.clone();
+                let button = Button::new(SharedString::from(format!("requests-kind-{wire}"))).small().label(kind.label(locale(cx))).on_click(cx.listener(move |_, _, _, cx| {
+                    let mut next = current.clone();
+                    if on {
+                        next.kinds.retain(|picked| *picked != kind);
+                    } else {
+                        next.kinds.push(kind);
+                    }
+                    Self::filter(next, cx);
+                }));
+                Some(if on { button.secondary() } else { button.ghost() }.into_any_element())
+            })
+            .collect();
+        let statuses: Vec<AnyElement> = [
+            (RequestStatusFilter::All, "all"),
+            (RequestStatusFilter::Open, "open"),
+            (RequestStatusFilter::Resolved, "resolved"),
+            (RequestStatusFilter::Withdrawn, "withdrawn"),
+        ]
+        .into_iter()
+        .map(|(status, key)| {
+            let current = filter.clone();
+            let button = Button::new(SharedString::from(format!("requests-status-{key}")))
+                .small()
+                .label(tr(cx, &format!("work:requests.statusFilter.{key}")))
+                .on_click(cx.listener(move |_, _, _, cx| Self::filter(RequestFilter { status, ..current.clone() }, cx)));
+            if filter.status == status { button.secondary() } else { button.ghost() }.into_any_element()
+        })
+        .collect();
+        let group = |id: &'static str, label: String, chips: Vec<AnyElement>| {
+            div()
+                .id(id)
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_0p5()
+                .p_0p5()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(border)
+                .aria_label(label)
+                .children(chips)
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(Input::new(&self.search).id("requests-search"))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(group("requests-kinds", tr(cx, "work:requests.filterKind"), kinds))
+                    .child(group("requests-statuses", tr(cx, "work:requests.filterStatus"), statuses)),
+            )
+    }
+
+    /// El final de una lista: dice si está cargando o por qué falló, y
+    /// cuando entra en vista (o queda cerca) pide la página siguiente. Lo
+    /// pinta cada cuadro, también al deslizar; que no salgan dos peticiones
+    /// lo cuida el core.
+    fn render_end(&self, id: &'static str, paging: cac_core::RequestPaging, active: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (muted, danger) = (theme.muted_foreground, theme.danger);
+        let wants = active && paging.more && !paging.loading && !paging.failed;
+        let scroll = self.scroll.clone();
+        div()
+            .id(id)
+            .relative()
+            .min_h(px(1.))
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        let area = scroll.bounds();
+                        if wants && area.size.height > px(0.) && bounds.top() <= area.bottom() + px(LOAD_BEFORE) {
+                            Backend::run(cx, |core| async move { core.requests().load_more().await });
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .when(active && paging.loading, |this| {
+                this.child(div().id(SharedString::from(format!("{id}-loading"))).leading_sm().text_color(muted).child(tr(cx, "work:requests.loadingMore")).test_support())
+            })
+            .when(active && paging.failed, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(div().id(SharedString::from(format!("{id}-error"))).leading_sm().text_color(danger).child(tr(cx, "work:requests.errLoadMore")).test_support())
+                        .child(Button::new(SharedString::from(format!("{id}-retry"))).small().outline().label(tr(cx, "work:requests.retry")).on_click(cx.listener(|_, _, _, cx| {
+                            Backend::run(cx, |core| async move { core.requests().load_more().await });
+                        }))),
+                )
+            })
+            .test_support()
+            .into_any_element()
     }
 
     fn card(&mut self, code: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -866,7 +1016,6 @@ impl Render for RequestsView {
             if closed || state.open.iter().any(|request| &request.code == code) {
                 self.shown_highlight = Some(code.clone());
                 self.scroll_to = Some(code.clone());
-                self.resolved_open |= closed;
             }
         } else if state.highlight.is_none() {
             self.shown_highlight = None;
@@ -875,21 +1024,30 @@ impl Render for RequestsView {
         self.cards.retain(|code, _| state.open.iter().any(|request| &request.code == code));
 
         let highlight = state.highlight.clone();
+        // Con «Todos», los de abajo van plegados en «Resueltos»; filtrando por
+        // uno de sus estados, se enseñan sin pliegue y no hay abiertos.
+        let status = state.filter.status;
+        let shows_open = matches!(status, RequestStatusFilter::All | RequestStatusFilter::Open);
+        let has_toggle = status == RequestStatusFilter::All;
+        let resolved_open = match status {
+            RequestStatusFilter::All => state.resolved_open,
+            RequestStatusFilter::Open => false,
+            _ => true,
+        };
         let open: Vec<AnyElement> = state.open.iter().map(|request| self.render_card(request, highlight.as_deref() == Some(request.code.as_str()), window, cx)).collect();
-        let closed: Vec<AnyElement> = if self.resolved_open {
+        let closed: Vec<AnyElement> = if resolved_open {
             state.closed.iter().map(|request| self.render_card(request, highlight.as_deref() == Some(request.code.as_str()), window, cx)).collect()
         } else {
             Vec::new()
         };
         // `scroll_to_item` cuenta hijos directos de lo que se desliza: en qué
-        // puesto va la resaltada, contando lo de encima (título, error, estado)
-        // y el pliegue «Resueltos».
-        let resolved_open = self.resolved_open;
-        let before_open = 2 + usize::from(state.failed) + state.elsewhere.len();
+        // puesto va la resaltada, contando lo de encima (título, filtros,
+        // error, estado), el final de los abiertos y el pliegue «Resueltos».
+        let before_open = 3 + usize::from(state.failed) + state.elsewhere.len();
         let shown: Vec<&str> = state.open.iter().chain(state.closed.iter().filter(|_| resolved_open)).map(|request| request.code.as_str()).collect();
         let at = highlight.as_deref().and_then(|code| {
             let n = shown.iter().position(|shown| *shown == code)?;
-            Some(before_open + n + usize::from(n >= state.open.len()))
+            Some(before_open + n + if n >= state.open.len() { 1 + usize::from(has_toggle) } else { 0 })
         });
         self.keep_reading(shown.iter().map(|code| code.to_string()).collect());
         if let (Some(_), Some(at)) = (self.scroll_to.as_ref(), at) {
@@ -916,12 +1074,21 @@ impl Render for RequestsView {
                     .child(div().leading_sm().text_color(muted).child(tr(cx, "work:requests.lead"))),
             )
             .child(self.render_scope(state.scope, cx));
-        let empty_key = if state.scope == RequestScope::Mine { "work:requests.empty" } else { "work:requests.emptyTeam" };
+        let filtered = !state.filter.text.trim().is_empty() || !state.filter.kinds.is_empty() || status != RequestStatusFilter::All;
+        let empty_key = if filtered {
+            "work:requests.noMatches"
+        } else if state.scope == RequestScope::Mine {
+            "work:requests.empty"
+        } else {
+            "work:requests.emptyTeam"
+        };
+        let nothing = if shows_open { state.open.is_empty() } else { state.closed_paging.loaded && state.closed.is_empty() };
         let status_line: AnyElement = if !state.loaded {
             div().id("requests-loading").leading_sm().text_color(muted).child(tr(cx, "work:requests.loading")).test_support().into_any_element()
-        } else if state.open.is_empty() {
+        } else if nothing {
             div()
                 .id("requests-empty")
+                .aria_label(tr(cx, empty_key))
                 .p_6()
                 .rounded(px(10.))
                 .border_1()
@@ -936,8 +1103,9 @@ impl Render for RequestsView {
         } else {
             div().into_any_element()
         };
-        let resolved_count = state.closed.len();
-        let toggle = (resolved_count > 0).then(|| {
+        // Sin número: lo cargado no es cuántos hay, y contarlos todos es
+        // justo lo que la paginación evita.
+        let toggle = (has_toggle && state.loaded).then(|| {
             div()
                 .id("requests-resolved")
                 .flex()
@@ -948,12 +1116,12 @@ impl Render for RequestsView {
                 .text_color(muted)
                 .cursor_pointer()
                 .hover(move |style| style.text_color(foreground))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.resolved_open = !this.resolved_open;
-                    cx.notify();
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    Backend::run(cx, move |core| async move { core.requests().set_resolved_open(!resolved_open).await });
                 }))
-                .child(Icon::new(if self.resolved_open { Lucide::ChevronDown } else { Lucide::ChevronRight }).size_4())
-                .child(cac_core::text_with(locale(cx), "work:requests.resolved", &[("count", &resolved_count.to_string())]))
+                .child(Icon::new(if resolved_open { Lucide::ChevronDown } else { Lucide::ChevronRight }).size_4())
+                .aria_label(tr(cx, "work:requests.resolvedTitle"))
+                .child(tr(cx, "work:requests.resolvedTitle"))
                 .test_support()
                 .into_any_element()
         });
@@ -987,6 +1155,9 @@ impl Render for RequestsView {
             })
             .collect();
         let said = self.said.clone();
+        let filters = self.render_filters(&state.filter, cx);
+        let open_end = self.render_end("requests-open-end", state.open_paging, shows_open, cx);
+        let closed_end = self.render_end("requests-closed-end", state.closed_paging, resolved_open, cx);
 
         div()
             .size_full()
@@ -1011,12 +1182,15 @@ impl Render for RequestsView {
                     .mx_auto()
                     .p_6()
                     .child(header)
+                    .child(filters)
                     .children(elsewhere)
                     .when(state.failed, |this| this.child(div().id("requests-error").leading_sm().text_color(danger).child(tr(cx, "work:requests.errLoad")).test_support()))
                     .child(status_line)
                     .children(open)
+                    .child(open_end)
                     .children(toggle)
                     .children(closed)
+                    .child(closed_end)
                     .children(said.map(|said| {
                         div()
                             .id("requests-said")
@@ -1071,6 +1245,7 @@ mod tests {
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{point, px, size, AnyWindowHandle, AppContext, Bounds, Pixels, Point, ScrollDelta, TestAppContext, WindowBounds, WindowOptions};
     use serde_json::{json, Value};
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, ResponseTemplate};
@@ -1283,7 +1458,7 @@ mod tests {
         gate.open();
         wait_until(cx, "pasa a «Resueltos»", |cx| on_screen(window, "requests-resolved", cx) && !on_screen(window, "request-req-a1", cx));
         click(window, "requests-resolved", cx);
-        assert!(on_screen(window, "request-outcome-req-a1", cx));
+        wait_until(cx, "«Resueltos», desplegado", |cx| on_screen(window, "request-outcome-req-a1", cx));
         stop(cx);
     }
 
@@ -1526,7 +1701,7 @@ mod tests {
         let server = live_server(&listed, &Arc::new(Mutex::new(Vec::new())));
         let window = open_sized(&server, 560., cx);
         show_list(window, "req-b1", cx);
-        scroll_down(window, 420., cx);
+        scroll_down(window, 700., cx);
         let (code, was) = first_visible(window, &codes, cx);
         assert_ne!(code, "req-b1", "la lista tenía que estar deslizada");
 
@@ -1605,4 +1780,166 @@ mod tests {
         }
         panic!("no se ve ninguna tarjeta");
     }
+
+    fn resolved(code: &str) -> Value {
+        let mut value = approve(code, &format!("resuelto {code}"));
+        value["status"] = json!("answered");
+        value["canAnswer"] = json!(false);
+        value["answer"] = json!({ "approved": true });
+        value
+    }
+
+    /// Las consultas a `/api/v1/requests` de ese estado, como pares.
+    fn asked(server: &FakeServer, status: &str) -> Vec<HashMap<String, String>> {
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.url.path() == "/api/v1/requests")
+            .map(|request| request.url.query_pairs().into_owned().collect::<HashMap<String, String>>())
+            .filter(|query| query.get("status").map(String::as_str) == Some(status))
+            .collect()
+    }
+
+    fn closed_page(server: &FakeServer, cursor: &str, template: ResponseTemplate) {
+        server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/requests"))
+                .and(query_param("scope", "mine"))
+                .and(query_param("status", "closed"))
+                .and(query_param("cursor", cursor.to_string()))
+                .respond_with(template)
+                .with_priority(1),
+        );
+    }
+
+    fn page(requests: Vec<Value>, next: &str) -> ResponseTemplate {
+        ok(json!({ "requests": requests, "next": next }))
+    }
+
+    /// «Resueltos» plegado no pide nada; desplegarlo pide la primera página, y
+    /// llevar el scroll al fondo pide la siguiente una sola vez, con su
+    /// cursor. Si falla se dice y se reintenta a mano; cuando no hay más, no
+    /// se pide más. Y no hay número: lo cargado no es cuántos hay.
+    ///
+    /// Roturas que atrapa: pedir los resueltos al abrir; no pedir la
+    /// siguiente al llegar al fondo; pedirla sin llegar; pedirla dos veces
+    /// mientras se desliza; reintentar sola tras un fallo (un bucle contra un
+    /// servidor caído); no ofrecer «Reintentar»; seguir pidiendo sin más.
+    #[gpui_kit::test]
+    fn scrolling_to_the_end_of_resolved_asks_the_next_page_once(cx: &mut TestAppContext) {
+        let server = server();
+        let first: Vec<Value> = (0..20).map(|n| resolved(&format!("req-c{n:02}"))).collect();
+        closed_page(&server, "", page(first, "CUR-1"));
+        let gate = Gate::default();
+        server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/requests"))
+                .and(query_param("status", "closed"))
+                .and(query_param("cursor", "CUR-1"))
+                .respond_with(gate.hold(ResponseTemplate::new(500)))
+                .up_to_n_times(1)
+                .with_priority(1),
+        );
+        server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/requests"))
+                .and(query_param("status", "closed"))
+                .and(query_param("cursor", "CUR-1"))
+                .respond_with(page(vec![resolved("req-c15"), resolved("req-c16")], ""))
+                .with_priority(2),
+        );
+        let window = open_sized(&server, 1000., cx);
+        show_requests(window, cx);
+        assert!(asked(&server, "closed").is_empty(), "plegado no se pide");
+        assert_eq!(label(window, "requests-resolved", cx), "Resueltos");
+
+        click(window, "requests-resolved", cx);
+        wait_until(cx, "la primera página", |cx| on_screen(window, "request-req-c00", cx));
+        assert_eq!(asked(&server, "closed").len(), 1);
+        for _ in 0..3 {
+            cx.update_window(window, |_, window, cx| window.render_frame(cx)).unwrap();
+            cx.run_until_parked();
+        }
+        assert_eq!(asked(&server, "closed").len(), 1, "sin llegar al fondo no se pide la siguiente");
+
+        for _ in 0..4 {
+            scroll_down(window, 4000., cx);
+        }
+        wait_until(cx, "la siguiente, retenida", |_| gate.held() == 1);
+        assert!(on_screen(window, "requests-closed-end-loading", cx), "abajo dice que está cargando");
+        for _ in 0..3 {
+            scroll_down(window, 4000., cx);
+        }
+        gate.open();
+        wait_until(cx, "el fallo, dicho", |cx| on_screen(window, "requests-closed-end-error", cx));
+        for _ in 0..3 {
+            scroll_down(window, 4000., cx);
+        }
+        let next = |server: &FakeServer| asked(server, "closed").iter().filter(|query| query["cursor"] == "CUR-1").count();
+        assert_eq!(next(&server), 1, "una sola petición, y tras el fallo no se reintenta sola");
+
+        click(window, "requests-closed-end-retry", cx);
+        wait_until(cx, "la segunda página", |cx| on_screen(window, "request-req-c16", cx));
+        for _ in 0..3 {
+            scroll_down(window, 4000., cx);
+        }
+        assert_eq!(next(&server), 2);
+        assert_eq!(asked(&server, "closed").len(), 3, "sin más, no se pide más");
+        assert!(!on_screen(window, "requests-closed-end-error", cx));
+        stop(cx);
+    }
+
+    /// Un enlace a un pedido resuelto que no está en lo cargado lo abre: se
+    /// pide suelto, se despliega «Resueltos» y se enseña cómo quedó.
+    ///
+    /// Rotura que atrapa: que la pantalla no lo encuentre (sólo buscaba en lo
+    /// que ya tenía).
+    #[gpui_kit::test]
+    fn a_link_to_a_resolved_request_outside_the_page_opens_it(cx: &mut TestAppContext) {
+        let server = server();
+        server.mount(Mock::given(method("GET")).and(path("/api/v1/requests/req-old")).respond_with(ok(resolved("req-old"))));
+        let window = open(&server, cx);
+        wait_until(cx, "las tareas", |cx| on_screen(window, "work-row-t1", cx));
+        cx.update(|cx| {
+            Backend::run(cx, |core| async move {
+                core.open_link("cac://requests?open=req-old").await;
+            })
+        });
+        wait_until(cx, "el pedido resuelto", |cx| on_screen(window, "request-outcome-req-old", cx));
+        stop(cx);
+    }
+
+    /// La búsqueda va al servidor un rato después de dejar de escribir, y los
+    /// chips de tipo y estado también; sin resultados se dice.
+    ///
+    /// Roturas que atrapa: buscar en local; mandar una petición por tecla;
+    /// no mandar el tipo elegido; que filtrar por resueltos siga pidiendo
+    /// abiertos; decir «nada te espera» de un filtro sin resultados.
+    #[gpui_kit::test]
+    fn filters_are_asked_to_the_server(cx: &mut TestAppContext) {
+        let server = server();
+        let window = open(&server, cx);
+        show_requests(window, cx);
+        let opens = asked(&server, "open").iter().filter(|query| query["scope"] == "mine").count();
+
+        type_in(window, "requests-search", "req-a", cx);
+        cx.run_until_parked();
+        assert!(asked(&server, "open").iter().all(|query| !query.contains_key("q")), "no con cada tecla");
+        cx.executor().advance_clock(std::time::Duration::from_millis(400));
+        wait_until(cx, "la búsqueda, en el servidor", |_| asked(&server, "open").iter().any(|query| query.get("q").map(String::as_str) == Some("req-a")));
+        assert_eq!(asked(&server, "open").iter().filter(|query| query.contains_key("q")).count(), 1, "una sola petición");
+
+        click(window, "requests-kind-decide", cx);
+        wait_until(cx, "el tipo", |_| asked(&server, "open").iter().any(|query| query.get("kind").map(String::as_str) == Some("decide") && query["q"] == "req-a"));
+
+        let before = asked(&server, "open").len();
+        click(window, "requests-status-resolved", cx);
+        wait_until(cx, "los resueltos, filtrados", |_| asked(&server, "closed").iter().any(|query| query.get("kind").map(String::as_str) == Some("decide")));
+        assert_eq!(asked(&server, "open").len(), before, "filtrando por resueltos no se piden abiertos");
+        wait_until(cx, "sin resultados", |cx| on_screen(window, "requests-empty", cx));
+        assert_eq!(label(window, "requests-empty", cx), "Ningún pedido coincide con el filtro.");
+        assert!(opens >= 1);
+        stop(cx);
+    }
 }
+

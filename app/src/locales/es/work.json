@@ -644,6 +644,20 @@
     "elsewhere_other": "{{count}} pedidos más en {{org}}",
     "errLoad": "No se pudieron cargar los pedidos.",
     "resolved": "Resueltos ({{count}})",
+    "resolvedTitle": "Resueltos",
+    "loadingMore": "Cargando más…",
+    "errLoadMore": "No se pudieron cargar más pedidos.",
+    "retry": "Reintentar",
+    "searchPlaceholder": "Buscar por código, resumen o tarea",
+    "filterKind": "Tipo",
+    "filterStatus": "Estado",
+    "statusFilter": {
+      "all": "Todos",
+      "open": "Abiertos",
+      "resolved": "Resueltos",
+      "withdrawn": "Retirados"
+    },
+    "noMatches": "Ningún pedido coincide con el filtro.",
     "kind": {
       "approve_message": "Aprobar mensaje",
       "test": "Probar",

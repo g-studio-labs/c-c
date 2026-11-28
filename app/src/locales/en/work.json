@@ -644,6 +644,20 @@
     "elsewhere_other": "{{count}} more requests in {{org}}",
     "errLoad": "Couldn't load the requests.",
     "resolved": "Resolved ({{count}})",
+    "resolvedTitle": "Resolved",
+    "loadingMore": "Loading more…",
+    "errLoadMore": "Couldn't load more requests.",
+    "retry": "Try again",
+    "searchPlaceholder": "Search by code, summary or task",
+    "filterKind": "Kind",
+    "filterStatus": "Status",
+    "statusFilter": {
+      "all": "All",
+      "open": "Open",
+      "resolved": "Resolved",
+      "withdrawn": "Withdrawn"
+    },
+    "noMatches": "No request matches the filter.",
     "kind": {
       "approve_message": "Approve message",
       "test": "Test",
