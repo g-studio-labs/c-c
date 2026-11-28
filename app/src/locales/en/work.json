@@ -701,6 +701,8 @@
     "copyDraft": "Copy the draft",
     "draftCopied": "Draft copied",
     "pathMissing": "That path does not exist: {{path}}",
+    "revealedByContent": "{{name}}: its content is {{type}}, not the document its name says. Shown in its folder, not opened.",
+    "revealedTypeUnknown": "Could not check what is inside {{name}}: shown in its folder, not opened.",
     "pathCopied": "Path copied",
     "revealPath": "Show in folder",
     "openPath": "Open",

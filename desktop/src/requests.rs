@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use cac_core::{AgentRequest, AnswerDraft, InboxTarget, LinkSegment, RequestFile, RequestFileSlot, RequestFilter, RequestKind, RequestScope, RequestStatus, RequestStatusFilter};
+use cac_mcp::host::{NotOpened, Opened};
 use cac_mcp::text_file::Refusal;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -73,8 +74,6 @@ enum LocalFile {
 /// Un fichero adjunto con más líneas se enseña plegado.
 const FOLDED_LINES: usize = 12;
 
-/// Lo escrito en una tarjeta. Vive mientras el pedido siga abierto: la lista
-/// se vuelve a pedir con cada evento, y lo escrito no se pierde por eso.
 /// Qué se pulsó en un adjunto cuyo contenido hubo que pedir.
 enum FileWanted {
     Copy,
@@ -83,10 +82,12 @@ enum FileWanted {
 }
 
 /// La clave del contenido de un adjunto: el pedido, su versión y el índice.
-fn file_key(request: &AgentRequest, n: usize) -> String {
-    format!("{}#{}#{n}", request.code, request.version)
+fn file_key(code: &str, version: i64, n: usize) -> String {
+    format!("{code}#{version}#{n}")
 }
 
+/// Lo escrito en una tarjeta. Vive mientras el pedido siga abierto: la lista
+/// se vuelve a pedir con cada evento, y lo escrito no se pierde por eso.
 struct Card {
     mode: Mode,
     text: Entity<TextareaState>,
@@ -425,8 +426,15 @@ impl RequestsView {
                 cx.spawn(async move |this, cx| {
                     let result = cx.background_executor().spawn(async move { open_path(&path) }).await;
                     this.update(cx, |this, cx| {
+                        let name = file_name(&shown);
                         match result {
-                            Ok(()) => return,
+                            Ok(Opened::WithItsProgram | Opened::Revealed(None)) => return,
+                            Ok(Opened::Revealed(Some(NotOpened::ContentType(mime)))) => {
+                                this.said = Some(cac_core::text_with(locale(cx), "work:requests.revealedByContent", &[("name", &name), ("type", &mime)]))
+                            }
+                            Ok(Opened::Revealed(Some(NotOpened::TypeUnknown))) => {
+                                this.said = Some(cac_core::text_with(locale(cx), "work:requests.revealedTypeUnknown", &[("name", &name)]))
+                            }
                             Err(cac_mcp::host::RevealError::Failed(_)) => this.said = Some(tr(cx, "common:last.openLinkFailed")),
                             Err(_) => this.said = Some(cac_core::text_with(locale(cx), "work:requests.pathMissing", &[("path", &shown)])),
                         }
@@ -630,12 +638,12 @@ impl RequestsView {
     fn file_block(&mut self, request: &AgentRequest, n: usize, file: &RequestFile, cx: &mut Context<Self>) -> AnyElement {
         let code = request.code.clone();
         let id = format!("request-file-{code}-{n}");
-        let key = file_key(request, n);
+        let key = file_key(&code, request.version, n);
         let content = if file.has_content() { Some(file.content.clone()) } else { self.file_contents.get(&key).cloned() };
         let unfolded = self.unfolded.contains(&id);
         let name = file.name.clone();
         let copy = {
-            let (content, name, code, key) = (content.clone(), name.clone(), code.clone(), key.clone());
+            let (content, name, code) = (content.clone(), name.clone(), code.clone());
             Button::new(SharedString::from(format!("{id}-copy")))
                 .outline()
                 .small()
@@ -643,18 +651,18 @@ impl RequestsView {
                 .label(cac_core::text_with(locale(cx), "work:requests.copyFile", &[("name", &file.name)]))
                 .on_click(cx.listener(move |this, _, _, cx| match &content {
                     Some(content) => this.copy_file(content.clone(), &name, cx),
-                    None => this.fetch_file(code.clone(), key.clone(), name.clone(), FileWanted::Copy, cx),
+                    None => this.fetch_file(code.clone(), n, name.clone(), FileWanted::Copy, cx),
                 }))
         };
         let Some(content) = content else {
             // Sin contenido todavía: «Ver el contenido» lo trae y lo despliega.
             let show = {
-                let (code, key, name, id) = (code.clone(), key.clone(), name.clone(), id.clone());
+                let (code, name, id) = (code.clone(), name.clone(), id.clone());
                 Button::new(SharedString::from(format!("{id}-fold")))
                     .ghost()
                     .small()
                     .label(tr(cx, "work:requests.showFile"))
-                    .on_click(cx.listener(move |this, _, _, cx| this.fetch_file(code.clone(), key.clone(), name.clone(), FileWanted::Show(id.clone()), cx)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.fetch_file(code.clone(), n, name.clone(), FileWanted::Show(id.clone()), cx)))
             };
             return div().flex().flex_wrap().items_center().gap_2().child(copy).child(show).into_any_element();
         };
@@ -690,20 +698,25 @@ impl RequestsView {
 
     /// Pide al detalle del pedido el contenido de sus ficheros, lo guarda y
     /// hace lo que se pulsó: copiar el que se pidió o desplegarlo.
-    fn fetch_file(&mut self, code: String, key: String, name: String, wanted: FileWanted, cx: &mut Context<Self>) {
+    fn fetch_file(&mut self, code: String, n: usize, name: String, wanted: FileWanted, cx: &mut Context<Self>) {
         let asked = code.clone();
         let files = Backend::ask(cx, move |core| async move { core.requests().files_of(&asked).await });
         cx.spawn(async move |this, cx| {
             let Ok(result) = files.await else { return };
             this.update(cx, |this, cx| {
                 // El detalle trae los ficheros en el mismo orden que la lista:
-                // se guardan todos, y el nombre confirma el que se pulsó.
-                let (prefix, n) = key.rsplit_once('#').map(|(prefix, n)| (prefix.to_string(), n.parse::<usize>().ok())).unwrap_or_default();
-                let files = result.unwrap_or_default();
-                for (i, file) in files.iter().enumerate().filter(|(_, file)| file.has_content()) {
-                    this.file_contents.insert(format!("{prefix}#{i}"), file.content.clone());
+                // se guardan todos, con la versión que trae (si se rehízo, la
+                // lista nueva los encuentra), y el nombre confirma el pulsado.
+                let Ok(detail) = result else {
+                    this.said = Some(cac_core::text_with(locale(cx), "work:requests.fileFailed", &[("name", &name)]));
+                    cx.notify();
+                    return;
+                };
+                for (i, file) in detail.files.iter().enumerate().filter(|(_, file)| file.has_content()) {
+                    this.file_contents.insert(file_key(&code, detail.version, i), file.content.clone());
                 }
-                let found = n.and_then(|n| files.into_iter().nth(n)).filter(|file| file.name == name && file.has_content());
+                let files = detail.files;
+                let found = files.into_iter().nth(n).filter(|file| file.name == name && file.has_content());
                 match found {
                     Some(file) => {
                         match wanted {
@@ -1279,17 +1292,17 @@ fn refusal_line(name: &str, why: &Refusal, cx: &App) -> String {
 /// Pulsar una ruta: un documento se abre con su programa, lo demás se
 /// muestra en la carpeta (`cac_mcp::host::open_path_with`). En las pruebas se
 /// decide igual, con la misma regla, y se anota en vez de lanzar.
-fn open_path(path: &str) -> Result<(), cac_mcp::host::RevealError> {
+fn open_path(path: &str) -> Result<Opened, cac_mcp::host::RevealError> {
     #[cfg(test)]
     {
         let Ok(real) = std::fs::canonicalize(cac_mcp::host::expand_home(path)) else {
             return Err(cac_mcp::host::RevealError::NotFound);
         };
         if !cac_mcp::host::opens_with_its_program(&real) {
-            return reveal(path);
+            return reveal(path).map(|()| Opened::Revealed(None));
         }
         tests::OPENED_FILES.lock().unwrap().push(path.to_string());
-        Ok(())
+        Ok(Opened::WithItsProgram)
     }
     #[cfg(not(test))]
     cac_mcp::host::open_path(path)
@@ -2001,6 +2014,42 @@ mod tests {
         click(window, "request-file-req-l2-1-fold", cx);
         wait_until(cx, "el contenido traído", |cx| on_screen(window, "request-file-req-l2-1-content-line-0", cx));
         assert!(on_screen(window, "request-file-req-l2-1-content-line-19", cx), "lo que se pidió ver se ve entero");
+        stop(cx);
+    }
+
+    /// Si el pedido se rehízo entre la lista y el detalle, lo traído es de la
+    /// versión nueva y se guarda con ella, no con la de la tarjeta: copiar
+    /// otra vez desde la tarjeta vieja lo vuelve a pedir, y la lista nueva lo
+    /// encuentra (command-and-control-567).
+    ///
+    /// Rotura que atrapa: guardar el contenido nuevo con la versión que tenía
+    /// la tarjeta, con lo que la tarjeta vieja copiaría lo de otra versión sin
+    /// preguntar.
+    #[gpui_kit::test]
+    fn a_file_fetched_from_a_newer_version_is_kept_for_that_version(cx: &mut TestAppContext) {
+        let listed = request("req-v1", "run", "t1", ("u1", "Ana Ruiz"), true, json!({
+            "command": "Pegar apply.sql", "where": "Supabase", "expected": "UPDATE 1",
+            "files": [{ "name": "apply.sql", "role": "apply", "size": 10 }],
+        }));
+        let newer = "update pagos set moneda = 'EUR';\n";
+        let mut detail = listed.clone();
+        detail["version"] = json!(2);
+        detail["body"]["files"] = json!([{ "name": "apply.sql", "content": newer, "role": "apply", "size": newer.len() }]);
+        let server = live_server(&Arc::new(Mutex::new(vec![listed])), &Arc::new(Mutex::new(Vec::new())));
+        server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/requests/req-v1"))
+                .respond_with(move |_: &wiremock::Request| ResponseTemplate::new(200).set_body_json(json!({ "success": true, "data": detail.clone() }))),
+        );
+        let fetched = || server.requests().iter().filter(|r| r.method.as_str() == "GET" && r.url.path() == "/api/v1/requests/req-v1").count();
+        let window = open_sized(&server, 2400., cx);
+        show_list(window, "req-v1", cx);
+        wait_until(cx, "el fichero", |cx| on_screen(window, "request-file-req-v1-0-copy", cx));
+        click(window, "request-file-req-v1-0-copy", cx);
+        wait_until(cx, "lo copiado", |cx| label(window, "requests-said", cx) == "Copiado apply.sql");
+        assert_eq!(clipboard(cx).as_deref(), Some(newer));
+        click(window, "request-file-req-v1-0-copy", cx);
+        wait_until(cx, "lo pedido otra vez", |_| fetched() == 2);
         stop(cx);
     }
 

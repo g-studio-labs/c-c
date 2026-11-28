@@ -209,6 +209,13 @@ pub struct RequestTask {
     pub status: String,
 }
 
+/// Los ficheros del detalle de un pedido y la versión de la que son.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestFiles {
+    pub version: i64,
+    pub files: Vec<RequestFile>,
+}
+
 /// Un pedido tal como lo leen las apps (`domain.RequestView`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -1028,9 +1035,11 @@ impl Requests {
 
     /// Los ficheros de un pedido con su contenido, que la lista no trae: se
     /// piden al detalle por su código.
-    pub async fn files_of(&self, code: &str) -> Result<Vec<RequestFile>, ApiError> {
+    /// Con la versión que trae el detalle: si el pedido se rehízo después de
+    /// la lista, el contenido es de la nueva.
+    pub async fn files_of(&self, code: &str) -> Result<RequestFiles, ApiError> {
         let request: AgentRequest = self.core.get(&format!("/api/v1/requests/{code}")).await?;
-        Ok(request.body.files)
+        Ok(RequestFiles { version: request.version, files: request.body.files })
     }
 
     /// Abre la tarea del pedido, en su organización.

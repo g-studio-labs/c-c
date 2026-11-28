@@ -701,6 +701,8 @@
     "copyDraft": "Copiar el borrador",
     "draftCopied": "Borrador copiado",
     "pathMissing": "Esa ruta no existe: {{path}}",
+    "revealedByContent": "{{name}}: por su contenido es {{type}}, no un documento como su nombre. Se muestra en la carpeta, sin abrirlo.",
+    "revealedTypeUnknown": "No se pudo comprobar qué hay dentro de {{name}}: se muestra en la carpeta, sin abrirlo.",
     "pathCopied": "Ruta copiada",
     "revealPath": "Mostrar en la carpeta",
     "openPath": "Abrir",
