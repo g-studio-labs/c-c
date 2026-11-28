@@ -289,7 +289,8 @@ pub fn content_matches_extension(ext: &str, mime: &str) -> bool {
         "jpg" | "jpeg" => mime == "image/jpeg",
         "gif" => mime == "image/gif",
         "webp" => mime == "image/webp",
-        _ => TEXT_TYPES.contains(&mime),
+        // Un fichero vacío no tiene nada que ejecutar: se abre si su extensión es de texto.
+        _ => TEXT_TYPES.contains(&mime) || mime == "inode/x-empty",
     }
 }
 
@@ -631,10 +632,10 @@ else echo text/plain; fi
     fn a_document_type_matches_its_extension() {
         assert!(content_refusal(Os::Mac, Path::new("/x/a.sql")).is_none());
         assert!(content_refusal(Os::Windows, Path::new("/x/a.sql")).is_none());
-        for (ext, mime) in [("sql", "application/sql"), ("md", "text/markdown"), ("txt", "text/plain"), ("json", "application/json"), ("pdf", "application/pdf"), ("PNG", "image/png"), ("jpg", "image/jpeg")] {
+        for (ext, mime) in [("sql", "application/sql"), ("md", "text/markdown"), ("txt", "text/plain"), ("json", "application/json"), ("pdf", "application/pdf"), ("PNG", "image/png"), ("jpg", "image/jpeg"), ("sql", "inode/x-empty")] {
             assert!(content_matches_extension(ext, mime), "{ext} {mime}");
         }
-        for (ext, mime) in [("sql", "text/html"), ("txt", "application/xhtml+xml"), ("md", "image/svg+xml"), ("txt", "application/xml"), ("txt", "text/xml"), ("png", "image/jpeg"), ("pdf", "text/plain"), ("txt", "application/x-shellscript")] {
+        for (ext, mime) in [("sql", "text/html"), ("txt", "application/xhtml+xml"), ("md", "image/svg+xml"), ("txt", "application/xml"), ("txt", "text/xml"), ("png", "image/jpeg"), ("pdf", "text/plain"), ("txt", "application/x-shellscript"), ("txt", "application/x-desktop"), ("sql", "application/octet-stream"), ("md", "application/x-shellscript"), ("csv", "application/x-executable"), ("png", "inode/x-empty"), ("pdf", "inode/x-empty")] {
             assert!(!content_matches_extension(ext, mime), "{ext} {mime}");
         }
     }
